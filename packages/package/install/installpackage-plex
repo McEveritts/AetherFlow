@@ -23,10 +23,15 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/apt/keyrings/plex.gpg
 if [[ "$APP_PORT" != 32400 ]]; then
     print_error "plex requires port 32400; refusing an unsupported port override"
     exit 1
 fi
+PACKAGE_NAME="${PACKAGE_NAME:-plex}"
+begin_state_transaction "plexmediaserver" "$APP_PORT" "/identity" "/var/lib/plex" "/var/lib/plexmediaserver" "/etc/plexmediaserver" "/etc/apt/sources.list.d/plexmediaserver.list" "/etc/apt/keyrings/plex.gpg" "/etc/systemd/system/plexmediaserver.service" "/usr/lib/plexmediaserver" "/usr/share/plexmediaserver" "/usr/bin/plexmediaserver"
+
+prepare_apt_package_transaction /var/lib/plexmediaserver/.af-version plexmediaserver
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Plex Media Server..."
 
@@ -35,18 +40,25 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates
 
 report_progress 30 "Configuring official Plex APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor --yes -o /etc/apt/keyrings/plex.gpg >> "$LOGFILE" 2>&1
+install_apt_signing_key https://downloads.plex.tv/plex-keys/PlexSign.key /etc/apt/keyrings/plex.gpg >> "$LOGFILE" 2>&1
 chmod a+r /etc/apt/keyrings/plex.gpg
 echo "deb [signed-by=/etc/apt/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
 
 report_progress 55 "Installing plexmediaserver package..."
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" plexmediaserver >> "$LOGFILE" 2>&1
+verify_deb_installed plexmediaserver
 
 report_progress 85 "Starting and enabling plexmediaserver service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now plexmediaserver >> "$LOGFILE" 2>&1
 
+systemctl restart plexmediaserver >> "$LOGFILE" 2>&1
+systemctl is-active --quiet plexmediaserver
+mkdir -p /var/lib/plexmediaserver
+queue_app_version /var/lib/plexmediaserver/.af-version "$(dpkg-query -W -f='${Version}' plexmediaserver)"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Plex Media Server installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

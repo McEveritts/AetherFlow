@@ -46,17 +46,17 @@ esac
 report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
 LIDARR_VERSION="$(github_latest_tag "Lidarr/Lidarr" "2.8.2.4493")"
 TMP_TAR=$(mktemp /tmp/lidarr-XXXXXX.tar.gz)
-curl -fsSL "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Lidarr to /opt/Lidarr..."
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Lidarr" "Lidarr" "/var/lib/lidarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
 if [[ -n "$LIDARR_VERSION" ]]; then
-    printf '%s\n' "${LIDARR_VERSION#v}" > /opt/Lidarr/.af-version
+    queue_app_version /opt/Lidarr/.af-version "$(resolve_installed_binary_version /opt/Lidarr/Lidarr "${LIDARR_VERSION#v}")"
 fi
 set_config_value "/var/lib/lidarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
-chown -R lidarr:lidarr /opt/Lidarr /var/lib/lidarr
+chown -hRP lidarr:lidarr /opt/Lidarr /var/lib/lidarr
 
 report_progress 85 "Configuring and starting lidarr.service..."
 cat <<'EOF' > /etc/systemd/system/lidarr.service
@@ -83,8 +83,12 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now lidarr >> "$LOGFILE" 2>&1
 systemctl restart lidarr >> "$LOGFILE" 2>&1
+systemctl is-active --quiet lidarr
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "lidarr" ${APP_PORT} "v1"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Lidarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -9,7 +10,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from installer_test_helpers import common_functions, replace_paths_once
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import common_functions
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,7 +24,17 @@ printf '%s %s\n' "$cmd" "$*" >> "${root}/mock_commands.log"
 
 case "$cmd" in
     dpkg)
+        if [[ "$1" == "--compare-versions" ]]; then exec /usr/bin/dpkg "$@"; fi
         echo "amd64"
+        exit 0
+        ;;
+    dpkg-deb)
+        echo "3.0.0"
+        exit 0
+        ;;
+    dpkg-query)
+        if [[ "$*" == *db:Status-Status* ]]; then printf 'installed '; fi
+        echo "3.0.0"
         exit 0
         ;;
     uname)
@@ -42,7 +55,7 @@ case "$cmd" in
                 exit 0
                 ;;
             *digest*)
-                echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                printf '#!/bin/sh\nexit 0\n' | /usr/bin/sha256sum | awk '{print "sha256:" $1}'
                 exit 0
                 ;;
             *tag_name*|*0*.name*)
@@ -55,6 +68,9 @@ case "$cmd" in
                 ;;
         esac
         ;;
+    sha256sum)
+        exec /usr/bin/sha256sum "$@"
+        ;;
     node)
         if [ "$1" = "-v" ]; then
             echo "${TEST_NODE_VERSION:-v20.18.0}"
@@ -64,10 +80,6 @@ case "$cmd" in
         ;;
     curl)
         if [[ "$*" == *http_code* ]]; then echo 200; exit 0; fi
-        if [ "${FAIL_STAGE:-}" = "download" ]; then
-            printf "injected failure %s\n" "$FAIL_STAGE" >> "${root}/mock_commands.log"
-            exit 22
-        fi
         out=""
         prev=""
         for arg in "$@"; do
@@ -77,9 +89,37 @@ case "$cmd" in
             fi
             prev="$arg"
         done
+        if [[ "$*" == *github.com/*/releases/latest* ]]; then
+            if [[ "$*" == *url_effective* ]]; then
+                printf 'https://github.com/fixture/app/releases/tag/v3.0.0\n'
+            elif [ -n "$out" ]; then
+                mkdir -p "$(dirname "$out")"
+                printf '{"tag_name":"v3.0.0"}\n' > "$out"
+            else
+                printf '{"tag_name":"v3.0.0"}\n'
+            fi
+            exit 0
+        fi
+        if [ "${FAIL_STAGE:-}" = "download" ]; then
+            printf "injected failure %s\n" "$FAIL_STAGE" >> "${root}/mock_commands.log"
+            exit 22
+        fi
         if [ -n "$out" ]; then
             mkdir -p "$(dirname "$out")"
-            echo "mock-data" > "$out"
+            if [[ "$* $out" == *speedtest* || "$* $out" == *librespeed* ]] && [[ "$out" == *.tar.gz || "$out" == *.tgz ]]; then
+                /usr/bin/python3 - "$out" <<'PYEOF'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as tf:
+    data = b"#!/bin/sh\nexit 0\n"
+    info = tarfile.TarInfo(name="speedtest-backend")
+    info.size = len(data)
+    info.mode = 0o755
+    tf.addfile(info, io.BytesIO(data))
+PYEOF
+            else
+                printf '#!/bin/sh\nexit 0\n' > "$out"
+            fi
+            /usr/bin/sha256sum "$out" | awk '{print $1}' > "$out.sha256"
         else
             printf '%s\n' '{"token":"mock-token","layers":[{"digest":"sha256:fixture"}]}'
         fi
@@ -173,20 +213,20 @@ EOF
         mkdir -p "$c_dir"
         case "$*" in
             *vaultwarden*)
-                touch "${c_dir}/vaultwarden"
+                printf '#!/bin/sh\nexit 0\n' > "${c_dir}/vaultwarden"
                 chmod +x "${c_dir}/vaultwarden"
                 mkdir -p "${c_dir}/web-vault"
                 ;;
             *speedtest*|*librespeed*)
-                touch "${c_dir}/speedtest-backend"
+                printf '#!/bin/sh\nexit 0\n' > "${c_dir}/speedtest-backend"
                 chmod +x "${c_dir}/speedtest-backend"
                 ;;
             *paperless*)
                 mkdir -p "${c_dir}/src"
-                touch "${c_dir}/src/manage.py"
+                printf 'print("mock manage")\n' > "${c_dir}/src/manage.py"
                 ;;
             *flaresolverr*)
-                touch "${c_dir}/flaresolverr"
+                printf '#!/bin/sh\nexit 0\n' > "${c_dir}/flaresolverr"
                 chmod +x "${c_dir}/flaresolverr"
                 ;;
             *sabnzbd*)
@@ -234,6 +274,7 @@ EOF
         shift
         while [[ "${1:-}" == -* ]]; do shift; done
         unit="${1:-}"
+        unit="${unit%.service}"
         if [ "$sub" = "is-active" ]; then
             if [ -f "${root}/service_active_${unit}" ]; then
                 exit 0
@@ -261,6 +302,7 @@ EOF
         elif [ "$sub" = "enable" ]; then
             for enabled_unit in "$@"; do
                 [[ "$enabled_unit" == -* ]] && continue
+                enabled_unit="${enabled_unit%.service}"
                 touch "${root}/service_enabled_${enabled_unit}"
                 if [[ "$arguments" == *--now* ]]; then touch "${root}/service_active_${enabled_unit}"; fi
             done
@@ -271,6 +313,16 @@ EOF
         exit 0
         ;;
     openssl)
+        if [[ "${1:-}" == req ]]; then
+            previous=""
+            for argument in "$@"; do
+                if [[ "$previous" == -out || "$previous" == -keyout ]]; then
+                    printf 'fixture TLS material\n' > "$argument"
+                fi
+                previous="$argument"
+            done
+            exit 0
+        fi
         echo "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         exit 0
         ;;
@@ -343,40 +395,85 @@ class SafeMarketplaceUpdatesTests(unittest.TestCase):
             "srv",
             "mnt",
             "usr/local/bin",
+            "usr/bin",
+            "usr/sbin",
+            "usr/lib",
+            "usr/share",
         ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
 
         (self.root / "etc/os-release").write_text("ID=ubuntu\nVERSION_CODENAME=noble\n")
 
         for command in (
-            "dpkg", "uname", "flock", "jq", "sha256sum", "node", "curl", "git", "yarn", "npm", "pip", "pip3",
+            "dpkg", "dpkg-deb", "dpkg-query", "uname", "flock", "jq", "sha256sum", "node", "curl", "git", "yarn", "npm", "pip", "pip3",
             "tar", "python", "python3", "systemctl", "openssl", "apt-get", "chown", "chmod",
             "useradd", "usermod", "userdel", "groupdel", "id", "install", "sudo", "runuser", "cargo", "kasmvncpasswd"
         ):
             p = self.root / "mock-bin" / command
             p.write_text(MOCK_SCRIPT)
             p.chmod(0o755)
+            shutil.copy2(p, self.root / 'usr/bin' / command)
 
         common_content = r"""set -euo pipefail
 MASTER_USER=admin
 MASTER_PASS=testpass123
 log_info() { printf '%s\n' "$*" >> "$LOGFILE"; }
+log_warn() { printf '%s\n' "$*" >> "$LOGFILE"; }
 log_error() { printf '%s\n' "$*" >&2; }
+print_warn() { printf '%s\n' "$*" >&2; }
 print_error() { printf '%s\n' "$*" >&2; }
 report_progress() { :; }
 require_root() { :; }
 ensure_node() { :; }
 sync_node_global_bins() { :; }
-github_latest_tag() { printf '%s\n' "${2:-3.0.0}"; }
 get_base_domain() { printf 'example.com\n'; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
+lock_path() { printf '%s/install/.%s.lock\n' "$TEST_ROOT" "$1"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 purge_systemd_unit() { :; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
-set_config_value() { :; }
 """
-        common_content += common_functions("node_build", "install_npm_app", "replace_app_tree")
-        (self.root / "opt/AetherFlow/packages/common.sh").write_text(common_content)
+        common_content += common_functions(
+            "systemd_unit_inactive",
+            "stop_systemd_unit",
+            "github_latest_tag",
+            "node_build",
+            "install_npm_app",
+            "replace_app_tree",
+            "write_app_version",
+            "resolve_installed_binary_version",
+            "queue_app_version",
+            "commit_app_versions",
+            "safe_restore_path_from_backup",
+            "snapshot_state_dirs",
+            "restore_state_snapshot",
+            "begin_state_transaction",
+            "cleanup_state_transaction",
+            "verify_systemd_service_active",
+            "wait_for_service_ready",
+            "verify_download_sha256",
+            "download_file",
+            "git_checkout_version",
+            "verify_deb_installed",
+            "safe_rm_rf",
+            "snapshot_app_state",
+            "restore_app_state",
+            "safe_config_python",
+            "validate_config_paths",
+            "write_config_file",
+            "set_config_file_mode",
+            "verify_sha256",
+            "set_config_value",
+            "stage_app_archive",
+            "rollback_app_archive_update",
+            "finish_app_archive_update",
+        )
+        (self.root / "opt/AetherFlow/packages/common.sh").write_text(self.rebase(common_content))
+
+    def rebase(self, source):
+        prefixes = ('/usr/local', '/usr/bin', '/usr/sbin', '/usr/lib', '/usr/share', '/opt', '/var', '/etc', '/srv', '/mnt', '/run', '/install', '/tmp', '/home', '/root', '/data')
+        pattern = re.compile(r'(?<![\w/.-])(' + '|'.join(re.escape(prefix) for prefix in prefixes) + r')(?=/|[^\w.-]|$)')
+        return pattern.sub(lambda match: str(self.root) + match.group(0), source)
 
     def run_script(self, package, action="install", **environment):
         script_path = ROOT / f"packages/package/{action}/{action}package-{package}"
@@ -384,21 +481,7 @@ set_config_value() { :; }
         root_posix = str(self.root).replace("\\", "/")
 
         (self.root / "tmp").mkdir(exist_ok=True)
-        replacements = [
-            ("/tmp/", f"{root_posix}/tmp/"),
-            ("/usr/bin/kasmvncpasswd", f"{root_posix}/mock-bin/kasmvncpasswd"),
-            ("/mnt/", f"{root_posix}/mnt/"),
-            ("/opt/", f"{root_posix}/opt/"),
-            ("/var/", f"{root_posix}/var/"),
-            ("/etc/", f"{root_posix}/etc/"),
-            ("/usr/local/", f"{root_posix}/usr/local/"),
-            ("/srv/", f"{root_posix}/srv/"),
-            ("/srv ", f"{root_posix}/srv "),
-            ("/home/", f"{root_posix}/home/"),
-            ("/run/lock", f"{root_posix}/run/lock"),
-            (" /install", f" {root_posix}/install"),
-        ]
-        source = replace_paths_once(source, replacements)
+        source = self.rebase(source)
 
         staged_script = self.root / "run_test_script.sh"
         staged_script.write_text(source)
@@ -409,6 +492,8 @@ set_config_value() { :; }
             "PATH": f"{self.root}/mock-bin:{os.environ['PATH']}",
             "HOME": f"{root_posix}/home",
             "TEST_ROOT": root_posix,
+            "TMPDIR": f"{root_posix}/tmp",
+            "AETHERFLOW_INSTALL_ROOT": root_posix,
             "LOGFILE": f"{root_posix}/test.log",
             **environment,
         }
@@ -567,7 +652,7 @@ set_config_value() { :; }
         self.assertEqual(success_result.returncode, 0, success_result.stderr)
         self.assertEqual((srv_dir / ".af-version").read_text().strip(), "2026.11.0")
 
-    def test_paperless_ngx_preserves_secret_key_and_backs_up_db(self):
+    def test_paperless_ngx_preserves_secret_key_and_discards_committed_snapshot(self):
         conf = self.root / "etc/paperless.conf"
         conf.write_text("PAPERLESS_SECRET_KEY=custom-user-secret\nPAPERLESS_PORT=8010\nPAPERLESS_CUSTOM_FLAG=true\n")
         db = self.root / "var/lib/paperless/data/db.sqlite3"
@@ -581,8 +666,8 @@ set_config_value() { :; }
         self.assertIn("PAPERLESS_PORT=8015", conf_after)
         self.assertIn("PAPERLESS_CUSTOM_FLAG=true", conf_after)
         backups = list(self.root.glob("var/backups/aetherflow-paperless.*/db.sqlite3"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_text(), "database contents")
+        self.assertEqual(backups, [])
+        self.assertEqual(db.read_text(), "database contents")
 
     def test_paperless_ngx_first_install_generates_secret(self):
         conf = self.root / "etc/paperless.conf"

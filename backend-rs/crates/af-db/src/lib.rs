@@ -1,7 +1,8 @@
 mod retained_ingress;
 pub use retained_ingress::{
     archive_app_ingress_config, archive_app_ingress_config_for_lifecycle,
-    get_retained_app_ingress_config, load_lifecycle_ingress, synchronize_lifecycle_ingress,
+    get_reserved_ports_excluding, get_retained_app_ingress_config, list_reserved_ports_excluding,
+    load_lifecycle_ingress, synchronize_lifecycle_ingress,
 };
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -1228,7 +1229,7 @@ pub fn set_app_ingress_config_for_lifecycle(
     action: &str,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        matches!(action, "install" | "update"),
+        matches!(action, "install" | "reinstall" | "update"),
         "Invalid ingress lifecycle action"
     );
     anyhow::ensure!(
@@ -1242,6 +1243,14 @@ pub fn set_app_ingress_config_for_lifecycle(
 }
 
 fn write_app_ingress_config(conn: &Connection, cfg: &AppIngressConfig) -> anyhow::Result<()> {
+    if cfg.listen_port > 0 {
+        let reserved = retained_ingress::list_reserved_ports_excluding(conn, &cfg.app_name)?;
+        anyhow::ensure!(
+            !reserved.contains(&cfg.listen_port),
+            "Listen port {} is already reserved by another application",
+            cfg.listen_port
+        );
+    }
     conn.execute(
         r#"
         INSERT INTO app_ingress_configs (app_name, public_domain, external_access_enabled, listen_port, tls_enabled, updated_at)
@@ -1685,11 +1694,14 @@ pub fn consume_mfa_challenge(conn: &Connection, token: &str, user_id: i64) -> an
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) static TEST_DB_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn revocation_query_distinguishes_absent_revoked_and_database_errors() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let conn = Connection::open_in_memory().unwrap();
         assert!(token_revocation_status_with_conn(&conn, "session").is_err());
         conn.execute_batch(
@@ -1723,6 +1735,7 @@ mod tests {
 
     #[test]
     fn bounded_read_pool_works_while_writer_is_held_and_cannot_write() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!(
             "af-read-pool-{}-{}.sqlite",
             std::process::id(),
@@ -1757,6 +1770,7 @@ mod tests {
 
     #[test]
     fn test_aes_gcm_roundtrip_and_format() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         env::set_var("AES_MASTER_KEY", "a".repeat(32));
         init_aes_key().unwrap();
         assert!(is_encryption_enabled());
@@ -1769,6 +1783,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_migrations_and_settings_singleton() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         env::set_var("DB_PATH", ":memory:");
         init_db().unwrap();
         let health = db_health_check().unwrap();

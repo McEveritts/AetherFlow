@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import ROOT, common_functions, replace_paths_once
 
 
@@ -71,7 +73,7 @@ class MarketplaceTeardownTests(unittest.TestCase):
                                           ('/etc/', '/var/', '/opt/', '/home/', '/install/', '/usr/local/', '/usr/bin/', '/run/', '/srv/', '/data')])
 
     def run_remove(self, package='syncthing', **environment):
-        names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists')
+        names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists', 'purge_app_archive_backups', 'safe_rm_rf')
         source = (ROOT / 'packages/common.sh').read_text()
         names += tuple(name for name in ('systemd_unit_inactive', 'stop_systemd_unit', 'purge_systemd_units')
                        if f'\n{name}() ' in source)
@@ -124,8 +126,10 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                 self.assertEqual((self.root / 'etc/dispatcharr/db_pass').exists(), purge == 'false')
                 calls = (self.root / 'commands').read_text()
                 if purge == 'true':
-                    self.assertLess(calls.index('DROP DATABASE'), calls.index(f'rm -rf {self.root}/etc/dispatcharr'))
-                    self.assertLess(calls.index('DROP USER'), calls.index(f'rm -rf {self.root}/etc/dispatcharr'))
+                    command_lines = calls.splitlines()
+                    removal_index = next(index for index, command in enumerate(command_lines) if command.split()[:2] == ['rm', '-rf'] and str(self.root / 'etc/dispatcharr') in command.split()[2:])
+                    for statement in ('DROP DATABASE', 'DROP USER'):
+                        self.assertLess(next(index for index, command in enumerate(command_lines) if statement in command), removal_index)
                 else:
                     self.assertNotIn('DROP DATABASE', calls)
                     self.assertNotIn('DROP USER', calls)
@@ -324,6 +328,8 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
             for purge in ('false', 'true'):
                 with self.subTest(package=package, purge=purge):
                     self.prepare_shared_web_app(package)
+                    if package == 'rutorrent':
+                        self.file('var/www/rutorrent/share/sentinel', 'retained ruTorrent state')
                     (self.root / 'commands').unlink(missing_ok=True)
                     (self.root / 'sql').unlink(missing_ok=True)
                     result = self.run_remove(package, DELETE_DATA=purge)
@@ -337,7 +343,9 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                             sql_index = next(i for i, line in enumerate(commands) if line.startswith('mysql '))
                             self.assertLess(reload_index, sql_index)
                             self.assertLess(sql_index, data_index)
-                    self.assertEqual((self.root / f'var/www/{package}/sentinel').exists(), purge == 'false')
+                    self.assertEqual((self.root / f'var/www/{package}/sentinel').exists(), purge == 'false' and package != 'rutorrent')
+                    if package == 'rutorrent':
+                        self.assertEqual((self.root / 'var/www/rutorrent/share/sentinel').exists(), purge == 'false')
                     self.assertFalse((self.root / f'install/.{package}.lock').exists())
                     self.assertEqual(commands[-1], f'rm -f {self.root}/install/.{package}.lock')
                     self.assertFalse(any(line.startswith('systemctl stop ') for line in commands))

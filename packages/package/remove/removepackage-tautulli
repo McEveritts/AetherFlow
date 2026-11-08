@@ -26,12 +26,14 @@ report_progress 25 "Stopping and removing tautulli.service..."
 purge_systemd_unit "tautulli" "plexpy"
 
 report_progress 65 "Removing Tautulli files, state directories, and user account..."
-rm -rf /opt/Tautulli
+safe_rm_rf /opt/Tautulli
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/plexpy /var/lib/tautulli
+    safe_rm_rf /opt/plexpy /var/lib/tautulli /etc/tautulli
+    purge_system_user "tautulli"
 fi
-purge_system_user "tautulli"
-purge_system_user "plexpy"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "plexpy"
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

@@ -24,9 +24,22 @@ struct Runner {
     task: tokio::task::JoinHandle<()>,
 }
 
+fn short_socket_path(filename: &str) -> PathBuf {
+    let candidate = env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join(filename);
+    if candidate.as_os_str().len() < 95 {
+        candidate
+    } else {
+        PathBuf::from("/tmp").join(filename)
+    }
+}
+
 impl Runner {
     fn new(reply: Reply) -> Self {
-        let socket = env::temp_dir().join(format!(
+        let socket = short_socket_path(&format!(
             "nm-{}.sock",
             &uuid::Uuid::new_v4().to_string()[..8]
         ));
@@ -38,13 +51,46 @@ impl Runner {
         let peak = Arc::new(AtomicUsize::new(0));
         let idle = Arc::new(Notify::new());
         let (sender, requests) = mpsc::unbounded_channel();
+        let open_fds: Arc<Mutex<Vec<std::os::fd::RawFd>>> = Arc::new(Mutex::new(Vec::new()));
         let task = {
             let reply = reply.clone();
             let calls = calls.clone();
             let active = active.clone();
             let peak = peak.clone();
             let idle = idle.clone();
+            let open_fds = open_fds.clone();
             tokio::spawn(async move {
+                use std::os::fd::AsRawFd;
+                fn peer_fd_still_connected(fd: std::os::fd::RawFd) -> bool {
+                    extern "C" {
+                        fn recv(
+                            socket: std::os::raw::c_int,
+                            buf: *mut std::os::raw::c_void,
+                            len: usize,
+                            flags: std::os::raw::c_int,
+                        ) -> isize;
+                    }
+                    const MSG_PEEK: std::os::raw::c_int = 0x02;
+                    const MSG_DONTWAIT: std::os::raw::c_int = 0x40;
+                    let mut byte = 0u8;
+                    let rc = unsafe {
+                        recv(
+                            fd,
+                            (&mut byte as *mut u8).cast(),
+                            1,
+                            MSG_PEEK | MSG_DONTWAIT,
+                        )
+                    };
+                    if rc < 0 {
+                        let err = std::io::Error::last_os_error();
+                        matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        )
+                    } else {
+                        rc > 0
+                    }
+                }
                 let mut peers = tokio::task::JoinSet::new();
                 loop {
                     tokio::select! {
@@ -55,6 +101,7 @@ impl Runner {
                             let active = active.clone();
                             let peak = peak.clone();
                             let idle = idle.clone();
+                            let open_fds = open_fds.clone();
                             let sender = sender.clone();
                             peers.spawn(async move {
                                 let mut request = Vec::new();
@@ -73,9 +120,29 @@ impl Runner {
                                         }
                                     }
                                 }
+                                let peer_fd = stream.as_raw_fd();
                                 calls.fetch_add(1, Ordering::SeqCst);
-                                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                                peak.fetch_max(current, Ordering::SeqCst);
+                                {
+                                    let mut fds = open_fds.lock().unwrap();
+                                    let before = fds.len();
+                                    fds.retain(|&fd| peer_fd_still_connected(fd));
+                                    let reaped = before - fds.len();
+                                    if reaped > 0 {
+                                        active.fetch_sub(reaped, Ordering::SeqCst);
+                                        idle.notify_waiters();
+                                    }
+                                    fds.push(peer_fd);
+                                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                                    peak.fetch_max(current, Ordering::SeqCst);
+                                }
+                                let release_peer = |fd: std::os::fd::RawFd| {
+                                    let mut fds = open_fds.lock().unwrap();
+                                    if let Some(pos) = fds.iter().position(|&x| x == fd) {
+                                        fds.swap_remove(pos);
+                                        active.fetch_sub(1, Ordering::SeqCst);
+                                        idle.notify_waiters();
+                                    }
+                                };
                                 let _ = sender.send(());
                                 match reply {
                                     Reply::Silent => { let _ = stream.read(&mut buffer).await; }
@@ -85,15 +152,28 @@ impl Runner {
                                             tokio::time::sleep(Duration::from_millis(40)).await;
                                         }
                                     }
-                                    Reply::Bytes(bytes) => { let _ = stream.write_all(&bytes).await; }
+                                    Reply::Bytes(bytes) => {
+                                        if let Some((last, prefix)) = bytes.split_last() {
+                                            let _ = stream.write_all(prefix).await;
+                                            release_peer(peer_fd);
+                                            let _ = stream.write_all(&[*last]).await;
+                                        } else {
+                                            release_peer(peer_fd);
+                                        }
+                                    }
                                     Reply::Held(gate, bytes) => {
                                         let permit = gate.acquire().await.unwrap();
                                         permit.forget();
-                                        let _ = stream.write_all(&bytes).await;
+                                        if let Some((last, prefix)) = bytes.split_last() {
+                                            let _ = stream.write_all(prefix).await;
+                                            release_peer(peer_fd);
+                                            let _ = stream.write_all(&[*last]).await;
+                                        } else {
+                                            release_peer(peer_fd);
+                                        }
                                     }
                                 }
-                                active.fetch_sub(1, Ordering::SeqCst);
-                                idle.notify_one();
+                                release_peer(peer_fd);
                             });
                         }
                         Some(result) = peers.join_next(), if !peers.is_empty() => { result.unwrap(); }
@@ -438,7 +518,7 @@ async fn native_connect_to_saturated_socket_is_bounded() {
         return;
     }
     let _fixture = native_fixture(0);
-    let socket = env::temp_dir().join(format!(
+    let socket = short_socket_path(&format!(
         "nc-{}.sock",
         &uuid::Uuid::new_v4().to_string()[..8]
     ));

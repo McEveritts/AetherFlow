@@ -28,7 +28,7 @@ report_progress 20 "Stopping and disabling netdata.service..."
 purge_systemd_unit "netdata"
 
 report_progress 50 "Uninstalling Netdata packages..."
-if [[ -x /usr/libexec/netdata/netdata-uninstaller.sh ]]; then
+if [[ "${DELETE_DATA:-false}" == true && -x /usr/libexec/netdata/netdata-uninstaller.sh ]]; then
     /usr/libexec/netdata/netdata-uninstaller.sh --yes --force >> "$LOGFILE" 2>&1 || true
 fi
 DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq "netdata*" >> "$LOGFILE" 2>&1
@@ -36,13 +36,14 @@ DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/netdata*.list /usr/share/keyrings/netdata*.gpg
 
 report_progress 80 "Removing Netdata directories and user account..."
-rm -rf /var/cache/netdata /var/log/netdata /usr/lib/netdata /usr/share/netdata
+safe_rm_rf /var/cache/netdata /var/log/netdata /usr/lib/netdata /usr/share/netdata
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/netdata /var/lib/netdata /opt/netdata
+    safe_rm_rf /etc/netdata /var/lib/netdata /opt/netdata
+    purge_system_user "netdata"
 fi
-purge_system_user "netdata"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /etc/netdata/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Netdata removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

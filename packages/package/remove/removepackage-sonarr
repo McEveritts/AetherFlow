@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing sonarr.service..."
 purge_systemd_unit "sonarr"
 
 report_progress 65 "Removing Sonarr binaries, state directories, and user account..."
-rm -rf /opt/Sonarr /opt/NzbDrone
+safe_rm_rf /opt/Sonarr /opt/NzbDrone
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/sonarr
+    safe_rm_rf /var/lib/sonarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Sonarr"
+    purge_system_user "sonarr"
 fi
-purge_system_user "sonarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

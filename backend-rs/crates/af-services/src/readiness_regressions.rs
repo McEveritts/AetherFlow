@@ -190,10 +190,20 @@ async fn invalidated_in_flight_probes_cannot_repopulate_the_cache() {
         return;
     }
     let fixture = Fixture::new();
-    let socket = env::temp_dir().join(format!(
+    let sock_name = format!(
         "ic-{}.sock",
         &uuid::Uuid::new_v4().to_string()[..8]
-    ));
+    );
+    let candidate = env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join(&sock_name);
+    let socket = if candidate.as_os_str().len() < 95 {
+        candidate
+    } else {
+        std::path::PathBuf::from("/tmp").join(sock_name)
+    };
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     env::set_var("AF_INVALIDATION_SOCKET", &socket);
     fixture.command("systemctl", "test \"$1\" = show || exit 92\nexec /usr/bin/python3 -c 'import os,socket\nprobe=socket.socket(socket.AF_UNIX)\nprobe.connect(os.environ[\"AF_INVALIDATION_SOCKET\"])\nprobe.recv(1)\nprint(\"ActiveState=inactive\\nSubState=dead\")'\n");

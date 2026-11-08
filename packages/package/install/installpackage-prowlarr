@@ -48,17 +48,17 @@ PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
 PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/prowlarr-XXXXXX.tar.gz)
-curl -fsSL "$PROWLARR_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$PROWLARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Prowlarr to /opt/Prowlarr..."
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Prowlarr" "Prowlarr" "/var/lib/prowlarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
 if [[ -n "$PROWLARR_VERSION" ]]; then
-    printf '%s\n' "${PROWLARR_VERSION#v}" > /opt/Prowlarr/.af-version
+    queue_app_version /opt/Prowlarr/.af-version "$(resolve_installed_binary_version /opt/Prowlarr/Prowlarr "${PROWLARR_VERSION#v}")"
 fi
 set_config_value "/var/lib/prowlarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
-chown -R prowlarr:prowlarr /opt/Prowlarr /var/lib/prowlarr
+chown -hRP prowlarr:prowlarr /opt/Prowlarr /var/lib/prowlarr
 
 report_progress 85 "Configuring and starting prowlarr.service..."
 cat <<'EOF' > /etc/systemd/system/prowlarr.service
@@ -85,8 +85,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now prowlarr >> "$LOGFILE" 2>&1
 systemctl restart prowlarr >> "$LOGFILE" 2>&1
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "prowlarr" ${APP_PORT} "v1"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Prowlarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

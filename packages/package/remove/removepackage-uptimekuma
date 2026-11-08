@@ -27,9 +27,14 @@ purge_systemd_unit "uptime-kuma"
 
 report_progress 65 "Removing Uptime Kuma directory and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/uptime-kuma
+    purge_app_archive_backups "uptime-kuma" "/opt/uptime-kuma"
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/uptime-kuma"
+    safe_rm_rf /opt/uptime-kuma /var/lib/uptimekuma
+    purge_system_user "uptimekuma"
+else
+    safe_rm_rf /opt/uptime-kuma/{.git,.runtime,node_modules,dist,server,src,public,extra}
+    rm -f /opt/uptime-kuma/{.af-version,package.json,package-lock.json,yarn.lock,pnpm-lock.yaml}
 fi
-purge_system_user "uptimekuma"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

@@ -25,8 +25,17 @@ impl Fixture {
     async fn new() -> Self {
         let root = env::temp_dir().join(format!("update-observer-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        let socket =
-            env::temp_dir().join(format!("u-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]));
+        let sock_name = format!("u-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]);
+        let candidate = env::var_os("TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir)
+            .join(&sock_name);
+        let socket = if candidate.as_os_str().len() < 95 {
+            candidate
+        } else {
+            PathBuf::from("/tmp").join(sock_name)
+        };
         for key in [
             "AETHERFLOW_FS_ROOT",
             "AETHERFLOW_CONFIG_ROOT",

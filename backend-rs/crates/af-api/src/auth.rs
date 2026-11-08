@@ -691,9 +691,10 @@ pub fn save_master_credentials(username: &str, password: &str) {
     if u.is_empty() || password.is_empty() {
         return;
     }
-    let _ = af_services::mutators::save_master_credentials(u, password);
-    let ha1_input = format!("{}:AetherFlow:{}", u, password);
-    let ha1 = md5_hex(ha1_input.as_bytes());
+    if af_services::mutators::save_master_credentials(u, password).is_ok() {
+        return;
+    }
+    let ha1 = md5_hex(password.as_bytes());
     let payload = serde_json::json!({
         "username": u,
         "password": password,
@@ -730,18 +731,7 @@ pub fn save_master_credentials(username: &str, password: &str) {
         if p.as_os_str().is_empty() {
             continue;
         }
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
-        if std::fs::write(&p, &raw).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        let _ = af_services::mutators::write_file_atomic_mode(&p, &raw, Some(0o600));
     }
 }
 

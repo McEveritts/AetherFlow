@@ -18,6 +18,7 @@ youtube_init() {
     INSTALL_DIR="/opt/${APP_NAME}"
     DATA_DIR="/var/lib/${APP_NAME}"
     CONFIG_DIR="/etc/${APP_NAME}"
+    validate_config_paths "$INSTALL_DIR/.af-version" "$DATA_DIR/.af-version" "$CONFIG_DIR/runtime.env" "$CONFIG_DIR/companion.env" "$CONFIG_DIR/config.yml" "$CONFIG_DIR/config.properties" "$CONFIG_DIR/httpd.conf"
     export LOGFILE="/var/log/aetherflow/install-${APP_NAME}.log"
     export DEBIAN_FRONTEND=noninteractive
     trap 'print_error "Installation failed; see ${LOGFILE}."' ERR
@@ -42,6 +43,7 @@ youtube_source() {
 
 youtube_secret() {
     local path="${CONFIG_DIR}/$1"
+    validate_config_paths "$path"
     if [[ ! -s "$path" ]]; then
         (umask 077; openssl rand -hex "${2:-32}" > "$path")
     fi
@@ -52,6 +54,7 @@ youtube_secret() {
 
 youtube_private_port() {
     local path="${CONFIG_DIR}/$1-port"
+    validate_config_paths "$path"
     if [[ ! -s "$path" ]]; then
         python3 - "$APP_PORT" "$CONFIG_DIR" > "$path" <<'PY'
 import pathlib
@@ -80,24 +83,27 @@ PY
 youtube_database() {
     DB_PASSWORD="$(youtube_secret database-password)"
     systemctl enable --now postgresql.service
-    runuser -u postgres -- psql -v ON_ERROR_STOP=1 --set="app=$APP_NAME" --set="password=$DB_PASSWORD" >> "$LOGFILE" 2>&1 <<'SQL'
+    (
+    export AF_YOUTUBE_DB_PASSWORD="$DB_PASSWORD"
+    runuser --preserve-environment -u postgres -- psql -v ON_ERROR_STOP=1 --set="app=$APP_NAME" >> "$LOGFILE" 2>&1 <<'SQL'
+\getenv password AF_YOUTUBE_DB_PASSWORD
 SELECT format('CREATE ROLE %I LOGIN', :'app') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app') \gexec
 SELECT format('ALTER ROLE %I PASSWORD %L', :'app', :'password') \gexec
 SELECT format('CREATE DATABASE %I OWNER %I', :'app', :'app') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'app') \gexec
 SQL
+    )
 }
 
 youtube_asset() {
     local repo="$1" tag="$2" asset="$3" output="$4" metadata url digest
     metadata="$(curl --fail --silent --show-error --location "https://api.github.com/repos/${repo}/releases/tags/${tag}")"
     url="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' <<< "$metadata")"
-    digest="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .digest' <<< "$metadata")"
-    [[ "$url" == "https://github.com/${repo}/releases/download/"* && "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+    digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest // empty' <<< "$metadata")" || return 1
+    [[ "$url" == "https://github.com/${repo}/releases/download/"* && ( -z "$digest" || "$digest" =~ ^sha256:[a-fA-F0-9]{64}$ ) ]] || {
         print_error "Missing trusted download URL or SHA-256 digest for ${asset}."
         return 1
     }
-    curl --fail --silent --show-error --location "$url" -o "$output"
-    printf '%s  %s\n' "${digest#sha256:}" "$output" | sha256sum --check --status
+    RELEASE_JSON="$metadata" download_file "$url" "$output" "${APP_NAME:-${PACKAGE_NAME:-youtube}}" "${digest#sha256:}"
 }
 
 youtube_unit() {
@@ -160,11 +166,14 @@ youtube_remove() {
 SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
 SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
 SQL
-        rm -rf "/opt/${app}" "/etc/${app}" "/var/lib/${app}" || return 1
+        safe_rm_rf "/opt/${app}" || return 1
+        safe_rm_rf "/etc/${app}" || return 1
+        safe_rm_rf "/var/lib/${app}" || return 1
         purge_system_user "$app" || return 1
         remove_lock "$app" || return 1
         print_info "${app} purged, including its sources, configuration, PostgreSQL database and user data."
     else
+        rm -f "/opt/${app}/.af-version" "/var/lib/${app}/.af-version" "/etc/${app}/.af-version"
         remove_lock "$app" || return 1
         print_info "${app} removed. Sources, configuration, PostgreSQL database and user data are preserved for reinstall."
     fi

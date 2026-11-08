@@ -23,7 +23,9 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/autoscan/config.yml
 log_info "Starting installation for ${PACKAGE_NAME}..."
+print_warn "Cloudbox Autoscan is archived, unmaintained and feature frozen; future integration incompatibilities will not receive upstream fixes. Existing configuration and data are preserved; no fork is substituted."
 report_progress 10 "Installing prerequisites for Autoscan..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
@@ -51,7 +53,7 @@ report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
 TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/autoscan-extract-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
-curl -fsSL "$AS_URL" -o "$TMP_BIN" >> "$LOGFILE" 2>&1
+download_file "$AS_URL" "$TMP_BIN" >> "$LOGFILE" 2>&1
 if [[ "$AS_URL" == *.tar.gz ]]; then
     tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan >> "$LOGFILE" 2>&1
     rm -f "$TMP_BIN"
@@ -59,9 +61,10 @@ else
     cp "$TMP_BIN" "$TMP_DIR/autoscan"
     rm -f "$TMP_BIN"
 fi
-systemctl stop autoscan >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$TMP_DIR/autoscan" /usr/local/bin/autoscan
-printf '%s\n' "${AS_VERSION#v}" > /opt/autoscan/.af-version
+chmod 755 "$TMP_DIR/autoscan"
+stage_app_archive "$TMP_DIR" /usr/local/bin/autoscan autoscan /etc/autoscan "$PACKAGE_NAME" "." /opt/autoscan "" binary
+rm -rf "$TMP_DIR"
+queue_app_version /opt/autoscan/.af-version "${AS_VERSION#v}"
 
 report_progress 75 "Performing Zero-Touch Arr API key auto-discovery for Autoscan..."
 get_arr_key() {
@@ -119,7 +122,7 @@ fi
 
 set_config_value "/etc/autoscan/config.yml" yaml "port" "$APP_PORT" ""
 
-chown -R autoscan:autoscan /etc/autoscan /var/lib/autoscan /opt/autoscan
+chown -hRP autoscan:autoscan /etc/autoscan /var/lib/autoscan /opt/autoscan
 chmod 640 /etc/autoscan/config.yml
 
 report_progress 85 "Configuring and starting autoscan.service on port ${APP_PORT}..."
@@ -144,7 +147,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now autoscan >> "$LOGFILE" 2>&1
 systemctl restart autoscan >> "$LOGFILE" 2>&1
+systemctl is-active --quiet autoscan
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Autoscan installed on port ${APP_PORT} (Arr webhooks ready)."
 log_info "${PACKAGE_NAME} installed successfully"

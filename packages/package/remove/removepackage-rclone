@@ -33,11 +33,13 @@ report_progress 50 "Stopping and removing rclone.service..."
 report_progress 75 "Removing rclone binary, state directories, and user account..."
 rm -f /usr/bin/rclone
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/rclone /var/lib/rclone
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/bin/rclone"
+    safe_rm_rf /etc/rclone /var/lib/rclone
+    purge_system_user "rclone"
 fi
-purge_system_user "rclone"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/rclone/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Rclone removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

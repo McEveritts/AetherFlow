@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import ROOT, common_functions, replace_paths_once
 from test_marketplace_dispatcharr import UPGRADE_MOCK
 from test_marketplace_teardown import FAKE_COMMAND
@@ -30,7 +32,7 @@ class DispatcharrOwnershipTests(unittest.TestCase):
         mock = UPGRADE_MOCK.replace('sys.exit(subprocess.run(["/usr/bin/git", *args]).returncode)', 'shutil.copytree(root / "upstream", pathlib.Path(args[-1]), dirs_exist_ok=True)')
         mock = mock.replace('if args[:2] == ["-", "postgres"]:', 'if os.environ.get("FAIL_SQL") and os.environ["FAIL_SQL"] in args[-1]:\n        sys.exit(42)\n    if args[:2] == ["-", "postgres"]:')
         mock = mock.replace('"chown", "id", "useradd"):', '"chown", "id", "useradd", "getent", "userdel", "groupdel"):')
-        for command in ("git", "python3.13", "su", "npm", "systemctl", "apt-get", "chown", "id", "useradd", "getent", "userdel", "groupdel"):
+        for command in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "apt-get", "chown", "id", "useradd", "getent", "userdel", "groupdel"):
             self.file("fake-bin/" + command, mock).chmod(0o755)
         self.file("fake-bin/rm", FAKE_COMMAND).chmod(0o755)
         self.file("database", "old-schema")
@@ -51,12 +53,13 @@ log_error() { printf '%s\\n' "$*" >&2; }
 print_error() { printf '%s\\n' "$*" >&2; }
 report_progress() { printf '[PROGRESS:%s] %s\\n' "$1" "$2"; }
 ensure_node() { :; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
+lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 """
-        names = ("node_build", "purge_systemd_unit", "purge_system_user", "command_exists")
+        names = ("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "safe_config_python", "validate_config_paths", "write_config_file", "purge_systemd_unit", "purge_system_user", "command_exists", "safe_rm_rf")
         source = (ROOT / "packages/common.sh").read_text()
-        names += tuple(name for name in ("purge_systemd_units", "stop_systemd_unit", "systemd_unit_inactive") if f"\n{name}() " in source)
+        names += tuple(name for name in ("purge_systemd_units", "stop_systemd_unit", "systemd_unit_inactive", "backup_postgresql_database", "restore_postgresql_database") if f"\n{name}() " in source)
         common += self.rebase(common_functions(*names))
         self.file("opt/AetherFlow/packages/common.sh", common)
 

@@ -2662,15 +2662,44 @@ impl Drop for DeploymentRegistration {
     }
 }
 
+pub mod af_common {
+    pub mod redact {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static SECRET_BEARER_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}").unwrap());
+        static SECRET_URL_CRED_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@)").unwrap());
+        static SECRET_KV_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r#"(?i)\b(password|passwd|secret|api[_-]?key|token|auth[_-]?key|access[_-]?token|client[_-]?secret)(\s*[:=]\s*["']?)([^\s"',;]+)"#,
+            )
+            .unwrap()
+        });
+
+        pub fn redact_secrets(input: &str) -> String {
+            let step1 = SECRET_BEARER_RE.replace_all(input, "${1}[REDACTED]");
+            let step2 = SECRET_URL_CRED_RE.replace_all(&step1, "${1}[REDACTED]${3}");
+            SECRET_KV_RE
+                .replace_all(&step2, "${1}${2}[REDACTED]")
+                .into_owned()
+        }
+    }
+}
+
 fn deployment_restart_status(result: anyhow::Result<()>) -> String {
     match result {
         Ok(()) => {
             "[SUCCESS] Deployment configuration applied and managed service restarted.".to_string()
         }
-        Err(error) => format!(
-            "[ERROR] Deployment configuration applied, but managed service restart failed: {}",
-            error
-        ),
+        Err(error) => {
+            let sanitized = af_common::redact::redact_secrets(&format!("{error:#}"));
+            format!(
+                "[ERROR] Deployment configuration applied, but managed service restart failed: {}",
+                sanitized
+            )
+        }
     }
 }
 
@@ -3649,23 +3678,42 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
     }
 }
 
-fn allocate_or_verify_deploy_port(app_name: &str, default_port: i32) -> i32 {
-    if let Ok(Some(existing)) = af_db::get_app_ingress_config(app_name) {
+fn require_admin(auth_user: &AuthUser) -> Result<(), Response> {
+    if auth_user.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Admin access required",
+        ));
+    }
+    Ok(())
+}
+
+fn allocate_or_verify_deploy_port(bp: &af_services::AppBlueprint) -> i32 {
+    if bp.default_port <= 0 {
+        return 0;
+    }
+    if let Ok(Some(existing)) = af_db::get_app_ingress_config(&bp.app_name) {
         if (1..=65535).contains(&existing.listen_port) {
             return existing.listen_port;
         }
     }
-    if (1..=65535).contains(&default_port)
-        && std::net::TcpListener::bind(("127.0.0.1", default_port as u16)).is_ok()
-    {
-        return default_port;
+    if !bp.supports_dynamic_port || bp.fallback_port_range == [0, 0] {
+        return bp.default_port;
     }
-    for candidate in 17000..=19999 {
+    if (1..=65535).contains(&bp.default_port)
+        && std::net::TcpListener::bind(("127.0.0.1", bp.default_port as u16)).is_ok()
+    {
+        return bp.default_port;
+    }
+    let start = bp.fallback_port_range[0].max(17000) as u16;
+    let end = bp.fallback_port_range[1].max(19999) as u16;
+    for candidate in start..=end {
         if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
             return candidate as i32;
         }
     }
-    8080
+    bp.default_port
 }
 
 fn deployment_ingress_config(
@@ -3682,12 +3730,48 @@ fn deployment_ingress_config(
     config
 }
 
+fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    let mut snapshots = Vec::new();
+    let cfg_path = af_services::mutators::resolve_config_path(&bp.config_file_path);
+    if !cfg_path.as_os_str().is_empty() {
+        snapshots.push((cfg_path.clone(), std::fs::read(&cfg_path).ok()));
+    }
+    for vhost_rel in [
+        format!("/etc/apache2/sites-available/aetherflow-app-{}.conf", bp.app_name),
+        format!("/etc/apache2/sites-enabled/aetherflow-app-{}.conf", bp.app_name),
+        format!("/etc/apache2/sites-available/aetherflow-ext-{}.conf", bp.app_name),
+        format!("/etc/apache2/sites-enabled/aetherflow-ext-{}.conf", bp.app_name),
+    ] {
+        let resolved = af_services::mutators::resolve_config_path(&vhost_rel);
+        if !resolved.as_os_str().is_empty() {
+            snapshots.push((resolved.clone(), std::fs::read(&resolved).ok()));
+        }
+    }
+    snapshots
+}
+
+fn restore_deploy_files(snapshots: &[(std::path::PathBuf, Option<Vec<u8>>)]) {
+    for (path, prior_bytes) in snapshots {
+        match prior_bytes {
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 pub async fn handle_deploy_process(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(app_name): Path<String>,
 ) -> Response {
-    if auth_user.role != "admin" {
-        return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp;
     }
     if app_name.is_empty() {
         return (
@@ -3724,6 +3808,12 @@ pub async fn handle_deploy_process(
         send_step("[STEP 0] Deployment sequence queued asynchronously.".to_string());
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
+        let _lifecycle_guard = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+        let prior_ingress = af_db::get_app_ingress_config(&bp_clone.app_name)
+            .ok()
+            .flatten();
+        let file_snapshots = snapshot_deploy_files(&bp_clone);
+
         let configuration =
             af_services::mutators::with_blueprint_mutation(&bp_clone.app_name, async {
                 send_step(format!(
@@ -3743,54 +3833,99 @@ pub async fn handle_deploy_process(
                         )
                     })?;
                 }
-                let target_port =
-                    allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
-                send_step(format!(
-                    "[STEP 2] Applying blueprint configuration for {} on port {}...",
-                    bp_clone.app_name, target_port
-                ));
-                af_services::mutators::apply_blueprint_app_config(&bp_clone.app_name, target_port)
+                let target_port = allocate_or_verify_deploy_port(&bp_clone);
+                if target_port > 0 {
+                    send_step(format!(
+                        "[STEP 2] Applying blueprint configuration for {} on port {}...",
+                        bp_clone.app_name, target_port
+                    ));
+                    af_services::mutators::apply_blueprint_app_config(
+                        &bp_clone.app_name,
+                        target_port,
+                    )
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!("Blueprint configuration mutation failed: {}", error)
                     })?;
-                send_step(format!(
-                    "[STEP 3] Persisting ingress routing configuration ({} -> 127.0.0.1:{})...",
-                    bp_clone.internal_domain, target_port
-                ));
-                let existing =
-                    af_db::get_app_ingress_config(&bp_clone.app_name).map_err(|error| {
-                        anyhow::anyhow!("Failed to read ingress configuration: {}", error)
+                    send_step(format!(
+                        "[STEP 3] Persisting ingress routing configuration ({} -> 127.0.0.1:{})...",
+                        bp_clone.internal_domain, target_port
+                    ));
+                    let existing =
+                        af_db::get_app_ingress_config(&bp_clone.app_name).map_err(|error| {
+                            anyhow::anyhow!("Failed to read ingress configuration: {}", error)
+                        })?;
+                    let ingress_cfg =
+                        deployment_ingress_config(&bp_clone.app_name, target_port, existing);
+                    af_db::set_app_ingress_config(&ingress_cfg).map_err(|error| {
+                        anyhow::anyhow!("Failed to persist ingress configuration: {}", error)
                     })?;
-                let ingress_cfg =
-                    deployment_ingress_config(&bp_clone.app_name, target_port, existing);
-                af_db::set_app_ingress_config(&ingress_cfg).map_err(|error| {
-                    anyhow::anyhow!("Failed to persist ingress configuration: {}", error)
-                })?;
+                } else {
+                    send_step(format!(
+                        "[STEP 2] Portless service blueprint {} confirmed (port=0); skipping port mutation...",
+                        bp_clone.app_name
+                    ));
+                    send_step(format!(
+                        "[STEP 3] Skipping reverse-proxy port binding for portless service {}...",
+                        bp_clone.app_name
+                    ));
+                }
+
+                // Step 4: Restart the managed service inside PACKAGE_LIFECYCLE_MUTEX & blueprint mutation
+                let service_unit = if bp_clone.service_name.trim().is_empty() {
+                    bp_clone.app_name.clone()
+                } else {
+                    bp_clone.service_name.clone()
+                };
+                send_step(format!(
+                    "[STEP 4] Restarting managed service {}...",
+                    service_unit
+                ));
+                if let Err(restart_error) =
+                    af_services::control_service(&service_unit, "restart").await
+                {
+                    restore_deploy_files(&file_snapshots);
+                    match &prior_ingress {
+                        Some(prior) => {
+                            let _ = af_db::set_app_ingress_config(prior);
+                        }
+                        None => {
+                            let _ = af_db::delete_app_ingress_config(&bp_clone.app_name);
+                        }
+                    }
+                    return Err(anyhow::anyhow!(
+                        "Managed service restart failed for {}: {}",
+                        service_unit,
+                        restart_error
+                    ));
+                }
                 Ok(())
             })
             .await;
-        if let Err(error) = configuration {
-            send_step(format!(
-                "[ROLLBACK] Deployment configuration rejected: {error:#}"
-            ));
-            cleanup_deploy_channel(&bp_clone.app_name).await;
-            return;
-        }
 
-        // Step 4: Restart the managed service
-        let service_unit = if bp_clone.service_name.trim().is_empty() {
-            bp_clone.app_name.clone()
-        } else {
-            bp_clone.service_name.clone()
-        };
-        send_step(format!(
-            "[STEP 4] Restarting managed service {}...",
-            service_unit
-        ));
-        send_step(deployment_restart_status(
-            af_services::control_service(&service_unit, "restart").await,
-        ));
+        match configuration {
+            Ok(()) => {
+                send_step(deployment_restart_status(Ok(())));
+            }
+            Err(error) => {
+                restore_deploy_files(&file_snapshots);
+                match &prior_ingress {
+                    Some(prior) => {
+                        let _ = af_db::set_app_ingress_config(prior);
+                    }
+                    None => {
+                        let _ = af_db::delete_app_ingress_config(&bp_clone.app_name);
+                    }
+                }
+                let sanitized = af_common::redact::redact_secrets(&format!("{error:#}"));
+                send_step(format!(
+                    "[ROLLBACK] Deployment configuration rejected: {sanitized}"
+                ));
+                send_step(format!(
+                    "[ERROR] Deployment configuration rejected: {sanitized}"
+                ));
+            }
+        }
         cleanup_deploy_channel(&bp_clone.app_name).await;
     });
 
@@ -3811,7 +3946,13 @@ async fn cleanup_deploy_channel(_app_name: &str) {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
-pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> Response {
+pub async fn handle_deploy_stream(
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp;
+    }
     let Some(app_name) = q.get("appName").filter(|s| !s.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -3837,8 +3978,9 @@ pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> R
 
     let stream = async_stream::stream! {
         while let Ok(msg) = rx.recv().await {
-            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", msg));
-            if msg.starts_with("[SUCCESS]") || msg.starts_with("[ROLLBACK]") || msg.starts_with("[ERROR]") {
+            let safe_msg = af_common::redact::redact_secrets(&msg);
+            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+            if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
                 break;
             }
         }
@@ -4047,5 +4189,41 @@ mod updater_tests {
         retry_headers.insert("Retry-After", HeaderValue::from_static("180"));
         let retry_at_429 = compute_rate_limit_retry_at(429, &retry_headers, now).unwrap();
         assert_eq!(retry_at_429, now + Duration::seconds(180));
+    }
+
+    #[tokio::test]
+    async fn test_handle_deploy_stream_requires_admin_and_redacts_secrets() {
+        let non_admin = AuthUser {
+            user_id: 2,
+            username: "viewer".to_string(),
+            role: "user".to_string(),
+            jti: "test-jti".to_string(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut q = HashMap::new();
+        q.insert("appName".to_string(), "radarr".to_string());
+        let resp = handle_deploy_stream(axum::Extension(non_admin), Query(q)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let redacted = af_common::redact::redact_secrets(
+            "Restart failed with token=supersecretvalue123 and password: hiddenpass",
+        );
+        assert!(!redacted.contains("supersecretvalue123"));
+        assert!(!redacted.contains("hiddenpass"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_allocate_or_verify_deploy_port_respects_portless_and_fixed_port_blueprints() {
+        let fail2ban = af_services::get_blueprint("fail2ban").expect("fail2ban blueprint");
+        assert_eq!(fail2ban.default_port, 0);
+        assert!(!fail2ban.supports_dynamic_port);
+        assert_eq!(allocate_or_verify_deploy_port(&fail2ban), 0);
+
+        let plex = af_services::get_blueprint("plex").expect("plex blueprint");
+        assert_eq!(plex.default_port, 32400);
+        assert!(!plex.supports_dynamic_port);
+        assert_eq!(allocate_or_verify_deploy_port(&plex), 32400);
     }
 }

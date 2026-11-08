@@ -14,8 +14,13 @@ else
 fi
 
 require_root
+validate_config_paths /etc/xrdp/startwm.sh
 export LOGFILE="/var/log/aetherflow/install-xrdp.log"
 trap 'print_error "XRDP installation failed; see ${LOGFILE}."' ERR
+PACKAGE_NAME="${PACKAGE_NAME:-xrdp}"
+begin_state_transaction "xrdp-sesman.service xrdp.service" "0" "/" "/var/lib/xrdp" "/etc/xrdp" "/etc/systemd/system/xrdp-sesman.service" "/etc/systemd/system/xrdp.service" "/usr/sbin/xrdp" "/usr/sbin/xrdp-sesman" "/usr/lib/xrdp" "/usr/share/xrdp"
+
+prepare_apt_package_transaction /var/lib/xrdp/.af-version xrdp xorgxrdp
 report_progress 15 "Installing XRDP, Xorg backend, and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
@@ -24,18 +29,22 @@ apt-get install --no-remove -y -qq xrdp xorgxrdp xfce4 xfce4-terminal dbus-x11 s
 report_progress 60 "Configuring XRDP desktop sessions and TLS certificate access..."
 usermod -a -G ssl-cert xrdp
 backup_file_once /etc/xrdp/startwm.sh
-cat > /etc/xrdp/startwm.sh <<'EOF'
+if [[ ! -s /etc/xrdp/startwm.sh ]] || grep -q '^test -x /etc/X11/Xsession' /etc/xrdp/startwm.sh; then
+write_config_file /etc/xrdp/startwm.sh 0755 <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 exec dbus-run-session -- startxfce4
 EOF
-chmod 755 /etc/xrdp/startwm.sh
+fi
 
 report_progress 85 "Starting XRDP and its session manager..."
 systemctl daemon-reload
 systemctl enable xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
 systemctl restart xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
 systemctl is-active --quiet xrdp-sesman.service xrdp.service
+mkdir -p /var/lib/xrdp
+queue_app_version /var/lib/xrdp/.af-version "$(dpkg-query -W -f='${Version}' xrdp)"
+commit_app_versions
 write_lock xrdp
 report_progress 100 "XRDP installed. Connect using an RDP client on TCP 3389 (or your existing configured port) with an existing Linux account. Restrict access with a firewall or VPN."

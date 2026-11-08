@@ -25,15 +25,25 @@ report_progress 25 "Stopping and removing flood.service..."
 
 purge_systemd_unit "flood"
 
+if command_exists pm2; then
+    PM2_APP_PRESENT="$(pm2 jlist 2>> "$LOGFILE" | python3 -c 'import json,sys; processes=json.load(sys.stdin); print(int(any(process.get("name") == "flood" for process in processes)))')"
+    if [[ "$PM2_APP_PRESENT" == 1 ]]; then
+        pm2 stop flood >> "$LOGFILE" 2>&1
+        pm2 delete flood >> "$LOGFILE" 2>&1
+    fi
+    pm2 save --force >> "$LOGFILE" 2>&1
+fi
+
 report_progress 60 "Uninstalling Flood npm package and removing data directories..."
 npm uninstall -g @jesec/flood >> "$LOGFILE" 2>&1 || true
 npm uninstall -g flood >> "$LOGFILE" 2>&1 || true
-rm -f /usr/bin/flood /usr/local/bin/flood
-rm -rf /opt/flood
+rm -f /usr/bin/flood /usr/local/bin/flood /var/lib/flood/.af-version
+safe_rm_rf /opt/flood
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/flood /srv/rutorrent/home/flood /etc/apache2/sites-enabled/flood.conf /etc/apache2/sites-available/flood.conf
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/flood"
+    safe_rm_rf /var/lib/flood /srv/rutorrent/home/flood /etc/apache2/sites-enabled/flood.conf /etc/apache2/sites-available/flood.conf
+    purge_system_user "flood"
 fi
-purge_system_user "flood"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

@@ -23,6 +23,7 @@ exec 9>/run/lock/aetherflow-paperless.lock
 flock -n 9 || { log_error "Another Paperless-ngx installation is running."; exit 1; }
 
 require_root
+validate_config_paths /etc/paperless.conf /var/lib/paperless/data/db.sqlite3 /var/lib/paperless/data/db.sqlite3-wal /var/lib/paperless/data/db.sqlite3-shm
 
 BUILD_DIR=""
 BACKUP_DIR=""
@@ -36,56 +37,66 @@ CONF_HAD_PRIOR=0
 CONF_TOUCHED=0
 UNIT_WRITTEN=0
 SUCCESS=0
+PAPERLESS_DATABASE_NAME=""
+PAPERLESS_DATABASE_SAVED=false
 
 if [[ -f /etc/systemd/system/paperless-webserver.service ]] || systemctl is-active --quiet paperless-webserver 2>/dev/null || systemctl is-enabled --quiet paperless-webserver 2>/dev/null; then
     WAS_RUNNABLE=1
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 || "$UNIT_WRITTEN" -eq 1 ]]; then
-            systemctl stop paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback paperless-webserver paperless-worker paperless-scheduler || { restore_failed=true; exit 1; }
+            if [[ "$PAPERLESS_DATABASE_SAVED" == true ]]; then
+                restore_postgresql_database "$BACKUP_DIR" "$PAPERLESS_DATABASE_NAME" || exit 1
+            fi
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /opt/paperless "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/paperless
         elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
-            rm -rf /opt/paperless/.venv
+            rm -rf /opt/paperless/.venv || restore_failed=true
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/paperless 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /opt/paperless 2>/dev/null || restore_failed=true
         elif [[ "$VENV_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/venv" /opt/paperless/.venv 2>/dev/null || true
+            mv "$BACKUP_DIR/venv" /opt/paperless/.venv 2>/dev/null || restore_failed=true
         fi
         if [[ "$CONF_TOUCHED" -eq 1 ]]; then
             if [[ "$CONF_HAD_PRIOR" -eq 1 && -f "$BACKUP_DIR/paperless.conf" ]]; then
-                cp -a "$BACKUP_DIR/paperless.conf" /etc/paperless.conf
+                safe_restore_path_from_backup "$BACKUP_DIR/paperless.conf" /etc/paperless.conf || restore_failed=true
             elif [[ "$CONF_HAD_PRIOR" -eq 0 ]]; then
-                rm -f /etc/paperless.conf
+                rm -f /etc/paperless.conf || restore_failed=true
             fi
         fi
-        if [[ -n "$BACKUP_DIR" && -f "$BACKUP_DIR/db.sqlite3" ]]; then
-            cp -a "$BACKUP_DIR/db.sqlite3" /var/lib/paperless/data/db.sqlite3
+        if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR/database-state" ]]; then
+            safe_restore_path_from_backup "$BACKUP_DIR/database-state" /var/lib/paperless/data || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             for unit in paperless-webserver.service paperless-worker.service paperless-scheduler.service; do
                 if [[ -f "$BACKUP_DIR/$unit" ]]; then
-                    cp -a "$BACKUP_DIR/$unit" "/etc/systemd/system/$unit"
+                    safe_restore_path_from_backup "$BACKUP_DIR/$unit" "/etc/systemd/system/$unit" || restore_failed=true
                 else
-                    systemctl disable "${unit%.service}" >> "$LOGFILE" 2>&1 || true
-                    rm -f "/etc/systemd/system/$unit"
+                    systemctl disable "${unit%.service}" >> "$LOGFILE" 2>&1 || restore_failed=true
+                    rm -f "/etc/systemd/system/$unit" || restore_failed=true
                 fi
             done
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || true
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -100,7 +111,7 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     redis-server tesseract-ocr tesseract-ocr-eng imagemagick ghostscript \
     poppler-utils gnupg libpq-dev libmagic-dev pkg-config default-libmysqlclient-dev \
-    python3 python3-pip python3-venv python3-dev build-essential xz-utils curl git ca-certificates >> "$LOGFILE" 2>&1
+    python3 python3-pip python3-venv python3-dev postgresql-client build-essential xz-utils curl git ca-certificates >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0t64 >> "$LOGFILE" 2>&1 || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0 >> "$LOGFILE" 2>&1 || true
 
@@ -123,7 +134,7 @@ PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PN
 report_progress 55 "Downloading and extracting Paperless-ngx ${PNGX_VER} in staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.paperless-build.XXXXXX)"
 TMP_XZ=$(mktemp /tmp/paperless-XXXXXX.tar.xz)
-if curl -fsSL "$PNGX_URL" -o "$TMP_XZ" >> "$LOGFILE" 2>&1; then
+if download_file "$PNGX_URL" "$TMP_XZ" >> "$LOGFILE" 2>&1; then
     tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" >> "$LOGFILE" 2>&1
     rm -f "$TMP_XZ"
 else
@@ -131,7 +142,7 @@ else
     git clone --depth 1 https://github.com/paperless-ngx/paperless-ngx.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
 fi
 test -f "$BUILD_DIR/src/manage.py" || { log_error "Failed to verify Paperless-ngx manage.py"; exit 1; }
-printf '%s\n' "${PNGX_VER#v}" > "$BUILD_DIR/.af-version"
+queue_app_version "/opt/paperless/.af-version" "${PNGX_VER#v}"
 
 report_progress 70 "Setting up Python virtual environment and dependencies..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-paperless.XXXXXX)"
@@ -141,12 +152,37 @@ for unit in paperless-webserver.service paperless-worker.service paperless-sched
         cp -a "/etc/systemd/system/$unit" "$BACKUP_DIR/$unit"
     fi
 done
+if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
+    for unit in paperless-webserver.service paperless-worker.service paperless-scheduler.service; do
+        stop_systemd_unit "$unit"
+    done
+    SERVICE_STOPPED=1
+fi
+snapshot_app_state "$BACKUP_DIR" /var/lib/paperless
+if [[ -s /etc/paperless.conf ]]; then
+    PAPERLESS_DATABASE_NAME="$(safe_config_python /etc/paperless.conf <<'PYEOF'
+import shlex
+settings = {}
+for line in safe_read_text('/etc/paperless.conf').splitlines():
+    key, separator, value = line.partition('=')
+    if separator and key.strip() in ('PAPERLESS_DBHOST', 'PAPERLESS_DBNAME', 'PAPERLESS_DBENGINE'):
+        parsed = shlex.split(value, comments=True)
+        settings[key.strip()] = parsed[0] if parsed else ''
+host = settings.get('PAPERLESS_DBHOST', '')
+engine = settings.get('PAPERLESS_DBENGINE', 'postgresql')
+if host and engine in ('postgresql', 'postgres', 'django.db.backends.postgresql'):
+    if host not in ('127.0.0.1', 'localhost', '::1', '/var/run/postgresql'):
+        raise SystemExit('Cannot snapshot a remote Paperless PostgreSQL database with local rollback helpers')
+    print(settings.get('PAPERLESS_DBNAME') or 'paperless')
+PYEOF
+)"
+    if [[ -n "$PAPERLESS_DATABASE_NAME" ]]; then
+        backup_postgresql_database "$BACKUP_DIR" "$PAPERLESS_DATABASE_NAME"
+        PAPERLESS_DATABASE_SAVED=true
+    fi
+fi
 mkdir -p /opt/paperless
 if [[ -e /opt/paperless/.venv || -L /opt/paperless/.venv ]]; then
-    if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-        systemctl stop paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || true
-        SERVICE_STOPPED=1
-    fi
     mv /opt/paperless/.venv "$BACKUP_DIR/venv"
     VENV_MOVED=1
 fi
@@ -158,24 +194,23 @@ if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
 fi
 /opt/paperless/.venv/bin/pip install gunicorn psycopg2-binary >> "$LOGFILE" 2>&1 || true
 test -x /opt/paperless/.venv/bin/python || { log_error "Failed to verify Paperless-ngx virtual environment"; exit 1; }
-chown -R paperless:paperless /opt/paperless/.venv "$BUILD_DIR" /var/lib/paperless
+chown -hRP paperless:paperless /opt/paperless/.venv "$BUILD_DIR" /var/lib/paperless
 
 report_progress 78 "Configuring /etc/paperless.conf and backing up state..."
+validate_config_paths /etc/paperless.conf
 if [[ -f /etc/paperless.conf ]]; then
     CONF_HAD_PRIOR=1
     cp -a /etc/paperless.conf "$BACKUP_DIR/paperless.conf"
     CONF_TOUCHED=1
-    python3 - /etc/paperless.conf "$APP_PORT" <<'PYEOF'
+    safe_config_python /etc/paperless.conf "$APP_PORT" <<'PYEOF'
 import re, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8") as f:
-    text = f.read()
+text = safe_read_text(cfg_path)
 if re.search(r"^PAPERLESS_PORT=", text, re.MULTILINE):
     text = re.sub(r"^PAPERLESS_PORT=.*", f"PAPERLESS_PORT={port}", text, flags=re.MULTILINE)
 else:
     text += f"\nPAPERLESS_PORT={port}\n"
-with open(cfg_path, "w", encoding="utf-8") as f:
-    f.write(text)
+safe_write_text(cfg_path, text)
 PYEOF
 else
     SECRET_KEY="$(openssl rand -hex 32)"
@@ -187,7 +222,7 @@ else
         PAPERLESS_CSRF_ORIGINS="https://paperless-ngx.${BASE_DOMAIN},${PAPERLESS_CSRF_ORIGINS}"
     fi
     CONF_TOUCHED=1
-    cat <<EOF > /etc/paperless.conf
+    write_config_file /etc/paperless.conf <<EOF
 PAPERLESS_REDIS=redis://localhost:6379
 PAPERLESS_DATA_DIR=/var/lib/paperless/data
 PAPERLESS_MEDIA_ROOT=/var/lib/paperless/media
@@ -195,12 +230,12 @@ PAPERLESS_CONSUMPTION_DIR=/var/lib/paperless/consume
 PAPERLESS_EXPORT_DIR=/var/lib/paperless/export
 PAPERLESS_SECRET_KEY=${SECRET_KEY}
 PAPERLESS_URL=${PAPERLESS_URL_VAL}
-PAPERLESS_ALLOWED_HOSTS=*
+PAPERLESS_ALLOWED_HOSTS=localhost,127.0.0.1,[::1]
 PAPERLESS_CSRF_TRUSTED_ORIGINS=${PAPERLESS_CSRF_ORIGINS}
 PAPERLESS_USE_X_FORWARD_HOST=true
 PAPERLESS_PROXY_SSL_HEADER=["HTTP_X_FORWARDED_PROTO", "https"]
 PAPERLESS_PORT=${APP_PORT}
-PAPERLESS_BIND_ADDR=0.0.0.0
+PAPERLESS_BIND_ADDR=127.0.0.1
 PAPERLESS_ADMIN_USER=${MASTER_USER}
 PAPERLESS_ADMIN_PASSWORD=${MASTER_PASS}
 PAPERLESS_ADMIN_MAIL=${MASTER_USER}@aether.local
@@ -212,9 +247,12 @@ chown root:paperless /etc/paperless.conf
 if [[ -f /var/lib/paperless/data/db.sqlite3 ]]; then
     cp -a /var/lib/paperless/data/db.sqlite3 "$BACKUP_DIR/db.sqlite3"
 fi
+cp -a -- /var/lib/paperless/data "$BACKUP_DIR/database-state"
 
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-    systemctl stop paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || true
+    for unit in paperless-webserver.service paperless-worker.service paperless-scheduler.service; do
+        stop_systemd_unit "$unit"
+    done
     SERVICE_STOPPED=1
 fi
 mv /opt/paperless/.venv "$BUILD_DIR/.venv"
@@ -240,15 +278,29 @@ if [[ -f /opt/paperless/src/manage.py ]]; then
     export DJANGO_SUPERUSER_PASSWORD="${MASTER_PASS}"
     export DJANGO_SUPERUSER_EMAIL="${MASTER_USER}@aether.local"
     /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate >> "$LOGFILE" 2>&1
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py createsuperuser --noinput >> "$LOGFILE" 2>&1 || true
+    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py shell >> "$LOGFILE" 2>&1 <<'PYEOF'
+import os
+from django.contrib.auth import get_user_model
+UserModel = get_user_model()
+if not UserModel.objects.filter(is_superuser=True).exists():
+    UserModel.objects.create_superuser(
+        username=os.environ['DJANGO_SUPERUSER_USERNAME'],
+        email=os.environ['DJANGO_SUPERUSER_EMAIL'],
+        password=os.environ['DJANGO_SUPERUSER_PASSWORD'],
+    )
+PYEOF
     /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input >> "$LOGFILE" 2>&1
 fi
 
-chown -R paperless:paperless /opt/paperless /var/lib/paperless
+chown -hRP paperless:paperless /opt/paperless /var/lib/paperless
 
 report_progress 90 "Configuring multi-unit companion services (webserver, worker, scheduler)..."
 UNIT_WRITTEN=1
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/paperless-webserver.service
+PAPERLESS_BIND_HOST="$(retained_bind_address /etc/paperless.conf '^PAPERLESS_BIND_ADDR\s*=\s*([^\r\n#]+)')"
+if [[ "$PAPERLESS_BIND_HOST" == *:* && "$PAPERLESS_BIND_HOST" != \[*\] ]]; then
+    PAPERLESS_BIND_HOST="[$PAPERLESS_BIND_HOST]"
+fi
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_HOST@/${PAPERLESS_BIND_HOST}/g" <<'EOF' > /etc/systemd/system/paperless-webserver.service
 [Unit]
 Description=Paperless-ngx Web Server
 After=network.target redis-server.service
@@ -260,7 +312,7 @@ Group=paperless
 Type=simple
 WorkingDirectory=/opt/paperless/src
 EnvironmentFile=-/etc/paperless.conf
-ExecStart=/opt/paperless/.venv/bin/gunicorn -b 0.0.0.0:@AF_APP_PORT@ -w 2 --threads 4 paperless.wsgi
+ExecStart=/opt/paperless/.venv/bin/gunicorn -b @AF_BIND_HOST@:@AF_APP_PORT@ -w 2 --threads 4 paperless.wsgi
 Restart=on-failure
 RestartSec=10
 
@@ -326,7 +378,9 @@ if [[ "$HEALTHY" -ne 1 ]]; then
     exit 1
 fi
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Paperless-ngx installed on port ${APP_PORT} (multi-unit companion stack active)."
 log_info "${PACKAGE_NAME} installed successfully"

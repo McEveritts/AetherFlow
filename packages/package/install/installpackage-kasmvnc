@@ -14,12 +14,12 @@ else
 fi
 
 require_root
+validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password
 export LOGFILE="/var/log/aetherflow/install-kasmvnc.log"
 APP_PORT="${AF_APP_PORT:-6081}"
 DATA_DIR="/var/lib/kasmvnc"
 CONFIG_DIR="/etc/kasmvnc"
 TMP_DIR=""
-trap '[[ -z "$TMP_DIR" ]] || rm -rf "$TMP_DIR"' EXIT
 trap 'print_error "KasmVNC installation failed; see ${LOGFILE}."' ERR
 
 if [[ ! "$APP_PORT" =~ ^[0-9]{4,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
@@ -34,6 +34,24 @@ if [[ ! "${ID:-}" =~ ^(debian|ubuntu)$ || ! "$ARCH" =~ ^(amd64|arm64)$ || -z "${
     exit 1
 fi
 
+PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}"
+KASMVNC_WAS_ENABLED=false
+if systemctl is-enabled --quiet af-kasmvnc.service; then KASMVNC_WAS_ENABLED=true; fi
+AF_STATE_RESTART_ON_ROLLBACK=true
+begin_state_transaction "af-kasmvnc.service" "0" "/" "/var/lib/kasmvnc" "/etc/kasmvnc" "/usr/local/bin/af-kasmvnc-start" "/etc/systemd/system/af-kasmvnc.service" "/usr/bin/Xkasmvnc" "/usr/bin/kasmvncserver" "/usr/bin/kasmvncpasswd" "/usr/bin/vncserver" "/usr/bin/Xvnc" "/usr/lib/kasmvnc" "/usr/share/kasmvnc" "/usr/lib/kasmvncserver" "/usr/share/kasmvncserver"
+cleanup_kasmvnc() {
+    local status="$?"
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
+    cleanup_state_transaction "$status" return
+    status=$?
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$KASMVNC_WAS_ENABLED" != true ]]; then
+        systemctl disable af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
+    fi
+    exit "$status"
+}
+trap cleanup_kasmvnc EXIT
+
+prepare_apt_package_transaction /var/lib/kasmvnc/.af-version kasmvncserver
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
@@ -42,8 +60,11 @@ apt-get install --no-remove -y -qq python3 curl ca-certificates jq openssl ssl-c
 report_progress 30 "Resolving the matching KasmVNC release..."
 TMP_DIR="$(mktemp -d /tmp/af-kasmvnc-XXXXXX)"
 chmod 755 "$TMP_DIR"
-curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json"
-VERSION="$(jq -er '.tag_name | ltrimstr("v")' "${TMP_DIR}/release.json")"
+if ! curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json" \
+    || ! VERSION="$(jq -er '.tag_name | ltrimstr("v")' "${TMP_DIR}/release.json")" || [[ -z "$VERSION" ]]; then
+    print_error "Failed to discover latest GitHub release for kasmtech/KasmVNC"
+    exit 1
+fi
 ASSET_NAME="kasmvncserver_${ID}_${VERSION_CODENAME}_${VERSION}_${ARCH}.deb"
 ASSET_URL="$(jq -er --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' "${TMP_DIR}/release.json")" || {
     print_error "No upstream KasmVNC package for ${ID} ${VERSION_CODENAME} ${ARCH}."
@@ -56,19 +77,21 @@ if [[ ! "$ASSET_URL" == https://github.com/kasmtech/KasmVNC/releases/download/* 
 fi
 
 report_progress 50 "Downloading and verifying KasmVNC ${VERSION}..."
-curl -fsSL "$ASSET_URL" -o "${TMP_DIR}/kasmvnc.deb"
+download_file "$ASSET_URL" "${TMP_DIR}/kasmvnc.deb" kasmvnc "${ASSET_DIGEST#sha256:}"
 printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | sha256sum -c - >> "$LOGFILE" 2>&1
+KASMVNC_DEB_VERSION="$(dpkg-deb -f "${TMP_DIR}/kasmvnc.deb" Version)"
 apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb" >> "$LOGFILE" 2>&1
+verify_deb_installed kasmvncserver "$KASMVNC_DEB_VERSION"
 
 if ! id -u af-kasmvnc >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-kasmvnc
 fi
-usermod -a -G ssl-cert af-kasmvnc
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "$DATA_DIR"
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "${DATA_DIR}/.vnc"
 install -d -m 755 "$CONFIG_DIR"
 
 report_progress 70 "Configuring an authenticated, loopback-only desktop..."
+validate_config_paths "${DATA_DIR}/.kasmpasswd" "${CONFIG_DIR}/aetherflow-password" "${DATA_DIR}/.vnc/xstartup"
 if [[ ! -s "${DATA_DIR}/.kasmpasswd" ]]; then
     if [[ ! -s "${CONFIG_DIR}/aetherflow-password" ]]; then
         (umask 077; openssl rand -hex 24 > "${CONFIG_DIR}/aetherflow-password")
@@ -81,13 +104,21 @@ if [[ ! -s "${DATA_DIR}/.kasmpasswd" ]]; then
 fi
 chmod 600 "${DATA_DIR}/.kasmpasswd"
 chown af-kasmvnc:af-kasmvnc "${DATA_DIR}/.kasmpasswd"
+TLS_CERT="${DATA_DIR}/.vnc/aetherflow-cert.pem"
+TLS_KEY="${DATA_DIR}/.vnc/aetherflow-key.pem"
+validate_config_paths "$TLS_CERT" "$TLS_KEY"
+if [[ ! -s "$TLS_CERT" || ! -s "$TLS_KEY" ]]; then
+    (umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$TLS_KEY" -out "$TLS_CERT") >> "$LOGFILE" 2>&1
+fi
+chmod 600 "$TLS_KEY" "$TLS_CERT"
+chown af-kasmvnc:af-kasmvnc "$TLS_KEY" "$TLS_CERT"
 
+validate_config_paths "${DATA_DIR}/.vnc/kasmvnc.yaml"
 if [[ -f "${DATA_DIR}/.vnc/kasmvnc.yaml" ]]; then
-    python3 - "${DATA_DIR}/.vnc/kasmvnc.yaml" "$APP_PORT" <<'PYEOF'
+    safe_config_python "${DATA_DIR}/.vnc/kasmvnc.yaml" "$APP_PORT" <<'PYEOF'
 import re, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8") as f:
-    text = f.read()
+text = safe_read_text(cfg_path)
 lines = text.splitlines(keepends=True)
 network = next((index for index, line in enumerate(lines) if re.match(r"^network:[ \t]*(?:#.*)?$", line.rstrip("\r\n"))), None)
 if network is None:
@@ -105,29 +136,31 @@ else:
         indentation = re.match(r"^[ \t]+", lines[setting]).group()
         lines[setting] = f"{indentation}websocket_port: {port}\n"
     text = "".join(lines)
-with open(cfg_path, "w", encoding="utf-8") as f:
-    f.write(text)
+safe_write_text(cfg_path, text)
 PYEOF
 else
-    cat > "${DATA_DIR}/.vnc/kasmvnc.yaml" <<EOF
+    write_config_file "${DATA_DIR}/.vnc/kasmvnc.yaml" <<EOF
 network:
   interface: 127.0.0.1
   websocket_port: ${APP_PORT}
   use_ipv6: false
   ssl:
     require_ssl: false
+    pem_certificate: ${TLS_CERT}
+    pem_key: ${TLS_KEY}
 command_line:
   prompt: false
 EOF
 fi
-cat > "${DATA_DIR}/.vnc/xstartup" <<'EOF'
+if [[ ! -s "${DATA_DIR}/.vnc/xstartup" ]]; then
+write_config_file "${DATA_DIR}/.vnc/xstartup" 0755 <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 exec dbus-run-session -- startxfce4
 EOF
-chmod 755 "${DATA_DIR}/.vnc/xstartup"
-chown -R af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
+fi
+chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 
 cat > /etc/systemd/system/af-kasmvnc.service <<EOF
 [Unit]
@@ -140,7 +173,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :20 -fg -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/bin/vncserver :20 -fg -cert ${TLS_CERT} -key ${TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -170,5 +203,8 @@ if [[ "$READY" != "true" ]]; then
     print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :20."
     exit 1
 fi
+VERSION_FILE=/var/lib/kasmvnc/.af-version
+queue_app_version "$VERSION_FILE" "$(dpkg-query -W -f='${Version}' kasmvncserver)"
+commit_app_versions
 write_lock kasmvnc
 report_progress 100 "KasmVNC installed. Use the AetherFlow gateway; username admin, password in /etc/kasmvnc/aetherflow-password (root only)."

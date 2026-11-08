@@ -18,6 +18,7 @@ else
 fi
 
 require_root
+validate_config_paths /var/lib/quassel/quasselCert.pem
 
 PACKAGE_NAME="quassel"
 APP_NAME="quassel"
@@ -28,6 +29,10 @@ export AF_APP_PORT="$LISTEN_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
+PACKAGE_NAME="${PACKAGE_NAME:-quassel}"
+begin_state_transaction "quasselcore.service" "0" "/" "/var/lib/quassel" "/etc/default/quasselcore" "/etc/systemd/system/quasselcore.service" "/usr/bin/quasselcore" "/usr/lib/quassel" "/usr/share/quassel"
+
+prepare_apt_package_transaction /var/lib/quassel/.af-version quassel-core
 log_info "Starting ${APP_NAME} installation (target port: ${LISTEN_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
@@ -55,6 +60,7 @@ if [[ ! -f "${DATA_DIR}/quasselCert.pem" ]]; then
     chmod 600 "${DATA_DIR}/quasselCert.pem"
 fi
 
+if [[ ! -s /etc/default/quasselcore ]]; then
 cat > /etc/default/quasselcore <<EOF
 LISTEN="0.0.0.0"
 PORT="${LISTEN_PORT}"
@@ -62,16 +68,21 @@ CONFIGDIR="${DATA_DIR}"
 LOGFILE="${LOG_DIR}/quasselcore.log"
 LOGLEVEL="Info"
 EOF
+fi
+set_config_value /etc/default/quasselcore ini PORT "\"${LISTEN_PORT}\""
 
-chown -R "${QUASSEL_USER}:${QUASSEL_USER}" "${DATA_DIR}" "${LOG_DIR}"
+chown -hRP "${QUASSEL_USER}:${QUASSEL_USER}" "${DATA_DIR}" "${LOG_DIR}"
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' quassel-core 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '0.14.0')"
-echo "${INSTALLED_VER}" > "${DATA_DIR}/.af-version"
+queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting quasselcore.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now quasselcore.service >> "$LOGFILE" 2>&1
+systemctl restart quasselcore.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet quasselcore.service
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} Core installed and listening on TCP port ${LISTEN_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

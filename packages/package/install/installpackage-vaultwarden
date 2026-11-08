@@ -20,9 +20,14 @@ PACKAGE_NAME="vaultwarden"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8343}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
+mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/vaultwarden/vaultwarden.env /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+install -d -m 0700 /opt/AetherFlow/logs
+if [[ -f /etc/vaultwarden/vaultwarden.env ]]; then
+    set_config_file_mode 0600 /etc/vaultwarden/vaultwarden.env
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Vaultwarden..."
 
@@ -53,21 +58,30 @@ TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwar
 
 if [[ -n "$TOKEN" ]]; then
     ACCEPT_INDEX="application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
-    INDEX="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_TAG}" 2>/dev/null || \
-             curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_VERSION}" 2>/dev/null || \
-             curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/latest" 2>/dev/null || true)"
+    INDEX="$(printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_TAG}" 2>/dev/null || \
+             printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_VERSION}" 2>/dev/null || \
+             printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/latest" 2>/dev/null || true)"
 
     if [[ -n "$INDEX" ]]; then
         MANIFEST_DIGEST="$(printf '%s' "$INDEX" | jq -r --arg arch "$OCI_ARCH" 'if .manifests then (.manifests[] | select(.platform.architecture == $arch and .platform.os == "linux") | .digest) else empty end' | head -n1 || true)"
         if [[ -n "$MANIFEST_DIGEST" ]]; then
-            MANIFEST="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
+            MANIFEST="$(printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -H @- -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
         else
             MANIFEST="$INDEX"
         fi
 
         for LAYER_DIGEST in $(printf '%s' "$MANIFEST" | jq -r '.layers[]?.digest // empty'); do
+            if [[ ! "$LAYER_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+                print_error "Invalid Vaultwarden OCI layer digest"
+                rm -rf "$TMP_EXTRACT"
+                exit 1
+            fi
             BLOB_FILE="${TMP_EXTRACT}/layer.tar.gz"
-            if curl -fsSL -L -H "Authorization: Bearer ${TOKEN}" "https://ghcr.io/v2/dani-garcia/vaultwarden/blobs/${LAYER_DIGEST}" -o "$BLOB_FILE" >> "$LOGFILE" 2>&1; then
+            if printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsSL -L -H @- "https://ghcr.io/v2/dani-garcia/vaultwarden/blobs/${LAYER_DIGEST}" -o "$BLOB_FILE" >> "$LOGFILE" 2>&1; then
+                if ! verify_sha256 "$BLOB_FILE" "${LAYER_DIGEST#sha256:}" "Vaultwarden OCI layer"; then
+                    rm -rf "$TMP_EXTRACT"
+                    exit 1
+                fi
                 tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" vaultwarden web-vault 2>/dev/null || tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" ./vaultwarden ./web-vault 2>/dev/null || true
             fi
             rm -f "$BLOB_FILE"
@@ -81,50 +95,40 @@ if [[ ! -f "${TMP_EXTRACT}/vaultwarden" ]]; then
     exit 1
 fi
 
-install -m 0755 "${TMP_EXTRACT}/vaultwarden" /opt/vaultwarden/vaultwarden
-if [[ -d "${TMP_EXTRACT}/web-vault" ]]; then
-    rm -rf /opt/vaultwarden/web-vault
-    mv "${TMP_EXTRACT}/web-vault" /opt/vaultwarden/web-vault
-fi
-rm -rf "$TMP_EXTRACT"
+chmod 755 "${TMP_EXTRACT}/vaultwarden"
+stage_app_archive "$TMP_EXTRACT" /opt/vaultwarden vaultwarden /var/lib/vaultwarden "$PACKAGE_NAME" "." /etc/vaultwarden
 
-printf '%s\n' "${VW_VERSION#v}" > /opt/vaultwarden/.af-version
+queue_app_version /opt/vaultwarden/.af-version "${VW_VERSION#v}"
 
 report_progress 75 "Configuring Vaultwarden environment on port ${APP_PORT}..."
+if [[ -L /etc/vaultwarden/vaultwarden.env ]]; then
+    print_error "Refusing symlinked Vaultwarden configuration path"
+    exit 1
+fi
 if [[ -f /etc/vaultwarden/vaultwarden.env ]]; then
-    python3 - /etc/vaultwarden/vaultwarden.env "$APP_PORT" <<'PYEOF'
-import re, sys
-cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8") as f:
-    text = f.read()
-if re.search(r"^ROCKET_PORT=", text, re.MULTILINE):
-    text = re.sub(r"^ROCKET_PORT=.*", f"ROCKET_PORT={port}", text, flags=re.MULTILINE)
-else:
-    text += f"\nROCKET_PORT={port}\n"
-with open(cfg_path, "w", encoding="utf-8") as f:
-    f.write(text)
-PYEOF
+    set_config_value /etc/vaultwarden/vaultwarden.env env ROCKET_PORT "$APP_PORT"
 else
-    ADMIN_TOKEN="${MASTER_PASS}"
-    cat <<EOF > /etc/vaultwarden/vaultwarden.env
+    ADMIN_TOKEN="${AF_CONFIG_PASS:-$(openssl rand -hex 32)}"
+    SIGNUPS_ALLOWED=false
+    [[ "${AF_VAULTWARDEN_SIGNUPS_ALLOWED:-false}" != true ]] || SIGNUPS_ALLOWED=true
+    (umask 077; write_config_file /etc/vaultwarden/vaultwarden.env 0600 <<EOF
 DATA_FOLDER=/var/lib/vaultwarden/data
 WEB_VAULT_FOLDER=/opt/vaultwarden/web-vault
 WEB_VAULT_ENABLED=true
-ROCKET_ADDRESS=0.0.0.0
+ROCKET_ADDRESS=127.0.0.1
 ROCKET_PORT=${APP_PORT}
-SIGNUPS_ALLOWED=true
+SIGNUPS_ALLOWED=${SIGNUPS_ALLOWED}
 INVITATIONS_ALLOWED=true
 SHOW_PASSWORD_HINT=false
 ADMIN_TOKEN=${ADMIN_TOKEN}
 EOF
-    chmod 600 /etc/vaultwarden/vaultwarden.env
-    echo "Vaultwarden Admin Token: ${ADMIN_TOKEN}" > /opt/AetherFlow/logs/vaultwarden_admin_token.txt
-    chmod 600 /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+    printf 'Vaultwarden Admin Token: %s\n' "$ADMIN_TOKEN" | write_config_file /opt/AetherFlow/logs/vaultwarden_admin_token.txt 0600
+    )
 fi
 
-chown -R vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
+chown -hRP vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
 chown root:vaultwarden /etc/vaultwarden/vaultwarden.env
-chmod 640 /etc/vaultwarden/vaultwarden.env
+set_config_file_mode 0600 /etc/vaultwarden/vaultwarden.env
 
 report_progress 90 "Configuring and starting vaultwarden.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/vaultwarden.service
@@ -156,7 +160,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now vaultwarden >> "$LOGFILE" 2>&1
+systemctl restart vaultwarden >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/alive"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Vaultwarden installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

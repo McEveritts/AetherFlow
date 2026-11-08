@@ -9,6 +9,7 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=root
 Group=aetherflow
+UMask=0077
 WorkingDirectory=/opt/AetherFlow/current
 
 # Creates /run/aetherflow owned by root:aetherflow (0750)

@@ -4,6 +4,7 @@
 # Installs FileBot CLI and FileBot Node Web UI natively on bare-metal Debian/Ubuntu.
 #
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -18,6 +19,7 @@ else
 fi
 
 require_root
+validate_config_paths /var/lib/filebot/filebot-node.env
 
 PACKAGE_NAME="filebot"
 APP_NAME="filebot"
@@ -51,50 +53,111 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
     useradd --system --user-group --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
 fi
-mkdir -p "${FB_DIR}" "${NODE_DIR}" "${DATA_DIR}" "${DATA_DIR}/data"
+mkdir -p /opt /usr/local/bin
+FB_BUILD="$(mktemp -d /opt/.filebot-build.XXXXXX)"
+NODE_BUILD="$(mktemp -d /opt/.filebot-node-build.XXXXXX)"
+chmod 755 "$FB_BUILD" "$NODE_BUILD"
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-filebot-runtime.XXXXXX)"
+RUNTIME_PATHS=("$FB_DIR" "$NODE_DIR" "$DATA_DIR" "$SERVICE_FILE" /usr/local/bin/filebot)
+RUNTIME_CHANGED=false
+WAS_RUNNABLE=false
+TMP_FB=""
+TMP_NODE=""
+cleanup() {
+    local status=$? runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
+        quiesce_services_for_rollback filebot.service || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        [[ -f "$SERVICE_FILE" ]] || systemctl disable filebot.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
+            systemctl start filebot.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    rm -rf -- "$FB_BUILD" "$NODE_BUILD"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    [[ -z "$TMP_FB" ]] || rm -f -- "$TMP_FB"
+    [[ -z "$TMP_NODE" ]] || rm -f -- "$TMP_NODE"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 report_progress 50 "Downloading FileBot portable runtime..."
 FB_VERSION="5.1.6"
 FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
 TMP_FB="$(mktemp --suffix=.tar.xz)"
-if ! wget -qO "${TMP_FB}" "${FB_URL}" >> "$LOGFILE" 2>&1; then
+if ! download_file "${FB_URL}" "${TMP_FB}" >> "$LOGFILE" 2>&1; then
     FB_VERSION="5.2.0"
     FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
-    wget -qO "${TMP_FB}" "${FB_URL}" >> "$LOGFILE" 2>&1
+    download_file "${FB_URL}" "${TMP_FB}" >> "$LOGFILE" 2>&1
 fi
-tar -xJf "${TMP_FB}" -C "${FB_DIR}" >> "$LOGFILE" 2>&1
+tar -xJf "${TMP_FB}" -C "${FB_BUILD}" >> "$LOGFILE" 2>&1
 rm -f "${TMP_FB}"
-chmod +x "${FB_DIR}/filebot.sh"
-ln -sf "${FB_DIR}/filebot.sh" /usr/local/bin/filebot
+test -s "${FB_BUILD}/filebot.sh"
+chmod +x "${FB_BUILD}/filebot.sh"
 
 report_progress 70 "Downloading FileBot Node Web UI..."
 RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/filebot/filebot-node/releases/latest 2>/dev/null || true)"
-NODE_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // "0.4.8.1"')"
+NODE_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${NODE_TAG}" || "${NODE_TAG}" == "null" ]]; then
-    NODE_TAG="0.4.8.1"
+    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        NODE_TAG="0.4.8.1"
+    else
+        print_error "Failed to discover latest GitHub release for filebot/filebot-node"
+        exit 1
+    fi
 fi
 NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/filebot-node_${NODE_TAG}.tar.xz"
 
 TMP_NODE="$(mktemp --suffix=.tar.xz)"
-wget -qO "${TMP_NODE}" "${NODE_URL}" >> "$LOGFILE" 2>&1
-tar -xJf "${TMP_NODE}" -C "${NODE_DIR}" >> "$LOGFILE" 2>&1
+download_file "${NODE_URL}" "${TMP_NODE}" >> "$LOGFILE" 2>&1
+tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}" >> "$LOGFILE" 2>&1
 rm -f "${TMP_NODE}"
 
-if [[ -f "${NODE_DIR}/server/package.json" ]]; then
-    pushd "${NODE_DIR}/server" >/dev/null
+if [[ -f "${NODE_BUILD}/server/package.json" ]]; then
+    pushd "${NODE_BUILD}/server" >/dev/null
     node_build npm install --include=dev >> "$LOGFILE" 2>&1
     popd >/dev/null
 fi
 
-echo "${NODE_TAG#v}" > "${NODE_DIR}/.af-version"
-chmod +x "${NODE_DIR}/task" 2>/dev/null || true
+test -s "${NODE_BUILD}/server/app.js"
+queue_app_version "$NODE_DIR/.af-version" "${NODE_TAG#v}"
+queue_app_version "$FB_DIR/.af-version" "${FB_VERSION#v}"
+chmod +x "${NODE_BUILD}/task" 2>/dev/null || true
+if [[ -f "$SERVICE_FILE" ]] || systemctl is-active --quiet filebot.service 2>/dev/null; then
+    WAS_RUNNABLE=true
+fi
+stop_systemd_unit filebot.service
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_CHANGED=true
+replace_app_tree "$FB_BUILD" "$FB_DIR"
+replace_app_tree "$NODE_BUILD" "$NODE_DIR"
+ln -sf "${FB_DIR}/filebot.sh" /usr/local/bin/filebot
+mkdir -p "${DATA_DIR}/data"
 
 FB_UID="$(id -u "${APP_USER}")"
 FB_GID="$(id -g "${APP_USER}")"
 
 if [[ ! -f "${DATA_DIR}/filebot-node.env" ]]; then
     cat > "${DATA_DIR}/filebot-node.env" <<EOF
-FILEBOT_NODE_HOST=0.0.0.0
+FILEBOT_NODE_HOST=127.0.0.1
 FILEBOT_NODE_AUTH=BASIC
 FILEBOT_NODE_AUTH_USER=${ADMIN_USER}
 FILEBOT_NODE_AUTH_PASS=${ADMIN_PASS}
@@ -113,7 +176,7 @@ else
     sed -i "s|^FILEBOT_NODE_HTTP_PORT=.*|FILEBOT_NODE_HTTP_PORT=${APP_PORT}|" "${DATA_DIR}/filebot-node.env" || true
 fi
 chmod 600 "${DATA_DIR}/filebot-node.env"
-chown -R "${APP_USER}:${APP_USER}" "${FB_DIR}" "${NODE_DIR}" "${DATA_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${FB_DIR}" "${NODE_DIR}" "${DATA_DIR}"
 
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
@@ -140,7 +203,11 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now filebot.service >> "$LOGFILE" 2>&1
+systemctl restart filebot.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet filebot.service
+systemctl is-active --quiet filebot.service
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

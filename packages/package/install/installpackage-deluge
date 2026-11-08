@@ -23,6 +23,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-deluge}"
+begin_state_transaction "deluged deluge-web" "$APP_PORT" "/" "/var/lib/deluge" "/etc/deluge" "/etc/systemd/system/deluged.service" "/etc/systemd/system/deluge-web.service" "/usr/bin/deluged" "/usr/bin/deluge-web" "/usr/bin/deluge-console" "/usr/lib/python3/dist-packages/deluge" "/usr/share/deluge"
+
+prepare_apt_package_transaction /var/lib/deluge/.af-version deluged deluge-web deluge-console
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing deluged, deluge-web, and deluge-console..."
 
@@ -35,31 +39,45 @@ fi
 
 report_progress 55 "Configuring Deluge daemon and WebUI on port ${APP_PORT}..."
 systemctl stop deluge-web deluged >> "$LOGFILE" 2>&1 || true
-mkdir -p /var/lib/deluge/.config/deluge /var/log/deluge /var/lib/deluge/Downloads
-if ! grep -q "^${MASTER_USER}:" /var/lib/deluge/.config/deluge/auth 2>/dev/null; then
-    printf '%s:%s:10\n' "${MASTER_USER}" "${MASTER_PASS}" >> /var/lib/deluge/.config/deluge/auth
-fi
-python3 - "${MASTER_PASS}" <<'PYEOF'
-import os
-import sys, os, hashlib, json, pathlib
-pw = sys.argv[1]
-salt = hashlib.sha1(os.urandom(32)).hexdigest()
-sha1 = hashlib.sha1((salt + pw).encode('utf-8')).hexdigest()
-web_conf = '/var/lib/deluge/.config/deluge/web.conf'
-header = {'file': 1, 'format': 1}
-body = {}
-if pathlib.Path(web_conf).exists():
-    raw = pathlib.Path(web_conf).read_text()
+validate_config_paths /var/lib/deluge/.config/deluge/auth /var/lib/deluge/.config/deluge/web.conf /var/log/deluge/.af-directory-check
+mkdir -p /var/lib/deluge/Downloads
+DELUGE_VER="$(deluged --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' deluged 2>/dev/null || echo "2.1.1")"
+queue_app_version /var/lib/deluge/.af-version "$DELUGE_VER"
+AF_SEED_USER="${MASTER_USER}" AF_SEED_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}" safe_config_python <<'PYEOF'
+import os, hashlib, json
+user, password = os.environ['AF_SEED_USER'], os.environ['AF_SEED_PASS']
+with ManagedConfig('/var/lib/deluge/.config/deluge/auth') as auth, ManagedConfig('/var/lib/deluge/.config/deluge/web.conf') as web:
+    auth_text = auth.read_text()
+    raw = web.read_text()
+    header = {'file': 1, 'format': 1}
+    body = {}
     decoder = json.JSONDecoder()
     while raw.strip():
         body, offset = decoder.raw_decode(raw.lstrip())
         raw = raw.lstrip()[offset:]
-body.update({'port': int(os.environ['AF_APP_PORT']), 'pwd_salt': salt, 'pwd_sha1': sha1, 'first_login': False, 'default_daemon': body.get('default_daemon', '127.0.0.1:58846')})
-with open(web_conf, 'w', encoding='utf-8') as f:
-    f.write(json.dumps(header, indent=4) + json.dumps(body, indent=4))
+    rotate = bool(os.environ.get('AF_CONFIG_PASS')) and os.environ.get('AF_KEEP_EXISTING_SECRETS', '1') != '1'
+    if rotate or not body.get('pwd_salt') or not body.get('pwd_sha1'):
+        salt = hashlib.sha1(os.urandom(32)).hexdigest()
+        body['pwd_salt'] = salt
+        body['pwd_sha1'] = hashlib.sha1((salt + password).encode('utf-8')).hexdigest()
+    body.update(port=int(os.environ['AF_APP_PORT']), first_login=False,
+                default_daemon=body.get('default_daemon', '127.0.0.1:58846'))
+    if not auth_text or rotate:
+        auth_lines = auth_text.splitlines()
+        if any(line.startswith(user + ':') for line in auth_lines):
+            auth_lines = [f'{user}:{password}:10' if line.startswith(user + ':') else line for line in auth_lines]
+        else:
+            auth_lines.append(f'{user}:{password}:10')
+        auth.write_text('\n'.join(auth_lines) + '\n', 0o600)
+    web.write_text(json.dumps(header, indent=4) + json.dumps(body, indent=4))
+for path in ('/var/lib/deluge/.af-directory-check', '/var/log/deluge/.af-directory-check'):
+    directory, name = config_directory(path)
+    try:
+        os.fchmod(directory, 0o750)
+    finally:
+        os.close(directory)
 PYEOF
-chown -R deluge:deluge /var/lib/deluge /var/log/deluge
-chmod 750 /var/lib/deluge /var/log/deluge
+chown -RP deluge:deluge /var/lib/deluge /var/log/deluge
 
 cat <<'EOF' > /etc/systemd/system/deluged.service
 [Unit]
@@ -101,7 +119,10 @@ report_progress 85 "Starting deluged and deluge-web services..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now deluged >> "$LOGFILE" 2>&1
 systemctl enable --now deluge-web >> "$LOGFILE" 2>&1
+systemctl is-active --quiet deluged
+systemctl is-active --quiet deluge-web
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Deluge installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

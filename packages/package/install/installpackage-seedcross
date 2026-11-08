@@ -47,59 +47,133 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
 fi
-mkdir -p "${INSTALL_DIR}" "${DATA_DIR}"
+mkdir -p "${DATA_DIR}"
+
+BUILD_DIR="$(mktemp -d /opt/.seedcross-build.XXXXXX)"
+trap 'rm -rf -- "$BUILD_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+chmod 755 "$BUILD_DIR"
 
 report_progress 45 "Cloning ${APP_NAME} repository..."
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    git -C "${INSTALL_DIR}" pull --ff-only >> "$LOGFILE" 2>&1 || true
-else
-    rm -rf "${INSTALL_DIR:?}"/*
-    git clone --depth 1 https://github.com/ccf-2012/seedcross.git "${INSTALL_DIR}" >> "$LOGFILE" 2>&1
+git clone --depth 1 https://github.com/ccf-2012/seedcross.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+[[ -s "$BUILD_DIR/manage.py" && -s "$BUILD_DIR/csui/settings.py" ]]
+if [[ -f "$INSTALL_DIR/csui/settings.py" ]]; then
+    cp -a "$INSTALL_DIR/csui/settings.py" "$BUILD_DIR/csui/settings.py"
+elif [[ -f "$DATA_DIR/legacy-settings.py" ]]; then
+    cp -a "$DATA_DIR/legacy-settings.py" "$BUILD_DIR/csui/settings.py"
 fi
 
-COMMIT_VER="$(git -C "${INSTALL_DIR}" rev-parse --short HEAD 2>/dev/null || echo '1.0.0')"
-echo "0.1.0-${COMMIT_VER}" > "${INSTALL_DIR}/.af-version"
+COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse --short HEAD)"
+queue_app_version "/opt/seedcross/.af-version" "0.1.0-${COMMIT_VER}"
 
 report_progress 65 "Creating Python virtualenv and installing dependencies..."
-if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
-    python3 -m venv "${INSTALL_DIR}/.venv" >> "$LOGFILE" 2>&1
-fi
-"${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel gunicorn >> "$LOGFILE" 2>&1
-if [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
-    "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir -r "${INSTALL_DIR}/requirements.txt" >> "$LOGFILE" 2>&1
+python3 -m venv "$BUILD_DIR/.venv" >> "$LOGFILE" 2>&1
+"$BUILD_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel gunicorn 'whitenoise>=6,<7' >> "$LOGFILE" 2>&1
+if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
+    "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade --no-cache-dir -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
 fi
 
-chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
-
-report_progress 80 "Initializing ${APP_NAME} database and master account..."
-if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py makemigrations --noinput" >> "$LOGFILE" 2>&1 || true
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" >> "$LOGFILE" 2>&1
-    ADMIN_USER="${ADMIN_USER}" ADMIN_PASS="${ADMIN_PASS}" ADMIN_EMAIL="${ADMIN_EMAIL}" \
-        su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
-import os
-from django.contrib.auth import get_user_model
-User = get_user_model()
-u, _ = User.objects.get_or_create(username=os.environ["ADMIN_USER"])
-u.email = os.environ["ADMIN_EMAIL"]
-u.is_staff = True
-u.is_superuser = True
-u.set_password(os.environ["ADMIN_PASS"])
-u.save()
-PYEOF
-fi
-
-cat > "${INSTALL_DIR}/start-seedcross.sh" <<EOF
+cat > "$BUILD_DIR/start-seedcross.sh" <<EOF
 #!/bin/bash
 set -euo pipefail
 cd "${INSTALL_DIR}"
+export DJANGO_SETTINGS_MODULE=af_settings
 "${INSTALL_DIR}/.venv/bin/python" manage.py process_tasks &
-BG_PID=\$!
-trap 'kill "\${BG_PID}" 2>/dev/null || true' EXIT INT TERM
-exec "${INSTALL_DIR}/.venv/bin/python" manage.py runserver 0.0.0.0:${APP_PORT} --noreload
+exec "${INSTALL_DIR}/.venv/bin/python" -m gunicorn csui.wsgi:application --bind 127.0.0.1:${APP_PORT} --workers 2
 EOF
-chmod 755 "${INSTALL_DIR}/start-seedcross.sh"
-chown "${APP_USER}:${APP_USER}" "${INSTALL_DIR}/start-seedcross.sh"
+chmod 755 "$BUILD_DIR/start-seedcross.sh"
+stage_app_archive "$BUILD_DIR" "$INSTALL_DIR" "start-seedcross.sh" "$DATA_DIR" "$PACKAGE_NAME" "."
+retain_app_data_directory "$AF_ARCHIVE_BACKUP/app/db" "$DATA_DIR/db"
+rm -rf -- "$INSTALL_DIR/db"
+ln -s "$DATA_DIR/db" "$INSTALL_DIR/db"
+PUBLIC_DOMAIN="$(get_base_domain)"
+chown -hRP "${APP_USER}:${APP_USER}" "$INSTALL_DIR" "$DATA_DIR"
+validate_config_paths "$DATA_DIR/runtime.json" "$INSTALL_DIR/csui/settings.py"
+LEGACY_SETTINGS_SNAPSHOT="$AF_ARCHIVE_BACKUP/legacy-settings.json"
+if [[ ! -e "$DATA_DIR/runtime.json" ]]; then
+    if ! (umask 077; su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' -" > "$LEGACY_SETTINGS_SNAPSHOT" 2>> "$LOGFILE" <<'LEGACY_SETTINGS_PYEOF'
+import contextlib, importlib, io, json, sys
+with contextlib.redirect_stdout(io.StringIO()):
+    operator_settings = importlib.import_module("csui.settings")
+values = {"SECRET_KEY": getattr(operator_settings, "SECRET_KEY", "")}
+if not isinstance(values["SECRET_KEY"], str):
+    raise ValueError("SeedCross SECRET_KEY must be a string")
+for name in ("ALLOWED_HOSTS", "CSRF_TRUSTED_ORIGINS"):
+    value = getattr(operator_settings, name, [])
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise ValueError("SeedCross " + name + " must contain strings")
+    values[name] = list(value)
+json.dump(values, sys.stdout)
+LEGACY_SETTINGS_PYEOF
+    ); then
+        print_error "Unable to evaluate retained SeedCross settings as ${APP_USER}; refusing to replace its runtime identity"
+        exit 1
+    fi
+fi
+safe_config_python "$DATA_DIR/runtime.json" "$LEGACY_SETTINGS_SNAPSHOT" "$PUBLIC_DOMAIN" <<'RUNTIME_PYEOF'
+import json, pathlib, secrets, sys
+path, settings, domain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+runtime_text = safe_read_text(path)
+if runtime_text:
+    runtime = json.loads(runtime_text)
+    if not isinstance(runtime.get('secret_key'), str) or not runtime['secret_key']:
+        raise ValueError('Retained SeedCross runtime secret is missing; restore runtime.json')
+else:
+    operator_settings = json.loads(safe_read_text(settings))
+    secret = operator_settings.get('SECRET_KEY', '')
+    if not secret or secret.startswith('django-insecure-'):
+        secret = secrets.token_urlsafe(48)
+    hosts = [host for host in operator_settings.get('ALLOWED_HOSTS', []) if isinstance(host, str) and host != '*']
+    origins = operator_settings.get('CSRF_TRUSTED_ORIGINS', [])
+    hosts.extend(['localhost', '127.0.0.1', '[::1]'])
+    if domain:
+        hosts.append('seedcross.' + domain)
+        origins = [*origins, 'https://seedcross.' + domain]
+    runtime = {'secret_key': secret, 'allowed_hosts': list(dict.fromkeys(hosts)),
+               'csrf_trusted_origins': list(dict.fromkeys(origins))}
+    safe_write_text(path, json.dumps(runtime), 0o640)
+RUNTIME_PYEOF
+chown -h "${APP_USER}:${APP_USER}" "$DATA_DIR/runtime.json"
+cat > "$INSTALL_DIR/af_settings.py" <<EOF
+from csui.settings import *
+import json
+with open("${DATA_DIR}/runtime.json") as runtime_file:
+    runtime = json.load(runtime_file)
+SECRET_KEY = runtime["secret_key"]
+DEBUG = False
+ALLOWED_HOSTS = runtime["allowed_hosts"]
+CSRF_TRUSTED_ORIGINS = runtime.get("csrf_trusted_origins", [])
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+DATABASES["default"]["NAME"] = "${DATA_DIR}/db/db.sqlite3"
+STATIC_ROOT = "${DATA_DIR}/static"
+MIDDLEWARE = list(MIDDLEWARE)
+if "whitenoise.middleware.WhiteNoiseMiddleware" not in MIDDLEWARE:
+    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
+EOF
+export DJANGO_SETTINGS_MODULE=af_settings
+
+report_progress 80 "Initializing ${APP_NAME} database and master account..."
+if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
+    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py collectstatic --noinput" </dev/null >> "$LOGFILE" 2>&1
+    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" </dev/null >> "$LOGFILE" 2>&1
+    ADMIN_USER="${ADMIN_USER}" ADMIN_PASS="${ADMIN_PASS}" ADMIN_EMAIL="${ADMIN_EMAIL}" \
+        AF_KEEP_EXISTING_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-}" \
+        su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
+import os
+from django.contrib.auth import get_user_model
+UserModel = get_user_model()
+rotate = bool(os.environ.get("AF_CONFIG_PASS")) and os.environ.get("AF_KEEP_EXISTING_SECRETS", "1") != "1"
+if rotate or not UserModel.objects.filter(is_superuser=True).exists():
+    admin_user, created = UserModel.objects.get_or_create(username=os.environ["ADMIN_USER"])
+    if created or rotate:
+        admin_user.email = os.environ["ADMIN_EMAIL"]
+        admin_user.is_staff = True
+        admin_user.is_superuser = True
+        admin_user.set_password(os.environ["AF_CONFIG_PASS"] if rotate else os.environ["ADMIN_PASS"])
+        admin_user.save()
+PYEOF
+fi
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -125,7 +199,9 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now seedcross.service >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

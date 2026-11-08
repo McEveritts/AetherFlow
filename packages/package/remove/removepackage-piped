@@ -4,3 +4,8 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SELF_DIR}/../../common.sh"
 source "${SELF_DIR}/../../youtube-common.sh"
 youtube_remove piped af-piped-api af-piped-proxy
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    safe_rm_rf /var/lib/piped /etc/piped /opt/piped
+fi
+rm -f -- /opt/piped/.af-version
+remove_lock piped

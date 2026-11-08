@@ -5,12 +5,67 @@ source "${SELF_DIR}/../../common.sh"
 source "${SELF_DIR}/../../youtube-common.sh"
 
 youtube_init piped 8280
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-piped-runtime-XXXXXX)"
+RUNTIME_PATHS=("$INSTALL_DIR" "$DATA_DIR" "$CONFIG_DIR" /etc/systemd/system/af-piped.service /etc/systemd/system/af-piped-api.service /etc/systemd/system/af-piped-proxy.service)
+RUNTIME_HAD_PREVIOUS=false
+RUNTIME_CHANGED=false
+SERVICE_STOPPED=false
+[[ ! -f "$INSTALL_DIR/piped.jar" ]] || RUNTIME_HAD_PREVIOUS=true
+BUILD_DIR=""
+rollback_piped_runtime() {
+    local status="$?" runtime_index runtime_path restored=true restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
+        if ! quiesce_services_for_rollback af-piped af-piped-api af-piped-proxy; then
+            restore_failed=true
+            print_error "Cannot stop Piped; recovery retained in $RUNTIME_BACKUP"
+            exit "$status"
+        fi
+        restore_postgresql_database "$RUNTIME_BACKUP" piped || restored=false
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restored" != true || "$restore_failed" == true ]]; then
+            print_error "Piped recovery incomplete; backups retained in $RUNTIME_BACKUP"
+            exit "$status"
+        fi
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+            systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$SERVICE_STOPPED" == true && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+        systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_piped_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 report_progress 10 "Preparing experimental native Piped stack..."
 apt-get install --no-remove -y -qq openjdk-21-jdk-headless apache2-bin build-essential pkg-config libssl-dev cargo rustc >> "$LOGFILE" 2>&1
 ensure_node 24
+stop_systemd_unit af-piped.service af-piped-api.service af-piped-proxy.service
+SERVICE_STOPPED=true
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_CHANGED=true
 API_PORT="$(youtube_private_port api)"
 PROXY_PORT="$(youtube_private_port proxy)"
 youtube_database
+backup_postgresql_database "$RUNTIME_BACKUP" piped
 PROXY_SECRET="$(youtube_secret proxy-secret)"
 
 report_progress 25 "Building Piped frontend, API and media proxy as the service user..."
@@ -19,28 +74,64 @@ youtube_source TeamPiped/Piped-Backend "${INSTALL_DIR}/backend"
 youtube_source TeamPiped/Piped-Proxy "${INSTALL_DIR}/proxy"
 BUILD_DIR="$(mktemp -d "${DATA_DIR}/backend-build-XXXXXX")"
 chown "$APP_NAME:$APP_NAME" "$BUILD_DIR"
-trap 'rm -rf "$BUILD_DIR"' EXIT
+validate_config_paths "${INSTALL_DIR}/backend/src/main/java/me/kavin/piped/server/ServerLauncher.java"
 runuser -u "$APP_NAME" -- cp -a "${INSTALL_DIR}/backend/." "${BUILD_DIR}/"
-python3 - "${BUILD_DIR}/src/main/java/me/kavin/piped/server/ServerLauncher.java" <<'PY'
+safe_config_python "${BUILD_DIR}/src/main/java/me/kavin/piped/server/ServerLauncher.java" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-source = path.read_text()
+source = safe_read_text(path)
 old = 'new InetSocketAddress(Constants.PORT)'
 new = 'new InetSocketAddress("127.0.0.1", Constants.PORT)'
 if old not in source and new not in source:
     sys.exit('Piped listener contract changed; refusing to expose the API on all interfaces')
-path.write_text(source.replace(old, new))
+safe_write_text(path, source.replace(old, new))
 PY
 node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0 >> "$LOGFILE" 2>&1
 node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
 runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
-install -m 644 "${BUILD_DIR}/build/libs/piped-1.0-all.jar" "${INSTALL_DIR}/piped.jar"
+RUST_VERSION="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" rustc --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
+RUST_BUILD_PATH="$PATH"
+RUST_TOOLCHAIN_DIR=""
+if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
+    for RUST_COMPILER in /root/.rustup/toolchains/*/bin/rustc /home/*/.rustup/toolchains/*/bin/rustc /root/.cargo/bin/rustc /home/*/.cargo/bin/rustc; do
+        [[ -x "$RUST_COMPILER" ]] || continue
+        if [[ "$RUST_COMPILER" == */.cargo/bin/rustc ]]; then
+            RUST_HOME="${RUST_COMPILER%/.cargo/bin/rustc}/.rustup"
+            if [[ "$RUST_COMPILER" == /root/* ]]; then
+                RUST_COMPILER="$(RUSTUP_HOME="$RUST_HOME" "${RUST_COMPILER%/rustc}/rustup" which rustc 2>/dev/null)" || continue
+            else
+                RUST_COMPILER="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" RUSTUP_HOME="$RUST_HOME" "${RUST_COMPILER%/rustc}/rustup" which rustc 2>/dev/null)" || continue
+            fi
+        fi
+        [[ -x "${RUST_COMPILER%/rustc}/cargo" ]] || continue
+        RUST_TOOLCHAIN_DIR="$(mktemp -d "${DATA_DIR}/rust-toolchain-XXXXXX")"
+        cp -a -- "${RUST_COMPILER%/bin/rustc}/." "$RUST_TOOLCHAIN_DIR/"
+        chmod -R a+rX "$RUST_TOOLCHAIN_DIR"
+        RUST_VERSION="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" "$RUST_TOOLCHAIN_DIR/bin/rustc" --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
+        if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
+            safe_rm_rf "$RUST_TOOLCHAIN_DIR"
+            RUST_TOOLCHAIN_DIR=""
+            continue
+        fi
+        RUST_BUILD_PATH="$RUST_TOOLCHAIN_DIR/bin:$PATH"
+        break
+    done
+    if [[ -z "$RUST_TOOLCHAIN_DIR" ]]; then
+        print_error "Piped-Proxy requires Rust >= 1.89; install a current rustup toolchain before retrying."
+        exit 1
+    fi
+fi
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" CARGO_HOME="${DATA_DIR}/.cargo" RUSTC=rustc PATH="$RUST_BUILD_PATH" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
+[[ -z "$RUST_TOOLCHAIN_DIR" ]] || safe_rm_rf "$RUST_TOOLCHAIN_DIR"
+stop_systemd_unit af-piped-api
+STAGED_JAR="$(mktemp "${INSTALL_DIR}/.piped.jar.XXXXXX")"
+install -m 644 "${BUILD_DIR}/build/libs/piped-1.0-all.jar" "$STAGED_JAR"
+mv -fT -- "$STAGED_JAR" "${INSTALL_DIR}/piped.jar"
 
 report_progress 70 "Configuring private Piped API, proxy and Apache frontend..."
-cat > "${CONFIG_DIR}/managed.properties" <<EOF
+write_config_file "${CONFIG_DIR}/managed.properties" <<EOF
 PORT:${API_PORT}
 HTTP_WORKERS:2
 PROXY_PART:https://${APP_DOMAIN}/proxy
@@ -54,18 +145,20 @@ hibernate.dialect:org.hibernate.dialect.PostgreSQLDialect
 hibernate.connection.username:piped
 hibernate.connection.password:${DB_PASSWORD}
 EOF
-python3 - "$CONFIG_DIR" <<'PY'
+safe_config_python "$CONFIG_DIR" <<'PY'
 import pathlib
 import sys
 
 directory = pathlib.Path(sys.argv[1])
 path = directory / 'config.properties'
-managed = (directory / 'managed.properties').read_text().splitlines()
+managed = safe_read_text(directory / 'managed.properties').splitlines()
 keys = {line.split(':', 1)[0] for line in managed}
-existing = path.read_text().splitlines() if path.exists() else []
+existing = safe_read_text(path).splitlines()
 preserved = [line for line in existing if line.split(':', 1)[0].split('=', 1)[0].strip() not in keys]
-path.write_text('\n'.join(preserved + managed) + '\n')
-(directory / 'managed.properties').unlink()
+safe_write_text(path, '\n'.join(preserved + managed) + '\n')
+with ManagedConfig(directory / 'managed.properties') as managed_config:
+    managed_config.check_target()
+    os.unlink(managed_config.name, dir_fd=managed_config.directory)
 PY
 ln -sfn "${CONFIG_DIR}/config.properties" "${DATA_DIR}/config.properties"
 cat > "${CONFIG_DIR}/runtime.env" <<EOF
@@ -105,10 +198,13 @@ youtube_unit af-piped-proxy "${INSTALL_DIR}/proxy/target/release/piped-proxy"
 youtube_unit af-piped "/usr/sbin/apache2 -f ${CONFIG_DIR}/httpd.conf -DFOREGROUND" "af-piped-api.service af-piped-proxy.service"
 systemctl daemon-reload
 systemctl enable af-piped.service >> "$LOGFILE" 2>&1
-systemctl restart af-piped.service
+systemctl restart af-piped-api.service af-piped-proxy.service af-piped.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
 youtube_ready "http://127.0.0.1:${APP_PORT}/api/healthcheck"
 systemctl is-active --quiet af-piped-api.service af-piped-proxy.service
-runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD > "${INSTALL_DIR}/.af-version"
+PIPED_VERSION="$(runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD)"
+queue_app_version "${INSTALL_DIR}/.af-version" "$PIPED_VERSION"
+commit_app_versions
 write_lock piped
+RUNTIME_CHANGED=false
 report_progress 100 "Experimental Piped installed. YouTube playback may require additional upstream anti-bot configuration."

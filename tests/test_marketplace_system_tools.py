@@ -1,9 +1,14 @@
+import fcntl
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import common_functions
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,7 +88,54 @@ resolve_master_user() { echo admin; }
                 self.assertEqual(result, [str(script)])
                 script.unlink()
 
+    def cli_script(self):
+        source = (ROOT / "packages/system/af").read_text()
+        for prefix in ("/opt/", "/usr/local/", "/install/"):
+            source = source.replace(prefix, str(self.root) + prefix)
+        return self.file("af", source)
+
+    def test_cli_executes_authoritative_binary_before_loading_legacy_helpers(self):
+        script = self.cli_script()
+        for relative in ("custom/af-cli", "usr/local/bin/af-cli", "opt/AetherFlow/bin/af-cli"):
+            with self.subTest(binary=relative):
+                binary = self.file(relative, '#!/bin/bash\nprintf "%s\\n" "$@"\nexit 23\n')
+                binary.chmod(0o755)
+                environment = {**os.environ, "AETHERFLOW_USE_RUNNER": "1"}
+                if relative.startswith("custom/"):
+                    environment["AETHERFLOW_CLI_BIN"] = str(binary)
+                result = subprocess.run(["bash", str(script), "install", "rclone", "--port", "23456"],
+                                        env=environment, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 23, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["install", "rclone", "--port", "23456"])
+                binary.unlink()
+
+    def test_cli_runner_required_without_binary_fails_closed(self):
+        result = subprocess.run(["bash", str(self.cli_script()), "remove", "rclone"],
+                                env={**os.environ, "AETHERFLOW_USE_RUNNER": "1", "AETHERFLOW_CLI_BIN": ""},
+                                text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("authoritative af-cli is required", result.stderr)
+
+    def test_cli_bash_fallback_honors_shared_maintenance_lock(self):
+        script = self.cli_script()
+        self.file("opt/AetherFlow/packages/common.sh", common_functions("safe_config_python", "validate_config_paths"))
+        self.file("opt/AetherFlow/packages/package/install/installpackage-fixture", '#!/bin/sh\necho fixture-install\n')
+        lock = self.file("opt/AetherFlow/logs/maintenance.lock", "")
+        environment = {**os.environ, "TERM": "xterm", "AETHERFLOW_USE_RUNNER": "0", "AETHERFLOW_CLI_BIN": ""}
+        with lock.open("a") as descriptor:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = subprocess.run(["bash", str(script), "install", "fixture"], env=environment,
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("maintenance operation is running", result.stderr)
+            self.assertNotIn("fixture-install", result.stdout)
+        result = subprocess.run(["bash", str(script), "install", "fixture"], env=environment,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture-install", result.stdout)
+
     @unittest.skipUnless(shutil.which("rsync"), "requires rsync")
+    @unittest.skipUnless((ROOT / "deploy/release-manager.sh").is_file(), "requires deploy/release-manager.sh")
     def test_release_swap_syncs_existing_legacy_packages_and_shared_helpers(self):
         source = (ROOT / "deploy/release-manager.sh").read_text()
         functions = source[source.index("sync_legacy_package_paths() {"):source.index("\n###############################################################################\n# STAGE 3")]

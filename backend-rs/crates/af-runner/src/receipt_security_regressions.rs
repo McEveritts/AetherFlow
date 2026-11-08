@@ -47,6 +47,7 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn security_receipt_final_symlink_is_not_terminal_evidence() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let fixture = Fixture::new();
     let external = fixture.root.join("external.json");
     fs::write(&external, serde_json::to_vec(&fixture.terminal).unwrap()).unwrap();
@@ -71,6 +72,7 @@ async fn security_receipt_final_symlink_is_not_terminal_evidence() {
 
 #[tokio::test]
 async fn security_receipt_parent_symlinks_are_rejected_even_when_empty() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     for terminal in [false, true] {
         let fixture = Fixture::new();
         let external = fixture.root.join("external");
@@ -91,6 +93,7 @@ async fn security_receipt_parent_symlinks_are_rejected_even_when_empty() {
 
 #[tokio::test]
 async fn security_receipt_nonregular_corrupt_and_aliased_entries_fail_closed() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     for kind in [
         "directory",
         "fifo",
@@ -136,6 +139,7 @@ async fn security_receipt_nonregular_corrupt_and_aliased_entries_fail_closed() {
 
 #[tokio::test]
 async fn security_receipt_lock_identity_and_contention_fail_closed() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let fixture = Fixture::new();
     write(&fixture.path, &fixture.terminal).unwrap();
     let guard = ReceiptLock::acquire(&fixture.path).unwrap();
@@ -164,6 +168,7 @@ async fn security_receipt_lock_identity_and_contention_fail_closed() {
 
 #[tokio::test]
 async fn security_receipt_held_directory_rejects_replacement_and_disappearance() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let fixture = Fixture::new();
     write(&fixture.path, &fixture.terminal).unwrap();
     let directory = ReceiptDirectory::open_existing(&fixture.jobs)
@@ -205,6 +210,7 @@ async fn security_receipt_held_directory_rejects_replacement_and_disappearance()
 
 #[tokio::test]
 async fn security_receipt_launch_liveness_and_normal_terminal_states_survive() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let fixture = Fixture::new();
     let owner = begin_launch(&fixture.path).unwrap();
     let mut launching = fixture.terminal.clone();
@@ -256,6 +262,7 @@ async fn security_receipt_launch_liveness_and_normal_terminal_states_survive() {
 
 #[tokio::test]
 async fn security_receipt_running_owner_redirection_is_not_liveness() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     let fixture = Fixture::new();
     let mut running = fixture.terminal.clone();
     running.status = "running".into();
@@ -279,6 +286,7 @@ async fn security_receipt_running_owner_redirection_is_not_liveness() {
 
 #[tokio::test]
 async fn security_receipt_reconciliation_reread_and_public_query_remain_confined() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
     use std::os::unix::fs::PermissionsExt;
     let name = "job_receipts::security_regressions::security_receipt_reconciliation_reread_and_public_query_remain_confined";
     if std::env::var("AF_RECEIPT_SECURITY_CHILD").as_deref() != Ok(name) {

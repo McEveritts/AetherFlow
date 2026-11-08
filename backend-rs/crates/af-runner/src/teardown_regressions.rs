@@ -161,6 +161,7 @@ impl TeardownFixture {
     }
 
     async fn remove(&self, purge: bool) -> Result<PackageExecutionOutcome, PackageExecutorError> {
+        let _serial = super::tests::TEST_EXECUTION_SERIALIZER.lock().await;
         let mut environment = PackageExecutionEnv::isolated(&self.root);
         environment.delete_data = purge;
         DeclarativePackageExecutor::with_runner(environment, self.runner.clone())
@@ -353,6 +354,7 @@ async fn teardown_final_marker_unlink_failure_never_emits_complete() {
 
 #[tokio::test]
 async fn teardown_preflight_gates_apt_first_and_companion_recipes() {
+    let _serial = super::tests::TEST_EXECUTION_SERIALIZER.lock().await;
     for package in ["fail2ban", "quassel"] {
         let fixture = TeardownFixture::new("stop");
         let recipe = get_declarative_recipe(package).unwrap();

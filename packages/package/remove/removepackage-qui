@@ -28,11 +28,13 @@ purge_systemd_unit "qui"
 report_progress 65 "Removing Qui binary, state directories, and user account..."
 rm -f /usr/local/bin/qui
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/qui
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/qui"
+    safe_rm_rf /var/lib/qui
+    purge_system_user "qui"
 fi
-purge_system_user "qui"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/qui/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Qui removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

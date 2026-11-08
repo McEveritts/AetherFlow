@@ -20,14 +20,16 @@ PACKAGE_NAME="filebrowser"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8095}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
+mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /opt/AetherFlow/logs/filebrowser_credentials.txt
+install -d -m 0700 /opt/AetherFlow/logs
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing dependencies for File Browser..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar openssl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar openssl ca-certificates apache2-utils >> "$LOGFILE" 2>&1
 
 if ! id -u filebrowser >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/filebrowser --shell /usr/sbin/nologin filebrowser
@@ -46,39 +48,47 @@ FB_VERSION="$(github_latest_tag "filebrowser/filebrowser" "v2.31.2" "false")"
 FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSION}/${FB_ARCH}-filebrowser.tar.gz"
 
 TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
-curl -fsSL "$FB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$FB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 TMP_DIR="$(mktemp -d /tmp/filebrowser-extract-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser >> "$LOGFILE" 2>&1
-systemctl stop filebrowser >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$TMP_DIR/filebrowser" /usr/local/bin/filebrowser
+chmod 755 "$TMP_DIR/filebrowser"
+stage_app_archive "$TMP_DIR" /usr/local/bin/filebrowser filebrowser /opt/filebrowser "$PACKAGE_NAME" "." "" "" binary
+rm -rf "$TMP_DIR"
 rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/filebrowser
 
 report_progress 70 "Initializing File Browser database on port ${APP_PORT}..."
 mkdir -p /opt/filebrowser /srv
-printf '%s\n' "${FB_VERSION#v}" > /opt/filebrowser/.af-version
+queue_app_version /opt/filebrowser/.af-version "${FB_VERSION#v}"
 
 FB_NEW_DATABASE=0
 if [[ ! -s /opt/filebrowser/filebrowser.db ]]; then
     /usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
     FB_NEW_DATABASE=1
 fi
-/usr/local/bin/filebrowser config set --address 0.0.0.0 --port ${APP_PORT} --root /srv --minimum-password-length 1 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1 || \
-    /usr/local/bin/filebrowser config set --address 0.0.0.0 --port ${APP_PORT} --root /srv --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+if [[ "$FB_NEW_DATABASE" == 1 ]]; then
+    /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --root /srv --minimum-password-length 12 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+else
+    /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+fi
 
 FB_USER="${MASTER_USER}"
 FB_PASS="${MASTER_PASS}"
 if [[ "$FB_NEW_DATABASE" == 1 ]]; then
-if ! /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1; then
-    FB_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)aA1!"
-    /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
-fi
-printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" > /opt/AetherFlow/logs/filebrowser_credentials.txt
-chmod 600 /opt/AetherFlow/logs/filebrowser_credentials.txt
+FB_PASSWORD_HASH="$(printf '%s\n' "$FB_PASS" | htpasswd -niBC 10 "$FB_USER")"
+FB_PASSWORD_HASH="${FB_PASSWORD_HASH#*:}"
+FB_USERS_FILE="$(mktemp /opt/filebrowser/.af-users.XXXXXX.json)"
+AF_SEED_USER="$FB_USER" AF_SEED_HASH="$FB_PASSWORD_HASH" safe_config_python "$FB_USERS_FILE" <<'PYEOF'
+import json, sys
+safe_write_text(sys.argv[1], json.dumps([{'id': 0, 'username': os.environ['AF_SEED_USER'], 'password': os.environ['AF_SEED_HASH'], 'scope': '/srv', 'perm': {'admin': True}}]), 0o600)
+PYEOF
+/usr/local/bin/filebrowser users import "$FB_USERS_FILE" --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+rm -f -- "$FB_USERS_FILE"
+(umask 077; printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" | write_config_file /opt/AetherFlow/logs/filebrowser_credentials.txt 0600)
 fi
 
-chown -R filebrowser:filebrowser /opt/filebrowser
+chown -hRP filebrowser:filebrowser /opt/filebrowser
 
 report_progress 85 "Configuring and starting filebrowser.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/filebrowser.service
@@ -100,7 +110,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now filebrowser >> "$LOGFILE" 2>&1
 systemctl restart filebrowser >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/health"
+systemctl is-active --quiet filebrowser
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "File Browser installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

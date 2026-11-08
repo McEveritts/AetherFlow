@@ -3,6 +3,7 @@
 # Port: 3080
 
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -23,21 +24,12 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and preparing network environment..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates libcap2-bin apache2-utils >> "$LOGFILE" 2>&1
-
-# Resolve port 53 conflict with systemd-resolved if present
-if [[ -f /etc/systemd/resolved.conf ]]; then
-    if grep -q '^#*DNSStubListener=' /etc/systemd/resolved.conf 2>/dev/null; then
-        sed -i 's/^#*DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-    else
-        printf '\n[Resolve]\nDNSStubListener=no\n' >> /etc/systemd/resolved.conf
-    fi
-    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
-fi
 
 if ! id -u adguardhome >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/AdGuardHome --shell /usr/sbin/nologin adguardhome
@@ -59,22 +51,24 @@ AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VER
 
 report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."
 TMP_TAR=$(mktemp /tmp/agh-XXXXXX.tar.gz)
-if ! curl -fsSL "$AGH_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+if ! download_file "$AGH_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1; then
     # Fallback to static cdn URL
     STATIC_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${AGH_ARCH}.tar.gz"
-    curl -fsSL "$STATIC_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+    download_file "$STATIC_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 fi
 
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
+stage_app_archive "$TMP_TAR" "/opt/AdGuardHome" "AdGuardHome" "/etc/systemd/resolved.conf" "${PACKAGE_NAME}" "AdGuardHome" "/etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf" "preserve"
 rm -f "$TMP_TAR"
+validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 chmod +x /opt/AdGuardHome/AdGuardHome
 setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdGuardHome >> "$LOGFILE" 2>&1 || true
-printf '%s\n' "${AGH_VERSION#v}" > /opt/AdGuardHome/.af-version
+queue_app_version /opt/AdGuardHome/.af-version "${AGH_VERSION#v}"
 
 if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
-    AGH_BCRYPT="$(htpasswd -nbB "${MASTER_USER}" "${MASTER_PASS}" 2>/dev/null | cut -d: -f2- || true)"
-    cat <<EOF > /opt/AdGuardHome/AdGuardHome.yaml
-bind_host: 0.0.0.0
+    AGH_BCRYPT="$(printf '%s\n' "$MASTER_PASS" | htpasswd -niB "${MASTER_USER}" 2>/dev/null | cut -d: -f2- || true)"
+    write_config_file /opt/AdGuardHome/AdGuardHome.yaml 0600 <<EOF
+bind_host: 127.0.0.1
 bind_port: ${APP_PORT}
 auth_attempts: 5
 block_auth_min: 15
@@ -82,7 +76,7 @@ http:
   pprof:
     port: 0
     enabled: false
-  address: 0.0.0.0:${APP_PORT}
+  address: 127.0.0.1:${APP_PORT}
   session_ttl: 720h
 users:
   - name: ${MASTER_USER}
@@ -95,9 +89,72 @@ dns:
     - 1.1.1.1
     - 8.8.8.8
 EOF
+else
+    safe_config_python /opt/AdGuardHome/AdGuardHome.yaml "$APP_PORT" <<'PYEOF'
+import re, sys
+port = sys.argv[2]
+if not port.isdecimal() or not 1 <= int(port) <= 65535:
+    raise ValueError('Invalid AdGuard Home HTTP port')
+with ManagedConfig(sys.argv[1], create_parents=False) as config:
+    text = config.read_text()
+    text = re.sub(r'(?m)^(bind_port:[ \t]*)\d+', lambda match: match.group(1) + port, text)
+    header = re.search(r'(?m)^http:[ \t]*(?:#[^\n]*)?$', text)
+    if header:
+        start = header.end()
+        boundary = re.search(r'(?m)^[^\s#][^\n]*:', text[start:])
+        end = start + boundary.start() if boundary else len(text)
+        block = text[start:end]
+        address = re.search(r'(?m)^([ \t]+address:[ \t]*)([^\n]*)$', block)
+        if address:
+            scalar = re.fullmatch(r'''("[^"]*"|'[^']*'|[^#]*?)([ \t]*(?:#.*)?)''', address.group(2))
+            if scalar is None:
+                raise ValueError('Invalid retained AdGuard Home HTTP address')
+            value = scalar.group(1).strip()
+            quote = value[:1] if value[:1] in ('"', "'") else ''
+            endpoint = value[1:-1] if quote else value
+            host, separator, previous_port = endpoint.rpartition(':')
+            if not separator or not previous_port.isdecimal() or not re.fullmatch(r'[a-zA-Z0-9_.:\[\]-]*', host):
+                raise ValueError('Invalid retained AdGuard Home HTTP listener')
+            setting = address.group(1) + quote + host + ':' + port + quote + scalar.group(2)
+            block = block[:address.start()] + setting + block[address.end():]
+        else:
+            host = re.search(r'(?m)^bind_host:[ \t]*([^\n#]+)', text)
+            host = host.group(1).strip().strip('\'"') if host else '127.0.0.1'
+            if not re.fullmatch(r'[a-zA-Z0-9_.:\[\]-]+', host):
+                raise ValueError('Invalid retained AdGuard Home bind host')
+            block = '\n  address: ' + (f'[{host}]' if ':' in host and not host.startswith('[') else host) + ':' + port + block
+        text = text[:start] + block + text[end:]
+    else:
+        host = re.search(r'(?m)^bind_host:[ \t]*([^\n#]+)', text)
+        host = host.group(1).strip().strip('\'"') if host else '127.0.0.1'
+        if not re.fullmatch(r'[a-zA-Z0-9_.:\[\]-]+', host):
+            raise ValueError('Invalid retained AdGuard Home bind host')
+        text = text.rstrip('\n') + '\nhttp:\n  address: ' + (f'[{host}]' if ':' in host and not host.startswith('[') else host) + ':' + port + '\n'
+    config.write_text(text, 0o600)
+PYEOF
 fi
 
-chown -R adguardhome:adguardhome /opt/AdGuardHome
+validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
+chown -hRP adguardhome:adguardhome /opt/AdGuardHome
+set_config_file_mode 0600 /opt/AdGuardHome/AdGuardHome.yaml
+
+AGH_RESOLVED_CHANGED="$(safe_config_python /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf <<'PYEOF'
+import re, sys
+with ManagedConfig(sys.argv[1], create_parents=False) as config:
+    if config.metadata is not None:
+        settings = re.findall(r'(?m)^[ \t]*DNSStubListener[ \t]*=[ \t]*([^\n#]*)', config.read_text())
+        if not settings or settings[-1].strip().lower() not in ('no', 'false', 'off', '0'):
+            with ManagedConfig(sys.argv[2]) as dropin:
+                desired = '[Resolve]\nDNSStubListener=no\n'
+                if dropin.read_text() != desired:
+                    dropin.write_text(desired, 0o644)
+                    print('changed')
+PYEOF
+)"
+if [[ "$AGH_RESOLVED_CHANGED" == changed ]]; then
+    AF_ARCHIVE_ROLLBACK_RESTART_UNITS+=(systemd-resolved)
+    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1
+fi
 
 report_progress 85 "Configuring and starting adguardhome.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/adguardhome.service
@@ -125,7 +182,11 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now adguardhome >> "$LOGFILE" 2>&1
+systemctl is-active --quiet adguardhome
 
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "AdGuard Home installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

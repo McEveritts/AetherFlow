@@ -33,11 +33,12 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 60 "Removing quassel-core package..."
 DEBIAN_FRONTEND=noninteractive apt-get remove -y quassel-core >> "$LOGFILE" 2>&1
-rm -f "${DATA_DIR}/.af-version" /etc/default/quasselcore
+rm -f "${DATA_DIR}/.af-version"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${DATA_DIR} and ${LOG_DIR}..."
-    rm -rf "${DATA_DIR}" "${LOG_DIR}"
+    safe_rm_rf "/var/lib/quassel" "${LOG_DIR}"
+    rm -f /etc/default/quasselcore
     purge_system_user "quasselcore"
 fi
 

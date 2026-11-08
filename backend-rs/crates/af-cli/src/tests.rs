@@ -70,7 +70,19 @@ fn direct_cli_purge_is_explicit_and_ordinary_removal_retains_data() {
 #[test]
 fn actual_unix_transport_rejects_eof_after_script_success_without_durable_receipt() {
     use std::io::{Read, Write};
-    let root = TempTestDir { path: std::env::temp_dir().join(format!("s-{}", uuid::Uuid::new_v4().simple())) };
+    let dir_name = format!("s-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let tmpdir_base = std::env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let candidate_root = tmpdir_base.join(&dir_name);
+    let root = TempTestDir {
+        path: if candidate_root.join("runner.sock").as_os_str().len() < 95 {
+            candidate_root
+        } else {
+            PathBuf::from("/tmp").join(dir_name)
+        },
+    };
     fs::create_dir_all(root.path()).unwrap();
     let socket = root.path().join("runner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -241,12 +253,30 @@ fn cli_parser_supports_legacy_af_shorthands_and_rejects_no_arg_tui() {
     assert_eq!(empty_err.exit_code(), CliExitCode::UnsupportedOperation);
     assert!(empty_err.to_string().contains("interactive-tui"));
 
-    // 2. Legacy `af install sonarr radarr`
+    // 2. Legacy `af install sonarr radarr` and `af reinstall sonarr --port 18989`
     let inv = parse_cli_args(["install", "sonarr", "radarr"]).unwrap();
     assert_eq!(
         inv.command,
         AfCommand::Package(PackageCommand::Install {
             packages: vec!["sonarr".to_string(), "radarr".to_string()],
+            port: None,
+        })
+    );
+
+    let reinv = parse_cli_args(["reinstall", "sonarr", "--port", "18989"]).unwrap();
+    assert_eq!(
+        reinv.command,
+        AfCommand::Package(PackageCommand::Reinstall {
+            packages: vec!["sonarr".to_string()],
+            port: Some(18989),
+        })
+    );
+
+    let pkg_reinv = parse_cli_args(["package", "reinstall", "radarr", "sonarr"]).unwrap();
+    assert_eq!(
+        pkg_reinv.command,
+        AfCommand::Package(PackageCommand::Reinstall {
+            packages: vec!["radarr".to_string(), "sonarr".to_string()],
             port: None,
         })
     );
@@ -400,6 +430,36 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     assert_eq!(pkg_calls.len(), 1);
     assert_eq!(pkg_calls[0].package_id, "sonarr");
     assert_eq!(pkg_calls[0].script_name, "installpackage-sonarr");
+    drop(pkg_calls);
+
+    // 1b. Reinstall `radarr` and `sonarr` even when `/install/.radarr.lock` and `/etc/Swizzin/.sonarr.lock` exist
+    let swizzin_dir = tmp.path().join("etc/Swizzin");
+    fs::create_dir_all(&swizzin_dir).unwrap();
+    fs::write(swizzin_dir.join(".sonarr.lock"), b"PORT=18989\n").unwrap();
+
+    // Verify `af install sonarr` skips when `/etc/Swizzin/.sonarr.lock` exists
+    let skip_inv = parse_cli_args(["--json", "--root", &root_str, "install", "sonarr"]).unwrap();
+    let skip_env = execute_invocation(&skip_inv, &transport);
+    assert_eq!(skip_env.status, "ok");
+    assert_eq!(transport.package_calls.lock().unwrap().len(), 1);
+
+    // Verify `af reinstall radarr sonarr` executes both in-place with action="reinstall" and delete_data=false
+    let reinv = parse_cli_args(["--json", "--root", &root_str, "reinstall", "radarr", "sonarr"]).unwrap();
+    let reenv = execute_invocation(&reinv, &transport);
+    assert_eq!(reenv.status, "ok");
+    assert_eq!(reenv.exit_code, 0);
+    assert_eq!(reenv.action, "reinstall");
+    let pkg_calls = transport.package_calls.lock().unwrap();
+    assert_eq!(pkg_calls.len(), 3);
+    assert_eq!(pkg_calls[1].package_id, "radarr");
+    assert_eq!(pkg_calls[1].action, "reinstall");
+    assert_eq!(pkg_calls[1].script_name, "installpackage-radarr");
+    assert!(!pkg_calls[1].delete_data);
+    assert_eq!(pkg_calls[2].package_id, "sonarr");
+    assert_eq!(pkg_calls[2].action, "reinstall");
+    assert_eq!(pkg_calls[2].script_name, "installpackage-sonarr");
+    assert_eq!(pkg_calls[2].app_port, 18989);
+    assert!(!pkg_calls[2].delete_data);
     drop(pkg_calls);
 
     // 2. Service restart via `/v1/systemctl`

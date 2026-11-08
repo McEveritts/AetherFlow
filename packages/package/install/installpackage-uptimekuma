@@ -44,17 +44,30 @@ report_progress 65 "Building Uptime Kuma production bundle..."
 cd "$BUILD_DIR"
 node_build npm run setup >> "$LOGFILE" 2>&1
 
-UK_VERSION="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
-if [[ -n "$UK_VERSION" ]]; then
-    printf '%s\n' "${UK_VERSION#v}" > "$BUILD_DIR/.af-version"
-fi
+UK_VERSION="$(git_checkout_version "$BUILD_DIR" /opt/uptime-kuma/.af-version)"
+queue_app_version "/opt/uptime-kuma/.af-version" "${UK_VERSION#v}"
 
-systemctl stop uptime-kuma >> "$LOGFILE" 2>&1 || true
-replace_app_tree "$BUILD_DIR" /opt/uptime-kuma data .env
+UK_DATA_REL="data"
+mkdir -p "$BUILD_DIR/$UK_DATA_REL"
+if [[ -d "/opt/uptime-kuma/$UK_DATA_REL" ]]; then
+    cp -a "/opt/uptime-kuma/$UK_DATA_REL/." "$BUILD_DIR/$UK_DATA_REL/"
+fi
+if [[ -f /opt/uptime-kuma/.env ]]; then
+    cp -a /opt/uptime-kuma/.env "$BUILD_DIR/.env"
+fi
+if [[ -f "$BUILD_DIR/server/server.js" ]]; then
+    chmod +x "$BUILD_DIR/server/server.js"
+elif [[ -f "$BUILD_DIR/new-code" ]]; then
+    chmod +x "$BUILD_DIR/new-code"
+fi
+if ! command_exists stop_systemd_unit; then
+    stop_systemd_unit() { systemctl stop "$1" >> "$LOGFILE" 2>&1 || true; }
+fi
+stage_app_archive "$BUILD_DIR" /opt/uptime-kuma "server/server.js|new-code" "/opt/uptime-kuma/$UK_DATA_REL" uptime-kuma "."
 BUILD_DIR=""
 cd /opt/uptime-kuma
 
-chown -R uptimekuma:uptimekuma /opt/uptime-kuma
+chown -hRP uptimekuma:uptimekuma /opt/uptime-kuma
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
 report_progress 85 "Configuring and starting uptime-kuma.service on port ${APP_PORT}..."
@@ -80,7 +93,15 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now uptime-kuma >> "$LOGFILE" 2>&1
+systemctl restart uptime-kuma >> "$LOGFILE" 2>&1
+if [[ -f /opt/uptime-kuma/server/server.js ]]; then
+    finish_app_archive_update uptime-kuma "$APP_PORT" "/"
+else
+    systemctl is-active --quiet uptime-kuma
+    rm -rf -- "$AF_ARCHIVE_BACKUP/release"
+fi
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Uptime Kuma installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -28,11 +28,13 @@ purge_systemd_unit "unpackerr"
 report_progress 65 "Removing Unpackerr binary, configuration, and state directories..."
 rm -f /usr/local/bin/unpackerr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/unpackerr"
+    safe_rm_rf /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
+    purge_system_user "unpackerr"
 fi
-purge_system_user "unpackerr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /opt/unpackerr/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Unpackerr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

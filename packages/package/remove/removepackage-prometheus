@@ -26,14 +26,23 @@ report_progress 25 "Stopping and removing prometheus and node_exporter services.
 purge_systemd_unit "prometheus" "node_exporter"
 
 report_progress 65 "Removing Prometheus binaries, time-series data, config, and user accounts..."
+if [[ -L /usr/bin/prometheus && "$(readlink -- /usr/bin/prometheus)" == /usr/local/bin/prometheus ]]; then
+    rm -f /usr/bin/prometheus
+fi
+if [[ -L /usr/bin/prometheus-node-exporter && "$(readlink -- /usr/bin/prometheus-node-exporter)" == /usr/local/bin/node_exporter ]]; then
+    rm -f /usr/bin/prometheus-node-exporter
+fi
 rm -f /usr/local/bin/prometheus /usr/local/bin/promtool /usr/local/bin/node_exporter
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/prometheus /var/lib/prometheus
+    safe_rm_rf /etc/prometheus /var/lib/prometheus
+    purge_system_user "prometheus"
 fi
-purge_system_user "prometheus"
-purge_system_user "node_exporter"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "node_exporter"
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /etc/prometheus/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Prometheus and Node Exporter removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

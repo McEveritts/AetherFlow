@@ -35,12 +35,15 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 report_progress 60 "Removing ${APP_NAME} package..."
 DEBIAN_FRONTEND=noninteractive apt-get remove -y duplicati >> "$LOGFILE" 2>&1
 
+rm -f "${DATA_DIR}/.af-version"
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR} and ${DATA_DIR}..."
-    rm -rf "${CONFIG_DIR}" "${DATA_DIR}"
+    safe_rm_rf "${CONFIG_DIR}" "/var/lib/duplicati"
 fi
 
-purge_system_user "${APP_USER}"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "${APP_USER}"
+fi
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"

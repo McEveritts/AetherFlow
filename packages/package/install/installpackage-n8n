@@ -23,6 +23,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/systemd/system/n8n.service
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Setting up Node.js runtime and build prerequisites for n8n..."
 
@@ -31,6 +32,53 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build
 
 ensure_node 24
 
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_PATHS=("/opt/n8n" "/var/lib/n8n" "/etc/systemd/system/n8n.service" "/usr/local/bin/n8n")
+RUNTIME_HAD_PREVIOUS=false
+RUNTIME_WAS_ACTIVE=0
+RUNTIME_QUIESCE_STARTED=0
+RUNTIME_MUTATED=0
+[[ ! -e "/opt/n8n" ]] || RUNTIME_HAD_PREVIOUS=true
+if systemctl is-active --quiet n8n 2>/dev/null; then RUNTIME_WAS_ACTIVE=1; fi
+rollback_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback n8n || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+            systemctl restart n8n >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
+        systemctl restart n8n >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        [[ "$RUNTIME_MUTATED" -eq 0 ]] || status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$RUNTIME_HAD_PREVIOUS" == true || -f /etc/systemd/system/n8n.service || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+    RUNTIME_QUIESCE_STARTED=1
+    stop_systemd_unit n8n
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
 if ! id -u n8n >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/n8n --shell /usr/sbin/nologin n8n
 fi
@@ -55,20 +103,21 @@ if [[ -n "$TARGET_VER" ]]; then
     TARGET_PKG="n8n@${TARGET_VER}"
 
 fi
+RUNTIME_MUTATED=1
 install_npm_app "$TARGET_PKG" /opt/n8n /usr/local/bin/n8n
 
 N8N_VER="$(/usr/local/bin/n8n --version 2>/dev/null || true)"
 if [[ -n "$N8N_VER" ]]; then
-    printf '%s\n' "${N8N_VER#v}" > /var/lib/n8n/.af-version
+    queue_app_version /var/lib/n8n/.af-version "${N8N_VER#v}"
 fi
 
-chown -R n8n:n8n /var/lib/n8n /opt/n8n
+chown -hRP n8n:n8n /var/lib/n8n /opt/n8n
 
 NODE_PATH="$(command -v node || echo /usr/bin/node)"
 N8N_BIN=/usr/local/bin/n8n
 
 report_progress 85 "Configuring and starting n8n.service on port ${APP_PORT}..."
-cat <<EOF > /etc/systemd/system/n8n.service
+write_config_file /etc/systemd/system/n8n.service 0644 <<EOF
 [Unit]
 Description=n8n - Workflow Automation Tool
 After=network.target
@@ -78,7 +127,7 @@ Type=simple
 User=n8n
 Group=n8n
 Environment=N8N_PORT=${APP_PORT}
-Environment=N8N_LISTEN_ADDRESS=0.0.0.0
+Environment=N8N_LISTEN_ADDRESS=127.0.0.1
 Environment=N8N_USER_FOLDER=/var/lib/n8n
 Environment=N8N_PROXY_HOPS=1
 Environment=N8N_SECURE_COOKIE=false
@@ -94,6 +143,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now n8n >> "$LOGFILE" 2>&1
 
+systemctl restart n8n >> "$LOGFILE" 2>&1
+systemctl is-active --quiet n8n
+wait_for_service_ready n8n "$APP_PORT" /healthz
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "n8n installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

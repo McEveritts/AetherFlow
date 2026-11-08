@@ -23,6 +23,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+ADMIN_RETAINED=0
+for database in /etc/Ombi/*.db /var/lib/ombi/*.db; do
+    [[ ! -s "$database" ]] || ADMIN_RETAINED=1
+done
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Ombi..."
 
@@ -49,13 +53,13 @@ OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/${
 
 report_progress 60 "Downloading and extracting Ombi ${OMBI_VERSION}..."
 TMP_TAR=$(mktemp /tmp/ombi-XXXXXX.tar.gz)
-curl -fsSL "$OMBI_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /opt/Ombi >> "$LOGFILE" 2>&1
+download_file "$OMBI_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Ombi" "Ombi" "/var/lib/ombi" "${PACKAGE_NAME}" "." "/etc/Ombi"
 rm -f "$TMP_TAR"
 chmod +x /opt/Ombi/Ombi
-printf '%s\n' "${OMBI_VERSION#v}" > /opt/Ombi/.af-version
+queue_app_version /opt/Ombi/.af-version "${OMBI_VERSION#v}"
 
-chown -R ombi:ombi /opt/Ombi /etc/Ombi /var/lib/ombi
+chown -hRP ombi:ombi /opt/Ombi /etc/Ombi /var/lib/ombi
 
 report_progress 85 "Configuring and starting ombi.service on port ${APP_PORT}..."
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/ombi.service
@@ -67,7 +71,7 @@ After=network-online.target
 User=ombi
 Group=ombi
 WorkingDirectory=/opt/Ombi
-ExecStart=/opt/Ombi/Ombi --storage /etc/Ombi --host http://*:@AF_APP_PORT@
+ExecStart=/opt/Ombi/Ombi --storage /etc/Ombi --host http://127.0.0.1:@AF_APP_PORT@
 Type=simple
 TimeoutStopSec=30
 Restart=on-failure
@@ -79,10 +83,11 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now ombi >> "$LOGFILE" 2>&1
-python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+verify_systemd_service_active ombi
+AF_BOOTSTRAP_RETAINED="$ADMIN_RETAINED" AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF'
 import os
-import sys, time, json, urllib.request
-user, pw = (sys.argv[1], sys.argv[2])
+import sys, time, json, urllib.request, urllib.error
+user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]
 for _ in range(30):
     try:
         with urllib.request.urlopen('http://127.0.0.1:5000/api/v1/Status'.replace('5000', os.environ['AF_APP_PORT']), timeout=3) as r:
@@ -90,10 +95,25 @@ for _ in range(30):
                 break
     except Exception:
         time.sleep(1)
+else:
+    sys.exit('Ombi status endpoint did not become ready')
 req = urllib.request.Request('http://127.0.0.1:5000/api/v1/Identity/Wizard'.replace('5000', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'password': pw, 'usePlexAdminAccount': False}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
-urllib.request.urlopen(req, timeout=10).read()
+try:
+    with urllib.request.urlopen(req, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            sys.exit('Ombi account initialization failed')
+        response.read()
+except urllib.error.HTTPError as error:
+    detail = error.read(8192).decode('utf-8', errors='replace').lower()
+    retained = os.environ.get('AF_BOOTSTRAP_RETAINED') == '1'
+    exists = 'already' in detail and any(word in detail for word in ('admin', 'user', 'account', 'initializ'))
+    if error.code not in (400, 403, 409) or not (retained or exists):
+        raise
 PYEOF
 
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/api/v1/Status"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Ombi installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

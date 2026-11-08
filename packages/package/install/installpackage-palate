@@ -36,39 +36,64 @@ exec 9>/run/lock/aetherflow-palate.lock
 flock -n 9 || { print_error "Another Palate operation is running."; exit 1; }
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         print_error "Palate installation failed; see ${LOGFILE}."
+        if [[ -n "$ENV_BACKUP" || "$NEW_APP_MOVED" -eq 1 || "$OLD_APP_MOVED" -eq 1 || -n "$BACKUP_DIR" ]]; then
+            if [[ "$SERVICE_STOPPED" -ne 1 ]] && systemctl is-active --quiet af-palate.service; then
+                WAS_ACTIVE=1
+            fi
+            AF_ROLLBACK_BACKUP="${BACKUP_DIR:-$ENV_BACKUP}"
+            quiesce_services_for_rollback af-palate.service || { restore_failed=true; exit 1; }
+            SERVICE_STOPPED=1
+        fi
         if [[ -n "$ENV_BACKUP" ]]; then
-            cp -a "$ENV_BACKUP" "$ENV_FILE"
+            safe_restore_path_from_backup "$ENV_BACKUP" "$ENV_FILE" || restore_failed=true
         fi
         if [[ "$NEW_APP_MOVED" -eq 1 ]]; then
-            systemctl stop af-palate.service >> "$LOGFILE" 2>&1
-            rm -rf "$APP_DIR"
+            rm -rf "$APP_DIR" || restore_failed=true
         fi
         if [[ "$OLD_APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" "$APP_DIR"
+            mv "$BACKUP_DIR/app" "$APP_DIR" || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/af-palate.service" ]]; then
-                cp -a "$BACKUP_DIR/af-palate.service" "$UNIT_FILE"
+                safe_restore_path_from_backup "$BACKUP_DIR/af-palate.service" "$UNIT_FILE" || restore_failed=true
             else
-                systemctl disable af-palate.service >> "$LOGFILE" 2>&1
-                rm -f "$UNIT_FILE"
+                systemctl disable af-palate.service >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f "$UNIT_FILE" || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$SERVICE_STOPPED" -eq 1 && "$WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start af-palate.service >> "$LOGFILE" 2>&1
+        if [[ -n "$BACKUP_DIR" && -f "$BACKUP_DIR/.af-database-ready" ]]; then
+            if ! restore_postgresql_database "$BACKUP_DIR" af_palate; then
+                restore_failed=true
+                print_error "Palate recovery incomplete; backups retained in $BACKUP_DIR"
+                exit "${status:-1}"
+            fi
+            if [[ -d "$BACKUP_DIR/app-state" ]]; then
+                if ! safe_restore_path_from_backup "$BACKUP_DIR/app-state" "$DATA_DIR"; then
+                    print_error "Palate data recovery failed; backups retained in $BACKUP_DIR"
+    exit "$status"
+                fi
+            fi
+        fi
+        if [[ "$restore_failed" == false && "$SERVICE_STOPPED" -eq 1 && "$WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start af-palate.service >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
         if [[ -n "$BACKUP_DIR" ]]; then
             print_error "Database and vault backups are in ${BACKUP_DIR}."
         fi
     fi
-    [[ -z "$ENV_BACKUP" ]] || rm -f "$ENV_BACKUP"
     [[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${ENV_BACKUP:-unknown}}"
+    else
+        [[ -z "$ENV_BACKUP" ]] || rm -f "$ENV_BACKUP"
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -100,6 +125,7 @@ fi
 install -d -m 750 -o af-palate -g af-palate "$DATA_DIR"
 install -d -m 750 -o root -g af-palate "$CONFIG_DIR"
 
+validate_config_paths "$ENV_FILE"
 if [[ ! -f "$ENV_FILE" ]]; then
     DB_PORT="$(runuser -u postgres -- psql -XAt -d postgres -c 'SHOW port')"
     PALATE_DB_PASSWORD="$(openssl rand -hex 32)"
@@ -107,7 +133,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     APP_URL="http://palate.aether.local"
     [[ -z "$BASE_DOMAIN" ]] || APP_URL="https://palate.${BASE_DOMAIN}"
     umask 077
-    cat > "$ENV_FILE" <<EOF
+    write_config_file "$ENV_FILE" <<EOF
 NODE_ENV=production
 PORT=${APP_PORT}
 PALATE_DB_PASSWORD=${PALATE_DB_PASSWORD}
@@ -134,12 +160,12 @@ if [[ ! "${PALATE_DB_PASSWORD:-}" =~ ^[a-f0-9]{64}$ ]]; then
 fi
 
 # Only update the allocated port; preserve all secrets and administrator settings.
-python3 - "$ENV_FILE" "$APP_PORT" <<'PY'
+safe_config_python "$ENV_FILE" "$APP_PORT" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-lines = [line for line in path.read_text().splitlines() if not line.startswith('PORT=')]
-path.write_text('\n'.join(lines + ['PORT=' + sys.argv[2]]) + '\n')
+lines = [line for line in safe_read_text(path).splitlines() if not line.startswith('PORT=')]
+safe_write_text(path, '\n'.join(lines + ['PORT=' + sys.argv[2]]) + '\n')
 PY
 
 report_progress 20 "Preparing Palate's PostgreSQL database..."
@@ -171,7 +197,7 @@ if [[ ! "$NODE_ARCHIVE" =~ ^node-v22\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$
     print_error "Unable to resolve Palate's Node.js 22 runtime."
     exit 1
 fi
-curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" -o "$BUILD_DIR/$NODE_ARCHIVE"
+download_file "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" "$BUILD_DIR/$NODE_ARCHIVE"
 (cd "$BUILD_DIR"; awk -v name="$NODE_ARCHIVE" '$2 == name {print}' node-shasums.txt | sha256sum --check --status)
 mkdir "$BUILD_DIR/.runtime"
 tar -xJf "$BUILD_DIR/$NODE_ARCHIVE" --strip-components=1 -C "$BUILD_DIR/.runtime"
@@ -184,7 +210,7 @@ fi
 rm -rf "$BUILD_DIR/vault"
 ln -s "$DATA_DIR/vault" "$BUILD_DIR/vault"
 chmod 755 "$BUILD_DIR"
-chown -R af-palate:af-palate "$BUILD_DIR" "$DATA_DIR"
+chown -hRP af-palate:af-palate "$BUILD_DIR" "$DATA_DIR"
 
 run_app() {
     runuser -u af-palate -- env "PATH=$BUILD_DIR/.runtime/bin:$PATH" "HOME=$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 \
@@ -197,7 +223,7 @@ node_build run_app npm run build >> "$LOGFILE" 2>&1
 test -s "$BUILD_DIR/.next/BUILD_ID"
 VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json').version")"
 [[ "$VERSION" == "${TAG#v}" ]] || { print_error "Palate's package version does not match ${TAG}."; exit 1; }
-printf '%s\n' "$VERSION" > "$BUILD_DIR/.af-version"
+queue_app_version "$APP_DIR/.af-version" "$VERSION"
 
 report_progress 80 "Backing up data and applying Palate's database schema..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-palate.XXXXXX)"
@@ -210,6 +236,8 @@ if [[ -f "$UNIT_FILE" ]]; then
     SERVICE_STOPPED=1
 fi
 runuser -u postgres -- pg_dump --format=custom --dbname=af_palate > "$BACKUP_DIR/database.dump"
+backup_postgresql_database "$BACKUP_DIR" af_palate
+cp -a -- "$DATA_DIR" "$BACKUP_DIR/app-state"
 tar -czf "$BACKUP_DIR/vault.tar.gz" -C "$DATA_DIR" vault
 # Refuse destructive schema changes: never pass --accept-data-loss or --force-reset.
 run_app node node_modules/prisma/build/index.js db push >> "$LOGFILE" 2>&1
@@ -253,6 +281,8 @@ systemctl restart af-palate.service >> "$LOGFILE" 2>&1
 report_progress 90 "Checking Palate's login page..."
 curl --fail --silent --show-error --output /dev/null --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "http://127.0.0.1:${APP_PORT}/login" >> "$LOGFILE" 2>&1
 systemctl is-active --quiet af-palate.service
+commit_app_versions
 write_lock palate
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Palate ${VERSION} installed on port ${APP_PORT}. Configure Jellyfin and the public URL in ${ENV_FILE}; sign in with a Jellyfin account."

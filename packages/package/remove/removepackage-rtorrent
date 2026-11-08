@@ -34,13 +34,17 @@ else
 fi
 
 report_progress 65 "Removing rTorrent session data and system user..."
-rm -rf /run/rtorrent
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq rtorrent >> "$LOGFILE" 2>&1
+safe_rm_rf /run/rtorrent
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/rtorrent
+    safe_rm_rf /var/lib/rtorrent /etc/rtorrent
+    purge_system_user "rtorrent"
 fi
-purge_system_user "rtorrent"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/rtorrent/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "rTorrent removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

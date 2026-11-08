@@ -23,6 +23,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-emby}"
+begin_state_transaction "emby-server" "$APP_PORT" "/" "/var/lib/emby" "/var/lib/emby-server" "/etc/emby-server" "/etc/emby" "/opt/emby-server" "/etc/systemd/system/emby-server.service" "/usr/lib/emby-server" "/usr/share/emby-server" "/usr/bin/emby-server"
+
+prepare_apt_package_transaction /opt/emby-server/.af-version emby-server
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Emby Server..."
 
@@ -42,14 +46,14 @@ EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY
 
 report_progress 50 "Downloading Emby Server ${EMBY_VERSION}..."
 TMP_DEB=$(mktemp /tmp/emby-XXXXXX.deb)
-curl -fsSL "$EMBY_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1
+download_file "$EMBY_URL" "$TMP_DEB" >> "$LOGFILE" 2>&1
 
 report_progress 75 "Installing Emby Server package..."
-DEBIAN_FRONTEND=noninteractive dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1
+install_deb_verified "$TMP_DEB" emby-server
 rm -f "$TMP_DEB"
 
 mkdir -p /opt/emby-server /var/lib/emby/config
-printf '%s\n' "${EMBY_VERSION#v}" > /opt/emby-server/.af-version
+queue_app_version /opt/emby-server/.af-version "$(dpkg-query -W -f='${Version}' emby-server)"
 
 if [[ -f /var/lib/emby/config/system.xml ]]; then
     sed -i 's|<HttpServerPortNumber>.*</HttpServerPortNumber>|<HttpServerPortNumber>'"${APP_PORT}"'</HttpServerPortNumber>|g' /var/lib/emby/config/system.xml
@@ -63,14 +67,17 @@ else
 </ServerConfiguration>
 EOF
 fi
-chown -R emby:emby /var/lib/emby 2>/dev/null || true
+chown -hRP emby:emby /var/lib/emby 2>/dev/null || true
 
 report_progress 90 "Starting and enabling emby-server service on port ${APP_PORT}..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now emby-server >> "$LOGFILE" 2>&1
 systemctl restart emby-server >> "$LOGFILE" 2>&1
+systemctl is-active --quiet emby-server
+verify_systemd_service_active emby-server
 seed_jellyfin_master_user ${APP_PORT}
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Emby Server installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

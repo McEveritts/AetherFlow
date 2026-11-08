@@ -21,6 +21,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/lib/recyclarr/recyclarr.yml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and archive tools for Recyclarr..."
 
@@ -46,15 +47,16 @@ REC_URL="https://github.com/recyclarr/recyclarr/releases/download/v${REC_VERSION
 
 report_progress 60 "Downloading Recyclarr ${REC_VERSION} (${REC_ARCH})..."
 TMP_XZ=$(mktemp /tmp/recyclarr-XXXXXX.tar.xz)
-curl -fsSL "$REC_URL" -o "$TMP_XZ" >> "$LOGFILE" 2>&1
+download_file "$REC_URL" "$TMP_XZ" >> "$LOGFILE" 2>&1
 TMP_DIR="$(mktemp -d /tmp/recyclarr-extract-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_XZ"' EXIT
 tar -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr >> "$LOGFILE" 2>&1
 systemctl stop recyclarr.timer recyclarr.service >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$TMP_DIR/recyclarr" /usr/local/bin/recyclarr
+chmod 755 "$TMP_DIR/recyclarr"
+stage_app_archive "$TMP_DIR" /usr/local/bin/recyclarr recyclarr /var/lib/recyclarr "$PACKAGE_NAME" "." /opt/recyclarr "" binary
 rm -f "$TMP_XZ"
 chmod 755 /usr/local/bin/recyclarr
-printf '%s\n' "${REC_VERSION#v}" > /opt/recyclarr/.af-version
+queue_app_version /opt/recyclarr/.af-version "${REC_VERSION#v}"
 
 report_progress 75 "Discovering local Sonarr and Radarr API keys for Recyclarr configuration..."
 get_arr_key() {
@@ -116,7 +118,7 @@ EOF
 fi
 fi
 
-chown -R recyclarr:recyclarr /var/lib/recyclarr /etc/recyclarr /opt/recyclarr
+chown -hRP recyclarr:recyclarr /var/lib/recyclarr /etc/recyclarr /opt/recyclarr
 chmod 640 /var/lib/recyclarr/recyclarr.yml
 
 report_progress 85 "Creating and configuring recyclarr.service and companion recyclarr.timer..."
@@ -148,7 +150,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now recyclarr.timer >> "$LOGFILE" 2>&1
+systemctl is-active --quiet recyclarr.timer
+rm -rf -- "$AF_ARCHIVE_BACKUP/release"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Recyclarr installed (companion timer active)."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -21,6 +21,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/unpackerr/unpackerr.conf
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing extraction tools and prerequisites for Unpackerr..."
 
@@ -50,16 +51,17 @@ report_progress 60 "Downloading Unpackerr ${UP_VERSION}..."
 TMP_ARCHIVE=$(mktemp /tmp/unpackerr-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/unpackerr-extract-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_ARCHIVE"' EXIT
-if curl -fsSL "$UP_TAR_URL" -o "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1; then
+if download_file "$UP_TAR_URL" "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1; then
     tar --no-same-owner -xzf "$TMP_ARCHIVE" -C "$TMP_DIR" unpackerr >> "$LOGFILE" 2>&1
 else
-    curl -fsSL "$UP_GZ_URL" -o "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1
+    download_file "$UP_GZ_URL" "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1
     gzip -dc "$TMP_ARCHIVE" > "$TMP_DIR/unpackerr"
 fi
 rm -f "$TMP_ARCHIVE"
 systemctl stop unpackerr >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$TMP_DIR/unpackerr" /usr/local/bin/unpackerr
-printf '%s\n' "${UP_VERSION#v}" > /opt/unpackerr/.af-version
+chmod 755 "$TMP_DIR/unpackerr"
+stage_app_archive "$TMP_DIR" /usr/local/bin/unpackerr unpackerr /etc/unpackerr "$PACKAGE_NAME" "." /opt/unpackerr "" binary
+queue_app_version /opt/unpackerr/.af-version "${UP_VERSION#v}"
 
 report_progress 75 "Executing Zero-Touch Arr API discovery..."
 get_arr_key() {
@@ -164,7 +166,7 @@ EOF
 fi
 fi
 
-chown -R unpackerr:unpackerr /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
+chown -hRP unpackerr:unpackerr /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
 chmod 640 /etc/unpackerr/unpackerr.conf
 
 report_progress 85 "Configuring and starting unpackerr.service..."
@@ -188,7 +190,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now unpackerr >> "$LOGFILE" 2>&1
 systemctl restart unpackerr >> "$LOGFILE" 2>&1
+systemctl is-active --quiet unpackerr
+rm -rf -- "$AF_ARCHIVE_BACKUP/release"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Unpackerr installed (Zero-Touch Arr config active)."
 log_info "${PACKAGE_NAME} installed successfully"

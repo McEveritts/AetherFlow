@@ -33,11 +33,12 @@ DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg
 
 report_progress 80 "Removing Grafana state, logs, configuration, and user account..."
-rm -rf /var/log/grafana /usr/share/grafana
+safe_rm_rf /var/log/grafana /usr/share/grafana
+rm -f /var/lib/grafana/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/grafana /etc/grafana
+    safe_rm_rf /var/lib/grafana /etc/grafana
+    purge_system_user "grafana"
 fi
-purge_system_user "grafana"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

@@ -35,14 +35,17 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 60 "Removing ${APP_NAME} binaries..."
 rm -f /usr/local/bin/filebot
-rm -rf "${FB_DIR}" "${NODE_DIR}"
+safe_rm_rf "${FB_DIR}" "${NODE_DIR}"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${DATA_DIR}..."
-    rm -rf "${DATA_DIR}"
+    safe_rm_rf "/var/lib/filebot"
+    safe_rm_rf /opt/filebot.af-backup.* /opt/filebot-node.af-backup.* /opt/.filebot-build.* /opt/.filebot-node-build.*
 fi
 
-purge_system_user "${APP_USER}"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "${APP_USER}"
+fi
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"

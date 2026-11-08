@@ -23,6 +23,10 @@ exec 9>/run/lock/aetherflow-tautulli.lock
 flock -n 9 || { log_error "Another Tautulli installation is running."; exit 1; }
 
 require_root
+validate_config_paths /var/lib/tautulli/config.ini
+if [[ -f /var/lib/tautulli/config.ini ]]; then
+    set_config_file_mode 0600 /var/lib/tautulli/config.ini
+fi
 
 BUILD_DIR=""
 BACKUP_DIR=""
@@ -38,34 +42,39 @@ if [[ -f /etc/systemd/system/tautulli.service ]] || systemctl is-active --quiet 
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            systemctl stop tautulli >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback tautulli || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /opt/Tautulli "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/Tautulli
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/Tautulli 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /opt/Tautulli 2>/dev/null || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/tautulli.service" ]]; then
-                cp -a "$BACKUP_DIR/tautulli.service" /etc/systemd/system/tautulli.service
+                safe_restore_path_from_backup "$BACKUP_DIR/tautulli.service" /etc/systemd/system/tautulli.service || restore_failed=true
             else
-                systemctl disable tautulli >> "$LOGFILE" 2>&1 || true
-                rm -f /etc/systemd/system/tautulli.service
+                systemctl disable tautulli >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f /etc/systemd/system/tautulli.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start tautulli >> "$LOGFILE" 2>&1 || true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start tautulli >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -90,34 +99,37 @@ BUILD_DIR="$(mktemp -d /opt/.tautulli-build.XXXXXX)"
 git clone --depth 1 https://github.com/Tautulli/Tautulli.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
 test -s "$BUILD_DIR/Tautulli.py" || { log_error "Failed to clone Tautulli repository"; exit 1; }
 
-TAUTULLI_VERSION="$(git -C "$BUILD_DIR" describe --tags --abbrev=0 2>/dev/null || true)"
-if [[ -n "$TAUTULLI_VERSION" ]]; then
-    printf '%s\n' "${TAUTULLI_VERSION#v}" > "$BUILD_DIR/.af-version"
-fi
+TAUTULLI_VERSION="$(git_checkout_version "$BUILD_DIR" "/opt/Tautulli/.af-version")"
 
-chown -R tautulli:tautulli "$BUILD_DIR"
+chown -hRP tautulli:tautulli "$BUILD_DIR"
 
 if [[ ! -f /var/lib/tautulli/config.ini ]]; then
-    cat <<EOF > /var/lib/tautulli/config.ini
+    (umask 077; write_config_file /var/lib/tautulli/config.ini 0600 <<EOF
 [General]
 http_port = ${APP_PORT}
-http_host = 0.0.0.0
+http_host = 127.0.0.1
 http_username = ${MASTER_USER}
 http_password = ${MASTER_PASS}
 launch_browser = 0
 first_run_complete = 1
 EOF
+    )
 fi
-chown -R tautulli:tautulli /var/lib/tautulli
+set_config_file_mode 0600 /var/lib/tautulli/config.ini
+chown -hRP tautulli:tautulli /var/lib/tautulli
 
 report_progress 75 "Backing up existing Tautulli installation and activating new build..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-tautulli.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+queue_app_version "/opt/Tautulli/.af-version" "${TAUTULLI_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
+stop_systemd_unit tautulli
+SERVICE_STOPPED=1
+snapshot_app_state "$BACKUP_DIR" /var/lib/tautulli /etc/tautulli
 if [[ -f /etc/systemd/system/tautulli.service ]]; then
     cp -a /etc/systemd/system/tautulli.service "$BACKUP_DIR/tautulli.service"
 fi
 if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-    systemctl stop tautulli >> "$LOGFILE" 2>&1 || true
+    stop_systemd_unit tautulli
     SERVICE_STOPPED=1
 fi
 if [[ -d /opt/Tautulli ]]; then
@@ -155,20 +167,12 @@ UNIT_WRITTEN=1
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now tautulli >> "$LOGFILE" 2>&1
 
-HEALTHY=0
-for attempt in {1..15}; do
-    if systemctl is-active --quiet tautulli; then
-        HEALTHY=1
-        break
-    fi
-    sleep 1
-done
-if [[ "$HEALTHY" -ne 1 ]]; then
-    log_error "Tautulli service did not become active; rolling back."
-    exit 1
-fi
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+wait_for_service_ready "tautulli.service" "$APP_PORT" "$READY_URL"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Tautulli installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

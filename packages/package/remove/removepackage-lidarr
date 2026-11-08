@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing lidarr.service..."
 purge_systemd_unit "lidarr"
 
 report_progress 65 "Removing Lidarr binaries, state directories, and user account..."
-rm -rf /opt/Lidarr
+safe_rm_rf /opt/Lidarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/lidarr
+    safe_rm_rf /var/lib/lidarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Lidarr"
+    purge_system_user "lidarr"
 fi
-purge_system_user "lidarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

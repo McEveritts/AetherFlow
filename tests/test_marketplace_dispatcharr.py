@@ -13,6 +13,8 @@ import threading
 import types
 import unittest
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import common_functions
 from unittest.mock import patch
 
@@ -328,6 +330,33 @@ class DispatcharrLiveStreamTests(unittest.TestCase):
 
 
 class DispatcharrProvisioningTests(unittest.TestCase):
+    def test_existing_admin_identity_and_privileges_are_preserved_without_explicit_rotation(self):
+        block = SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
+        program = block.split("<<'PYEOF'\n", 1)[1].split('\nPYEOF', 1)[0]
+        for policy, password in ((None, ""), (None, "requested-password"), ("1", "requested-password"), ("0", "")):
+            with self.subTest(policy=policy, password=password):
+                class User:
+                    def set_password(self, password): raise AssertionError("Existing password was changed")
+                    def save(self): raise AssertionError("Existing account was written")
+                user = User()
+                user.__dict__.update(username="operator", email="operator@example.invalid", password="operator-hash",
+                                     user_level=2, is_staff=False, is_superuser=False, is_active=False)
+                before = vars(user).copy()
+                model = types.SimpleNamespace(objects=types.SimpleNamespace(get_or_create=lambda **kwargs: (user, False)))
+                auth = types.ModuleType("django.contrib.auth")
+                auth.get_user_model = lambda: model
+                db = types.ModuleType("django.db")
+                db.transaction = types.SimpleNamespace(atomic=contextlib.nullcontext)
+                modules = {"django": types.ModuleType("django"), "django.contrib": types.ModuleType("django.contrib"),
+                           "django.contrib.auth": auth, "django.db": db}
+                environment = {"AF_ADMIN_USER": "operator", "AF_ADMIN_PASS": "bootstrap-password",
+                               "AF_ADMIN_EMAIL": "bootstrap@localhost", "AF_CONFIG_PASS": password}
+                if policy is not None:
+                    environment["AF_KEEP_EXISTING_SECRETS"] = policy
+                with patch.dict(sys.modules, modules), patch.dict(os.environ, environment, clear=True):
+                    exec(compile(program, '<dispatcharr-account-bootstrap>', 'exec'), {})
+                self.assertEqual(vars(user), before)
+
     def test_admin_credentials_survive_shell_and_python_boundaries(self):
         block = SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
@@ -351,7 +380,7 @@ class User:
 user = User()
 def get_or_create(**kwargs):
     user.username = kwargs["username"]
-    return user, False
+    return user, True
 model = types.SimpleNamespace(objects=types.SimpleNamespace(get_or_create=get_or_create))
 auth = types.ModuleType("django.contrib.auth")
 auth.get_user_model = lambda: model
@@ -425,6 +454,12 @@ elif command == "npm":
         assert not dist.exists(), "stale frontend output survived"
         dist.mkdir()
         (dist / "app.js").write_text("new-bundle")
+elif command == "runuser":
+    if "pg_dump" in args:
+        print((root / "database").read_text(), end="")
+    elif "psql" in args and "-f" in args:
+        source = args[args.index("-f") + 1]
+        (root / "database").write_text(sys.stdin.read() if source == "-" else pathlib.Path(source).read_text())
 elif command == "su":
     if args[:2] == ["-", "postgres"]:
         if "pg_dump" in args[-1]:
@@ -470,7 +505,7 @@ class DispatcharrUpgradeTests(unittest.TestCase):
         self.target = self.git(self.upstream, "rev-parse", "HEAD").stdout.strip()
         commands = self.root / "bin"
         commands.mkdir()
-        for name in ("git", "python3.13", "su", "npm", "systemctl", "apt-get", "chown", "id", "useradd"):
+        for name in ("git", "python3.13", "su", "runuser", "npm", "systemctl", "apt-get", "chown", "id", "useradd"):
             binary = commands / name
             binary.write_text(UPGRADE_MOCK)
             binary.chmod(0o755)
@@ -483,10 +518,12 @@ log_info() { :; }
 log_warn() { :; }
 log_error() { printf '%s\\n' "$*" >&2; }
 ensure_node() { printf 'node %s\\n' "$1" >> "$TEST_ROOT/commands"; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
+lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 ''')
         with common.open("a") as output:
-            output.write(common_functions("node_build"))
+            helpers = common_functions("node_build", "queue_app_version", "commit_app_versions", "safe_restore_path_from_backup", "write_app_version", "safe_config_python", "validate_config_paths", "write_config_file", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
+            output.write(helpers.replace("/var/lib/postgresql", str(self.root / "var/lib/postgresql")))
         self.install = self.root / "opt/dispatcharr"
         self.config = self.root / "etc/dispatcharr"
         self.config.mkdir(parents=True)

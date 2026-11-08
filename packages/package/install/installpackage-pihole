@@ -30,9 +30,71 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates >> "$LOGFILE" 2>&1
 
 report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
+validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf
+PIHOLE_BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-pihole.XXXXXX)"
+PIHOLE_COMMITTED=0
+RESOLVED_WAS_ACTIVE=0
+PIHOLE_WAS_ACTIVE=0
+if systemctl is-active --quiet pihole-FTL 2>/dev/null; then PIHOLE_WAS_ACTIVE=1; fi
+PRIOR_RESOLV_LINK=""
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then RESOLVED_WAS_ACTIVE=1; fi
+if [[ -L /etc/resolv.conf ]]; then
+    PRIOR_RESOLV_LINK="$(readlink /etc/resolv.conf)"
+elif [[ -e /etc/resolv.conf ]]; then
+    cp -a -- /etc/resolv.conf "$PIHOLE_BACKUP_DIR/resolv.conf"
+fi
+PIHOLE_STATE_PATHS=(/etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf)
+if [[ -d /etc/lighttpd ]]; then
+    PIHOLE_STATE_PATHS+=(/etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf)
+    validate_config_paths /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf
+fi
+for index in "${!PIHOLE_STATE_PATHS[@]}"; do
+    if [[ -e "${PIHOLE_STATE_PATHS[$index]}" ]]; then
+        cp -a -- "${PIHOLE_STATE_PATHS[$index]}" "$PIHOLE_BACKUP_DIR/$index"
+    fi
+done
+rollback_pihole() {
+    local status=$? index restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    AF_ROLLBACK_BACKUP="$PIHOLE_BACKUP_DIR"
+    if [[ "$PIHOLE_COMMITTED" -ne 1 ]]; then
+        [[ "$status" -ne 0 ]] || status=1
+        quiesce_services_for_rollback pihole-FTL || { restore_failed=true; exit 1; }
+        restore_app_state "$PIHOLE_BACKUP_DIR" || exit 1
+        for index in "${!PIHOLE_STATE_PATHS[@]}"; do
+            safe_restore_path_from_backup "$PIHOLE_BACKUP_DIR/$index" "${PIHOLE_STATE_PATHS[$index]}" || restore_failed=true
+        done
+        if [[ -n "$PRIOR_RESOLV_LINK" ]]; then
+            ln -sfnT -- "$PRIOR_RESOLV_LINK" /etc/resolv.conf
+        elif [[ -e "$PIHOLE_BACKUP_DIR/resolv.conf" ]]; then
+            safe_restore_path_from_backup "$PIHOLE_BACKUP_DIR/resolv.conf" /etc/resolv.conf || restore_failed=true
+        else
+            rm -f -- /etc/resolv.conf || restore_failed=true
+        fi
+        if [[ "$restore_failed" == false && "$PIHOLE_WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start pihole-FTL >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+        if [[ "$restore_failed" == false && "$RESOLVED_WAS_ACTIVE" -eq 1 ]]; then
+            systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $PIHOLE_BACKUP_DIR"
+    else
+        rm -rf -- "$PIHOLE_BACKUP_DIR" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_pihole EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+stop_systemd_unit pihole-FTL
+snapshot_app_state "$PIHOLE_BACKUP_DIR" /etc/pihole /etc/dnsmasq.d /var/lib/pihole
+
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat <<'EOF' > /etc/systemd/resolved.conf.d/pihole.conf
+    write_config_file /etc/systemd/resolved.conf.d/pihole.conf 0644 <<'EOF'
 [Resolve]
 DNSStubListener=no
 EOF
@@ -47,8 +109,13 @@ mkdir -p /etc/pihole
 DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || true)"
 DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
 
-PIHOLE_WEBPASS_HASH="$(printf '%s' "${MASTER_PASS}" | sha256sum | awk '{printf "%s", $1}' | sha256sum | awk '{print $1}')"
-cat <<EOF > /etc/pihole/setupVars.conf
+PIHOLE_EXISTING=false
+if [[ -s /etc/pihole/setupVars.conf || -s /etc/pihole/pihole.toml ]]; then
+    PIHOLE_EXISTING=true
+fi
+if [[ "$PIHOLE_EXISTING" != true ]]; then
+PIHOLE_WEBPASS_HASH="$(printf '%s' "${AF_CONFIG_PASS:-$MASTER_PASS}" | sha256sum | awk '{printf "%s", $1}' | sha256sum | awk '{print $1}')"
+write_config_file /etc/pihole/setupVars.conf 0600 <<EOF
 PIHOLE_INTERFACE=${DEFAULT_IFACE}
 PIHOLE_DNS_1=1.1.1.1
 PIHOLE_DNS_2=8.8.8.8
@@ -63,30 +130,70 @@ DNSMASQ_LISTENING=local
 WEBPASSWORD=${PIHOLE_WEBPASS_HASH}
 BLOCKING_ENABLED=true
 EOF
+fi
 
 report_progress 65 "Running official Pi-hole installer..."
-fetch_and_run "https://install.pi-hole.net" "SKIP" --unattended >> "$LOGFILE" 2>&1
-if command_exists pihole; then
-    pihole setpassword "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || pihole -a -p "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
+PIHOLE_BOOTSTRAP_SHA256="${AF_PIHOLE_BOOTSTRAP_SHA256:-0c67c8f8358fede4b4dd8d51b429114461c9bb90ad56ff00ef05637f664bf3ac}"
+if ! fetch_and_run "https://install.pi-hole.net" "$PIHOLE_BOOTSTRAP_SHA256" --unattended >> "$LOGFILE" 2>&1; then
+    print_error "Pi-hole bootstrap verification or execution failed."
+    exit 1
+fi
+if command_exists pihole && { [[ "$PIHOLE_EXISTING" != true ]] || [[ -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ]]; }; then
+    PIHOLE_WEBPASS_HASH="$(printf '%s' "${AF_CONFIG_PASS:-$MASTER_PASS}" | sha256sum | awk '{printf "%s", $1}' | sha256sum | awk '{print $1}')"
+    if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
+        AF_PIHOLE_PWHASH="$PIHOLE_WEBPASS_HASH" safe_config_python /etc/pihole/pihole.toml <<'PYEOF'
+import json, os, re
+path = '/etc/pihole/pihole.toml'
+text = safe_read_text(path)
+if text and not text.endswith('\n'):
+    text += '\n'
+value = 'pwhash = ' + json.dumps(os.environ['AF_PIHOLE_PWHASH'])
+section = re.search(r'(?ms)^([ \t]*\[webserver\.api\][^\n]*\n)(.*?)(?=^[ \t]*\[|\Z)', text)
+if section:
+    body, count = re.subn(r'(?m)^[ \t]*pwhash[ \t]*=.*$', lambda match: value, section.group(2))
+    if not count:
+        body = body.rstrip('\n') + '\n' + value + '\n'
+    text = text[:section.start(2)] + body + text[section.end(2):]
+else:
+    text = text.rstrip('\n') + '\n[webserver.api]\n' + value + '\n'
+safe_write_text(path, text)
+PYEOF
+    else
+        set_config_value /etc/pihole/setupVars.conf ini WEBPASSWORD "$PIHOLE_WEBPASS_HASH"
+    fi
 fi
 
 report_progress 85 "Configuring Pi-hole Web Admin interface on port ${APP_PORT}..."
 # Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)
 if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
-    pihole-FTL --config webserver.port "${APP_PORT}o" >> "$LOGFILE" 2>&1 || sed -i 's/port = "80o,.*/port = "'"${APP_PORT}"'o"/g' /etc/pihole/pihole.toml || true
+    pihole-FTL --config webserver.port "${APP_PORT}o" >> "$LOGFILE" 2>&1
 fi
 if [[ -d /etc/lighttpd ]]; then
-    echo 'server.port := '"${APP_PORT}"'' > /etc/lighttpd/external.conf
-    if [[ -d /etc/lighttpd/conf-enabled ]]; then
-        echo 'server.port := '"${APP_PORT}"'' > /etc/lighttpd/conf-enabled/99-pihole-port.conf
-    fi
-    systemctl restart lighttpd >> "$LOGFILE" 2>&1 || true
+    safe_config_python "$APP_PORT" /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf <<'PYEOF'
+import re, sys
+with contextlib.ExitStack() as stack:
+    configs = [stack.enter_context(ManagedConfig(path)) for path in sys.argv[2:]]
+    for config in configs:
+        text = config.read_text()
+        pattern = r'(?m)^([ \t]*server\.port[ \t]*:?[ \t]*=[ \t]*)[0-9]+'
+        if re.search(pattern, text):
+            text = re.sub(pattern, lambda match: match.group(1) + sys.argv[1], text)
+        else:
+            text += ('\n' if text and not text.endswith('\n') else '') + 'server.port := ' + sys.argv[1] + '\n'
+        config.write_text(text, 0o644)
+PYEOF
+    systemctl restart lighttpd >> "$LOGFILE" 2>&1
 fi
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now pihole-FTL >> "$LOGFILE" 2>&1
-systemctl restart pihole-FTL >> "$LOGFILE" 2>&1 || true
+systemctl restart pihole-FTL >> "$LOGFILE" 2>&1
+systemctl is-active --quiet pihole-FTL
+PIHOLE_VERSION="$(pihole-FTL -v | head -n1)"
+queue_app_version /etc/pihole/.af-version "${PIHOLE_VERSION#v}"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
+PIHOLE_COMMITTED=1
 report_progress 100 "Pi-hole installed on Web port ${APP_PORT} (/admin) and DNS port 53."
 log_info "${PACKAGE_NAME} installed successfully"

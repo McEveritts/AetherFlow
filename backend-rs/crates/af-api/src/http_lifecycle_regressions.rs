@@ -357,3 +357,56 @@ async fn blueprint_http_sync_rejects_removal_without_side_effects_and_reports_ca
     drop(conn);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn f01_reinstall_action_preserves_install_port_and_finalization_contract() {
+    let existing = AppIngressConfig {
+        app_name: "sonarr".into(),
+        listen_port: 18989,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_package_lifecycle_port_with(
+            "reinstall",
+            "sonarr",
+            8989,
+            |_| 0,
+            |_| Ok(Some(existing.clone())),
+            |_, _| unreachable!(),
+        )
+        .unwrap(),
+        18989
+    );
+
+    let pre_stopped = pre_stop_units_for_package_update_with(
+        "reinstall",
+        "sonarr",
+        "",
+        |_| vec!["sonarr".into()],
+        |_| "running".into(),
+        |_, _| async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(pre_stopped, vec!["sonarr".to_string()]);
+
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let saved_clone = saved.clone();
+    let finalized = finalize_post_script_lifecycle_with(
+        "reinstall",
+        "sonarr",
+        18989,
+        vec![],
+        "aetherflow.local",
+        |_| Ok(None),
+        move |cfg| {
+            saved_clone.lock().unwrap().push(cfg.listen_port);
+            Ok(())
+        },
+        |_, _| async { Ok(()) },
+        |_| async {},
+    )
+    .await;
+    assert!(finalized.is_ok());
+    assert_eq!(*saved.lock().unwrap(), vec![18989]);
+}

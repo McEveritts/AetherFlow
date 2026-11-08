@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing navidrome.service..."
 purge_systemd_unit "navidrome"
 
 report_progress 65 "Removing Navidrome binaries, data directories, and user account..."
-rm -rf /opt/navidrome
+safe_rm_rf /opt/navidrome
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/navidrome
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/navidrome"
+    safe_rm_rf /var/lib/navidrome
+    purge_system_user "navidrome"
 fi
-purge_system_user "navidrome"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

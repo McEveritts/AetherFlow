@@ -18,12 +18,20 @@ else
 fi
 
 PACKAGE_NAME="wireguard"
+WG_PORT_OVERRIDE="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
+APP_PORT="${WG_PORT_OVERRIDE:-51820}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 touch "$LOGFILE"
 chmod 600 "$LOGFILE"
 
 require_root
+validate_config_paths /etc/wireguard/.aetherflow-network.lock /etc/wireguard/wg0.conf /etc/wireguard/client.conf /etc/wireguard/server_private.key /etc/wireguard/server_public.key /etc/wireguard/client_private.key /etc/wireguard/client_public.key
+PACKAGE_NAME="${PACKAGE_NAME:-wireguard}"
+begin_state_transaction "wg-quick@wg0" "0" "/" "/var/lib/wireguard" "/etc/wireguard" "/etc/sysctl.d/99-wireguard.conf" "/etc/systemd/system/wg-quick@wg0.service" "/usr/bin/wg" "/usr/bin/wg-quick" "/usr/share/wireguard-tools"
+
+prepare_apt_package_transaction /etc/wireguard/.af-version wireguard wireguard-tools
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing WireGuard and networking tools..."
 
@@ -67,7 +75,12 @@ else
     done
     report_progress 55 "Creating initial WireGuard server and client configuration..."
     WG_STAGE="$(mktemp -d /etc/wireguard/.aetherflow-install.XXXXXX)"
-    trap 'rm -rf -- "$WG_STAGE"' EXIT
+    cleanup_wireguard() {
+        local status=$?
+        rm -rf -- "${WG_STAGE:-}" || true
+        cleanup_state_transaction "$status"
+    }
+    trap cleanup_wireguard EXIT
     wg genkey | tee "${WG_STAGE}/server_private.key" | wg pubkey > "${WG_STAGE}/server_public.key"
     wg genkey | tee "${WG_STAGE}/client_private.key" | wg pubkey > "${WG_STAGE}/client_public.key"
     SERVER_PRIV="$(cat "${WG_STAGE}/server_private.key")"
@@ -98,7 +111,7 @@ else
     cat > "${WG_STAGE}/wg0.conf" <<EOF_CONFIG
 [Interface]
 Address = 10.66.66.1/24
-ListenPort = 51820
+ListenPort = ${APP_PORT}
 PrivateKey = ${SERVER_PRIV}
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
@@ -115,7 +128,7 @@ DNS = 1.1.1.1, 9.9.9.9
 
 [Peer]
 PublicKey = ${SERVER_PUB}
-Endpoint = ${PUBLIC_IP}:51820
+Endpoint = ${PUBLIC_IP}:${APP_PORT}
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF_CONFIG
@@ -124,6 +137,12 @@ EOF_CONFIG
         mv -- "${WG_STAGE}/${name}" "/etc/wireguard/${name}"
     done
     unset SERVER_PRIV CLIENT_PRIV
+fi
+
+WG_PORT_CHANGED=false
+if [[ -n "$WG_PORT_OVERRIDE" ]] && ! grep -Eq "^[[:space:]]*ListenPort[[:space:]]*=[[:space:]]*${APP_PORT}[[:space:]]*(#.*)?$" /etc/wireguard/wg0.conf; then
+    set_config_value /etc/wireguard/wg0.conf ini ListenPort "$APP_PORT" Interface
+    WG_PORT_CHANGED=true
 fi
 
 for name in wg0.conf client.conf server_private.key server_public.key client_private.key client_public.key; do
@@ -141,6 +160,9 @@ report_progress 90 "Verifying wg-quick@wg0 service and tunnel..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable wg-quick@wg0 >> "$LOGFILE" 2>&1
 systemctl start wg-quick@wg0 >> "$LOGFILE" 2>&1
+if [[ "$WG_PORT_CHANGED" == true ]]; then
+    systemctl restart wg-quick@wg0 >> "$LOGFILE" 2>&1
+fi
 systemctl is-active --quiet wg-quick@wg0
 wg show wg0 public-key > /dev/null
 ip -o link show dev wg0 | awk '
@@ -148,6 +170,9 @@ ip -o link show dev wg0 | awk '
       for (i=1;i<=n;i++) if (flags[i]=="UP") found=1 }
     END { exit !found }'
 
+WG_VERSION="$(dpkg-query -W -f='${Version}' wireguard-tools 2>/dev/null || true)"
+queue_app_version /etc/wireguard/.af-version "${WG_VERSION:-1.0.20210914}"
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "WireGuard VPN installed on UDP port 51820."
+report_progress 100 "WireGuard VPN installed on UDP port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

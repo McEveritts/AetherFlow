@@ -24,6 +24,7 @@ mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
+print_warn "Readarr upstream retired on June 27, 2025 because its metadata became unusable. Discovery and updates may not work; this installer preserves Readarr and existing data without substituting an unofficial fork."
 report_progress 10 "Installing dependencies for Readarr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
@@ -48,17 +49,17 @@ READARR_VERSION="$(github_latest_tag "Readarr/Readarr" "0.4.12.2738")"
 READARR_URL="https://readarr.servarr.com/v1/update/develop/updatefile?os=linux&runtime=netcore&arch=${READARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/readarr-XXXXXX.tar.gz)
-curl -fsSL "$READARR_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$READARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Readarr to /opt/Readarr..."
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Readarr" "Readarr" "/var/lib/readarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
 if [[ -n "$READARR_VERSION" ]]; then
-    printf '%s\n' "${READARR_VERSION#v}" > /opt/Readarr/.af-version
+    queue_app_version /opt/Readarr/.af-version "$(resolve_installed_binary_version /opt/Readarr/Readarr "${READARR_VERSION#v}")"
 fi
 set_config_value "/var/lib/readarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
-chown -R readarr:readarr /opt/Readarr /var/lib/readarr
+chown -hRP readarr:readarr /opt/Readarr /var/lib/readarr
 
 report_progress 85 "Configuring and starting readarr.service..."
 cat <<'EOF' > /etc/systemd/system/readarr.service
@@ -85,8 +86,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now readarr >> "$LOGFILE" 2>&1
 systemctl restart readarr >> "$LOGFILE" 2>&1
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "readarr" ${APP_PORT} "v1"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Readarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -1,6 +1,7 @@
 {
   "plex": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "plexmediaserver",
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -28,6 +29,7 @@
   },
   "jellyfin": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "jellyfin",
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -57,6 +59,7 @@
   },
   "emby": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "MediaBrowser/Emby.Releases",
     "version_command": [
       "bash",
@@ -89,6 +92,7 @@
   },
   "sonarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Sonarr/Sonarr",
     "version_command": [
       "bash",
@@ -122,6 +126,7 @@
   },
   "radarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Radarr/Radarr",
     "version_command": [
       "bash",
@@ -155,6 +160,7 @@
   },
   "lidarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Lidarr/Lidarr",
     "version_command": [
       "bash",
@@ -188,6 +194,7 @@
   },
   "readarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Readarr/Readarr",
     "version_command": [
       "bash",
@@ -221,6 +228,7 @@
   },
   "prowlarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Prowlarr/Prowlarr",
     "version_command": [
       "bash",
@@ -250,6 +258,7 @@
   },
   "bazarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "morpheus65535/bazarr",
     "version_command": [
       "bash",
@@ -283,6 +292,7 @@
   },
   "overseerr": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "sct/overseerr",
     "update_repo_url": "https://github.com/sct/overseerr.git",
     "version_command": [
@@ -313,6 +323,7 @@
   },
   "ombi": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Ombi-app/Ombi",
     "version_command": [
       "bash",
@@ -343,6 +354,7 @@
   },
   "maintainerr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Maintainerr/Maintainerr",
     "version_command": [
       "cat",
@@ -360,12 +372,13 @@
   },
   "tautulli": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "Tautulli/Tautulli",
     "update_repo_url": "https://github.com/Tautulli/Tautulli.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Tautulli/.af-version 2>/dev/null || git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null"
+      "cat /opt/Tautulli/.af-version 2>/dev/null || git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -390,6 +403,7 @@
   },
   "jackett": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Jackett/Jackett",
     "version_command": [
       "bash",
@@ -419,6 +433,7 @@
   },
   "flaresolverr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "FlareSolverr/FlareSolverr",
     "version_command": [
       "bash",
@@ -448,6 +463,7 @@
   },
   "navidrome": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "navidrome/navidrome",
     "version_command": [
       "bash",
@@ -481,6 +497,7 @@
   },
   "threadfin": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Threadfin/Threadfin",
     "version_command": [
       "bash",
@@ -513,6 +530,7 @@
   },
   "qbittorrent": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "qbittorrent-nox",
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -540,6 +558,7 @@
   },
   "deluge": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "deluged",
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -569,6 +588,7 @@
   },
   "transmission": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "transmission-daemon",
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -597,6 +617,7 @@
   },
   "sabnzbd": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "sabnzbd/sabnzbd",
     "version_command": [
       "bash",
@@ -630,6 +651,7 @@
   },
   "nzbget": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "nzbgetcom/nzbget",
     "version_command": [
       "bash",
@@ -663,6 +685,7 @@
   },
   "flood": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "jesec/flood",
     "version_command": [
       "bash",
@@ -695,6 +718,7 @@
   },
   "autobrr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "autobrr/autobrr",
     "version_command": [
       "bash",
@@ -727,6 +751,7 @@
   },
   "qui": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "autobrr/qui",
     "version_command": [
       "bash",
@@ -759,6 +784,7 @@
   },
   "nextcloud": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "nextcloud/server",
     "version_command": [
       "bash",
@@ -791,6 +817,7 @@
   },
   "syncthing": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "syncthing",
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -818,6 +845,7 @@
   },
   "filebrowser": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "filebrowser/filebrowser",
     "version_command": [
       "bash",
@@ -850,6 +878,7 @@
   },
   "wireguard": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "wireguard-tools",
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -871,6 +900,7 @@
   },
   "tailscale": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "tailscale",
     "version_command": [
       "bash",
@@ -890,6 +920,7 @@
   },
   "pihole": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "pi-hole/pi-hole",
     "version_command": [
       "bash",
@@ -917,6 +948,7 @@
   },
   "fail2ban": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "fail2ban",
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -940,6 +972,7 @@
   },
   "vaultwarden": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "dani-garcia/vaultwarden",
     "version_command": [
       "bash",
@@ -969,6 +1002,7 @@
   },
   "grafana": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "grafana",
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -992,6 +1026,7 @@
   },
   "prometheus": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "prometheus/prometheus",
     "version_command": [
       "/usr/local/bin/prometheus",
@@ -1019,7 +1054,9 @@
     ]
   },
   "netdata": {
-    "update_source": "github",
+    "update_source": "apt",
+    "require_download_sha256": true,
+    "update_package": "netdata",
     "update_repo": "netdata/netdata",
     "version_command": [
       "bash",
@@ -1049,12 +1086,13 @@
   },
   "uptimekuma": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "louislam/uptime-kuma",
     "update_repo_url": "https://github.com/louislam/uptime-kuma.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/uptime-kuma/.af-version 2>/dev/null || git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null"
+      "cat /opt/uptime-kuma/.af-version 2>/dev/null || git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null || git -C /opt/uptime-kuma rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1077,6 +1115,7 @@
   },
   "homeassistant": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "home-assistant/core",
     "version_command": [
       "/srv/homeassistant/bin/hass",
@@ -1104,6 +1143,7 @@
   },
   "jellyseerr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "seerr-team/seerr",
     "version_command": [
       "bash",
@@ -1137,6 +1177,7 @@
   },
   "adguardhome": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "AdguardTeam/AdGuardHome",
     "version_command": [
       "bash",
@@ -1163,6 +1204,7 @@
   },
   "rtorrent": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "rtorrent",
     "version_command": [
       "bash",
@@ -1196,12 +1238,13 @@
   },
   "rutorrent": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "Novik/ruTorrent",
     "update_repo_url": "https://github.com/Novik/ruTorrent.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/www/rutorrent/.af-version 2>/dev/null || git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1"
+      "cat /var/www/rutorrent/.af-version 2>/dev/null || git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1 || git -C /var/www/rutorrent rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1230,6 +1273,7 @@
   },
   "rclone": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "rclone/rclone",
     "version_command": [
       "bash",
@@ -1261,7 +1305,9 @@
     ]
   },
   "mergerfs": {
-    "update_source": "github",
+    "update_source": "apt",
+    "require_download_sha256": true,
+    "update_package": "mergerfs",
     "update_repo": "trapexit/mergerfs",
     "version_command": [
       "bash",
@@ -1290,6 +1336,7 @@
   },
   "cloudplow": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "l3uddz/cloudplow",
     "update_repo_url": "https://github.com/l3uddz/cloudplow.git",
     "version_command": [
@@ -1322,6 +1369,7 @@
   },
   "unpackerr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "davidnewhall/unpackerr",
     "version_command": [
       "bash",
@@ -1354,6 +1402,7 @@
   },
   "autoscan": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Cloudbox/autoscan",
     "version_command": [
       "bash",
@@ -1386,6 +1435,7 @@
   },
   "recyclarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "recyclarr/recyclarr",
     "version_command": [
       "bash",
@@ -1416,6 +1466,7 @@
   },
   "audiobookshelf": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "advplyr/audiobookshelf",
     "version_command": [
       "bash",
@@ -1450,6 +1501,7 @@
   },
   "kavita": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Kareadita/Kavita",
     "version_command": [
       "bash",
@@ -1483,12 +1535,13 @@
   },
   "calibreweb": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "janeczku/calibre-web",
     "update_repo_url": "https://github.com/janeczku/calibre-web.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/calibre-web/.af-version 2>/dev/null || /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null"
+      "cat /opt/calibre-web/.af-version 2>/dev/null || PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null || git -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1518,6 +1571,7 @@
   },
   "librespeed": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "librespeed/speedtest-go",
     "version_command": [
       "bash",
@@ -1545,6 +1599,7 @@
   },
   "thelounge": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "thelounge/thelounge",
     "version_command": [
       "bash",
@@ -1572,6 +1627,7 @@
   },
   "znc": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "znc",
     "version_command": [
       "bash",
@@ -1599,6 +1655,7 @@
   },
   "scrutiny": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "AnalogJ/scrutiny",
     "version_command": [
       "bash",
@@ -1628,6 +1685,7 @@
   },
   "paperless-ngx": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "paperless-ngx/paperless-ngx",
     "version_command": [
       "bash",
@@ -1662,6 +1720,7 @@
   },
   "n8n": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "n8n-io/n8n",
     "version_command": [
       "bash",
@@ -1690,6 +1749,7 @@
   },
   "gitea": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "go-gitea/gitea",
     "version_command": [
       "bash",
@@ -1718,12 +1778,13 @@
   },
   "organizr": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "causefx/Organizr",
     "update_repo_url": "https://github.com/causefx/Organizr.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/www/organizr/.af-version 2>/dev/null || git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1"
+      "cat /var/www/organizr/.af-version 2>/dev/null || git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || git -C /var/www/organizr rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1745,11 +1806,12 @@
   },
   "dispatcharr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Dispatcharr/Dispatcharr",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/dispatcharr/.af-version 2>/dev/null || git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null"
+      "cat /opt/dispatcharr/.af-version 2>/dev/null || git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1783,6 +1845,7 @@
   },
   "duplicati": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "duplicati/duplicati",
     "version_command": [
       "bash",
@@ -1817,6 +1880,7 @@
   },
   "filebot": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "filebot/filebot-node",
     "version_command": [
       "bash",
@@ -1852,6 +1916,7 @@
   },
   "listenarr": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "Listenarrs/Listenarr",
     "update_repo_url": "https://github.com/Listenarrs/Listenarr.git",
     "version_command": [
@@ -1886,6 +1951,7 @@
   },
   "notifiarr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Notifiarr/notifiarr",
     "version_command": [
       "bash",
@@ -1915,6 +1981,7 @@
   },
   "novnc": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "novnc",
     "version_command": [
       "bash",
@@ -1945,6 +2012,7 @@
   },
   "pyload": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "pyload/pyload",
     "update_repo_url": "https://github.com/pyload/pyload.git",
     "version_command": [
@@ -1980,6 +2048,7 @@
   },
   "quassel": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "quassel-core",
     "version_command": [
       "bash",
@@ -2008,6 +2077,7 @@
   },
   "requestrr": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "thomst08/requestrr",
     "version_command": [
       "bash",
@@ -2037,6 +2107,7 @@
   },
   "seedcross": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "ccf-2012/seedcross",
     "update_repo_url": "https://github.com/ccf-2012/seedcross.git",
     "version_command": [
@@ -2071,6 +2142,7 @@
   },
   "unmanic": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "Unmanic/unmanic",
     "version_command": [
       "bash",
@@ -2105,6 +2177,7 @@
   },
   "kasmvnc": {
     "update_source": "github",
+    "require_download_sha256": true,
     "update_repo": "kasmtech/KasmVNC",
     "version_command": [
       "dpkg-query",
@@ -2124,6 +2197,7 @@
   },
   "palate": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "McEveritts/Palate",
     "update_repo_url": "https://github.com/McEveritts/Palate.git",
     "version_command": [
@@ -2142,6 +2216,7 @@
   },
   "mcvnc": {
     "update_source": "git_tags",
+    "require_download_sha256": true,
     "update_repo": "McEveritts/McVNC",
     "update_repo_url": "https://github.com/McEveritts/McVNC.git",
     "version_command": [
@@ -2161,6 +2236,7 @@
   },
   "xrdp": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "xrdp",
     "version_command": [
       "dpkg-query",
@@ -2182,6 +2258,7 @@
   },
   "x2go": {
     "update_source": "apt",
+    "require_download_sha256": true,
     "update_package": "x2goserver",
     "version_command": [
       "bash",
@@ -2210,6 +2287,7 @@
   },
   "piped": {
     "update_source": "git",
+    "require_download_sha256": true,
     "update_repo_url": "https://github.com/TeamPiped/Piped.git",
     "version_command": [
       "cat",
@@ -2228,6 +2306,7 @@
   },
   "invidious": {
     "update_source": "git",
+    "require_download_sha256": true,
     "update_repo_url": "https://github.com/iv-org/invidious.git",
     "version_command": [
       "cat",

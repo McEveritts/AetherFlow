@@ -259,7 +259,7 @@ export default function MarketplaceTab() {
     };
 
     // Job Completion Monitoring
-    const observedJobsRef = useRef<Map<string, { action: 'installing' | 'updating' | 'uninstalling'; identity: string }>>(new Map());
+    const observedJobsRef = useRef<Map<string, { action: PendingAction; identity: string }>>(new Map());
     const notifiedRef = useRef<Set<string>>(new Set());
     const unconfirmedNotifiedRef = useRef<Set<string>>(new Set());
     // Keep accepted identity/action after an observation timeout: a later receipt
@@ -290,7 +290,7 @@ export default function MarketplaceTab() {
             acceptedJobsRef.current.delete(app.id);
             observedJobsRef.current.delete(app.id);
             if (outcome.status === 'completed') {
-                const verb = outcome.action === 'remove' ? 'removed' : outcome.action === 'update' ? 'updated' : 'installed';
+                const verb = outcome.action === 'remove' ? 'removed' : outcome.action === 'update' ? 'updated' : outcome.action === 'reinstall' ? 'reinstalled' : 'installed';
                 addToast(`${app.name} has been successfully ${verb}.`, 'success');
             } else {
                 addToast(`${app.name}: ${outcome.action} ${outcome.status === 'failed' ? 'failed' : 'could not be confirmed'}. Check application state and system logs.`, 'error');
@@ -315,12 +315,15 @@ export default function MarketplaceTab() {
     }, [apps, searchQuery, categoryFilter]);
 
     const isAppBusy = (app: App): boolean => {
-        return app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating' || operatingApp === app.id || pendingJobs.has(app.id);
+        return isLifecycleStatus(app.status) || operatingApp === app.id || pendingJobs.has(app.id);
     };
 
     const getEffectiveStatus = (app: App): string => {
-        if (app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating') return app.status;
-        if (pendingJobs.has(app.id)) return pendingJobs.get(app.id) as string;
+        if (isLifecycleStatus(app.status)) return app.status === 'reinstalling' ? 'installing' : app.status;
+        if (pendingJobs.has(app.id)) {
+            const pending = pendingJobs.get(app.id) as string;
+            return pending === 'reinstalling' ? 'installing' : pending;
+        }
         if (operatingApp === app.id) return 'installing';
         return app.status;
     };
@@ -332,10 +335,11 @@ export default function MarketplaceTab() {
     const selectedRemoveApp = apps?.find(app => app.id === removeAppId);
     const selectedReinstallApp = apps?.find(app => app.id === reinstallAppId);
 
-    const handleInstall = async (app: App) => {
+    const handleInstall = async (app: App, isReinstall = false) => {
+        const pendingAction = isReinstall ? 'reinstalling' : 'installing';
         acceptedJobsRef.current.delete(app.id);
         setOperatingApp(app.id);
-        markPending(app.id, 'installing');
+        markPending(app.id, pendingAction);
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(app.id)}/install`, { method: 'POST' });
             if (!res.ok) {
@@ -343,8 +347,8 @@ export default function MarketplaceTab() {
                 clearPending(app.id);
                 throw new Error(data.message || 'Installation request failed');
             }
-            await rememberJob(app.id, res, 'installing');
-            addToast(`Installation started for ${app.name}`, 'info');
+            await rememberJob(app.id, res, pendingAction);
+            addToast(`${isReinstall ? 'Reinstall' : 'Installation'} started for ${app.name}`, 'info');
             setOperatingApp(null);
             mutate();
         } catch (error: unknown) {
@@ -612,7 +616,7 @@ export default function MarketplaceTab() {
                     <div className="min-w-0 w-full max-w-lg bg-slate-900 border border-white/10 rounded-xl p-6 space-y-4">
                         <h3 className="text-lg font-bold">Reinstall {selectedReinstallApp.name}</h3>
                         <p className="text-sm text-slate-300">Reapply the installer in place using the existing configuration, data, secrets, and allocated port. The application may restart.</p>
-                        <div className="flex justify-end gap-3"><button onClick={() => setReinstallAppId(null)}>Cancel</button><button disabled={isAppBusy(selectedReinstallApp)} onClick={() => { void handleInstall(selectedReinstallApp); setReinstallAppId(null); }} className="bg-indigo-600 rounded px-4 py-2 disabled:opacity-40">Reinstall and keep data</button></div>
+                        <div className="flex justify-end gap-3"><button onClick={() => setReinstallAppId(null)}>Cancel</button><button disabled={isAppBusy(selectedReinstallApp)} onClick={() => { void handleInstall(selectedReinstallApp, true); setReinstallAppId(null); }} className="bg-indigo-600 rounded px-4 py-2 disabled:opacity-40">Reinstall and keep data</button></div>
                     </div>
                 </div>
             )}

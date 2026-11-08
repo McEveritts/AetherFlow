@@ -26,11 +26,11 @@ report_progress 25 "Stopping and removing flaresolverr.service..."
 purge_systemd_unit "flaresolverr"
 
 report_progress 65 "Removing FlareSolverr binaries, state directories, and user account..."
-rm -rf /opt/flaresolverr
+safe_rm_rf /opt/flaresolverr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/flaresolverr
+    safe_rm_rf /var/lib/flaresolverr /etc/flaresolverr
+    purge_system_user "flaresolverr"
 fi
-purge_system_user "flaresolverr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

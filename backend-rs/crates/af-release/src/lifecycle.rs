@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub struct OwnerLease {
     pub id: String,
+    database: PathBuf,
     _file: File,
 }
 
@@ -37,9 +38,28 @@ impl OwnerLease {
             lock_exclusive(&file)?,
             "new lifecycle owner lease already locked"
         );
-        file.sync_all()?;
+        let lease = Self {
+            id,
+            database: database.to_owned(),
+            _file: file,
+        };
+        lease._file.sync_all()?;
         File::open(parent)?.sync_all()?;
-        Ok(Self { id, _file: file })
+        Ok(lease)
+    }
+}
+
+impl Drop for OwnerLease {
+    fn drop(&mut self) {
+        let cleanup = || -> Result<()> {
+            let conn = Connection::open_with_flags(
+                &self.database,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            conn.busy_timeout(std::time::Duration::ZERO)?;
+            retire_owner(&conn, &self.database, &self.id, &self._file)
+        };
+        let _ = cleanup();
     }
 }
 
@@ -62,23 +82,113 @@ fn lock_exclusive(_file: &File) -> Result<bool> {
     anyhow::bail!("lifecycle owner leases require advisory lock support")
 }
 
-pub fn owner_is_alive(database: &Path, owner: &str) -> Result<bool> {
+fn open_owner_file(database: &Path, owner: &str) -> Result<File> {
     let path = lease_path(database, owner)?;
+    crate::fs_security::ensure_no_symlink_ancestors(&path)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
     let file = options
         .open(path)
         .context("cannot inspect lifecycle owner lease")?;
-    anyhow::ensure!(
-        file.metadata()?.is_file(),
-        "invalid lifecycle owner lease file"
-    );
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "invalid lifecycle owner lease file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(metadata.nlink() == 1, "linked lifecycle owner lease file");
+    }
+    Ok(file)
+}
+
+pub fn owner_is_alive(database: &Path, owner: &str) -> Result<bool> {
+    let file = open_owner_file(database, owner)?;
     Ok(!lock_exclusive(&file)?)
+}
+
+#[cfg(unix)]
+fn retire_owner(conn: &Connection, database: &Path, owner: &str, file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    anyhow::ensure!(
+        conn.is_autocommit(),
+        "lifecycle cleanup requires committed receipts"
+    );
+    let active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE owner_id=?1 AND status NOT IN ('completed','failed','interrupted'))",
+        [owner], |row| row.get(0),
+    )?;
+    anyhow::ensure!(!active, "lifecycle owner still has a reservation");
+    let path = lease_path(database, owner)?;
+    let parent = path.parent().context("missing lifecycle lease directory")?;
+    crate::fs_security::ensure_no_symlink_ancestors(parent)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    anyhow::ensure!(
+        directory.metadata()?.mode() & 0o022 == 0,
+        "lifecycle lease directory is writable by other users"
+    );
+    let expected = file.metadata()?;
+    anyhow::ensure!(
+        expected.is_file() && expected.nlink() == 1,
+        "invalid lifecycle owner lease inode"
+    );
+    let name = std::ffi::CString::new(owner)?;
+    let mut observed = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            observed.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let observed = unsafe { observed.assume_init() };
+    anyhow::ensure!(
+        observed.st_mode & libc::S_IFMT == libc::S_IFREG
+            && observed.st_nlink == 1
+            && observed.st_dev == expected.dev()
+            && observed.st_ino == expected.ino(),
+        "lifecycle owner lease inode changed"
+    );
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    directory.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn retire_owner(_conn: &Connection, _database: &Path, _owner: &str, _file: &File) -> Result<()> {
+    anyhow::bail!("lifecycle owner cleanup requires advisory lock support")
+}
+
+fn retire_finished_owners(conn: &Connection, database: &Path) -> Result<()> {
+    if !conn.is_autocommit() {
+        return Ok(());
+    }
+    let owners: Vec<String> = conn
+        .prepare("SELECT DISTINCT owner_id FROM package_lifecycle_jobs WHERE status IN ('completed','failed','interrupted') AND owner_id!=''")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for owner in owners {
+        if let Ok(file) = open_owner_file(database, &owner) {
+            if matches!(lock_exclusive(&file), Ok(true)) {
+                let _ = retire_owner(conn, database, &owner, &file);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn initialize_schema(conn: &Connection) -> Result<()> {
@@ -129,6 +239,7 @@ pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
             params![chrono::Utc::now().to_rfc3339(), package, job, owner],
         )?;
     }
+    let _ = retire_finished_owners(conn, database);
     Ok(())
 }
 
@@ -136,6 +247,14 @@ pub enum ReservationTarget<'a> {
     Package(&'a str),
     Service(&'a str),
     System,
+}
+
+pub fn port_resource(port: i32) -> Option<String> {
+    if (1..=65535).contains(&port) {
+        Some(format!("port:{port}"))
+    } else {
+        None
+    }
 }
 
 pub fn package_resources(package: &str, units: &[String]) -> BTreeSet<String> {
@@ -183,7 +302,7 @@ pub fn admit_job(
         "lifecycle identity is required"
     );
     let status = match action {
-        "install" => "installing",
+        "install" | "reinstall" => "installing",
         "update" => "updating",
         "remove" => "uninstalling",
         _ => anyhow::bail!("invalid lifecycle action"),
@@ -193,6 +312,7 @@ pub fn admit_job(
         !database.as_os_str().is_empty(),
         "durable lifecycle database is required"
     );
+    let _ = retire_finished_owners(conn, &database);
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     check_package_reservation(&tx, package, units, "", Some(action))?;
     let lease = OwnerLease::create(&database)?;
@@ -290,7 +410,7 @@ fn check_resources(
         let matches_target = !resources.as_ref().unwrap().is_disjoint(&reserved_resources);
         if matches_target {
             let expected_status = match reserved_action.as_str() {
-                "install" => "installing",
+                "install" | "reinstall" => "installing",
                 "update" => "updating",
                 "remove" => "uninstalling",
                 _ => anyhow::bail!("Lifecycle reservation action is unknown for {package}"),
@@ -390,9 +510,275 @@ mod tests {
     }
 
     #[test]
+    fn finished_jobs_retire_owner_files_without_changing_receipts() {
+        let (root, _, database, mut conn) = fixture();
+        let directory = database.with_extension("lifecycle-owners");
+        for success in [true, false] {
+            for index in 0..64 {
+                let job = format!("finished-{success}-{index}");
+                let lease = admit_job(&mut conn, "fixture", &job, "update", "now", &[]).unwrap();
+                assert!(owner_is_alive(&database, &lease.id).unwrap());
+                finish_job(&conn, "fixture", &job, "update", success, "configuration").unwrap();
+                let receipt: (String, String, String, String, String) = conn
+                    .query_row(
+                        "SELECT owner_id,job_id,action,status,failure_category FROM package_lifecycle_jobs",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                    )
+                    .unwrap();
+                assert_eq!(receipt.0, lease.id);
+                assert_eq!(receipt.1, job);
+                assert_eq!(receipt.2, "update");
+                assert_eq!(receipt.3, if success { "completed" } else { "failed" });
+                assert_eq!(receipt.4, if success { "" } else { "configuration" });
+                assert!(owner_is_alive(&database, &lease.id).unwrap());
+                drop(lease);
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            }
+        }
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_preserves_shared_active_owner_and_direct_sql_receipts() {
+        let (root, _, database, conn) = fixture();
+        let lease = OwnerLease::create(&database).unwrap();
+        let owner = lease.id.clone();
+        insert(&conn, &owner);
+        conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id) VALUES ('other','other-job','remove','uninstalling','now',?1)", [&owner]).unwrap();
+        conn.execute("UPDATE package_lifecycle_jobs SET status='failed',finished_at='finished',failure_category='configuration' WHERE package_id='fixture'", []).unwrap();
+        drop(lease);
+        assert!(lease_path(&database, &owner).unwrap().exists());
+        assert!(!owner_is_alive(&database, &owner).unwrap());
+        check_reservation(
+            &conn,
+            ReservationTarget::Package("other"),
+            "other-job",
+            Some("remove"),
+        )
+        .unwrap();
+        assert!(check_reservation(
+            &conn,
+            ReservationTarget::Package("other"),
+            "job",
+            Some("remove")
+        )
+        .is_err());
+        reconcile_jobs(&conn, &database).unwrap();
+        assert!(!lease_path(&database, &owner).unwrap().exists());
+        let receipts: Vec<(String, String, String, String, String)> = conn
+            .prepare("SELECT package_id,job_id,action,status,owner_id FROM package_lifecycle_jobs ORDER BY package_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            receipts,
+            vec![
+                (
+                    "fixture".into(),
+                    "job".into(),
+                    "update".into(),
+                    "failed".into(),
+                    owner.clone()
+                ),
+                (
+                    "other".into(),
+                    "other-job".into(),
+                    "remove".into(),
+                    "interrupted".into(),
+                    owner
+                ),
+            ]
+        );
+        let finished: String = conn
+            .query_row(
+                "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id='fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(finished, "finished");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_cleanup_preserves_live_and_successor_owner_identities() {
+        let (root, _, database, mut conn) = fixture();
+        let lease = admit_job(&mut conn, "fixture", "first", "update", "now", &[]).unwrap();
+        let first_path = lease_path(&database, &lease.id).unwrap();
+        finish_job(&conn, "fixture", "first", "update", true, "").unwrap();
+        reconcile_jobs(&conn, &database).unwrap();
+        assert!(owner_is_alive(&database, &lease.id).unwrap());
+        let successor = admit_job(&mut conn, "fixture", "second", "remove", "later", &[]).unwrap();
+        let successor_path = lease_path(&database, &successor.id).unwrap();
+        assert_ne!(lease.id, successor.id);
+        drop(lease);
+        assert!(!first_path.exists());
+        assert!(owner_is_alive(&database, &successor.id).unwrap());
+        for (package, job, action) in [
+            ("fixture", "first", "update"),
+            ("other", "second", "remove"),
+            ("fixture", "second", "update"),
+        ] {
+            assert!(finish_job(&conn, package, job, action, true, "").is_err());
+        }
+        let identity: (String, String, String, String) = conn
+            .query_row(
+                "SELECT job_id,action,status,owner_id FROM package_lifecycle_jobs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            (
+                "second".into(),
+                "remove".into(),
+                "uninstalling".into(),
+                successor.id.clone()
+            )
+        );
+        drop(successor);
+        assert!(successor_path.exists());
+        reconcile_jobs(&conn, &database).unwrap();
+        assert_eq!(state(&conn), "interrupted");
+        assert!(!successor_path.exists());
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uncommitted_receipts_never_remove_recovery_evidence() {
+        let (root, _, database, conn) = fixture();
+        let lease = OwnerLease::create(&database).unwrap();
+        insert(&conn, &lease.id);
+        let path = lease_path(&database, &lease.id).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        finish_job(&conn, "fixture", "job", "update", true, "").unwrap();
+        drop(lease);
+        retire_finished_owners(&conn, &database).unwrap();
+        assert!(path.exists());
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(state(&conn), "updating");
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        reconcile_jobs(&conn, &database).unwrap();
+        assert_eq!(state(&conn), "interrupted");
+        assert!(path.exists());
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(state(&conn), "updating");
+        reconcile_jobs(&conn, &database).unwrap();
+        assert_eq!(state(&conn), "interrupted");
+        assert!(!path.exists());
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cleanup_failures_preserve_receipts_and_retry_without_weakening_locks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, _, database, conn) = fixture();
+        let lease = OwnerLease::create(&database).unwrap();
+        insert(&conn, &lease.id);
+        let path = lease_path(&database, &lease.id).unwrap();
+        let directory = path.parent().unwrap();
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        finish_job(&conn, "fixture", "job", "update", false, "configuration").unwrap();
+        drop(lease);
+        assert!(path.exists());
+        reconcile_jobs(&conn, &database).unwrap();
+        assert!(path.exists());
+        assert_eq!(state(&conn), "failed");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        reconcile_jobs(&conn, &database).unwrap();
+        assert!(!path.exists());
+        assert_eq!(state(&conn), "failed");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn link_substitutions_never_unlink_executor_locks_or_owner_evidence() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        for hard_link in [false, true] {
+            let (root, _, database, conn) = fixture();
+            let lease = OwnerLease::create(&database).unwrap();
+            insert(&conn, &lease.id);
+            let path = lease_path(&database, &lease.id).unwrap();
+            let evidence = root.join("original-owner");
+            std::fs::rename(&path, &evidence).unwrap();
+            let executor_path = root.join("package-executor.lock");
+            let executor = ReleaseLockGuard::acquire(&executor_path, Duration::ZERO).unwrap();
+            let executor_identity = executor.file_identity().unwrap();
+            let executor_contents = std::fs::read(&executor_path).unwrap();
+            if hard_link {
+                std::fs::hard_link(&executor_path, &path).unwrap();
+            } else {
+                symlink(&executor_path, &path).unwrap();
+            }
+            assert!(owner_is_alive(&database, &lease.id).is_err());
+            reconcile_jobs(&conn, &database).unwrap();
+            assert_eq!(state(&conn), "updating");
+            finish_job(&conn, "fixture", "job", "update", true, "").unwrap();
+            drop(lease);
+            reconcile_jobs(&conn, &database).unwrap();
+            assert!(std::fs::symlink_metadata(&path).is_ok());
+            assert!(evidence.exists());
+            assert_eq!(std::fs::read(&executor_path).unwrap(), executor_contents);
+            let metadata = std::fs::metadata(&executor_path).unwrap();
+            assert_eq!((metadata.dev(), metadata.ino()), executor_identity);
+            assert!(ReleaseLockGuard::acquire(&executor_path, Duration::ZERO).is_err());
+            assert_eq!(state(&conn), "completed");
+            drop((conn, executor));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_directory_symlink_substitution_is_not_followed_during_cleanup() {
+        use std::os::unix::fs::symlink;
+
+        let (root, _, database, conn) = fixture();
+        let lease = OwnerLease::create(&database).unwrap();
+        insert(&conn, &lease.id);
+        finish_job(&conn, "fixture", "job", "update", true, "").unwrap();
+        let directory = database.with_extension("lifecycle-owners");
+        let saved = root.join("saved-owners");
+        let substituted = root.join("unrelated-owners");
+        std::fs::create_dir(&substituted).unwrap();
+        let sentinel = substituted.join(&lease.id);
+        std::fs::write(&sentinel, b"unrelated executor evidence").unwrap();
+        std::fs::rename(&directory, &saved).unwrap();
+        symlink(&substituted, &directory).unwrap();
+        drop(lease);
+        reconcile_jobs(&conn, &database).unwrap();
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"unrelated executor evidence"
+        );
+        assert_eq!(std::fs::read_dir(&saved).unwrap().count(), 1);
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&saved, &directory).unwrap();
+        reconcile_jobs(&conn, &database).unwrap();
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        assert!(sentinel.exists());
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn live_owner_survives_same_process_reopen_and_dead_owner_is_interrupted() {
         let (root, cfg, database, conn) = fixture();
         let lease = OwnerLease::create(&database).unwrap();
+        let path = lease_path(&database, &lease.id).unwrap();
         insert(&conn, &lease.id);
         let replacement_instance = OwnerLease::create(&database).unwrap();
         assert_ne!(replacement_instance.id, lease.id);
@@ -421,8 +807,10 @@ mod tests {
         )
         .unwrap();
         drop(lease);
+        assert!(path.exists());
         admission(&cfg).unwrap();
         assert_eq!(state(&conn), "interrupted");
+        assert!(!path.exists());
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -539,10 +927,19 @@ mod tests {
             }
         }
         assert!(admission(&cfg).is_err());
+        let owner: String = conn
+            .query_row("SELECT owner_id FROM package_lifecycle_jobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let path = lease_path(&database, &owner).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
+        assert!(path.exists());
+        assert!(!owner_is_alive(&database, &owner).unwrap());
         admission(&cfg).unwrap();
         assert_eq!(state(&conn), "interrupted");
+        assert!(!path.exists());
         assert_eq!(
             std::fs::read(&recovery).unwrap(),
             b"release-recovery-sentinel"

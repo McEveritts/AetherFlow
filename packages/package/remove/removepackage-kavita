@@ -27,9 +27,13 @@ purge_systemd_unit "kavita"
 
 report_progress 65 "Removing Kavita binaries, libraries, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/Kavita /var/lib/kavita
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Kavita"
+    safe_rm_rf /opt/Kavita /var/lib/kavita
+    purge_system_user "kavita"
+else
+    rm -f /opt/Kavita/{Kavita,Kavita.dll,Kavita.deps.json,Kavita.runtimeconfig.json,.af-version} /opt/Kavita/*.dll /opt/Kavita/*.so /opt/Kavita/*.pdb
+    safe_rm_rf /opt/Kavita/{wwwroot,runtimes,ref}
 fi
-purge_system_user "kavita"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

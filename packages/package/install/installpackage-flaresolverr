@@ -40,38 +40,43 @@ if [[ -f /etc/systemd/system/flaresolverr.service ]] || systemctl is-active --qu
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            systemctl stop flaresolverr >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback flaresolverr || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /opt/flaresolverr "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/flaresolverr
         elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
-            rm -rf /opt/flaresolverr/.venv
+            rm -rf /opt/flaresolverr/.venv || restore_failed=true
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/flaresolverr 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /opt/flaresolverr 2>/dev/null || restore_failed=true
         elif [[ "$VENV_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/venv" /opt/flaresolverr/.venv 2>/dev/null || true
+            mv "$BACKUP_DIR/venv" /opt/flaresolverr/.venv 2>/dev/null || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/flaresolverr.service" ]]; then
-                cp -a "$BACKUP_DIR/flaresolverr.service" /etc/systemd/system/flaresolverr.service
+                safe_restore_path_from_backup "$BACKUP_DIR/flaresolverr.service" /etc/systemd/system/flaresolverr.service || restore_failed=true
             else
-                systemctl disable flaresolverr >> "$LOGFILE" 2>&1 || true
-                rm -f /etc/systemd/system/flaresolverr.service
+                systemctl disable flaresolverr >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f /etc/systemd/system/flaresolverr.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start flaresolverr >> "$LOGFILE" 2>&1 || true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start flaresolverr >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -117,24 +122,27 @@ fi
 report_progress 60 "Downloading and staging FlareSolverr ${FS_VERSION}..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-flaresolverr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+stop_systemd_unit flaresolverr
+SERVICE_STOPPED=1
+snapshot_app_state "$BACKUP_DIR" /var/lib/flaresolverr /etc/flaresolverr
 if [[ -f /etc/systemd/system/flaresolverr.service ]]; then
     cp -a /etc/systemd/system/flaresolverr.service "$BACKUP_DIR/flaresolverr.service"
 fi
 BUILD_DIR="$(mktemp -d /opt/.flaresolverr-build.XXXXXX)"
 if [[ -n "$FS_URL" ]]; then
     TMP_TAR=$(mktemp /tmp/flaresolverr-XXXXXX.tar.gz)
-    curl -fsSL "$FS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+    download_file "$FS_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
     tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || tar -xzf "$TMP_TAR" -C "$BUILD_DIR" >> "$LOGFILE" 2>&1
     rm -f "$TMP_TAR"
 else
     TMP_TAR=$(mktemp /tmp/flaresolverr-src-XXXXXX.tar.gz)
-    curl -fsSL "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+    download_file "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" "$TMP_TAR" >> "$LOGFILE" 2>&1
     tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
     rm -f "$TMP_TAR"
     mkdir -p /opt/flaresolverr
     if [[ -e /opt/flaresolverr/.venv || -L /opt/flaresolverr/.venv ]]; then
         if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-            systemctl stop flaresolverr >> "$LOGFILE" 2>&1 || true
+            stop_systemd_unit flaresolverr
             SERVICE_STOPPED=1
         fi
         mv /opt/flaresolverr/.venv "$BACKUP_DIR/venv"
@@ -152,18 +160,18 @@ WRAP
 fi
 
 test -s "$BUILD_DIR/flaresolverr" || test -s "$BUILD_DIR/src/flaresolverr.py" || { log_error "Failed to verify FlareSolverr build output"; exit 1; }
-printf '%s\n' "${FS_VERSION#v}" > "$BUILD_DIR/.af-version"
-chown -R flaresolverr:flaresolverr "$BUILD_DIR" /var/lib/flaresolverr
+queue_app_version /opt/flaresolverr/.af-version "${FS_VERSION#v}"
+chown -hRP flaresolverr:flaresolverr "$BUILD_DIR" /var/lib/flaresolverr
 
 CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /usr/bin/chromium)"
 
 report_progress 75 "Backing up existing FlareSolverr installation and activating new build..."
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-    systemctl stop flaresolverr >> "$LOGFILE" 2>&1 || true
+    stop_systemd_unit flaresolverr
     SERVICE_STOPPED=1
 fi
 if [[ "$VENV_ACTIVATED" -eq 1 ]]; then
-    chown -R flaresolverr:flaresolverr /opt/flaresolverr/.venv
+    chown -hRP flaresolverr:flaresolverr /opt/flaresolverr/.venv
     mv /opt/flaresolverr/.venv "$BUILD_DIR/.venv"
     VENV_ACTIVATED=0
 fi
@@ -191,7 +199,7 @@ Type=simple
 User=flaresolverr
 Group=flaresolverr
 WorkingDirectory=/opt/flaresolverr
-Environment=HOST=0.0.0.0
+Environment=HOST=127.0.0.1
 Environment=PORT=${APP_PORT}
 Environment=LOG_LEVEL=info
 Environment=HEADLESS=true
@@ -209,20 +217,12 @@ UNIT_WRITTEN=1
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now flaresolverr >> "$LOGFILE" 2>&1
 
-HEALTHY=0
-for attempt in {1..15}; do
-    if systemctl is-active --quiet flaresolverr; then
-        HEALTHY=1
-        break
-    fi
-    sleep 1
-done
-if [[ "$HEALTHY" -ne 1 ]]; then
-    log_error "FlareSolverr service did not become active; rolling back."
-    exit 1
-fi
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+wait_for_service_ready "flaresolverr.service" "$APP_PORT" "$READY_URL"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "FlareSolverr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

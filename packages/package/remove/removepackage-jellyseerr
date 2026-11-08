@@ -27,9 +27,12 @@ purge_systemd_unit "jellyseerr"
 
 report_progress 65 "Removing Jellyseerr application bundle, state directories, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/jellyseerr /var/lib/jellyseerr
+    safe_rm_rf /opt/jellyseerr /var/lib/jellyseerr
+    purge_system_user "jellyseerr"
+else
+    safe_rm_rf /opt/jellyseerr/{.git,.next,.runtime,.yarn,dist,node_modules,public,server,src}
+    rm -f /opt/jellyseerr/{.af-version,package.json,yarn.lock,package-lock.json,pnpm-lock.yaml}
 fi
-purge_system_user "jellyseerr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

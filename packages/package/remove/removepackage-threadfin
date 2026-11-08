@@ -28,11 +28,13 @@ purge_systemd_unit "threadfin"
 report_progress 65 "Removing Threadfin binary, state directories, and user account..."
 rm -f /usr/local/bin/threadfin
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/threadfin
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/threadfin"
+    safe_rm_rf /var/lib/threadfin
+    purge_system_user "threadfin"
 fi
-purge_system_user "threadfin"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/threadfin/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Threadfin removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -23,6 +23,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/www/rutorrent/.af-directory-check
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Apache, PHP, and media utility dependencies for ruTorrent..."
 
@@ -32,10 +33,62 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd >> "$LOGFILE" 2>&1
 
 report_progress 40 "Cloning ruTorrent repository to /var/www/rutorrent..."
+RUTORRENT_EXISTING_CONFIG=false
+[[ ! -s /var/www/rutorrent/conf/config.php ]] || RUTORRENT_EXISTING_CONFIG=true
 BUILD_DIR="$(mktemp -d /var/www/.rutorrent-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
 git clone --depth 1 https://github.com/Novik/ruTorrent.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
-replace_app_tree "$BUILD_DIR" /var/www/rutorrent share conf plugins
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_SNAPSHOT_READY=false
+RUNTIME_STOPPED=false
+RUNTIME_PATHS=("/var/www/rutorrent" "/var/lib/rutorrent" "/etc/apache2/sites-available/rutorrent.conf" "/etc/apache2/conf-available/aetherflow-rutorrent-listen.conf")
+rollback_web_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_SNAPSHOT_READY" == true ]]; then
+        quiesce_services_for_rollback apache2 || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+    fi
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_STOPPED" == true ]]; then
+        [[ "$restore_failed" == false ]] && apache2ctl configtest >> "$LOGFILE" 2>&1 && systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+
+trap rollback_web_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+stop_systemd_unit apache2
+RUNTIME_STOPPED=true
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_SNAPSHOT_READY=true
+mkdir -p "$BUILD_DIR/plugins"
+for plugin_dir in /var/www/rutorrent/plugins/*; do
+    [[ -d "$plugin_dir" ]] || continue
+    plugin_name="$(basename "$plugin_dir")"
+    if [[ ! -e "$BUILD_DIR/plugins/$plugin_name" ]]; then
+        cp -a -- "$plugin_dir" "$BUILD_DIR/plugins/$plugin_name"
+    elif [[ -f "$plugin_dir/conf.php" ]]; then
+        cp -a -- "$plugin_dir/conf.php" "$BUILD_DIR/plugins/$plugin_name/conf.php"
+    fi
+done
+replace_app_tree "$BUILD_DIR" /var/www/rutorrent share conf
 BUILD_DIR=""
 if [[ -e /srv/rutorrent && ! -L /srv/rutorrent ]]; then
     print_error "/srv/rutorrent is an existing data directory; refusing to replace it with a symlink"
@@ -43,13 +96,11 @@ if [[ -e /srv/rutorrent && ! -L /srv/rutorrent ]]; then
 fi
 ln -sfn /var/www/rutorrent /srv/rutorrent
 
-RUT_TAG="$(git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || true)"
-if [[ -n "$RUT_TAG" ]]; then
-    printf '%s\n' "${RUT_TAG#v}" > /var/www/rutorrent/.af-version
-fi
+RUT_TAG="$(git_checkout_version "/var/www/rutorrent" "/var/www/rutorrent/.af-version")"
+queue_app_version /var/www/rutorrent/.af-version "${RUT_TAG#v}"
 
 report_progress 65 "Configuring ruTorrent SCGI connection parameters..."
-if [[ -f /var/www/rutorrent/conf/config.php ]]; then
+if [[ "$RUTORRENT_EXISTING_CONFIG" != true && -f /var/www/rutorrent/conf/config.php ]]; then
     sed -i 's/\$scgi_port\s*=\s*[0-9]*;/\$scgi_port = 15000;/' /var/www/rutorrent/conf/config.php
     sed -i 's/\$scgi_host\s*=\s*"[^"]*";/\$scgi_host = "127.0.0.1";/' /var/www/rutorrent/conf/config.php
 fi
@@ -58,32 +109,40 @@ mkdir -p /var/www/rutorrent/share/torrents \
          /var/www/rutorrent/share/users \
          /var/www/rutorrent/share/settings
 
-chown -R www-data:www-data /var/www/rutorrent /srv/rutorrent
-chmod -R 775 /var/www/rutorrent
+chown -hRP www-data:www-data /var/www/rutorrent /srv/rutorrent
+find -P /var/www/rutorrent \( -type d -o -type f \) -exec chmod 775 -- {} +
 
 report_progress 85 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/rutorrent.conf
+if [[ -s /etc/apache2/sites-available/rutorrent.conf ]]; then
+    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/rutorrent.conf
+else
+AUTH_DIRECTIVES="Require all granted"
+if [[ -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+    AUTH_DIRECTIVES=$'AuthType Basic\n        AuthName "ruTorrent"\n        AuthUserFile /etc/apache2/AetherFlow/rutorrent.htpasswd\n        Require valid-user'
+fi
+cat <<EOF > /etc/apache2/sites-available/rutorrent.conf
 Alias /rutorrent "/var/www/rutorrent"
 
 <Directory /var/www/rutorrent>
     Options FollowSymLinks
     AllowOverride All
-    Require all granted
+    ${AUTH_DIRECTIVES}
     DirectoryIndex index.php index.html
 </Directory>
 
-<VirtualHost *:@AF_APP_PORT@>
+<VirtualHost *:${APP_PORT}>
     DocumentRoot /var/www/rutorrent
     <Directory /var/www/rutorrent>
         Options FollowSymLinks
         AllowOverride All
-        Require all granted
+        ${AUTH_DIRECTIVES}
         DirectoryIndex index.php index.html
     </Directory>
 </VirtualHost>
 EOF
+fi
 
 a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
 a2ensite rutorrent.conf >> "$LOGFILE" 2>&1
@@ -91,6 +150,9 @@ systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 apache2ctl configtest >> "$LOGFILE" 2>&1
 systemctl reload apache2 >> "$LOGFILE" 2>&1
 
+systemctl is-active --quiet apache2
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "ruTorrent installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

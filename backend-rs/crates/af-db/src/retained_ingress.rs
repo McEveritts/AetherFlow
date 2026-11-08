@@ -1,5 +1,6 @@
 use af_models::AppIngressConfig;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::BTreeSet;
 
 fn schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);")?;
@@ -63,7 +64,7 @@ fn check_reservation(
         let action: String = row.get(2)?;
         let status: String = row.get(3)?;
         let expected_status = match action.as_str() {
-            "install" => "installing",
+            "install" | "reinstall" => "installing",
             "update" => "updating",
             "remove" => "uninstalling",
             _ => anyhow::bail!("Unknown ingress lifecycle action for {package}"),
@@ -94,7 +95,7 @@ pub(super) fn set_config(
 ) -> anyhow::Result<()> {
     if let Some((identity, action)) = owner {
         anyhow::ensure!(
-            !identity.is_empty() && matches!(action, "install" | "update"),
+            !identity.is_empty() && matches!(action, "install" | "reinstall" | "update"),
             "Invalid ingress lifecycle owner"
         );
     }
@@ -166,7 +167,7 @@ pub fn synchronize_lifecycle_ingress(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!job_id.is_empty(), "Ingress lifecycle identity is required");
     anyhow::ensure!(
-        matches!(action, "install" | "update" | "remove"),
+        matches!(action, "install" | "reinstall" | "update" | "remove"),
         "Invalid ingress lifecycle action"
     );
     anyhow::ensure!(
@@ -284,6 +285,99 @@ fn archive(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Returns all nonzero listen ports persisted or actively reserved by applications
+/// other than `app` (comparing canonical application names).
+pub fn list_reserved_ports_excluding(
+    conn: &Connection,
+    app: &str,
+) -> anyhow::Result<BTreeSet<i32>> {
+    let target = canonical_app(app);
+    let mut reserved = BTreeSet::new();
+
+    let has_active: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_active {
+        let mut stmt = conn.prepare(
+            "SELECT app_name, listen_port FROM app_ingress_configs WHERE listen_port > 0",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+        })?;
+        for row in rows {
+            let (owner_app, port) = row?;
+            if port > 0 && canonical_app(&owner_app) != target {
+                reserved.insert(port);
+            }
+        }
+    }
+
+    let has_retained: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_app_ingress_configs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_retained {
+        let mut stmt = conn.prepare(
+            "SELECT app_name, config_json FROM retained_app_ingress_configs",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (owner_app, raw_json) = row?;
+            if canonical_app(&owner_app) != target {
+                if let Ok(cfg) = serde_json::from_str::<AppIngressConfig>(&raw_json) {
+                    if cfg.listen_port > 0 {
+                        reserved.insert(cfg.listen_port);
+                    }
+                }
+            }
+        }
+    }
+
+    let has_jobs: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_jobs {
+        let mut stmt = conn.prepare(
+            "SELECT package_id, service_units FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted')",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (pkg_id, units_json) = row?;
+            if canonical_app(&pkg_id) != target {
+                if let Ok(units) = serde_json::from_str::<Vec<String>>(&units_json) {
+                    for unit in units {
+                        if let Some(port_str) = unit.trim().strip_prefix("port:") {
+                            if let Ok(port) = port_str.parse::<i32>() {
+                                if port > 0 {
+                                    reserved.insert(port);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(reserved)
+}
+
+/// Returns all nonzero listen ports persisted or actively reserved by applications
+/// other than `app` using the global SQLite connection pool.
+pub fn get_reserved_ports_excluding(app: &str) -> anyhow::Result<BTreeSet<i32>> {
+    let conn = crate::get_conn()?;
+    list_reserved_ports_excluding(&conn, app)
 }
 
 #[cfg(test)]
@@ -527,5 +621,34 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn afmp003_write_app_ingress_config_and_reserved_ports_prevent_cross_app_port_stealing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let config = fixture(&conn); // maintainerr on port 16246
+
+        let reserved_for_other = list_reserved_ports_excluding(&conn, "sonarr").unwrap();
+        assert!(reserved_for_other.contains(&config.listen_port));
+        let reserved_for_self = list_reserved_ports_excluding(&conn, "maintainerr").unwrap();
+        assert!(!reserved_for_self.contains(&config.listen_port));
+
+        // Another app attempting to claim maintainerr's persisted port must be rejected
+        let conflict = AppIngressConfig {
+            app_name: "sonarr".into(),
+            public_domain: "sonarr.example.test".into(),
+            external_access_enabled: true,
+            listen_port: config.listen_port,
+            tls_enabled: true,
+            ..Default::default()
+        };
+        assert!(set_config(&mut conn, &conflict, None).is_err());
+
+        // Even after maintainerr is removed with data retention, its retained port remains reserved against other apps
+        archive(&mut conn, "maintainerr", false, None).unwrap();
+        assert!(list_reserved_ports_excluding(&conn, "sonarr")
+            .unwrap()
+            .contains(&config.listen_port));
+        assert!(set_config(&mut conn, &conflict, None).is_err());
     }
 }

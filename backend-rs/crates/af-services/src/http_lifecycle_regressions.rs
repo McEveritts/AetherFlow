@@ -14,10 +14,20 @@ async fn runner_controls_require_complete_success_acknowledgements() {
         "systemctl",
         "printf 'unexpected fallback\\n' >> \"$AF_STATUS_CALLS\"; exit 93",
     );
-    let socket = env::temp_dir().join(format!(
+    let sock_name = format!(
         "hc-{}.sock",
         &uuid::Uuid::new_v4().to_string()[..8]
-    ));
+    );
+    let candidate = env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join(&sock_name);
+    let socket = if candidate.as_os_str().len() < 95 {
+        candidate
+    } else {
+        std::path::PathBuf::from("/tmp").join(sock_name)
+    };
     env::set_var("AETHERFLOW_RUNNER_SOCK", &socket);
     let valid = r#"{"success":true,"output":"","error":""}"#;
     let responses = vec![

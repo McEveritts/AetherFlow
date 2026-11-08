@@ -6,6 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_streaming_marker() {
+    let _guard = crate::tests::TEST_DB_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let directory = TempTestDir::new("full_init_epoch");
     let path = directory.db_file("full.sqlite");
     let previous = std::env::var_os("DB_PATH");

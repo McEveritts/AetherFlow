@@ -1,5 +1,6 @@
 """Exercise VPN installers with isolated files and fake host commands."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,8 @@ with (root/'commands').open('a') as log:
     log.write(json.dumps([name]+args)+'\n')
 if name in ('apt-get','flock'):
     pass
+elif name=='dpkg-query':
+    sys.exit(1)
 elif name=='wg':
     if args==['genkey']:
         counter=root/'key-count'
@@ -43,7 +46,9 @@ elif name=='ip':
     else:raise RuntimeError(args)
 elif name=='curl':
     if '-o' in args:
-        Path(args[args.index('-o')+1]).write_text('synthetic-repository-key')
+        target = Path(args[args.index('-o')+1])
+        target.write_text('synthetic-repository-key')
+        Path(str(target) + '.sha256').write_text(hashlib.sha256(target.read_bytes()).hexdigest() + '\n')
     else:print('192.0.2.25')
 elif name=='hostname':print('192.0.2.25')
 elif name=='sysctl':
@@ -51,7 +56,12 @@ elif name=='sysctl':
 elif name=='systemctl':
     if args[0] in ('start','enable') and failure==args[0]:sys.exit(1)
     if args[0]=='restart':raise RuntimeError('Installer must preserve live sessions with start')
-    if args[0]=='is-active' and failure=='inactive':sys.exit(3)
+    active=root/('active-'+args[-1].removesuffix('.service'))
+    if args[0]=='start':active.touch()
+    if args[0]=='stop':active.unlink(missing_ok=True)
+    if args[0]=='is-active':sys.exit(0 if active.exists() and failure!='inactive' else 3)
+    if args[0]=='show':
+        print('LoadState=loaded\nActiveState='+('active' if active.exists() else 'inactive')+'\nMainPID='+('1' if active.exists() else '0')+'\nUnitFileState=enabled')
 elif name=='tailscale':
     if args[0]!='login':raise RuntimeError(args)
     arg=next(arg for arg in args if arg.startswith('--auth-key='))
@@ -74,28 +84,38 @@ class NetworkInstallerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="af-vpn-install-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ("bin", "opt/AetherFlow/packages", "etc/apt/sources.list.d", "run", "var/log/aetherflow", "install"):
+        for name in ("bin", "opt/AetherFlow/packages", "etc/apt/sources.list.d", "run", "var/log/aetherflow", "install", "tmp"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / "etc/os-release").write_text("ID=debian\nVERSION_CODENAME=bookworm\n")
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from installer_test_helpers import installer_common_functions as common_functions
         (self.root / "opt/AetherFlow/packages/common.sh").write_text(r'''
 require_root() { :; }
 log_info() { printf '%s\n' "$*"; }
 log_error() { printf '%s\n' "$*" >&2; }
 log_warn() { printf '%s\n' "$*" >&2; }
 report_progress() { printf '[PROGRESS:%s] %s\n' "$1" "$2"; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
-''')
-        for command in ("apt-get", "flock", "wg", "ip", "curl", "hostname", "sysctl", "systemctl", "tailscale"):
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; }
+lock_path() { printf '%s/install/.%s.lock\n' "$TEST_ROOT" "$1"; }
+print_warn() { printf '%s\n' "$*" >&2; }
+print_error() { printf '%s\n' "$*" >&2; }
+''' + self.rewrite(common_functions("write_app_version", "set_config_value", "safe_config_python", "validate_config_paths")))
+        for command in ("apt-get", "dpkg-query", "flock", "wg", "ip", "curl", "hostname", "sysctl", "systemctl", "tailscale"):
             path = self.root / "bin" / command
             path.write_text(MOCK)
             path.chmod(0o700)
-        self.env = {**os.environ, "PATH": f"{self.root}/bin:{os.environ['PATH']}", "TEST_ROOT": str(self.root)}
+        self.env = {**os.environ, "PATH": f"{self.root}/bin:{os.environ['PATH']}", "TEST_ROOT": str(self.root),
+                    "AF_TRUSTED_KEY_SHA256": hashlib.sha256(b"synthetic-repository-key").hexdigest()}
+
+    def rewrite(self, source):
+        from installer_test_helpers import replace_paths_once
+        prefixes = ("/opt/", "/var/", "/etc/", "/run/", "/usr/bin/", "/usr/sbin/", "/usr/share/", "/tmp/")
+        rewritten = replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in prefixes])
+        return rewritten.replace(" /install", " " + str(self.root) + "/install")
 
     def run_installer(self, provider="wireguard", **environment):
-        source = (ROOT / f"packages/package/install/installpackage-{provider}").read_text()
-        for prefix in ("/opt/", "/var/", "/etc/", "/run/"):
-            source = source.replace(prefix, str(self.root) + prefix)
-        source = source.replace(" /install", " " + str(self.root) + "/install")
+        source = self.rewrite((ROOT / f"packages/package/install/installpackage-{provider}").read_text())
         path = self.root / f"install-{provider}.sh"
         path.write_text(source)
         return subprocess.run(["bash", str(path)], env={**self.env, **environment},
@@ -155,10 +175,14 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.marker("wireguard").exists())
                 self.assertNotIn("[PROGRESS:100]", result.stdout)
+                self.assertFalse((self.root / "etc/wireguard/server_private.key").exists())
+                self.assertFalse((self.root / "etc/wireguard/wg0.conf").exists())
+        self.install()
         saved = (self.root / "etc/wireguard/server_private.key").read_bytes()
+        generated = (self.root / "key-count").read_text()
         self.install()
         self.assertEqual((self.root / "etc/wireguard/server_private.key").read_bytes(), saved)
-        self.assertEqual((self.root / "key-count").read_text(), "2")
+        self.assertEqual((self.root / "key-count").read_text(), generated)
 
     def test_symlinked_identity_and_lock_do_not_touch_their_targets(self):
         directory = self.root / "etc/wireguard"

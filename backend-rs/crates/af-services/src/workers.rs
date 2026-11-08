@@ -312,14 +312,29 @@ pub fn start_heal_worker(interval_secs: u64) {
 }
 
 fn resolve_fs_path(path_str: &str) -> PathBuf {
-    if let Ok(root) = env::var("AETHERFLOW_FS_ROOT") {
-        let trimmed = root.trim();
-        if !trimmed.is_empty() {
-            let rel = path_str.trim_start_matches('/');
-            return Path::new(trimmed).join(rel);
+    resolve_installed_path(Path::new(path_str))
+}
+
+fn resolve_installed_path(path: &Path) -> PathBuf {
+    for env_key in ["AETHERFLOW_FS_ROOT", "AETHERFLOW_INSTALL_ROOT"] {
+        if let Ok(root) = env::var(env_key) {
+            let trimmed = root.trim();
+            if !trimmed.is_empty() {
+                let root_path = Path::new(trimmed);
+                if path.starts_with(root_path) {
+                    return path.to_path_buf();
+                }
+                let path_str = path.to_string_lossy();
+                let rel = path_str.trim_start_matches('/');
+                let rebased = root_path.join(rel);
+                if path.exists() && !rebased.exists() {
+                    return path.to_path_buf();
+                }
+                return rebased;
+            }
         }
     }
-    PathBuf::from(path_str)
+    path.to_path_buf()
 }
 
 /// Collects the list of critical systemd units (`nginx`, `smbd`, `wsdd`) and
@@ -848,11 +863,14 @@ pub static PACKAGE_UPDATE_CACHE: Lazy<Mutex<HashMap<String, PackageUpdateRecord>
 
 static APP_UPDATE_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-static DOTTED_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bv?(\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)\b").unwrap());
-static DEFAULT_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bv?([0-9]+(?:[._:+~-][0-9A-Za-z]+)*)\b").unwrap());
-static NUMERIC_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+").unwrap());
+static DOTTED_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)")
+        .unwrap()
+});
+static DEFAULT_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?[0-9]+(?:[._:+~-][0-9A-Za-z]+)*)")
+        .unwrap()
+});
 
 #[derive(Debug, Deserialize)]
 struct GitHubReleaseResponse {
@@ -1085,6 +1103,37 @@ fn build_github_http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn github_release_observation_follows_canonical_repository_redirect() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for redirect in [true, false] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let length = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let repository = if redirect { "davidnewhall/unpackerr" } else { "Unpackerr/unpackerr" };
+            assert!(request.starts_with(&format!("GET /repos/{repository}/releases/latest ")));
+            let response = if redirect {
+                format!("HTTP/1.1 301 Moved Permanently\r\nLocation: http://{address}/repos/Unpackerr/unpackerr/releases/latest\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            } else {
+                let body = r#"{"tag_name":"v0.14.2","html_url":"https://github.com/Unpackerr/unpackerr/releases/tag/v0.14.2"}"#;
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            };
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let observed = detect_latest_github_release(
+        &build_github_http_client(), &format!("http://{address}"), "davidnewhall/unpackerr",
+    ).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(observed.0, "0.14.2");
+    assert!(observed.1.contains("Unpackerr/unpackerr"));
+}
+
 fn should_track_package(pkg: &Package) -> bool {
     if pkg.update_source.is_empty() {
         return false;
@@ -1195,14 +1244,80 @@ async fn update_probe_output(
         .map_err(Into::into)
 }
 
+fn effective_update_source_and_apt_package(pkg: &Package) -> (&str, &str) {
+    if af_runner::select_package_engine(&pkg.name) == af_runner::PackageEngineMode::DeclarativeRust
+        && matches!(
+            pkg.name.as_str(),
+            "prometheus" | "rclone" | "netdata" | "mergerfs"
+        )
+    {
+        let apt_pkg = if pkg.update_package.is_empty() {
+            pkg.name.as_str()
+        } else {
+            pkg.update_package.as_str()
+        };
+        return ("apt", apt_pkg);
+    }
+    (pkg.update_source.as_str(), pkg.update_package.as_str())
+}
+
+fn resolve_configured_fs_root() -> Option<PathBuf> {
+    for env_key in ["AETHERFLOW_FS_ROOT", "AETHERFLOW_INSTALL_ROOT"] {
+        if let Ok(root) = env::var(env_key) {
+            let trimmed = root.trim();
+            if !trimmed.is_empty() && trimmed != "/" {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    None
+}
+
 async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
-    match pkg.update_source.as_str() {
+    if let Some(ref root) = resolve_configured_fs_root() {
+        static AF_VER_PATH_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(/[A-Za-z0-9_./-]*/\.af-version)").unwrap());
+        let mut candidate_rel_paths = vec![
+            format!("opt/{}/.af-version", pkg.name),
+            format!("var/lib/{}/.af-version", pkg.name),
+        ];
+        for token in &pkg.version_command {
+            for cap in AF_VER_PATH_RE.captures_iter(token) {
+                if let Some(m) = cap.get(1) {
+                    let rel = m.as_str().trim_start_matches('/').to_string();
+                    if !candidate_rel_paths.contains(&rel) {
+                        candidate_rel_paths.push(rel);
+                    }
+                }
+            }
+        }
+        for rel in candidate_rel_paths {
+            let candidate = root.join(&rel);
+            if candidate.is_file() {
+                if let Ok(contents) = fs::read_to_string(&candidate) {
+                    let version = extract_version(&contents, &pkg.version_regex);
+                    if !version.is_empty() {
+                        return Ok(version);
+                    }
+                }
+            }
+        }
+    }
+
+    let (update_source, apt_package) = effective_update_source_and_apt_package(pkg);
+    match update_source {
         "apt" => {
-            if pkg.update_package.is_empty() {
+            if apt_package.is_empty() {
                 anyhow::bail!("no apt package configured for {}", pkg.name);
             }
             let mut command = Command::new("dpkg-query");
-            command.args(["-W", "-f=${Version}", &pkg.update_package]);
+            if let Some(ref root) = resolve_configured_fs_root() {
+                let dpkg_dir = root.join("var/lib/dpkg");
+                if dpkg_dir.exists() {
+                    command.arg(format!("--admindir={}", dpkg_dir.display()));
+                }
+            }
+            command.args(["-W", "-f=${Version}", apt_package]);
             let out = update_probe_output(command, Duration::from_secs(15)).await?;
 
             if !out.status.success() {
@@ -1211,10 +1326,6 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
                     out.status,
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
-            }
-
-            if pkg.update_source == "git" {
-                return parse_git_head(&String::from_utf8_lossy(&out.stdout));
             }
 
             let combined = format!(
@@ -1232,10 +1343,34 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
             if pkg.version_command.is_empty() {
                 anyhow::bail!("no version command configured");
             }
-            let prog = &pkg.version_command[0];
-            let args = &pkg.version_command[1..];
-            let mut command = Command::new(prog);
-            command.args(args);
+            let raw_prog = &pkg.version_command[0];
+            let resolved_prog = resolve_fs_path(raw_prog);
+            let prog: PathBuf = if resolved_prog.exists() {
+                resolved_prog
+            } else if raw_prog == "/usr/local/bin/prometheus" {
+                let alt = resolve_fs_path("/usr/bin/prometheus");
+                if alt.exists() {
+                    alt
+                } else {
+                    resolved_prog
+                }
+            } else {
+                PathBuf::from(raw_prog)
+            };
+            let args: Vec<String> = pkg.version_command[1..]
+                .iter()
+                .map(|arg| {
+                    if arg.starts_with('/') {
+                        let rebased = resolve_fs_path(arg);
+                        if rebased.exists() {
+                            return rebased.to_string_lossy().into_owned();
+                        }
+                    }
+                    arg.clone()
+                })
+                .collect();
+            let mut command = Command::new(&prog);
+            command.args(&args);
             let out = update_probe_output(command, Duration::from_secs(15)).await?;
 
             if !out.status.success() {
@@ -1246,7 +1381,7 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
                 );
             }
 
-            if pkg.update_source == "git" {
+            if update_source == "git" {
                 return parse_git_head(&String::from_utf8_lossy(&out.stdout));
             }
 
@@ -1264,13 +1399,50 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
     }
 }
 
+async fn fetch_github_latest_release(
+    client: &reqwest::Client,
+    github_api_base: &str,
+    repo: &str,
+) -> Option<(String, String)> {
+    detect_latest_github_release(client, github_api_base, repo)
+        .await
+        .ok()
+}
+
 async fn detect_latest_version(
     client: &reqwest::Client,
     github_api_base: &str,
     pkg: &Package,
 ) -> anyhow::Result<(String, String)> {
-    match pkg.update_source.as_str() {
-        "apt" => detect_latest_apt_version(&pkg.update_package).await,
+    if pkg.name == "threadfin" {
+        if af_runner::resolve_threadfin_sha256_override().is_some() {
+            let target_ver = af_runner::resolve_threadfin_target_version();
+            let release_url = format!(
+                "https://github.com/Threadfin/Threadfin/releases/tag/{}",
+                target_ver
+            );
+            return Ok((target_ver, release_url));
+        }
+        let repo = if pkg.update_repo.trim().is_empty() {
+            "Threadfin/Threadfin"
+        } else {
+            pkg.update_repo.trim()
+        };
+        if let Some((latest_ver, release_url)) =
+            fetch_github_latest_release(client, github_api_base, repo).await
+        {
+            return Ok((latest_ver, release_url));
+        }
+        let fallback_ver = af_runner::resolve_threadfin_target_version();
+        let release_url = format!(
+            "https://github.com/Threadfin/Threadfin/releases/tag/{}",
+            fallback_ver
+        );
+        return Ok((fallback_ver, release_url));
+    }
+    let (update_source, apt_package) = effective_update_source_and_apt_package(pkg);
+    match update_source {
+        "apt" => detect_latest_apt_version(apt_package).await,
         "github" => detect_latest_github_release(client, github_api_base, &pkg.update_repo).await,
         "git_tags" | "git" => {
             let repo_url = if !pkg.update_repo_url.is_empty() {
@@ -1280,7 +1452,7 @@ async fn detect_latest_version(
             } else {
                 String::new()
             };
-            if pkg.update_source == "git" {
+            if update_source == "git" {
                 if repo_url.is_empty() {
                     anyhow::bail!("missing repository URL");
                 }
@@ -1449,13 +1621,6 @@ fn extract_version(raw: &str, custom_expr: &str) -> String {
     String::new()
 }
 
-fn normalize_version_tokens(raw: &str) -> Vec<u64> {
-    NUMERIC_TOKEN_RE
-        .find_iter(raw)
-        .filter_map(|m| m.as_str().parse::<u64>().ok())
-        .collect()
-}
-
 fn parse_git_head(output: &str) -> anyhow::Result<String> {
     let head = output.split_whitespace().next().unwrap_or_default();
     if !is_git_commit(head) {
@@ -1471,28 +1636,210 @@ fn is_git_commit(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Compares two version strings by numeric segments matching Go's `IsRemoteVersionNewer`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedDebianSemver {
+    epoch: u64,
+    upstream: String,
+    debian_revision: Option<String>,
+}
+
+fn is_semver_prerelease_tag(suffix: &str) -> bool {
+    let lower = suffix.to_ascii_lowercase();
+    for prefix in [
+        "rc", "alpha", "beta", "pre", "dev", "preview", "nightly", "snapshot", "canary",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            if rest.is_empty()
+                || rest.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn parse_debian_semver(raw: &str) -> Option<ParsedDebianSemver> {
+    let mut s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if !s.bytes().any(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    let (epoch, rest) = if let Some((ep, rem)) = s.split_once(':') {
+        if !ep.is_empty() && ep.bytes().all(|b| b.is_ascii_digit()) {
+            (ep.parse::<u64>().ok()?, rem)
+        } else {
+            (0, s)
+        }
+    } else {
+        s = s
+            .strip_prefix('v')
+            .or_else(|| s.strip_prefix('V'))
+            .unwrap_or(s);
+        (0, s)
+    };
+
+    if rest.is_empty() || !rest.bytes().any(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    // Strip SemVer build metadata (`+build...`) only when not a Debian `+dfsg` / `+deb` upstream token
+    let (mut upstream, debian_revision) = if let Some((up, rev)) = rest.rsplit_once('-') {
+        if is_semver_prerelease_tag(rev) {
+            (format!("{up}~{rev}"), None)
+        } else {
+            (up.to_string(), Some(rev.to_string()))
+        }
+    } else {
+        (rest.to_string(), None)
+    };
+
+    // Also normalize an earlier `-rc...` inside upstream if followed by a Debian revision (e.g. `2.4.0-rc1-1`)
+    if let Some((up_base, up_tag)) = upstream.rsplit_once('-') {
+        if is_semver_prerelease_tag(up_tag) {
+            upstream = format!("{up_base}~{up_tag}");
+        }
+    }
+
+    Some(ParsedDebianSemver {
+        epoch,
+        upstream,
+        debian_revision,
+    })
+}
+
+fn debian_char_order(c: Option<u8>) -> i32 {
+    match c {
+        Some(b'~') => -1,
+        None => 0,
+        Some(b) if b.is_ascii_alphabetic() => b as i32,
+        Some(b) => (b as i32) + 256,
+    }
+}
+
+fn split_numeric_segments(s: &str) -> Option<Vec<&str>> {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+            return Some(parts);
+        }
+    }
+    None
+}
+
+fn compare_digit_runs(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_trim = a.trim_start_matches('0');
+    let b_trim = b.trim_start_matches('0');
+    a_trim.len().cmp(&b_trim.len()).then_with(|| a_trim.cmp(b_trim))
+}
+
+fn debian_verrevcmp(a: &str, b: &str) -> std::cmp::Ordering {
+    // Fast path for pure dotted numeric prefixes before any `~`/`+`/`-` suffix so `1.0` == `1.0.0`
+    fn split_tilde_or_plus(s: &str) -> (&str, &str) {
+        match s.find(|c: char| !c.is_ascii_digit() && c != '.') {
+            Some(idx) => (&s[..idx], &s[idx..]),
+            None => (s, ""),
+        }
+    }
+    let (a_num_prefix, a_tail) = split_tilde_or_plus(a);
+    let (b_num_prefix, b_tail) = split_tilde_or_plus(b);
+    if let (Some(a_segs), Some(b_segs)) = (
+        split_numeric_segments(a_num_prefix),
+        split_numeric_segments(b_num_prefix),
+    ) {
+        let max_len = a_segs.len().max(b_segs.len());
+        for i in 0..max_len {
+            let l = a_segs.get(i).copied().unwrap_or("0");
+            let r = b_segs.get(i).copied().unwrap_or("0");
+            let ord = compare_digit_runs(l, r);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        return debian_verrevcmp_raw(a_tail, b_tail);
+    }
+
+    debian_verrevcmp_raw(a, b)
+}
+
+fn debian_verrevcmp_raw(a: &str, b: &str) -> std::cmp::Ordering {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < ab.len() || j < bb.len() {
+        while (i < ab.len() && !ab[i].is_ascii_digit())
+            || (j < bb.len() && !bb[j].is_ascii_digit())
+        {
+            let ac = if i < ab.len() && !ab[i].is_ascii_digit() {
+                Some(ab[i])
+            } else {
+                None
+            };
+            let bc = if j < bb.len() && !bb[j].is_ascii_digit() {
+                Some(bb[j])
+            } else {
+                None
+            };
+            let ord = debian_char_order(ac).cmp(&debian_char_order(bc));
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+            if ac.is_some() {
+                i += 1;
+            }
+            if bc.is_some() {
+                j += 1;
+            }
+        }
+
+        let i_start = i;
+        while i < ab.len() && ab[i].is_ascii_digit() {
+            i += 1;
+        }
+        let j_start = j;
+        while j < bb.len() && bb[j].is_ascii_digit() {
+            j += 1;
+        }
+
+        let a_digits = std::str::from_utf8(&ab[i_start..i]).unwrap_or("");
+        let b_digits = std::str::from_utf8(&bb[j_start..j]).unwrap_or("");
+        let ord = compare_digit_runs(a_digits, b_digits);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
+
+/// Compares two version strings using Debian Policy (§5.6.12 `dpkg --compare-versions`)
+/// and SemVer prerelease ordering (`~rc1` and `-rc1` sort before final release,
+/// epochs `1:` sort above epoch `0:`, and Debian revisions `-1 < -2` sort after base version).
 pub fn is_remote_version_newer(local: &str, remote: &str) -> bool {
     if is_git_commit(local) && is_git_commit(remote) {
         return local != remote;
     }
-    let local_tokens = normalize_version_tokens(local);
-    let remote_tokens = normalize_version_tokens(remote);
-    if local_tokens.is_empty() || remote_tokens.is_empty() {
+    let (Some(l), Some(r)) = (parse_debian_semver(local), parse_debian_semver(remote)) else {
         return false;
+    };
+
+    if l.epoch != r.epoch {
+        return r.epoch > l.epoch;
     }
 
-    let max_len = local_tokens.len().max(remote_tokens.len());
-    for i in 0..max_len {
-        let l = local_tokens.get(i).copied().unwrap_or(0);
-        let r = remote_tokens.get(i).copied().unwrap_or(0);
-        if l == r {
-            continue;
-        }
-        return r > l;
+    let up_ord = debian_verrevcmp(&l.upstream, &r.upstream);
+    if up_ord != std::cmp::Ordering::Equal {
+        return up_ord == std::cmp::Ordering::Less;
     }
 
-    false
+    let l_rev = l.debian_revision.as_deref().unwrap_or("");
+    let r_rev = r.debian_revision.as_deref().unwrap_or("");
+    debian_verrevcmp_raw(l_rev, r_rev) == std::cmp::Ordering::Less
 }
 
 fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
@@ -2163,9 +2510,18 @@ signal.pause()'
     fn test_version_extraction_and_comparison() {
         assert_eq!(extract_version("jellyfin 10.9.11", ""), "10.9.11");
         assert_eq!(extract_version("v2.4.0-rc1", ""), "2.4.0-rc1");
+        assert_eq!(extract_version("1:1.0.0-1", ""), "1:1.0.0-1");
+        assert_eq!(extract_version("1.0.0~rc1", ""), "1.0.0~rc1");
         assert!(is_remote_version_newer("10.9.10", "10.9.11"));
         assert!(!is_remote_version_newer("10.9.11", "10.9.11"));
         assert!(!is_remote_version_newer("10.10.0", "10.9.11"));
+        assert!(is_remote_version_newer("1.0.0~rc1", "1.0.0"));
+        assert!(is_remote_version_newer("2.4.0-rc1", "2.4.0"));
+        assert!(is_remote_version_newer("1.0.0-1", "1.1.0"));
+        assert!(is_remote_version_newer("1.0.0-1", "1.0.0-2"));
+        assert!(!is_remote_version_newer("1:1.0.0-1", "2.0.0"));
+        assert!(!is_remote_version_newer("1.0.0", "1.0.0~rc1"));
+        assert!(!is_remote_version_newer("2.4.0", "2.4.0-rc1"));
     }
 
     #[test]

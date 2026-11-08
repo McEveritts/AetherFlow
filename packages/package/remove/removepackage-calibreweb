@@ -26,11 +26,11 @@ report_progress 25 "Stopping and removing calibreweb.service..."
 purge_systemd_unit "calibreweb"
 
 report_progress 65 "Removing Calibre-Web virtualenv, app directory, and user account..."
-rm -rf /opt/calibre-web
+safe_rm_rf /opt/calibre-web
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/calibre-web /var/lib/calibre-library
+    safe_rm_rf "/var/lib/calibreweb" /var/lib/calibre-web /var/lib/calibre-library
+    purge_system_user "calibreweb"
 fi
-purge_system_user "calibreweb"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

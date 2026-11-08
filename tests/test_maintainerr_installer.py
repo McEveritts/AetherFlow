@@ -5,9 +5,14 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import installer_common_functions as common_functions
+from installer_test_helpers import replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -363,6 +368,9 @@ purge_systemd_unit() {
 }
 purge_system_user() { touch "$TEST_ROOT/user-removed"; }
 ''')
+        with common.open("a") as output:
+            output.write(replace_paths_once(common_functions("safe_config_python", "validate_config_paths", "safe_rm_rf"),
+                                           (("/var/backups/", str(self.root) + "/var/backups/"),)))
         for command in (
             "apt-get", "chown", "id", "getent", "uname", "sleep", "useradd", "userdel",
             "groupdel", "pgrep", "pkill", "runuser", "git", "node", "curl", "systemctl",
@@ -399,9 +407,10 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
             ["bash", str(script or self.installer)],
             env={
                 **os.environ, "PATH": f"{self.root}/mock-bin:{os.environ['PATH']}", "TEST_ROOT": str(self.root),
+                "AETHERFLOW_INSTALL_ROOT": str(self.root), "AF_BUILDER_QUIESCE_SLEEP": "0.01",
                 "AF_APP_PORT": "", "AETHERFLOW_APP_PORT": "", "DELETE_DATA": "false", **environment,
             },
-            text=True, capture_output=True, timeout=30,
+            text=True, capture_output=True, timeout=int(os.environ.get("AF_TEST_SUBPROCESS_TIMEOUT", "90")),
         )
 
     def assert_success(self, result):
@@ -440,6 +449,8 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
         self.assertEqual((backups[0] / "app/.af-version").read_text(), "3.30.0\n")
         self.assertEqual((backups[0] / "af-maintainerr.service").read_text(), "original unit")
         self.assertEqual(backups[0].stat().st_mode & 0o777, 0o700)
+        self.assertEqual((backups[0] / ".af-successful-backup").read_text(),
+                         "aetherflow completed backup v1\nmaintainerr\n")
         with tarfile.open(backups[0] / "data.tar.gz") as archive:
             self.assertEqual(archive.extractfile("./maintainerr.sqlite").read(), b"original database")
         unit = self.unit.read_text()

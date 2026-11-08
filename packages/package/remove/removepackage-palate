@@ -22,7 +22,7 @@ flock -n 9 || { print_error "Another Palate operation is running."; exit 1; }
 
 report_progress 20 "Stopping Palate..."
 purge_systemd_unit af-palate
-rm -rf /opt/palate
+safe_rm_rf /opt/palate
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     report_progress 60 "Deleting Palate's database, vault, and secrets..."
@@ -31,7 +31,7 @@ if [[ "${DELETE_DATA:-false}" == "true" ]]; then
 DROP DATABASE IF EXISTS af_palate;
 DROP ROLE IF EXISTS af_palate;
 SQL
-    rm -rf /var/lib/palate /etc/palate
+    safe_rm_rf /var/lib/palate /etc/palate
     purge_system_user af-palate
 else
     print_info "Preserved /var/lib/palate, /etc/palate, and PostgreSQL database af_palate for reinstall."

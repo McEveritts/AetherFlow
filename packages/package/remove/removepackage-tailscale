@@ -36,13 +36,14 @@ rm -f /etc/apt/sources.list.d/tailscale.list /etc/apt/keyrings/tailscale-archive
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     report_progress 80 "Purging Tailscale node state and configuration..."
     DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq tailscale >> "$LOGFILE" 2>&1 || true
-    rm -rf /var/lib/tailscale /etc/default/tailscaled
+    safe_rm_rf /var/lib/tailscale /etc/tailscale /etc/default/tailscaled
 fi
 
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 sysctl --system >> "$LOGFILE" 2>&1 || true
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/tailscale/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Tailscale removed."
 log_info "${PACKAGE_NAME} removed successfully"

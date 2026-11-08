@@ -23,6 +23,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system dependencies and FUSE runtime for Rclone..."
 
@@ -47,37 +48,89 @@ report_progress 35 "Downloading official Rclone binary (${RCLONE_ARCH})..."
 TMP_ZIP=$(mktemp /tmp/rclone-XXXXXX.zip)
 TMP_DIR=$(mktemp -d /tmp/rclone-extract-XXXXXX)
 
-RCLONE_URL="https://downloads.rclone.org/rclone-current-linux-${RCLONE_ARCH}.zip"
-curl -fsSL "$RCLONE_URL" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
+RCLONE_RELEASE="$(github_latest_tag rclone/rclone)"
+RCLONE_URL="https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-${RCLONE_ARCH}.zip"
+download_file "$RCLONE_URL" "$TMP_ZIP" >> "$LOGFILE" 2>&1
 unzip -qo "$TMP_ZIP" -d "$TMP_DIR" >> "$LOGFILE" 2>&1
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_ZIP"' EXIT
 RCLONE_BINARY="$(find "$TMP_DIR" -type f -name rclone -print -quit)"
 VFS_WAS_ACTIVE=0
 if systemctl is-active --quiet rclone-vfs; then VFS_WAS_ACTIVE=1; fi
-systemctl stop rclone rclone-vfs >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$RCLONE_BINARY" /usr/bin/rclone
+chmod 755 "$RCLONE_BINARY"
+stage_app_archive "$TMP_DIR" /usr/bin/rclone "${RCLONE_BINARY#"$TMP_DIR"/}" /etc/rclone "$PACKAGE_NAME" "." /var/lib/rclone "" binary
+if [[ -e /etc/systemd/system/rclone-vfs.service ]]; then
+    cp -a /etc/systemd/system/rclone-vfs.service "$AF_ARCHIVE_BACKUP/vfs-unit"
+fi
+rollback_rclone_update() {
+    local status="$?" restore_failed=false
+    trap - EXIT INT TERM
+    [[ "${INSTALL_COMMITTED:-false}" != true ]] || exit "$status"
+    quiesce_services_for_rollback rclone-vfs "$AF_ARCHIVE_UNIT" || { restore_failed=true; exit 1; }
+    (rollback_app_archive_update "$status") || true
+    [[ ! -e "$AF_ARCHIVE_BACKUP/.af-archive-pending" ]] || restore_failed=true
+    if [[ -e "$AF_ARCHIVE_BACKUP/vfs-unit" ]]; then
+        safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/vfs-unit" /etc/systemd/system/rclone-vfs.service || restore_failed=true
+    else
+        rm -f /etc/systemd/system/rclone-vfs.service || restore_failed=true
+    fi
+    systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+    if [[ "$restore_failed" == false && "$VFS_WAS_ACTIVE" == 1 && ! -e "$AF_ARCHIVE_BACKUP/.af-archive-pending" ]]; then
+        systemctl restart rclone-vfs >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+        print_warn "Rollback incomplete; recovery backup preserved at $AF_ARCHIVE_BACKUP"
+    fi
+    exit "$status"
+}
+trap rollback_rclone_update EXIT
+stop_systemd_unit rclone-vfs
 chmod 755 /usr/bin/rclone
 rm -rf "$TMP_ZIP" "$TMP_DIR"
 
 # Record version
 RCLONE_VER="$(/usr/bin/rclone version 2>/dev/null | head -n1 | awk '{print $2}' || true)"
 if [[ -n "$RCLONE_VER" ]]; then
-    printf '%s\n' "${RCLONE_VER#v}" > /var/lib/rclone/.af-version
+    queue_app_version /var/lib/rclone/.af-version "${RCLONE_VER#v}"
 fi
 
 # Ensure baseline rclone.conf and credentials env exist
-touch /etc/rclone/rclone.conf
-python3 - "${MASTER_USER}" "${MASTER_PASS}" > /etc/rclone/rclone.env <<'PYEOF'
-import sys
-u, p = sys.argv[1], sys.argv[2].replace('\\', '\\\\').replace('"', '\\"')
-print(f'RCLONE_RC_USER="{u}"')
-print(f'RCLONE_RC_PASS="{p}"')
+validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf
+if [[ ! -e /etc/rclone/rclone.conf ]]; then
+    printf '' | write_config_file /etc/rclone/rclone.conf 0600
+fi
+if [[ ! -s /etc/rclone/rclone.env || ( -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ) ]]; then
+AF_SEED_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_SEED_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}" python3 - <<'PYEOF' | write_config_file /etc/rclone/rclone.env 0600
+import os
+username, password = [value.replace('\\', '\\\\').replace('"', '\\"') for value in (os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"])]
+print(f'RCLONE_RC_USER="{username}"')
+print(f'RCLONE_RC_PASS="{password}"')
 PYEOF
-chmod 600 /etc/rclone/rclone.conf /etc/rclone/rclone.env
-chown -R rclone:rclone /etc/rclone /var/lib/rclone
+fi
+validate_config_paths /etc/rclone/rclone.conf /etc/rclone/rclone.env
+set_config_file_mode 0600 /etc/rclone/rclone.conf /etc/rclone/rclone.env
+chown -hRP rclone:rclone /etc/rclone /var/lib/rclone
+
+wait_for_service_ready() {
+    local service="${1:-rclone}" port="${2:-$APP_PORT}" path="${3:-/}"
+    systemctl is-active --quiet "$service" || return 1
+    safe_config_python /etc/rclone/rclone.env <<'PYEOF' | curl -K - -fsS -o /dev/null \
+        --connect-timeout 2 --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
+        "http://127.0.0.1:${port}${path}" >> "$LOGFILE" 2>&1 || return 1
+import json, shlex
+settings = {}
+for assignment in shlex.split(safe_read_text('/etc/rclone/rclone.env'), comments=True):
+    key, separator, value = assignment.partition('=')
+    if separator and key.strip() in ('RCLONE_RC_USER', 'RCLONE_RC_PASS'):
+        settings[key.strip()] = value
+credentials = settings.get('RCLONE_RC_USER', '') + ':' + settings.get('RCLONE_RC_PASS', '')
+print('user = ' + json.dumps(credentials, ensure_ascii=False))
+PYEOF
+    systemctl is-active --quiet "$service"
+}
 
 report_progress 70 "Scaffolding rclone.service (GUI on ${APP_PORT}) and companion rclone-vfs.service..."
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/rclone.service
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/rclone.service
 [Unit]
 Description=Rclone Remote Control GUI Daemon
 After=network-online.target
@@ -88,7 +141,7 @@ Type=simple
 User=rclone
 Group=rclone
 EnvironmentFile=/etc/rclone/rclone.env
-ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:@AF_APP_PORT@ --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
+ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=@AF_BIND_ADDRESS@:@AF_APP_PORT@ --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
 Restart=on-failure
 RestartSec=5
 
@@ -122,7 +175,9 @@ systemctl enable rclone-vfs >> "$LOGFILE" 2>&1 || true
 if [[ "$VFS_WAS_ACTIVE" == 1 ]]; then
     systemctl start rclone-vfs >> "$LOGFILE" 2>&1
 fi
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Rclone installed on port ${APP_PORT} (rcd web GUI & rclone-vfs companion ready)."
 log_info "${PACKAGE_NAME} installed successfully"

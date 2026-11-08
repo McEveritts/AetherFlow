@@ -36,8 +36,6 @@ if ! id -u node_exporter >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --shell /usr/sbin/nologin node_exporter
 fi
 
-mkdir -p /etc/prometheus /var/lib/prometheus
-
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) PROM_ARCH="linux-amd64" ;;
@@ -46,20 +44,79 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_PATHS=("/usr/local/bin/prometheus" "/usr/local/bin/promtool" "/usr/local/bin/node_exporter" "/usr/bin/prometheus" "/usr/bin/prometheus-node-exporter" "/etc/prometheus" "/var/lib/prometheus" "/etc/systemd/system/prometheus.service" "/etc/systemd/system/node_exporter.service" "/usr/bin/promtool" "/usr/share/prometheus" "/usr/share/prometheus-node-exporter")
+RUNTIME_HAD_PREVIOUS=false
+RUNTIME_MUTATED=0
+if [[ -e /usr/local/bin/prometheus || -e /usr/bin/prometheus || -e /etc/systemd/system/prometheus.service || -e /etc/systemd/system/node_exporter.service ]] || systemctl is-active --quiet prometheus 2>/dev/null || systemctl is-active --quiet node_exporter 2>/dev/null; then
+    RUNTIME_HAD_PREVIOUS=true
+fi
+rollback_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback prometheus node_exporter || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+            systemctl restart prometheus node_exporter >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
 PROM_VERSION="$(github_latest_tag "prometheus/prometheus" "2.53.1")"
 PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
 
 TMP_DIR="$(mktemp -d /tmp/prometheus-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 TMP_TAR="$TMP_DIR/prometheus.tar.gz"
-curl -fsSL "$PROM_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$PROM_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 tar -xzf "$TMP_TAR" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
 
 PROM_EXTRACTED="$TMP_DIR/prometheus-${PROM_VERSION}.${PROM_ARCH}"
-systemctl stop prometheus node_exporter >> "$LOGFILE" 2>&1 || true
+
+report_progress 50 "Downloading and extracting Node Exporter..."
+NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
+NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
+TMP_NE="$TMP_DIR/node_exporter.tar.gz"
+download_file "$NE_URL" "$TMP_NE" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_NE" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
+rm -f "$TMP_NE"
+test -s "${PROM_EXTRACTED}/prometheus"
+test -s "${PROM_EXTRACTED}/promtool"
+test -s "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter"
+
+if [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+    stop_systemd_unit prometheus
+    stop_systemd_unit node_exporter
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_MUTATED=1
+mkdir -p /etc/prometheus /var/lib/prometheus
 install_binary_atomic "${PROM_EXTRACTED}/prometheus" /usr/local/bin/prometheus
+if [[ ! -e /usr/bin/prometheus && ! -L /usr/bin/prometheus ]]; then
+    ln -s /usr/local/bin/prometheus /usr/bin/prometheus
+fi
 install_binary_atomic "${PROM_EXTRACTED}/promtool" /usr/local/bin/promtool
 if [[ -d "${PROM_EXTRACTED}/consoles" ]]; then
     cp -r "${PROM_EXTRACTED}/consoles" /etc/prometheus/
@@ -70,16 +127,11 @@ fi
 rm -rf "$PROM_EXTRACTED"
 chmod +x /usr/local/bin/prometheus /usr/local/bin/promtool
 
-report_progress 60 "Downloading and installing Node Exporter..."
-NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
-NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
-
-TMP_NE="$TMP_DIR/node_exporter.tar.gz"
-curl -fsSL "$NE_URL" -o "$TMP_NE" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_NE" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
-rm -f "$TMP_NE"
-
+report_progress 60 "Installing Node Exporter..."
 install_binary_atomic "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter" /usr/local/bin/node_exporter
+if [[ ! -e /usr/bin/prometheus-node-exporter && ! -L /usr/bin/prometheus-node-exporter ]]; then
+    ln -s /usr/local/bin/node_exporter /usr/bin/prometheus-node-exporter
+fi
 rm -rf "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}"
 chmod +x /usr/local/bin/node_exporter
 
@@ -100,12 +152,12 @@ scrape_configs:
 EOF
 fi
 
-chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+chown -hRP prometheus:prometheus /etc/prometheus /var/lib/prometheus
 chown prometheus:prometheus /usr/local/bin/prometheus /usr/local/bin/promtool
 chown node_exporter:node_exporter /usr/local/bin/node_exporter
 
 report_progress 85 "Configuring and starting prometheus.service and node_exporter.service..."
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/prometheus.service
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/prometheus.service
 [Unit]
 Description=Prometheus Monitoring Time-Series Database
 Wants=network-online.target
@@ -118,7 +170,7 @@ Type=simple
 ExecStart=/usr/local/bin/prometheus \
     --config.file /etc/prometheus/prometheus.yml \
     --storage.tsdb.path /var/lib/prometheus/ \
-    --web.listen-address=0.0.0.0:@AF_APP_PORT@
+    --web.listen-address=@AF_BIND_ADDRESS@:@AF_APP_PORT@
 Restart=on-failure
 RestartSec=5
 
@@ -150,6 +202,10 @@ systemctl restart node_exporter >> "$LOGFILE" 2>&1
 systemctl enable --now prometheus >> "$LOGFILE" 2>&1
 systemctl restart prometheus >> "$LOGFILE" 2>&1
 
+systemctl is-active --quiet node_exporter prometheus
+queue_app_version /etc/prometheus/.af-version "${PROM_VERSION#v}"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Prometheus installed on port ${APP_PORT} (with Node Exporter on port 9100)."
 log_info "${PACKAGE_NAME} installed successfully"

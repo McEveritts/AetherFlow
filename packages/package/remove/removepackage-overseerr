@@ -27,9 +27,12 @@ purge_systemd_unit "overseerr"
 
 report_progress 65 "Removing Overseerr files, config directory, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/overseerr /var/lib/overseerr
+    safe_rm_rf /opt/overseerr /var/lib/overseerr /etc/overseerr
+    purge_system_user "overseerr"
+else
+    safe_rm_rf /opt/overseerr/{.git,.next,.runtime,.yarn,dist,node_modules,public,server,src}
+    rm -f /opt/overseerr/{.af-version,package.json,yarn.lock,package-lock.json,pnpm-lock.yaml}
 fi
-purge_system_user "overseerr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

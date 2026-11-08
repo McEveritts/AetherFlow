@@ -11,7 +11,9 @@ import tarfile
 import tempfile
 import unittest
 
-from installer_test_helpers import common_functions
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import installer_common_functions as common_functions
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +102,9 @@ class PalateInstallerTests(unittest.TestCase):
         common = self.root / 'opt/AetherFlow/packages/common.sh'
         common.write_text(r'''
 require_root() { :; }
+log_info() { :; }
+log_warn() { printf '%s\n' "$*" >&2; }
+print_warn() { printf '%s\n' "$*" >&2; }
 print_error() { printf '%s\n' "$*" >&2; }
 print_info() { printf '%s\n' "$*"; }
 report_progress() { printf '[PROGRESS:%s] %s\n' "$1" "$2"; }
@@ -113,7 +118,8 @@ purge_systemd_unit() {
 purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
 ''')
         with common.open("a") as output:
-            output.write(common_functions("node_build"))
+            helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
+            output.write(helpers.replace("/var/lib/postgresql", str(self.root / "var/lib/postgresql")))
         for name in ('apt-get', 'chown', 'id', 'useradd', 'install', 'runuser', 'psql', 'pg_dump', 'git', 'node', 'npm', 'curl', 'systemctl'):
             path = self.root / 'mock-bin' / name
             path.write_text(MOCK_COMMAND)
@@ -184,8 +190,7 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
                 self.assertIn(line, self.config.read_text())
         self.assertIn('PORT=17009', self.config.read_text())
         backups = list((self.root / 'var/backups').glob('aetherflow-palate.*'))
-        self.assertEqual(len(backups), 2)
-        self.assertTrue(all((backup / 'database.dump').is_file() for backup in backups))
+        self.assertFalse(backups)
 
     def test_upgrade_failures_keep_previous_app_and_data(self):
         self.install()

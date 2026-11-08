@@ -9,16 +9,64 @@ import tarfile
 import tempfile
 import unittest
 
-from installer_test_helpers import common_functions
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import installer_common_functions as common_functions
 
 
 REPO = Path(__file__).resolve().parents[1]
 APPS = {"piped": 8280, "invidious": 8281}
 HEAD = "a" * 40
 
+PACKAGE_MANAGER = r'''#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ["TEST_ROOT"])
+command = Path(sys.argv[0]).name
+arguments = sys.argv[1:]
+with (root / "commands").open("a") as output:
+    output.write(command + " " + " ".join(arguments) + "\n")
+state = root / "apt-packages.json"
+packages = json.loads(state.read_text()) if state.exists() else {}
+if command == "dpkg":
+    assert len(arguments) == 4 and arguments[0] == "--compare-versions" and arguments[2] == "ge"
+    current = tuple(int(part) for part in arguments[1].split("."))
+    previous = tuple(int(part) for part in arguments[3].split("."))
+    sys.exit(0 if current >= previous else 1)
+elif command == "dpkg-query":
+    if arguments[:1] != ["-W"]:
+        sys.exit("Unexpected dpkg-query arguments")
+    package = arguments[-1]
+    if package not in packages:
+        sys.exit(1)
+    print("installed " + packages[package])
+elif command == "apt-get":
+    if arguments[:1] == ["update"]:
+        sys.exit(0)
+    if not arguments or arguments[0] not in ("install", "remove"):
+        sys.exit("Unexpected apt-get arguments")
+    for argument in arguments[1:]:
+        if argument.startswith("-"):
+            continue
+        package, separator, version = argument.partition("=")
+        if arguments[0] == "remove":
+            packages.pop(package, None)
+        else:
+            packages[package] = version if separator else "2.0.0"
+    state.write_text(json.dumps(packages))
+else:
+    sys.exit("Unexpected package manager")
+'''
+
 COMMON = r'''
 record() { printf '%s\n' "$*" >> "$TEST_ROOT/commands"; }
 require_root() { :; }
+log_info() { :; }
+log_warn() { printf '%s\n' "$*" >&2; }
+print_warn() { printf '%s\n' "$*" >&2; }
 get_base_domain() { printf '%s' "${MOCK_DOMAIN-example.com}"; }
 print_error() { printf '%s\n' "$*" >&2; }
 print_info() { printf '%s\n' "$*"; }
@@ -26,7 +74,6 @@ report_progress() { :; }
 ensure_node() { record "ensure_node $*"; }
 write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
-apt-get() { record "apt-get $*"; }
 id() { return 0; }
 chown() { :; }
 sleep() { :; }
@@ -36,6 +83,38 @@ systemctl() {
     if [[ "$1" == restart && "${MOCK_FAIL_START:-0}" == 1 ]]; then return 42; fi
     if [[ "$1" == stop && "${MOCK_FAIL_STOP:-0}" == 1 ]]; then return 42; fi
     if [[ "$1" == disable && "${MOCK_FAIL_REMOVE:-0}" == 1 ]]; then return 42; fi
+    local action="$1" unit load_state=not-found active_state=inactive main_pid=0 unit_file_state=disabled
+    shift
+    local units=()
+    for unit in "$@"; do
+        [[ "$unit" == -* ]] || units+=("${unit%.service}")
+    done
+    for unit in "${units[@]}"; do
+        case "$action" in
+            start|restart)
+                touch "$TEST_ROOT/systemd-state/$unit.active"
+                if [[ "$unit" == af-invidious ]]; then
+                    touch "$TEST_ROOT/systemd-state/af-invidious-companion.active"
+                fi
+                ;;
+            stop) rm -f "$TEST_ROOT/systemd-state/$unit.active" ;;
+            enable) touch "$TEST_ROOT/systemd-state/$unit.enabled" ;;
+            disable) rm -f "$TEST_ROOT/systemd-state/$unit.enabled" ;;
+            is-active) [[ -f "$TEST_ROOT/systemd-state/$unit.active" ]] || return 3 ;;
+            show)
+                [[ ! -f "$TEST_ROOT/etc/systemd/system/$unit.service" ]] || load_state=loaded
+                if [[ -f "$TEST_ROOT/systemd-state/$unit.active" ]]; then
+                    active_state=active
+                    main_pid=123
+                fi
+                [[ ! -f "$TEST_ROOT/systemd-state/$unit.enabled" ]] || unit_file_state=enabled
+                printf '%s\n' "LoadState=$load_state" "ActiveState=$active_state" "MainPID=$main_pid" "UnitFileState=$unit_file_state"
+                ;;
+            daemon-reload|reset-failed) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
 }
 install() {
     local args=()
@@ -45,6 +124,7 @@ install() {
     command install "${args[@]}"
 }
 runuser() {
+    if [[ "$1" == --preserve-environment ]]; then shift; fi
     shift 3
     record "runuser $*"
     if [[ "$1" == git ]]; then
@@ -61,10 +141,13 @@ runuser() {
         return 0
     fi
     if [[ "$1" == psql ]]; then cat >/dev/null; return 0; fi
+    if [[ "$1" == pg_dump ]]; then printf 'fixture SQL backup\n'; return 0; fi
+    if [[ "$1" == cp ]]; then command cp "${@:2}"; return; fi
     if [[ "$1" == env ]]; then
         shift
         while [[ "$1" == *=* ]]; do shift; done
         if [[ "${MOCK_FAIL_BUILD:-0}" == 1 ]]; then return 42; fi
+        if [[ "$1" == rustc && "${2:-}" == --version ]]; then printf 'rustc 1.90.0 (fixture)\n'; return 0; fi
         if [[ "$1" == npm ]]; then return 0; fi
         if [[ "$1" == cargo ]]; then
             mkdir -p "$INSTALL_DIR/proxy/target/release"
@@ -78,7 +161,8 @@ runuser() {
         fi
         return 0
     fi
-    "$@"
+    print_error "Unexpected runuser command: $*"
+    return 1
 }
 '''
 
@@ -119,9 +203,14 @@ class YouTubeLifecycleTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="af-youtube-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for directory in ("etc/systemd/system", "var/lib", "var/log/aetherflow", "opt", "install", "tmp"):
+        for directory in ("etc/systemd/system", "var/lib", "var/log/aetherflow", "opt", "install", "tmp", "mock-bin", "systemd-state"):
             (self.root / directory).mkdir(parents=True)
-        helpers = common_functions("node_build", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit")
+        for command in ("apt-get", "dpkg-query", "dpkg"):
+            executable = self.root / "mock-bin" / command
+            executable.write_text(PACKAGE_MANAGER)
+            executable.chmod(0o755)
+        self.command_path = os.pathsep.join((str(self.root / "mock-bin"), str(Path(sys.executable).parent), os.environ.get("PATH", "")))
+        helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit", "safe_rm_rf", "backup_postgresql_database", "restore_postgresql_database")
         (self.root / "common.sh").write_text(COMMON + self.rewrite(helpers))
         (self.root / "overrides.sh").write_text(OVERRIDES)
         helper = self.rewrite((REPO / "packages/youtube-common.sh").read_text())
@@ -146,8 +235,33 @@ class YouTubeLifecycleTest(unittest.TestCase):
         path.write_text(source)
         return subprocess.run(["bash", str(path)], text=True, capture_output=True,
                               env=dict(os.environ, TEST_ROOT=str(self.root),
-                                       PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+                                       PATH=self.command_path,
                                        **environment))
+
+    def test_private_package_commands_preserve_apt_rollback(self):
+        packages = self.root / "apt-packages.json"
+        packages.write_text(json.dumps({"fixture-existing": "1.0.0"}))
+        script = f'source "{self.root}/common.sh"\n' + r'''
+set -euo pipefail
+LOGFILE="$TEST_ROOT/apt.log"
+AF_TX_DIR="$TEST_ROOT/apt-transaction"
+mkdir -p "$AF_TX_DIR"
+record_apt_package_for_rollback fixture-existing fixture-new
+AF_APT_TRANSACTION_PACKAGES=(fixture-existing fixture-new)
+AF_APT_REINSTALL_PACKAGES=(fixture-existing)
+apt-get install --no-remove -y fixture-new
+[[ "$(installed_apt_package_version fixture-existing)" == 2.0.0 ]]
+[[ "$(installed_apt_package_version fixture-new)" == 2.0.0 ]]
+rollback_apt_packages
+'''
+        result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                                env=dict(os.environ, TEST_ROOT=str(self.root), PATH=self.command_path))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(packages.read_text()), {"fixture-existing": "1.0.0"})
+        commands = (self.root / "commands").read_text().splitlines()
+        self.assertIn("apt-get install --reinstall --no-remove -y fixture-new fixture-existing", commands)
+        self.assertIn("apt-get install -y --allow-downgrades --reinstall fixture-existing=1.0.0", commands)
+        self.assertIn("apt-get remove -y --no-auto-remove fixture-new", commands)
 
     def test_install_reinstall_and_remove_preserve_data(self):
         for app in APPS:
@@ -224,15 +338,41 @@ class YouTubeLifecycleTest(unittest.TestCase):
         self.assertEqual(key_path.read_text(), invalid_key)
         self.assertFalse((self.root / "install/.invidious.lock").exists())
 
-    @unittest.skipUnless(shutil.which("apache2"), "Requires Apache binary")
     def test_piped_apache_configuration_parses(self):
         result = self.run_script("piped")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        (self.root / "etc/apache2").mkdir()
-        shutil.copyfile("/etc/mime.types", self.root / "etc/mime.types")
-        result = subprocess.run(["apache2", "-t", "-f", str(self.root / "etc/piped/httpd.conf")],
-                                text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = self.root / "etc/piped/httpd.conf"
+        apache = shutil.which("apache2", path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")
+        if apache:
+            (self.root / "etc/apache2").mkdir()
+            shutil.copyfile("/etc/mime.types", self.root / "etc/mime.types")
+            result = subprocess.run([apache, "-t", "-f", str(config)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            text = config.read_text()
+            depth = 0
+            for line in text.splitlines():
+                directive = line.strip()
+                if directive.startswith("<VirtualHost"):
+                    self.assertRegex(directive, r"^<VirtualHost\s+[^<>]+>$")
+                    depth += 1
+                    self.assertEqual(depth, 1, "Nested VirtualHost")
+                elif directive.startswith("</VirtualHost"):
+                    self.assertEqual(directive, "</VirtualHost>")
+                    depth -= 1
+                    self.assertEqual(depth, 0, "Unmatched VirtualHost close")
+            self.assertEqual(depth, 0, "Unclosed VirtualHost")
+            self.assertRegex(text, r"(?m)^Listen 127\.0\.0\.1:[0-9]+$")
+            for route in ("api", "proxy"):
+                for directive in ("ProxyPass", "ProxyPassReverse"):
+                    self.assertRegex(text, rf"(?m)^{directive} /{route}/ http://127\.0\.0\.1:[0-9]+/$")
+            for module in ("mpm_event", "authz_core", "dir", "mime", "proxy", "proxy_http"):
+                self.assertRegex(text, rf"(?m)^LoadModule {module}_module /\S*/mod_{module}\.so$")
+
+    def test_piped_apache_structural_parse_without_binary(self):
+        from unittest.mock import patch
+        with patch.object(shutil, "which", return_value=None):
+            self.test_piped_apache_configuration_parses()
 
     @unittest.skipUnless(shutil.which("jq"), "Requires jq")
     def test_asset_digest_is_required_and_verified(self):
@@ -254,7 +394,7 @@ youtube_asset iv-org/invidious-companion release-master binary.tar.gz "$TEST_ROO
                 metadata["assets"][0]["digest"] = digest
                 (self.root / "metadata.json").write_text(json.dumps(metadata))
                 result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
-                                        env=dict(os.environ, TEST_ROOT=str(self.root)))
+                                        env=dict(os.environ, TEST_ROOT=str(self.root), PATH=self.command_path))
                 self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
 
 

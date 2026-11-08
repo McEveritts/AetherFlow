@@ -33,13 +33,14 @@ DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/jellyfin.list /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg
 
 report_progress 80 "Removing Jellyfin state, caches, logs, and user account..."
-rm -rf /var/cache/jellyfin /var/log/jellyfin /usr/share/jellyfin
+safe_rm_rf /var/cache/jellyfin /var/log/jellyfin /usr/share/jellyfin
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/jellyfin /etc/jellyfin
+    safe_rm_rf /var/lib/jellyfin /etc/jellyfin
+    purge_system_user "jellyfin"
 fi
-purge_system_user "jellyfin"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f /var/lib/jellyfin/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Jellyfin removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

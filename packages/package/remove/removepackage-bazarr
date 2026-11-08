@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing bazarr.service..."
 purge_systemd_unit "bazarr"
 
 report_progress 65 "Removing Bazarr files, state directories, and user account..."
-rm -rf /opt/bazarr
+safe_rm_rf /opt/bazarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/bazarr
+    safe_rm_rf /var/lib/bazarr
+    safe_rm_rf /var/backups/aetherflow-bazarr.* /opt/.bazarr-build.*
+    purge_system_user "bazarr"
 fi
-purge_system_user "bazarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

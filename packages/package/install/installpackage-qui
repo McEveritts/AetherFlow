@@ -23,6 +23,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/lib/qui/.af-version /var/lib/qui/config.toml /var/lib/qui/qui.db
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing dependencies for Qui..."
 
@@ -48,36 +49,35 @@ QUI_VERSION="$(github_latest_tag "autobrr/qui" "1.33.1")"
 QUI_URL="https://github.com/autobrr/qui/releases/download/v${QUI_VERSION}/qui_${QUI_VERSION}_${QUI_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Qui ${QUI_VERSION}..."
-systemctl stop qui >> "$LOGFILE" 2>&1 || true
 TMP_TAR=$(mktemp /tmp/qui-XXXXXX.tar.gz)
-curl -fsSL "$QUI_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /usr/local/bin qui >> "$LOGFILE" 2>&1
+download_file "$QUI_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/usr/local/bin/qui" "qui" "/var/lib/qui" "$PACKAGE_NAME" "." "" "" "binary"
 rm -f "$TMP_TAR"
 chmod 755 /usr/local/bin/qui
-printf '%s\n' "${QUI_VERSION#v}" > /var/lib/qui/.af-version
-chmod 644 /var/lib/qui/.af-version
+queue_app_version /var/lib/qui/.af-version "${QUI_VERSION#v}"
 
 if [[ ! -f /var/lib/qui/config.toml ]]; then
     SESSION_SECRET="$(openssl rand -hex 32)"
     cat <<EOF > /var/lib/qui/config.toml
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = ${APP_PORT}
 logLevel = "INFO"
 sessionSecret = "${SESSION_SECRET}"
 EOF
 fi
 
-if [[ ! -f /var/lib/qui/qui.db && -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" ]]; then
-    /usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" --password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
-        || /usr/local/bin/qui change-password --config-dir=/var/lib/qui --username="${MASTER_USER}" --new-password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
-        || true
+if [[ ! -f /var/lib/qui/qui.db ]]; then
+    [[ -n "${MASTER_USER:-}" && -n "${AF_CONFIG_PASS:-$MASTER_PASS}" ]] || { print_error "Qui account credentials are required"; exit 1; }
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" >> "$LOGFILE" 2>&1
+elif [[ -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != "1" ]]; then
+    printf '%s\n' "$AF_CONFIG_PASS" | /usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" >> "$LOGFILE" 2>&1 \
+        || printf '%s\n' "$AF_CONFIG_PASS" | /usr/local/bin/qui change-password --config-dir=/var/lib/qui --username="${MASTER_USER}" >> "$LOGFILE" 2>&1
 fi
 
 set_config_value "/var/lib/qui/config.toml" ini "port" "$APP_PORT" ""
 
-chown -R qui:qui /var/lib/qui
+chown -hRP qui:qui /var/lib/qui
 chmod 755 /var/lib/qui
-chmod 644 /var/lib/qui/.af-version
 chmod 640 /var/lib/qui/config.toml
 [[ -f /var/lib/qui/qui.db ]] && chmod 640 /var/lib/qui/qui.db
 
@@ -105,8 +105,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now qui >> "$LOGFILE" 2>&1
 systemctl restart qui >> "$LOGFILE" 2>&1
-systemctl restart qui >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
+chmod 644 /var/lib/qui/.af-version
+chmod 644 /var/lib/qui/.af-version
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Qui installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

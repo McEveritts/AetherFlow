@@ -20,6 +20,7 @@ APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6246}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 require_root
+validate_config_paths /var/lib/maintainerr/.af-directory-check
 if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
     log_error "Invalid Maintainerr port: ${APP_PORT}"
     exit 1
@@ -107,7 +108,7 @@ quiesce_builder_processes() {
             log_error "Failed to terminate builder processes by effective UID ${BUILDER_UID} (pkill exit ${kill_rc})."
             return 1
         fi
-        sleep 0.1
+        sleep "${AF_BUILDER_QUIESCE_SLEEP:-0.1}"
     done
     pgrep_rc=0
     pgrep -U "$BUILDER_UID" >/dev/null 2>&1 || pgrep_rc=$?
@@ -146,45 +147,38 @@ PY
 }
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     local builder_cleanup_ok=1
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 && "$SERVICE_STOPPED" -eq 1 ]]; then
         log_error "Maintainerr activation failed; restoring the previous installation from ${BACKUP_DIR}."
-        if [[ -f /etc/systemd/system/af-maintainerr.service || "$WAS_ACTIVE" -eq 1 ]]; then
-            systemctl stop af-maintainerr >> "$LOGFILE" 2>&1
-        fi
+        quiesce_services_for_rollback af-maintainerr || { restore_failed=true; exit 1; }
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
-            mv /opt/maintainerr "$BACKUP_DIR/failed-app"
+            mv /opt/maintainerr "$BACKUP_DIR/failed-app" || restore_failed=true
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/maintainerr
+            mv "$BACKUP_DIR/app" /opt/maintainerr || restore_failed=true
         fi
         if [[ "$DATA_SAVED" -eq 1 && "$APP_ACTIVATED" -eq 1 ]]; then
-            rm -rf /var/lib/maintainerr
-            mkdir -p /var/lib/maintainerr
-            tar -xzf "$BACKUP_DIR/data.tar.gz" -C /var/lib/maintainerr
-            chown -R maintainerr:maintainerr /var/lib/maintainerr
+            restore_app_state "$BACKUP_DIR" || restore_failed=true
+            chown -hRP maintainerr:maintainerr /var/lib/maintainerr
             chmod 750 /var/lib/maintainerr
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/af-maintainerr.service" ]]; then
-                cp -a "$BACKUP_DIR/af-maintainerr.service" /etc/systemd/system/af-maintainerr.service
+                safe_restore_path_from_backup "$BACKUP_DIR/af-maintainerr.service" /etc/systemd/system/af-maintainerr.service || restore_failed=true
             else
-                rm -f /etc/systemd/system/af-maintainerr.service
+                rm -f /etc/systemd/system/af-maintainerr.service || restore_failed=true
             fi
-            rm -rf /etc/systemd/system/af-maintainerr.service.d
-            if [[ -d "$BACKUP_DIR/af-maintainerr.service.d" ]]; then
-                cp -a "$BACKUP_DIR/af-maintainerr.service.d" /etc/systemd/system/af-maintainerr.service.d
-            fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1
+            safe_restore_path_from_backup "$BACKUP_DIR/af-maintainerr.service.d" /etc/systemd/system/af-maintainerr.service.d || restore_failed=true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start af-maintainerr >> "$LOGFILE" 2>&1 || log_error "Rollback service restart failed; see ${LOGFILE}."
+        if [[ "$restore_failed" == false && "$WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start af-maintainerr >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     elif [[ "$SUCCESS" -ne 1 && -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
-        rm -rf "$BACKUP_DIR"
+        rm -rf "$BACKUP_DIR" || restore_failed=true
     fi
     if [[ "$BUILD_USER_CREATED" -eq 1 ]]; then
         if ! quiesce_builder_processes; then
@@ -218,13 +212,17 @@ cleanup() {
     fi
     if [[ "$builder_cleanup_ok" -eq 1 ]]; then
         if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-            rm -rf "$BUILD_DIR"
+            rm -rf "$BUILD_DIR" || restore_failed=true
         fi
         if [[ -n "$BUILD_ROOT" && -d "$BUILD_ROOT" ]]; then
-            rm -rf "$BUILD_ROOT"
+            rm -rf "$BUILD_ROOT" || restore_failed=true
         fi
     elif [[ "$status" -eq 0 ]]; then
         status=1
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $BACKUP_DIR"
     fi
     exit "$status"
 }
@@ -251,7 +249,7 @@ if ! id -u maintainerr >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/maintainerr --shell /usr/sbin/nologin maintainerr
 fi
 mkdir -p /var/lib/maintainerr /var/backups /etc/systemd/system
-chown -R maintainerr:maintainerr /var/lib/maintainerr
+chown -hRP maintainerr:maintainerr /var/lib/maintainerr
 chmod 750 /var/lib/maintainerr
 
 if id -u "$BUILD_USER" >/dev/null 2>&1 || getent group "$BUILD_USER" >/dev/null 2>&1; then
@@ -311,7 +309,7 @@ if [[ ! "$NODE_ARCHIVE" =~ ^node-v26\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$
     log_error "Unable to resolve the private Node.js 26 runtime."
     exit 1
 fi
-curl --fail --silent --show-error --location "https://nodejs.org/dist/latest-v26.x/${NODE_ARCHIVE}" -o "$BUILD_ROOT/$NODE_ARCHIVE"
+download_file "https://nodejs.org/dist/latest-v26.x/${NODE_ARCHIVE}" "$BUILD_ROOT/$NODE_ARCHIVE"
 python3 - "$BUILD_ROOT" "$NODE_ARCHIVE" <<'PY'
 import os, stat, sys
 dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -574,17 +572,6 @@ try:
             os.unlink(".af-version", dir_fd=app_fd)
         except FileNotFoundError:
             pass
-        vfd = os.open(
-            ".af-version",
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
-            0o644,
-            dir_fd=app_fd,
-        )
-        with os.fdopen(vfd, "w", encoding="utf-8") as fh:
-            if is_root:
-                os.fchown(fh.fileno(), 0, 0)
-            os.fchmod(fh.fileno(), 0o644)
-            fh.write(f"{version}\n")
     finally:
         os.close(app_fd)
 finally:
@@ -613,6 +600,7 @@ fi
 report_progress 75 "Backing up Maintainerr state and activating ${LATEST_TAG}..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-maintainerr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+queue_app_version /opt/maintainerr/.af-version "${LATEST_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"
 if [[ -f /etc/systemd/system/af-maintainerr.service ]]; then
     cp -a /etc/systemd/system/af-maintainerr.service "$BACKUP_DIR/af-maintainerr.service"
 fi
@@ -627,6 +615,7 @@ if [[ -f /etc/systemd/system/af-maintainerr.service || "$WAS_ACTIVE" -eq 1 ]]; t
 fi
 SERVICE_STOPPED=1
 tar -czf "$BACKUP_DIR/data.tar.gz" -C /var/lib/maintainerr .
+    snapshot_app_state "$BACKUP_DIR" /var/lib/maintainerr
 DATA_SAVED=1
 if [[ -d /opt/maintainerr ]]; then
     mv /opt/maintainerr "$BACKUP_DIR/app"
@@ -697,7 +686,9 @@ if [[ "$HEALTHY" -ne 1 ]]; then
 fi
 
 systemctl enable af-maintainerr >> "$LOGFILE" 2>&1
+commit_app_versions
 write_lock "$PACKAGE_NAME"
 SUCCESS=1
+retain_successful_app_backups "$PACKAGE_NAME" "$BACKUP_DIR" || print_warn "Completed backup retention needs attention; recovery copies remain in /var/backups."
 log_info "Maintainerr ${LATEST_TAG} verified. Previous application and state retained in ${BACKUP_DIR}."
 report_progress 100 "Maintainerr ${LATEST_TAG} installed and verified on port ${APP_PORT}."

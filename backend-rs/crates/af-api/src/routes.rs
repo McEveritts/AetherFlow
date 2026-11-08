@@ -372,6 +372,7 @@ fn build_v1_router() -> Router {
         .route("/services/:name/control", post(control_service_handler))
         .route("/services/restart/status", get(get_core_restart_status))
         .route("/packages/:id/install", post(install_package))
+        .route("/packages/:id/reinstall", post(reinstall_package))
         .route("/packages/:id/uninstall", post(uninstall_package))
         .route("/packages/:id/update", post(update_package))
         .route(
@@ -928,8 +929,8 @@ async fn get_core_restart_status(Query(query): Query<HashMap<String, String>>) -
     crate::storage::get_system_update_status(Query(query)).await
 }
 
-async fn get_marketplace_apps() -> Response {
-    tokio::task::spawn_blocking(get_marketplace_apps_blocking)
+async fn get_marketplace_apps(headers: HeaderMap) -> Response {
+    tokio::task::spawn_blocking(move || get_marketplace_apps_blocking(headers))
         .await
         .unwrap_or_else(|_| {
             api_error(
@@ -940,7 +941,64 @@ async fn get_marketplace_apps() -> Response {
         })
 }
 
-fn get_marketplace_apps_blocking() -> Response {
+fn has_valid_marketplace_auth(headers: &HeaderMap) -> bool {
+    let Some(token) = crate::auth::resolve_raw_token(headers) else {
+        return false;
+    };
+    if let Ok(plugin_claims) = crate::plugins::decode_and_verify_plugin_token(&token) {
+        return crate::plugins::plugin_claims_allow_request(
+            &plugin_claims,
+            &axum::http::Method::GET,
+            "/api/v1/public/marketplace",
+        ) || crate::plugins::plugin_claims_allow_request(
+            &plugin_claims,
+            &axum::http::Method::GET,
+            "/api/v1/admin/packages",
+        );
+    }
+    if let Ok(claims) = crate::auth::decode_session_claims(&token, false) {
+        if !matches!(af_db::token_revocation_status(&claims.jti), Ok(false)) {
+            return false;
+        }
+        if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
+            if crate::plugins::is_plugin_request_denied(
+                &axum::http::Method::GET,
+                "/api/v1/public/marketplace",
+            ) {
+                return false;
+            }
+            return af_services::plugins::verify_plugin_route_scope(
+                &claims.plugin_scopes,
+                "/api/v1/public/marketplace",
+            ) || af_services::plugins::verify_plugin_route_scope(
+                &claims.plugin_scopes,
+                "/api/v1/admin/packages",
+            );
+        }
+        let ua = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let client_ip = extract_client_ip(headers);
+        if !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, ua) {
+            return false;
+        }
+        let Ok(conn) = af_db::get_conn() else {
+            return false;
+        };
+        return conn
+            .query_row(
+                "SELECT 1 FROM users WHERE id = ?1",
+                rusqlite::params![claims.user_id],
+                |_| Ok(()),
+            )
+            .is_ok();
+    }
+    false
+}
+
+fn get_marketplace_apps_blocking(headers: HeaderMap) -> Response {
+    let is_authenticated = has_valid_marketplace_auth(&headers);
     let Ok(jobs) = af_services::package_job_snapshot() else {
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -956,15 +1014,53 @@ fn get_marketplace_apps_blocking() -> Response {
         );
     };
 
-    let ingress_map: HashMap<String, AppIngressConfig> = af_db::get_all_app_ingress_configs()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| (c.app_name.clone(), c))
-        .collect();
-    let base_domain = af_services::resolve_base_domain();
+    let ingress_map: HashMap<String, AppIngressConfig> = if is_authenticated {
+        af_db::get_all_app_ingress_configs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.app_name.clone(), c))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let base_domain = if is_authenticated {
+        af_services::resolve_base_domain()
+    } else {
+        String::new()
+    };
 
     let mut apps = Vec::with_capacity(pkgs.len());
     for p in pkgs {
+        if !is_authenticated {
+            apps.push(MarketplaceApp {
+                id: p.name,
+                name: p.label,
+                desc: p.description,
+                hits: p.hits,
+                category: p.category,
+                status: "not_installed".to_string(),
+                default_port: p.default_port,
+                active_port: 0,
+                internal_domain: String::new(),
+                public_domain: String::new(),
+                external_access_enabled: false,
+                tls_enabled: false,
+                web_path: p.web_path,
+                progress: 0,
+                started_at: None,
+                job_id: None,
+                log_line: String::new(),
+                installed_version: String::new(),
+                latest_version: String::new(),
+                update_available: false,
+                update_checked_at: String::new(),
+                update_url: String::new(),
+                update_error: String::new(),
+                last_job: None,
+            });
+            continue;
+        }
+
         let mut active_port = p.default_port;
         let internal_domain = af_services::get_blueprint(&p.name)
             .map(|bp| bp.internal_domain)
@@ -1019,7 +1115,7 @@ fn get_marketplace_apps_blocking() -> Response {
             app.progress = job.progress;
             app.job_id = Some(job.job_id);
             app.started_at = Some(job.started_at);
-            app.log_line = format!("{} application…", job.status);
+            app.log_line = af_services::package_job_progress_summary(&job.status).to_string();
         }
 
         apps.push(app);
@@ -1112,7 +1208,21 @@ async fn install_package(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    dispatch_package_lifecycle(id, "install", "installing", false, auth_user, headers).await
+    let clean_id = id.trim_start_matches("package-");
+    let action = if af_services::is_package_installed(clean_id) {
+        "reinstall"
+    } else {
+        "install"
+    };
+    dispatch_package_lifecycle(id, action, "installing", false, auth_user, headers).await
+}
+
+pub(crate) async fn reinstall_package(
+    Path(id): Path<String>,
+    Extension(auth_user): Extension<AuthUser>,
+    headers: HeaderMap,
+) -> Response {
+    dispatch_package_lifecycle(id, "reinstall", "installing", false, auth_user, headers).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1252,17 +1362,40 @@ async fn system_update_lifecycle_block() -> Option<SystemUpdateLifecycleBlock> {
 }
 
 fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
-    if let Ok(Some(existing)) = load_authoritative_app_ingress_config(app_name) {
-        if existing.listen_port > 0 {
-            return existing.listen_port;
-        }
+    allocate_or_resolve_app_port_with(
+        app_name,
+        default_port,
+        load_authoritative_app_ingress_config,
+        af_db::get_reserved_ports_excluding,
+    )
+}
+
+fn allocate_or_resolve_app_port_with<LoadExistingFn, LoadReservedFn>(
+    app_name: &str,
+    default_port: i32,
+    mut load_existing: LoadExistingFn,
+    mut load_reserved: LoadReservedFn,
+) -> i32
+where
+    LoadExistingFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
+    LoadReservedFn: FnMut(&str) -> anyhow::Result<std::collections::BTreeSet<i32>>,
+{
+    match load_existing(app_name) {
+        Ok(Some(existing)) if existing.listen_port > 0 => return existing.listen_port,
+        Ok(_) => {}
+        Err(_) => return 0,
     }
+    let Ok(reserved) = load_reserved(app_name) else {
+        return 0;
+    };
     let bp = af_services::get_blueprint(app_name);
     let candidate = bp.as_ref().map(|b| b.default_port).unwrap_or(default_port);
     if candidate <= 0 {
         return 0;
     }
-    if std::net::TcpListener::bind(("127.0.0.1", candidate as u16)).is_ok() {
+    if !reserved.contains(&candidate)
+        && std::net::TcpListener::bind(("127.0.0.1", candidate as u16)).is_ok()
+    {
         return candidate;
     }
     // These applications do not expose a configurable native listen port.
@@ -1276,7 +1409,9 @@ fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
     let start = range[0].max(1024);
     let end = range[1].max(start);
     for port in start..=end {
-        if std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+        if !reserved.contains(&port)
+            && std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok()
+        {
             return port;
         }
     }
@@ -1332,7 +1467,9 @@ where
     ControlFut: std::future::Future<Output = anyhow::Result<()>>,
 {
     let mut stopped_units: Vec<String> = Vec::new();
-    if action == "update"
+    let is_reinstall =
+        action == "reinstall" || (action == "install" && af_services::is_package_installed(clean_id));
+    if (action == "update" || is_reinstall)
         && af_services::should_pre_stop_on_update(clean_id)
         && fs_root_override.trim().is_empty()
     {
@@ -1445,9 +1582,9 @@ where
             format!("cannot read existing configured port for {clean_id}: {error}")
         })?;
         let ingress_port = ingress.map(|config| config.listen_port).unwrap_or(0);
-        let resolved_port = if (1..=65535).contains(&configured_port) {
+        let resolved_port = if (1024..=65535).contains(&configured_port) {
             configured_port
-        } else if (1..=65535).contains(&ingress_port) {
+        } else if (1024..=65535).contains(&ingress_port) {
             ingress_port
         } else if pkg_default_port <= 0 {
             0
@@ -1457,7 +1594,18 @@ where
             ));
         };
         Ok(resolved_port)
-    } else if action == "install" {
+    } else if action == "install" || action == "reinstall" {
+        if action == "reinstall" || af_services::is_package_installed(clean_id) {
+            let configured_port = query_runtime_port(clean_id);
+            if (1024..=65535).contains(&configured_port) {
+                return Ok(configured_port);
+            }
+            if let Ok(Some(ingress)) = load_ingress_config(clean_id) {
+                if (1024..=65535).contains(&ingress.listen_port) {
+                    return Ok(ingress.listen_port);
+                }
+            }
+        }
         let allocated_port = allocate_install_port(clean_id, pkg_default_port);
         if pkg_default_port > 0 && allocated_port <= 0 {
             return Err("No supported listen port is available for this application".to_string());
@@ -1538,6 +1686,17 @@ fn merge_blueprint_finalization(
     finalization: Result<(), PackageLifecycleFailure>,
     blueprint_error: Option<String>,
 ) -> Result<(), PackageLifecycleFailure> {
+    let blueprint_error = blueprint_error.filter(|error| {
+        if af_services::mutators::is_unprivileged_host_write_error(error) {
+            tracing::info!(
+                "ignoring unprivileged blueprint host write error after runner completion: {}",
+                error
+            );
+            false
+        } else {
+            true
+        }
+    });
     match (finalization, blueprint_error) {
         (result, None) => result,
         (Ok(()), Some(error)) => Err(PackageLifecycleFailure {
@@ -1582,7 +1741,7 @@ where
     RefreshUpdateFn: FnMut(String) -> RefreshUpdateFut,
     RefreshUpdateFut: std::future::Future<Output = ()>,
 {
-    if action != "install" && action != "update" {
+    if !matches!(action, "install" | "reinstall" | "update") {
         return Ok(());
     }
 
@@ -1634,8 +1793,10 @@ where
         }
     }
 
-    if action == "update" && af_services::should_pre_stop_on_update(clean_id) {
-        for u in stopped_units {
+    if matches!(action, "update" | "install" | "reinstall")
+        && af_services::should_pre_stop_on_update(clean_id)
+    {
+        for u in stopped_units.iter().rev() {
             if let Err(e) = control_unit(u.clone(), "start").await {
                 service_restore_failed = true;
                 required_errors.push(format!("Failed to restart stopped unit {}: {}", u, e));
@@ -1657,6 +1818,55 @@ where
             kind,
             message: required_errors.join("; "),
         })
+    }
+}
+
+fn is_incomplete_rollback_error(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    lower.contains("incomplete rollback")
+        || lower.contains("incomplete_rollback")
+        || lower.contains("incomplete recovery")
+        || lower.contains("recovery backup preserved")
+        || lower.contains("failed to stop")
+}
+
+async fn restore_pre_stopped_units_after_installer_failure_with<ControlFn, ControlFut>(
+    clean_id: &str,
+    stopped_units: &[String],
+    installer_error: &str,
+    mut control_unit: ControlFn,
+) -> (af_services::PackageJobFailure, String)
+where
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let mut restore_errors: Vec<String> = Vec::new();
+    if af_services::should_pre_stop_on_update(clean_id) && !stopped_units.is_empty() {
+        if is_incomplete_rollback_error(installer_error) {
+            restore_errors.push(
+                "Refusing to restart pre-stopped service after incomplete rollback".to_string(),
+            );
+        } else {
+            for unit in stopped_units.iter().rev() {
+                if let Err(restore_err) = control_unit(unit.clone(), "start").await {
+                    restore_errors.push(format!(
+                        "Failed to restore stopped unit {}: {}",
+                        unit, restore_err
+                    ));
+                }
+            }
+        }
+    }
+    if restore_errors.is_empty() {
+        (
+            af_services::PackageJobFailure::Installer,
+            installer_error.to_string(),
+        )
+    } else {
+        (
+            af_services::PackageJobFailure::ServiceRestore,
+            format!("{}; {}", installer_error, restore_errors.join("; ")),
+        )
     }
 }
 
@@ -1936,46 +2146,9 @@ async fn dispatch_package_lifecycle(
                             )
                             .await
                         } else if can_run_bash {
-                            let request = af_models::PackageRunnerRequest {
-                                action: action.to_string(),
-                                package_id: clean_id.clone(),
-                                script_name: script_name.clone(),
-                                lifecycle_job_id: job_id.clone(),
-                                app_port: resolved_port,
-                                delete_data,
-                            };
-                            let stream = af_runner::execute_package_request_stream(request);
-                            tokio::pin!(stream);
-                            let mut result = Ok(());
-                            while let Some(item) = stream.next().await {
-                                match item {
-                                    Ok(line) => {
-                                        if let Some(error) =
-                                            line.trim().strip_prefix("__RUNNER_EXIT_ERROR__:")
-                                        {
-                                            result = Err(anyhow::anyhow!("{}", error));
-                                        } else {
-                                            let (pct, msg) = af_runner::parse_progress_line(&line)
-                                                .map(|(p, m)| (p as i32, m))
-                                                .unwrap_or_else(|| (60, line));
-                                            emit_package_progress(
-                                                &clean_id,
-                                                action,
-                                                status_label,
-                                                pct,
-                                                msg.trim(),
-                                                &started_at,
-                                                &job_id,
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        result = Err(error.into());
-                                        break;
-                                    }
-                                }
-                            }
-                            result
+                            Err(anyhow::anyhow!(
+                                "AetherFlow runner service is unavailable; refusing to execute privileged package operation in-process"
+                            ))
                         } else {
                             emit_package_progress(
                                 &clean_id,
@@ -2027,21 +2200,25 @@ async fn dispatch_package_lifecycle(
         if let Err(error) = execution_result {
             af_services::mutators::clear_app_runtime_meta_cache();
             let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
-            if af_services::should_pre_stop_on_update(&clean_id) {
-                for unit in &stopped_units {
-                    let _ =
-                        af_services::control_service_with_manager(unit, "start", "systemd-unit")
-                            .await;
-                }
-            }
+            let (failure_kind, failure_message) =
+                restore_pre_stopped_units_after_installer_failure_with(
+                    &clean_id,
+                    &stopped_units,
+                    &error.to_string(),
+                    |unit, ctl_action| async move {
+                        af_services::control_service_with_manager(&unit, ctl_action, "systemd-unit")
+                            .await
+                    },
+                )
+                .await;
             af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
             finish_package_lifecycle(
                 &clean_id,
                 action,
-                Some(af_services::PackageJobFailure::Installer),
+                Some(failure_kind),
                 60,
-                &error.to_string(),
+                &failure_message,
                 &started_at,
                 &job_id,
             );
@@ -2058,7 +2235,7 @@ async fn dispatch_package_lifecycle(
             &job_id,
         );
 
-        if action == "install" || action == "update" {
+        if matches!(action, "install" | "reinstall" | "update") {
             let blueprint_error =
                 af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port)
                     .await
@@ -2157,7 +2334,7 @@ async fn dispatch_package_lifecycle(
     }));
 
     let msg = match action {
-        "install" => "Installation started successfully",
+        "install" | "reinstall" => "Installation started successfully",
         "remove" => "Uninstallation started successfully",
         _ => "Update started successfully",
     };
@@ -3718,61 +3895,81 @@ async fn update_app_ingress_config(
             "App name is required",
         );
     }
-    let existing = match af_db::get_app_ingress_config(&clean_app) {
-        Ok(config) => config,
-        Err(error) => {
-            return api_error(
+    let guarded_app = clean_app.clone();
+    match af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
+        let existing = match af_db::get_app_ingress_config(&clean_app) {
+            Ok(config) => config,
+            Err(error) => {
+                return Ok(api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    error.to_string(),
+                ))
+            }
+        };
+        let runtime_port = af_services::mutators::get_app_runtime_meta(&clean_app).configured_port;
+        let blueprint_default_port = if runtime_port > 0 {
+            runtime_port
+        } else {
+            af_services::get_blueprint(&clean_app)
+                .map(|blueprint| blueprint.default_port)
+                .unwrap_or(0)
+        };
+
+        let now = Utc::now();
+        let cfg = match resolve_patched_ingress_config(
+            &clean_app,
+            &req,
+            existing.as_ref(),
+            blueprint_default_port,
+            now,
+        ) {
+            Ok(cfg) => cfg,
+            Err((status, code, msg)) => return Ok(api_error(status, code, msg)),
+        };
+        if let Err(e) = af_db::set_app_ingress_config(&cfg) {
+            return Ok(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
-                error.to_string(),
-            )
+                e.to_string(),
+            ));
         }
-    };
-    let runtime_port = af_services::mutators::get_app_runtime_meta(&clean_app).configured_port;
-    let blueprint_default_port = if runtime_port > 0 {
-        runtime_port
-    } else {
-        af_services::get_blueprint(&clean_app)
-            .map(|blueprint| blueprint.default_port)
-            .unwrap_or(0)
-    };
+        af_db::invalidate_ingress_cache();
 
-    let now = Utc::now();
-    let cfg = match resolve_patched_ingress_config(
-        &clean_app,
-        &req,
-        existing.as_ref(),
-        blueprint_default_port,
-        now,
-    ) {
-        Ok(cfg) => cfg,
-        Err((status, code, msg)) => return api_error(status, code, msg),
-    };
-    if let Err(e) = af_db::set_app_ingress_config(&cfg) {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            e.to_string(),
-        );
+        let internal_domain = af_services::get_blueprint(&clean_app)
+            .map(|bp| bp.internal_domain)
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| format!("{}.aether.local", clean_app));
+        if let Err(error) = af_services::mutators::sync_apache_app_vhost(
+            &cfg.app_name,
+            cfg.listen_port,
+            &internal_domain,
+            &cfg.public_domain,
+            cfg.external_access_enabled,
+        ) {
+            tracing::warn!(app = %cfg.app_name, detail = %error, "Apache vhost sync skipped or failed during ingress update");
+        }
+        if cfg.tls_enabled {
+            af_services::mutators::trigger_apache_cert_sync().await;
+        }
+        let mut dns_domains = vec![internal_domain];
+        if !cfg.public_domain.is_empty() && !dns_domains.contains(&cfg.public_domain) {
+            dns_domains.push(cfg.public_domain.clone());
+        }
+        let _ = af_services::mutators::sync_local_dns_domains(&dns_domains).await;
+        let _ = af_services::mutators::sync_network_dns_providers().await;
+
+        Ok(Json(serde_json::json!({
+            "message": "Ingress configuration updated successfully",
+            "config": cfg,
+        }))
+        .into_response())
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => blueprint_sync_failure_response(&error),
     }
-    af_db::invalidate_ingress_cache();
-
-    let internal_domain = af_services::get_blueprint(&clean_app)
-        .map(|bp| bp.internal_domain)
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| format!("{}.aether.local", clean_app));
-    let mut dns_domains = vec![internal_domain];
-    if !cfg.public_domain.is_empty() && !dns_domains.contains(&cfg.public_domain) {
-        dns_domains.push(cfg.public_domain.clone());
-    }
-    let _ = af_services::mutators::sync_local_dns_domains(&dns_domains).await;
-    let _ = af_services::mutators::sync_network_dns_providers().await;
-
-    Json(serde_json::json!({
-        "message": "Ingress configuration updated successfully",
-        "config": cfg,
-    }))
-    .into_response()
 }
 
 async fn get_notification_rules() -> Json<serde_json::Value> {
@@ -4052,8 +4249,163 @@ mod http_lifecycle_regressions;
 mod services_readiness_regressions;
 
 #[cfg(all(test, unix))]
-#[path = "update_error_regressions.rs"]
-mod update_error_regressions;
+mod update_error_regressions {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use std::os::unix::fs::PermissionsExt;
+    use tower::ServiceExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn raw_and_historical_update_diagnostics_never_reach_status_consumers() {
+        let name = "routes::update_error_regressions::raw_and_historical_update_diagnostics_never_reach_status_consumers";
+        if env::var("AF_UPDATE_ERROR_CHILD").as_deref() != Ok(name) {
+            assert!(std::process::Command::new(env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("AF_UPDATE_ERROR_CHILD", name)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        let root = env::temp_dir().join(format!("ue-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        fs::create_dir_all(root.join("install")).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
+        for key in [
+            "AETHERFLOW_FS_ROOT",
+            "AETHERFLOW_CONFIG_ROOT",
+            "AETHERFLOW_RELEASE_ROOT",
+        ] {
+            env::set_var(key, &root);
+        }
+        let db = root.join("fixture.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db);
+        }
+        env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+        env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+        env::set_var("AETHERFLOW_PACKAGES_CONFIG", root.join("packages.json"));
+        env::set_var(
+            "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+            root.join("automation.json"),
+        );
+        env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("bin").display(),
+                env::var("PATH").unwrap()
+            ),
+        );
+        let command = root.join("bin/systemctl");
+        fs::write(
+            &command,
+            "#!/bin/sh\ntest \"$1\" = show || exit 99\nprintf 'ActiveState=active\\nSubState=running\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.join("install/.fixture.lock"), "installed").unwrap();
+        fs::write(
+            root.join("packages.json"),
+            r#"[{"name":"fixture","label":"Fixture","description":"isolated fixture","category":"test","service_type":"systemd","service_name":"fixture","lock_file":"/install/.fixture.lock"}]"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("automation.json"),
+            r#"{"fixture":{"update_source":"command","version_command":["/bin/sh","-c","printf 'SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config' >&2; exit 27"]}}"#,
+        )
+        .unwrap();
+        af_db::init_db().unwrap();
+        af_services::initialize_package_jobs(rusqlite::Connection::open(&db).unwrap()).unwrap();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id,username,role) VALUES(1,'status-viewer','user')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_updates(package_name,installed_version,latest_version,update_available,last_error) VALUES('fixture','1.0','1.1',1,'SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let (token, _) = crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
+        let router = build_router();
+
+        // 1. Unauthenticated /api/v1/public/marketplace redacts update_error completely.
+        let unauth_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/public/marketplace")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_resp.status(), StatusCode::OK);
+        let unauth_body = to_bytes(unauth_resp.into_body(), 1024 * 1024).await.unwrap();
+        let unauth_text = String::from_utf8(unauth_body.to_vec()).unwrap();
+        assert!(!unauth_text.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
+        assert!(!unauth_text.contains("/etc/private/config"));
+        assert!(!unauth_text.contains("Update status could not be confirmed"));
+
+        // 2. Authenticated status consumers receive sanitized public_update_error, never raw diagnostics.
+        for path in ["/api/v1/public/marketplace", "/api/v1/auth/services"] {
+            let request = Request::builder()
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"));
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(
+                !text.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"),
+                "{path}: {text}"
+            );
+            assert!(!text.contains("/etc/private/config"), "{path}: {text}");
+            assert!(
+                text.contains("Update status could not be confirmed"),
+                "{path}: {text}"
+            );
+        }
+        let record = af_services::workers::refresh_package_update_by_id("fixture")
+            .await
+            .unwrap();
+        assert_eq!(
+            record.error,
+            "Installed version could not be confirmed; Latest version could not be confirmed"
+        );
+        let persisted: String = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT last_error FROM app_updates WHERE package_name='fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, record.error);
+        let response = build_single_package_update_response(
+            "fixture",
+            Some(af_services::workers::PackageUpdateRecord {
+                error: "SYNTHETIC_PRIVATE_DIAGNOSTIC".into(),
+                ..record
+            }),
+        );
+        assert_eq!(
+            response["last_error"],
+            "Update status could not be confirmed"
+        );
+        assert!(!response
+            .to_string()
+            .contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -4662,6 +5014,32 @@ mod tests {
             both.kind,
             af_services::PackageJobFailure::ConfigurationAndServiceRestore
         );
+
+        let reinstall_restored = Arc::new(Mutex::new(Vec::new()));
+        let reinstall_restore_handle = Arc::clone(&reinstall_restored);
+        finalize_post_script_lifecycle_with(
+            "install",
+            "radarr",
+            7878,
+            vec!["radarr".into()],
+            "example.com",
+            |_| Ok(None),
+            |_| Ok(()),
+            move |unit, action| {
+                reinstall_restore_handle
+                    .lock()
+                    .unwrap()
+                    .push(format!("{action} {unit}"));
+                async { Ok(()) }
+            },
+            |_| async {},
+        )
+        .await
+        .expect("in-place reinstall must restart pre-stopped units");
+        assert_eq!(
+            *reinstall_restored.lock().unwrap(),
+            vec!["start radarr".to_string()]
+        );
     }
 
     #[test]
@@ -5081,6 +5459,23 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn short_test_socket_path(filename: &str) -> std::path::PathBuf {
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            if !tmpdir.is_empty() {
+                let candidate = std::path::PathBuf::from(tmpdir).join(filename);
+                if candidate.as_os_str().len() < 95 {
+                    return candidate;
+                }
+            }
+        }
+        let candidate = std::env::temp_dir().join(filename);
+        if candidate.as_os_str().len() < 95 {
+            candidate
+        } else {
+            std::path::PathBuf::from("/tmp").join(filename)
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn package_admission_reconciles_dead_same_package_before_catalog_validation() {
         if crate::plugins::tests::run_plugin_test_in_subprocess() {
@@ -5103,10 +5498,10 @@ mod tests {
         std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", automation);
         std::env::set_var(
             "AETHERFLOW_RUNNER_SOCK",
-            format!(
-                "/tmp/afr-{}.sock",
+            short_test_socket_path(&format!(
+                "afr-{}.sock",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]
-            ),
+            )),
         );
         af_db::init_db().unwrap();
         let scripts = root.join("packages/package/install");
@@ -5351,8 +5746,10 @@ mod tests {
             return;
         }
         let (root, _connection) = lifecycle_status_fixture();
-        let socket =
-            std::env::temp_dir().join(format!("c-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]));
+        let socket = short_test_socket_path(&format!(
+            "c-{}.sock",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        ));
         std::env::set_var("AETHERFLOW_RUNNER_SOCK", &socket);
         let guard = af_runner::acquire_lifecycle_admission_lock(Some(&root)).unwrap();
         let request = |name: &str| {
@@ -5489,6 +5886,83 @@ mod tests {
             .unwrap();
             assert_eq!(stopped, expected);
         }
+    }
+
+    #[test]
+    fn test_port_reservation_lookup_failure_fails_closed() {
+        let port_when_reserved_err = allocate_or_resolve_app_port_with(
+            "sonarr",
+            8989,
+            |_| Ok(None),
+            |_| Err(anyhow::anyhow!("sqlite busy or unavailable")),
+        );
+        assert_eq!(
+            port_when_reserved_err, 0,
+            "reserved-port query failure must return 0 instead of handing out default port"
+        );
+
+        let port_when_existing_err = allocate_or_resolve_app_port_with(
+            "sonarr",
+            8989,
+            |_| Err(anyhow::anyhow!("sqlite busy or unavailable")),
+            |_| Ok(std::collections::BTreeSet::new()),
+        );
+        assert_eq!(
+            port_when_existing_err, 0,
+            "existing ingress lookup failure must return 0 instead of falling through"
+        );
+
+        let resolved = resolve_package_lifecycle_port_with(
+            "install",
+            "sonarr",
+            8989,
+            |_| 0,
+            |_| Ok(None),
+            |app, def| {
+                allocate_or_resolve_app_port_with(
+                    app,
+                    def,
+                    |_| Ok(None),
+                    |_| Err(anyhow::anyhow!("sqlite busy or unavailable")),
+                )
+            },
+        );
+        assert!(
+            resolved.is_err(),
+            "resolve_package_lifecycle_port_with must fail closed when reserved-port lookup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_rollback_refuses_to_restart_pre_stopped_units_in_api() {
+        let restarted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let restarted_clone = restarted.clone();
+        let stopped = vec!["sonarr".to_string(), "sonarr.timer".to_string()];
+        let (kind, msg) = restore_pre_stopped_units_after_installer_failure_with(
+            "sonarr",
+            &stopped,
+            "Package update failed; incomplete rollback: recovery backup preserved at /var/lib/sonarr.bak",
+            move |unit, action| {
+                let restarted_clone = restarted_clone.clone();
+                async move {
+                    restarted_clone
+                        .lock()
+                        .unwrap()
+                        .push(format!("{action} {unit}"));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert_eq!(kind, af_services::PackageJobFailure::ServiceRestore);
+        assert!(
+            msg.contains("Refusing to restart pre-stopped service after incomplete rollback"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            restarted.lock().unwrap().is_empty(),
+            "pre-stopped units must NOT be started when rollback is incomplete"
+        );
     }
 }
 
@@ -5712,5 +6186,39 @@ mod hillclimb_tests {
                 .unwrap();
             assert_eq!(stored, "http://localhost:1234");
         }
+    }
+
+    #[tokio::test]
+    async fn afmp003_allocate_or_resolve_app_port_skips_ports_persisted_for_stopped_apps() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
+        drop(conn);
+
+        // Persist Sonarr's default port (8989) and fallback port 17000 as owned by other stopped apps
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "stopped-owner-default".into(),
+            listen_port: 8989,
+            ..Default::default()
+        })
+        .unwrap();
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "stopped-owner-fallback".into(),
+            listen_port: 17000,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let allocated = allocate_or_resolve_app_port("sonarr", 8989);
+        assert_ne!(allocated, 8989, "must not steal stopped app's persisted default port");
+        assert_ne!(allocated, 17000, "must not steal stopped app's persisted fallback port");
+        assert!(
+            (17001..=19999).contains(&allocated),
+            "expected fallback port >= 17001, got {allocated}"
+        );
     }
 }

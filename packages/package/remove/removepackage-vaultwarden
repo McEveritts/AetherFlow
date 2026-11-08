@@ -26,13 +26,15 @@ report_progress 25 "Stopping and removing vaultwarden.service..."
 purge_systemd_unit "vaultwarden"
 
 report_progress 65 "Removing Vaultwarden binaries, database, config, and user account..."
+safe_rm_rf /opt/vaultwarden
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/vaultwarden /var/lib/vaultwarden /etc/vaultwarden
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/vaultwarden"
+    safe_rm_rf /var/lib/vaultwarden /etc/vaultwarden
 fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -f /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+    purge_system_user "vaultwarden"
 fi
-purge_system_user "vaultwarden"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

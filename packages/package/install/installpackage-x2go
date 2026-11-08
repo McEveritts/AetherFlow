@@ -25,6 +25,10 @@ DATA_DIR="/var/lib/x2go"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
+PACKAGE_NAME="${PACKAGE_NAME:-x2go}"
+begin_state_transaction "x2goserver.service" "0" "/" "/var/lib/x2go" "/etc/x2go" "/etc/systemd/system/x2goserver.service" "/usr/bin/x2gostartagent" "/usr/bin/x2goruncommand" "/usr/sbin/x2gocleansessions" "/usr/lib/x2go" "/usr/share/x2go"
+
+prepare_apt_package_transaction /var/lib/x2go/.af-version x2goserver x2goserver-xsession
 log_info "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
 report_progress 15 "Preparing ${APP_NAME} installation..."
 
@@ -40,12 +44,16 @@ if command -v x2godbadmin >/dev/null 2>&1; then
 fi
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
-echo "${INSTALLED_VER}" > "${DATA_DIR}/.af-version"
+queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting x2goserver.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now x2goserver.service >> "$LOGFILE" 2>&1
 
+systemctl restart x2goserver >> "$LOGFILE" 2>&1
+systemctl is-active --quiet x2goserver
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} remote desktop server installed and ready over SSH"
 log_info "${PACKAGE_NAME} installation complete."

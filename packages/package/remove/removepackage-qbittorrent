@@ -33,11 +33,12 @@ DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing qBittorrent state directories and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/qbittorrent
+    safe_rm_rf /var/lib/qbittorrent /etc/qbittorrent
+    purge_system_user "qbittorrent"
 fi
-purge_system_user "qbittorrent"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/qbittorrent/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "qBittorrent removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

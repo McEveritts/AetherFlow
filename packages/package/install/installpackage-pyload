@@ -49,7 +49,49 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
 fi
 mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/settings" "${DATA_DIR}/Downloads"
 
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_PATHS=("/opt/pyload" "/var/lib/pyload" "/etc/systemd/system/pyload.service")
+RUNTIME_HAD_PREVIOUS=false
+RUNTIME_MUTATED=0
+[[ ! -e "/opt/pyload" ]] || RUNTIME_HAD_PREVIOUS=true
+rollback_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback pyload || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+            systemctl restart pyload >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$RUNTIME_HAD_PREVIOUS" == true || -f /etc/systemd/system/pyload.service ]] || systemctl is-active --quiet pyload 2>/dev/null; then
+    stop_systemd_unit pyload
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
 report_progress 50 "Creating Python virtualenv and installing pyload-ng..."
+RUNTIME_MUTATED=1
 if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
     python3 -m venv "${INSTALL_DIR}/.venv" >> "$LOGFILE" 2>&1
 fi
@@ -58,7 +100,7 @@ fi
     "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng >> "$LOGFILE" 2>&1
 
 PYLOAD_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || echo '0.5.0')"
-echo "${PYLOAD_VER}" > "${INSTALL_DIR}/.af-version"
+queue_app_version "${INSTALL_DIR}/.af-version" "${PYLOAD_VER}"
 
 report_progress 75 "Configuring ${APP_NAME} Web UI settings on port ${APP_PORT}..."
 if [[ ! -f "${DATA_DIR}/settings/pyload.cfg" ]]; then
@@ -72,18 +114,17 @@ webui - "Web Interface":
 	bool autologin : "Skip login if single user" = False
 	bool develop : "Development mode" = False
 	bool enabled : "Activated" = True
-	ip host : "IP address" = 0.0.0.0
+	ip host : "IP address" = 127.0.0.1
 	int port : "Port" = ${APP_PORT}
 	str prefix : "Path prefix" =
 	str theme : "Theme" = modern
 	bool use_ssl : "Use HTTPS" = False
 EOF
 else
-    sed -i "s|int port : \"Port\" = .*|int port : \"Port\" = ${APP_PORT}|" "${DATA_DIR}/settings/pyload.cfg" || true
-    sed -i "s|ip host : \"IP address\" = .*|ip host : \"IP address\" = 0.0.0.0|" "${DATA_DIR}/settings/pyload.cfg" || true
+    set_config_value "${DATA_DIR}/settings/pyload.cfg" ini 'int port : "Port"' "$APP_PORT"
 fi
 
-chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -109,6 +150,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now pyload.service >> "$LOGFILE" 2>&1
 
+systemctl restart pyload >> "$LOGFILE" 2>&1
+systemctl is-active --quiet pyload
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

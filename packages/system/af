@@ -1,5 +1,14 @@
 #!/bin/bash
 set -euo pipefail
+for CLI_BIN in "${AETHERFLOW_CLI_BIN:-}" /usr/local/bin/af-cli /opt/AetherFlow/bin/af-cli; do
+  if [[ -n "$CLI_BIN" && -x "$CLI_BIN" && ! "$CLI_BIN" -ef "$0" ]]; then
+    exec "$CLI_BIN" "$@"
+  fi
+done
+if [[ "${AETHERFLOW_USE_RUNNER:-0}" == 1 ]]; then
+  printf 'The authoritative af-cli is required but is not installed.\n' >&2
+  exit 1
+fi
 for COMMON_SH in /opt/AetherFlow/current/packages/common.sh /opt/AetherFlow/packages/common.sh /usr/local/bin/AetherFlow/common.sh; do
   if [[ -f "${COMMON_SH}" ]]; then
     source "${COMMON_SH}"
@@ -10,6 +19,11 @@ if [[ ! -f "${COMMON_SH}" ]]; then
   printf 'Unable to locate AetherFlow common.sh\n' >&2
   exit 1
 fi
+mkdir -p /opt/AetherFlow/logs
+validate_config_paths /opt/AetherFlow/logs/maintenance.lock
+exec 200>>/opt/AetherFlow/logs/maintenance.lock
+export AF_MAINTENANCE_GUARD_FD=200
+flock -n 200 || { printf 'Another AetherFlow maintenance operation is running.\n' >&2; exit 1; }
 
 package_roots=(/opt/AetherFlow/current/packages/package /opt/AetherFlow/packages/package /usr/local/bin/AetherFlow/package)
 package_root() {
@@ -24,6 +38,7 @@ package_root() {
 }
 package_script() {
   local root
+  [[ "$2" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
   for root in "${package_roots[@]}"; do
     if [[ -f "${root}/$1/$1package-$2" ]]; then
       printf '%s\n' "${root}/$1/$1package-$2"
@@ -74,7 +89,7 @@ function _function() {
 
 function _install() {
   installa=()
-  mapfile -t locks < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+  mapfile -t locks < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -85,7 +100,7 @@ function _install() {
   local results_file
   results_file="$(mktemp)"
 	whiptail --title "Install Software" --checklist --noitem --separate-output "Make some choices:" 15 26 7 "${installa[@]}" 2>"${results_file}"
-  readarray packages < "${results_file}"
+  readarray -t packages < "${results_file}"
   rm -f "${results_file}"
   for i in "${packages[@]}"; do
     i="${i//\"/}"
@@ -97,7 +112,7 @@ function _install() {
 
 function _remove() {
 removea=()
-mapfile -t locks < <(find "$(package_root remove)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+mapfile -t locks < <(find "$(package_root remove)" -type f -name 'removepackage-*' -printf "%f\n" | sed 's/^removepackage-//' | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
   if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -108,47 +123,74 @@ done
 local results_file
 results_file="$(mktemp)"
 whiptail --title "Remove Software" --noitem --checklist --separate-output "Make some choices:" 15 26 7 "${removea[@]}" 2>"${results_file}"
-readarray packages < "${results_file}"
+readarray -t packages < "${results_file}"
 rm -f "${results_file}"
 for i in "${packages[@]}"; do
   i="${i//\"/}"
   echo -e "Removing $i "
-  bash "$(package_script remove "$i")"
+  AF_LIFECYCLE_ACTION=remove AF_PACKAGE_ACTION=remove DELETE_DATA=false bash "$(package_script remove "$i")"
 done
 _function
 }
 
 function _cli() {
-  arg=("$@")
-  packages=("${arg[@]:1}")
-  mapfile -t repo < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2)
-  for i in "${packages[@]}"; do
-    app=${i}
-    if [[ $i == autodl ]]; then app=autodlirssi; fi
-    if [[ -f /install/.${app}.lock ]]; then
-      echo -e "Package $i already installed"
+  local action="$1" package app script
+  shift
+  for package in "$@"; do
+    if ! package_script install "$package" >/dev/null; then
+      printf 'Package %s not found\n' "$package" >&2
+      return 1
+    fi
+    app="$package"
+    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
+    if [[ "$action" == update && ! -f /etc/Swizzin/.${app}.lock && ! -f /install/.${app}.lock ]]; then
+      printf 'Package %s not installed; cannot update\n' "$package" >&2
+      return 1
+    fi
+  done
+  export AF_LIFECYCLE_ACTION="$action" AF_PACKAGE_ACTION="$action"
+  if [[ "$action" == update || "$action" == reinstall ]]; then
+    export AF_KEEP_EXISTING_SECRETS=1
+  fi
+  for package in "$@"; do
+    app="$package"
+    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
+    if [[ -f /install/.${app}.lock && "$action" == install ]]; then
+      printf 'Package %s already installed\n' "$package"
     else
-      if printf '%s\n' "${repo[@]}" | grep -Fxq "$i"; then
-        echo -e "Installing $i "
-        bash "$(package_script install "$i")"
-      else
-        echo -e "Package $i not found"
-      fi
+      script="$(package_script install "$package")" || return 1
+      printf 'Installing %s\n' "$package"
+      bash "$script" || return $?
     fi
   done
 }
 
 function _clr() {
-  arg=("$@")
-  packages=("${arg[@]:1}")
-  for i in "${packages[@]}"; do
-    app=${i}
-    if [[ $i == autodl ]]; then app=autodlirssi; fi
-    if [[ -f /install/.$app.lock ]]; then
-      echo -e "Removing $i "
-      bash "$(package_script remove "$i")"
+  local package app script purge=false
+  local -a packages=()
+  shift
+  for package in "$@"; do
+    if [[ "$package" == --purge ]]; then purge=true; else packages+=("$package"); fi
+  done
+  [[ "${#packages[@]}" -gt 0 ]] || { printf 'Choose a package to remove\n' >&2; return 1; }
+  set -- "${packages[@]}"
+  for package in "$@"; do
+    if ! package_script remove "$package" >/dev/null; then
+      printf 'Package %s not found\n' "$package" >&2
+      return 1
+    fi
+  done
+  export AF_LIFECYCLE_ACTION=remove AF_PACKAGE_ACTION=remove DELETE_DATA="$purge"
+  for package in "$@"; do
+    app="$package"
+    if [[ "$package" == autodl ]]; then app=autodlirssi; fi
+    if [[ -f /etc/Swizzin/.$app.lock || -f /install/.$app.lock ]]; then
+      script="$(package_script remove "$package")" || return 1
+      printf 'Removing %s\n' "$package"
+      bash "$script" || return $?
     else
-      echo -e "Package $i not installed"
+      printf 'Package %s not installed\n' "$package" >&2
+      return 1
     fi
   done
 }
@@ -203,10 +245,10 @@ function _help() {
   sgformat="${bold}%-15s${normal}"
   spacing=$(echo $'\t' | pr -Te15)
 
-  echo -e "Usage: $(basename "$0") [ install | remove ] ${bold}pkg1 pkg2 [...]${normal}\n"
-  echo -e "       $(basename "$0") [ list | update | upgrade ]\n"
+  echo -e "Usage: $(basename "$0") [ install | reinstall | update | remove ] ${bold}pkg1 pkg2 [...]${normal}\n"
+  echo -e "       $(basename "$0") [ list | self-update | update | upgrade ]\n"
   echo -e "       $(basename "$0")\n"
-  echo -e "Note: Only install and remove functions accept package arguments. List and update must be run without modifiers\n" | fmt --goal=66 --tagged-paragraph
+  echo -e "Note: Bare update and self-update update the repository; update with package names updates those packages.\n" | fmt --goal=66 --tagged-paragraph
   echo -e "\n"
   printf "${sgformat}" "install"
   echo -e "The install function requires at least one package name as an argument but will accept multiples\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
@@ -215,7 +257,11 @@ function _help() {
   echo -e "The remove function requires at least one package name as an argument but will accept multiples\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   echo -e "               Example: af remove quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "update"
-  echo -e "The update command will update your local AetherFlow repository to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "Update named packages, or update the local repository when no packages are given\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  printf "${sgformat}" "reinstall"
+  echo -e "Reinstall named packages while retaining existing secrets\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  printf "${sgformat}" "self-update"
+  echo -e "Update the local AetherFlow repository without package arguments\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "upgrade"
   echo -e "The upgrade command will update your local AetherFlow installation to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "list"
@@ -223,7 +269,7 @@ function _help() {
 }
 
 function _list() {
-  mapfile -t repo < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+  mapfile -t repo < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | sort -d)
   for i in "${repo[@]}"; do
     app=$i
     sgformat="${bold}%-15s${normal}"
@@ -239,23 +285,32 @@ function _list() {
   done
 }
 
-normal=$(tput sgr0)
-yellow=$(tput setaf 3)
-bold=$(tput bold)
+normal=""
+yellow=""
+bold=""
+if [[ -t 1 && -n "${TERM:-}" && "$TERM" != dumb ]]; then
+  normal=$(tput sgr0 2>/dev/null || true)
+  yellow=$(tput setaf 3 2>/dev/null || true)
+  bold=$(tput bold 2>/dev/null || true)
+fi
 if [[ -z "${1:-}" ]]; then
   _intro
   _function
   exit 0
 fi
-if [[ "$1" == "-h" ]]; then
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   _help "$0"
   exit 0
 fi
-if [[ ! "${1}" =~ ("install"|"list"|"remove"|"update"|"upgrade") ]]; then
+if [[ ! "$1" =~ ^(install|remove|uninstall|update|reinstall|self-update|list|upgrade)$ ]]; then
   echo "Error: $1 invalid command"
-  exit 0
+  exit 1
 fi
-if [[ $1 == update ]]; then
+if [[ "$1" =~ ^(self-update|list|upgrade)$ && "$#" -gt 1 ]]; then
+  printf 'Error: %s does not accept package arguments\n' "$1" >&2
+  exit 1
+fi
+if [[ "$1" == self-update || ( "$1" == update && "$#" -eq 1 ) ]]; then
   _updateaf
   exit 0
 fi
@@ -288,13 +343,13 @@ if [[ $1 == list ]]; then
 fi
 if [[ -n "${1:-}" ]] && [[ -z "${2:-}" ]]; then
   echo "Error: You must choose some packages"
-  exit 0
+  exit 1
 fi
-if [[ $1 == install ]]; then
+if [[ "$1" =~ ^(install|reinstall|update)$ ]]; then
   _cli "$@"
   exit 0
 fi
-if [[ $1 == remove ]]; then
+if [[ $1 == remove || $1 == uninstall ]]; then
   _clr "$@"
   exit 0
 fi

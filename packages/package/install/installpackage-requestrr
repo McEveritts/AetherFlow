@@ -60,6 +60,10 @@ esac
 report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
 RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/thomst08/requestrr/releases/latest 2>/dev/null || true)"
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
+if [[ -z "${LATEST_TAG}" ]]; then
+    print_error "Failed to discover latest GitHub release for thomst08/requestrr"
+    exit 1
+fi
 ASSET_URL="$(echo "${RELEASE_JSON}" | jq -r --arg name "requestrr-${R_ARCH}.tar.gz" '.assets[]? | select(.name == $name) | .browser_download_url' | head -n1 || true)"
 
 if [[ -z "${ASSET_URL}" ]]; then
@@ -74,22 +78,26 @@ fi
 TMP_TAR="$(mktemp --suffix=.tar.gz)"
 TMP_EXTRACT="$(mktemp -d)"
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-wget -qO "${TMP_TAR}" "${ASSET_URL}" >> "$LOGFILE" 2>&1 || curl -fsSL -o "${TMP_TAR}" "${ASSET_URL}" >> "$LOGFILE" 2>&1
+download_file "${ASSET_URL}" "${TMP_TAR}" >> "$LOGFILE" 2>&1
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
 tar -xzf "${TMP_TAR}" -C "${TMP_EXTRACT}" >> "$LOGFILE" 2>&1
 rm -f "${TMP_TAR}"
 
-if [[ -f "${TMP_EXTRACT}/Requestrr.WebApi" ]]; then
-    cp -a "${TMP_EXTRACT}/." "${INSTALL_DIR}/"
-else
+if [[ ! -f "${TMP_EXTRACT}/Requestrr.WebApi" ]]; then
     SUBDIR="$(find "${TMP_EXTRACT}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
     if [[ -n "${SUBDIR}" ]]; then
-        cp -a "${SUBDIR}/." "${INSTALL_DIR}/"
+        RELEASE_DIR="$SUBDIR"
     fi
 fi
-rm -rf "${TMP_EXTRACT}"
+RELEASE_DIR="${RELEASE_DIR:-$TMP_EXTRACT}"
+chmod +x "$RELEASE_DIR/Requestrr.WebApi"
+stage_app_archive "$RELEASE_DIR" "$INSTALL_DIR" Requestrr.WebApi "$DATA_DIR" "$PACKAGE_NAME" "."
+[[ "$RELEASE_DIR" == "$TMP_EXTRACT" ]] || rm -rf -- "$TMP_EXTRACT"
 
+if [[ -d "$AF_ARCHIVE_BACKUP/app/config" && ! -L "$AF_ARCHIVE_BACKUP/app/config" ]]; then
+    cp -an -- "$AF_ARCHIVE_BACKUP/app/config/." "${DATA_DIR}/config/"
+fi
 if [[ -d "${INSTALL_DIR}/config" && ! -L "${INSTALL_DIR}/config" ]]; then
     cp -rn "${INSTALL_DIR}/config/." "${DATA_DIR}/config/" 2>/dev/null || true
     rm -rf "${INSTALL_DIR}/config"
@@ -97,14 +105,13 @@ fi
 ln -sfn "${DATA_DIR}/config" "${INSTALL_DIR}/config"
 
 if [[ -f "${DATA_DIR}/config/settings.json" ]]; then
-    jq --argjson port "${APP_PORT}" '.Port = $port' "${DATA_DIR}/config/settings.json" > "${DATA_DIR}/config/settings.json.tmp" && \
-        mv "${DATA_DIR}/config/settings.json.tmp" "${DATA_DIR}/config/settings.json" || true
+    set_config_value "${DATA_DIR}/config/settings.json" json Port "$APP_PORT"
 fi
 
 chmod +x "${INSTALL_DIR}/Requestrr.WebApi"
 CLEAN_VER="${LATEST_TAG#[vV]}"
-echo "${CLEAN_VER}" > "${INSTALL_DIR}/.af-version"
-chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+queue_app_version "${INSTALL_DIR}/.af-version" "${CLEAN_VER}"
+chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -131,7 +138,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now requestrr.service >> "$LOGFILE" 2>&1
+systemctl restart requestrr.service >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

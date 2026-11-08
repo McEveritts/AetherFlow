@@ -78,10 +78,9 @@ pub async fn output(
                     return;
                 }
             }
-            let _ = send.send(result);
-        } else {
-            let _ = send.send(result);
         }
+        drop(_command);
+        let _ = send.send(result);
     });
     receive
         .await
@@ -185,6 +184,40 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_commands_release_inherited_locks_before_returning() {
+        let test = "bounded_command::tests::completed_commands_release_inherited_locks_before_returning";
+        if std::env::var("AF_COMPLETED_COMMAND_TEST_CHILD").as_deref() != Ok(test) {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env("AF_COMPLETED_COMMAND_TEST_CHILD", test)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("af-command-release-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let lock = root.join("maintenance.lock");
+        for iteration in 0..256 {
+            let guard = af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO).unwrap();
+            let mut command = shell(if iteration % 2 == 0 { "exit 0" } else { "exit 7" });
+            guard.preserve_in_child(command.as_std_mut()).unwrap();
+            drop(guard);
+            let result = output(command, Duration::from_secs(2), 1024).await.unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(if iteration % 2 == 0 { 0 } else { 7 })
+            );
+            let released = af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO);
+            assert!(
+                released.is_ok(),
+                "completed command retained its lock: {released:?}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

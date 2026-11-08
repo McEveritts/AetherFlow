@@ -23,6 +23,65 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+BUILD_DIR=""
+TMP_ZIP=""
+BACKUP_DIR=""
+APP_MOVED=false
+APP_ACTIVATED=false
+VENV_BUILDING=false
+SERVICE_STOPPED=false
+WAS_RUNNABLE=false
+ORIGINAL_APP=false
+SNAPSHOT_READY=false
+[[ ! -d /opt/bazarr ]] || ORIGINAL_APP=true
+if [[ -f /etc/systemd/system/bazarr.service ]] || systemctl is-active --quiet bazarr.service 2>/dev/null; then
+    WAS_RUNNABLE=true
+fi
+cleanup() {
+    local status=$? restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$SNAPSHOT_READY" == true ]]; then
+        if [[ "$SERVICE_STOPPED" == true || "$APP_ACTIVATED" == true ]]; then
+            quiesce_services_for_rollback bazarr.service || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
+        fi
+        if [[ "$APP_ACTIVATED" == true ]]; then
+            rm -rf /opt/bazarr || restore_failed=true
+        elif [[ "$VENV_BUILDING" == true ]]; then
+            rm -rf /opt/bazarr/.venv || restore_failed=true
+        fi
+        if [[ "$APP_MOVED" == true ]]; then
+            mv -T "$BACKUP_DIR/app" /opt/bazarr || restore_failed=true
+        fi
+        if [[ -e "$BACKUP_DIR/venv" || -L "$BACKUP_DIR/venv" ]]; then
+            mv -T "$BACKUP_DIR/venv" /opt/bazarr/.venv || restore_failed=true
+        fi
+        if [[ "$ORIGINAL_APP" != true && "$APP_MOVED" != true ]]; then
+            rmdir /opt/bazarr 2>/dev/null
+        fi
+        if [[ -f "$BACKUP_DIR/bazarr.service" ]]; then
+            safe_restore_path_from_backup "$BACKUP_DIR/bazarr.service" /etc/systemd/system/bazarr.service || restore_failed=true
+        else
+            systemctl disable bazarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            rm -f /etc/systemd/system/bazarr.service || restore_failed=true
+        fi
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true && "$SERVICE_STOPPED" == true ]]; then
+            systemctl start bazarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
+    [[ -z "$TMP_ZIP" ]] || rm -f -- "$TMP_ZIP"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python and build dependencies for Bazarr..."
 
@@ -33,26 +92,57 @@ if ! id -u bazarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/bazarr --shell /usr/sbin/nologin bazarr
 fi
 
-mkdir -p /opt/bazarr /var/lib/bazarr
+mkdir -p /opt /var/lib/bazarr /var/backups
 
 report_progress 30 "Downloading official Bazarr release bundle..."
 BAZARR_VERSION="$(github_latest_tag "morpheus65535/bazarr" "1.5.1")"
 BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
 
 TMP_ZIP=$(mktemp /tmp/bazarr-XXXXXX.zip)
-curl -fsSL "$BAZARR_URL" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
+download_file "$BAZARR_URL" "$TMP_ZIP" >> "$LOGFILE" 2>&1
 
 report_progress 55 "Extracting Bazarr and creating isolated Python virtualenv..."
-unzip -qo "$TMP_ZIP" -d /opt/bazarr >> "$LOGFILE" 2>&1
+BUILD_DIR="$(mktemp -d /opt/.bazarr-build.XXXXXX)"
+chmod 755 "$BUILD_DIR"
+unzip -qo "$TMP_ZIP" -d "$BUILD_DIR" >> "$LOGFILE" 2>&1
 rm -f "$TMP_ZIP"
+test -s "$BUILD_DIR/bazarr.py"
 
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-bazarr.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/bazarr.service ]]; then
+    cp -a /etc/systemd/system/bazarr.service "$BACKUP_DIR/bazarr.service"
+fi
+SNAPSHOT_READY=true
+stop_systemd_unit bazarr.service
+SERVICE_STOPPED=true
+snapshot_app_state "$BACKUP_DIR" /var/lib/bazarr
+mkdir -p /opt/bazarr
+if [[ "$WAS_RUNNABLE" == true || -e /opt/bazarr/.venv || -L /opt/bazarr/.venv ]]; then
+    stop_systemd_unit bazarr.service
+    SERVICE_STOPPED=true
+fi
+if [[ -e /opt/bazarr/.venv || -L /opt/bazarr/.venv ]]; then
+    mv /opt/bazarr/.venv "$BACKUP_DIR/venv"
+fi
+VENV_BUILDING=true
 python3 -m venv /opt/bazarr/.venv >> "$LOGFILE" 2>&1
 /opt/bazarr/.venv/bin/pip install --upgrade pip wheel setuptools >> "$LOGFILE" 2>&1
-/opt/bazarr/.venv/bin/pip install -r /opt/bazarr/requirements.txt >> "$LOGFILE" 2>&1
+/opt/bazarr/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
 
 if [[ -n "$BAZARR_VERSION" ]]; then
-    printf '%s\n' "${BAZARR_VERSION#v}" > /opt/bazarr/.af-version
+    queue_app_version "/opt/bazarr/.af-version" "${BAZARR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
 fi
+mv /opt/bazarr/.venv "$BUILD_DIR/.venv"
+VENV_BUILDING=false
+mv -T /opt/bazarr "$BACKUP_DIR/app"
+APP_MOVED=true
+if [[ -e "$BACKUP_DIR/venv" || -L "$BACKUP_DIR/venv" ]]; then
+    mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
+fi
+mv -T "$BUILD_DIR" /opt/bazarr
+APP_ACTIVATED=true
+BUILD_DIR=""
 mkdir -p /var/lib/bazarr/config
 if [[ ! -f /var/lib/bazarr/config/config.yaml && ! -f /var/lib/bazarr/config/config.ini ]]; then
     cat <<EOF > /var/lib/bazarr/config/config.yaml
@@ -61,7 +151,7 @@ auth:
   username: ${MASTER_USER}
   password: ${MASTER_HA1}
 general:
-  ip: 0.0.0.0
+  ip: 127.0.0.1
   port: ${APP_PORT}
 EOF
 fi
@@ -71,7 +161,7 @@ else
     set_config_value "/var/lib/bazarr/config/config.yaml" yaml "port" "$APP_PORT" "general"
 fi
 
-chown -R bazarr:bazarr /opt/bazarr /var/lib/bazarr
+chown -hRP bazarr:bazarr /opt/bazarr /var/lib/bazarr
 
 report_progress 85 "Configuring and starting bazarr.service..."
 cat <<'EOF' > /etc/systemd/system/bazarr.service
@@ -100,7 +190,12 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now bazarr >> "$LOGFILE" 2>&1
 systemctl restart bazarr >> "$LOGFILE" 2>&1
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+wait_for_service_ready "bazarr.service" "$APP_PORT" "$READY_URL"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
+SNAPSHOT_READY=false
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Bazarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

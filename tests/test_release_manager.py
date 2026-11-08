@@ -147,6 +147,22 @@ class ReleaseManagerTests(unittest.TestCase):
         self.write_executable(self.mock / "curl", CURL_MOCK)
         self.write_executable(self.mock / "systemctl", SYSTEMCTL_MOCK)
         self.write_executable(self.mock / "chown", "#!/bin/sh\nexit 0\n")
+        if os.geteuid() != 0:
+            self.write_executable(self.mock / "runuser", r'''#!/usr/bin/python3
+import os
+from pathlib import Path
+import sys
+arguments = sys.argv[1:]
+user = arguments[arguments.index('-u') + 1]
+release = Path(arguments[-1])
+if user == 'nobody':
+    if os.environ.get('TEST_INACCESSIBLE_RELEASE') == '1':
+        sys.exit(1)
+    if any(path.stat().st_mode & 0o005 != 0o005 for path in (release, release.parent)):
+        sys.exit(1)
+inner = arguments[arguments.index('--') + 1:]
+os.execvp(inner[0], inner)
+''')
         self.write_artifact()
 
     def write_executable(self, path, source):
@@ -497,14 +513,23 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertIn("service access verified", result.stdout)
         self.assertLess(result.stdout.index("service access verified"), result.stdout.index("Atomic Symlink Swap"))
 
-    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires root")
     def test_inaccessible_release_aborts_before_swap(self):
         self.prepare_live_units()
+        self.releases.chmod(0o700)
         result = self.run_manager("deploy", "--channel", "stable", TEST_SERVICE_USER="nobody")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing symlink swap", result.stdout)
         self.assertFalse(self.current.exists())
         self.assertNotIn("systemctl restart", self.commands.read_text())
+
+    def test_accessible_release_is_checked_as_different_service_user(self):
+        self.prepare_live_units()
+        self.root.chmod(0o755)
+        self.releases.chmod(0o755)
+        result = self.run_manager("deploy", "--channel", "stable", TEST_SERVICE_USER="nobody")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.current.is_symlink())
+        self.assertIn("service access verified", result.stdout)
 
     def test_stable_tag_falls_back_without_github_api(self):
         result = self.run_manager("deploy", "--dry-run", TEST_API_RATE_LIMITED="1")

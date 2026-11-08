@@ -38,34 +38,39 @@ if [[ -f /etc/systemd/system/overseerr.service ]] || systemctl is-active --quiet
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            systemctl stop overseerr >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback overseerr || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /opt/overseerr "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/overseerr
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/overseerr 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /opt/overseerr 2>/dev/null || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/overseerr.service" ]]; then
-                cp -a "$BACKUP_DIR/overseerr.service" /etc/systemd/system/overseerr.service
+                safe_restore_path_from_backup "$BACKUP_DIR/overseerr.service" /etc/systemd/system/overseerr.service || restore_failed=true
             else
-                systemctl disable overseerr >> "$LOGFILE" 2>&1 || true
-                rm -f /etc/systemd/system/overseerr.service
+                systemctl disable overseerr >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f /etc/systemd/system/overseerr.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start overseerr >> "$LOGFILE" 2>&1 || true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start overseerr >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -74,6 +79,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 log_info "Starting installation for ${PACKAGE_NAME}..."
+print_warn "Overseerr upstream is archived and superseded by Seerr; no new features or major updates are planned. Existing configuration and data are preserved; migration requires an explicit operator decision."
 report_progress 10 "Installing system and Node.js prerequisites for Overseerr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
@@ -99,8 +105,11 @@ fi
 LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 if [[ -n "$LATEST_TAG" ]]; then
     git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
-    printf '%s\n' "${LATEST_TAG#v}" > "$BUILD_DIR/.af-version"
 fi
+
+OVERSEERR_VERSION="$(git_checkout_version "$BUILD_DIR" /opt/overseerr/.af-version)"
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-overseerr.XXXXXX)"
+queue_app_version "/opt/overseerr/.af-version" "${OVERSEERR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
 
 report_progress 55 "Installing Overseerr dependencies and building production bundle..."
 export CYPRESS_INSTALL_BINARY=0
@@ -108,18 +117,20 @@ export CYPRESS_INSTALL_BINARY=0
 (cd "$BUILD_DIR" && node_build yarn build >> "$LOGFILE" 2>&1)
 test -s "$BUILD_DIR/dist/index.js" || { log_error "Failed to verify Overseerr build output"; exit 1; }
 
-chown -R overseerr:overseerr "$BUILD_DIR" /var/lib/overseerr
+chown -hRP overseerr:overseerr "$BUILD_DIR" /var/lib/overseerr
 
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
 report_progress 75 "Backing up existing Overseerr installation and activating new build..."
-BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-overseerr.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+stop_systemd_unit overseerr
+SERVICE_STOPPED=1
+snapshot_app_state "$BACKUP_DIR" /var/lib/overseerr /etc/overseerr
 if [[ -f /etc/systemd/system/overseerr.service ]]; then
     cp -a /etc/systemd/system/overseerr.service "$BACKUP_DIR/overseerr.service"
 fi
 if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-    systemctl stop overseerr >> "$LOGFILE" 2>&1 || true
+    stop_systemd_unit overseerr
     SERVICE_STOPPED=1
 fi
 if [[ -d /opt/overseerr ]]; then
@@ -158,20 +169,12 @@ UNIT_WRITTEN=1
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now overseerr >> "$LOGFILE" 2>&1
 
-HEALTHY=0
-for attempt in {1..20}; do
-    if systemctl is-active --quiet overseerr; then
-        HEALTHY=1
-        break
-    fi
-    sleep 1
-done
-if [[ "$HEALTHY" -ne 1 ]]; then
-    log_error "Overseerr service did not become active; rolling back."
-    exit 1
-fi
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+wait_for_service_ready "overseerr.service" "$APP_PORT" "$READY_URL"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Overseerr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

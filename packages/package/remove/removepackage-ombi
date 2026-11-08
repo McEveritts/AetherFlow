@@ -27,11 +27,12 @@ purge_systemd_unit "ombi"
 rm -f /etc/apt/sources.list.d/ombi.list
 
 report_progress 65 "Removing Ombi binaries, storage directories, and user account..."
-rm -rf /opt/Ombi
+safe_rm_rf /opt/Ombi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/Ombi /var/lib/ombi
+    safe_rm_rf /etc/Ombi /var/lib/ombi
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Ombi"
+    purge_system_user "ombi"
 fi
-purge_system_user "ombi"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

@@ -10,7 +10,10 @@ import tarfile
 import tempfile
 import unittest
 
-from installer_test_helpers import common_functions
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import installer_common_functions as common_functions
+from installer_test_helpers import replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +104,8 @@ github_latest_tag() { printf '%s\\n' "${TEST_TAG-v3.5.1}"; }
 write_lock() { touch "$TEST_ROOT/completed"; }
 ''')
         with common.open("a") as output:
-            output.write(common_functions("node_build"))
+            output.write(replace_paths_once(common_functions("node_build", "write_app_version"),
+                                           (("/var/backups/", str(self.root) + "/var/backups/"),)))
         for command in ("apt-get", "chown", "id", "sleep", "git", "node", "npm", "pnpm", "curl", "systemctl"):
             executable = self.root / "mock-bin" / command
             executable.write_text(MOCK_COMMAND)
@@ -154,6 +158,8 @@ write_lock() { touch "$TEST_ROOT/completed"; }
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "app/.af-version").read_text(), "2.7.3\n")
         self.assertTrue((backups[0] / "data.tar.gz").exists())
+        self.assertEqual((backups[0] / ".af-successful-backup").read_text(),
+                         "aetherflow completed backup v1\njellyseerr\n")
         self.assertTrue((self.root / "completed").exists())
         self.assertEqual(list((self.root / "opt").glob(".jellyseerr-build.*")), [])
 

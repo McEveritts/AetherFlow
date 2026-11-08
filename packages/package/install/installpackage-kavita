@@ -23,6 +23,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+ADMIN_RETAINED=0
+for database in /opt/Kavita/config/*.db /var/lib/kavita/*.db; do
+    [[ ! -s "$database" ]] || ADMIN_RETAINED=1
+done
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system runtime dependencies for Kavita..."
 
@@ -49,17 +53,17 @@ KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/k
 
 report_progress 60 "Downloading and extracting Kavita ${KAV_VERSION}..."
 TMP_TAR=$(mktemp /tmp/kavita-XXXXXX.tar.gz)
-curl -fsSL "$KAV_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$KAV_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 BUILD_DIR="$(mktemp -d /opt/.kavita-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"; rm -f "$TMP_TAR"' EXIT
 tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
 [[ -s "$BUILD_DIR/Kavita" ]]
-systemctl stop kavita >> "$LOGFILE" 2>&1 || true
-replace_app_tree "$BUILD_DIR" /opt/Kavita config
+chmod 755 "$BUILD_DIR/Kavita"
+stage_app_archive "$BUILD_DIR" /opt/Kavita Kavita "" "$PACKAGE_NAME" "." "" preserve
 BUILD_DIR=""
 rm -f "$TMP_TAR"
 chmod +x /opt/Kavita/Kavita
-printf '%s\n' "${KAV_VERSION#v}" > /opt/Kavita/.af-version
+queue_app_version /opt/Kavita/.af-version "${KAV_VERSION#v}"
 
 for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json; do
     if [[ -f "$kav_cfg" ]]; then
@@ -67,10 +71,11 @@ for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json;
     fi
 done
 
-chown -R kavita:kavita /opt/Kavita /var/lib/kavita
+chown -hRP kavita:kavita /opt/Kavita /var/lib/kavita
 
 report_progress 85 "Configuring and starting kavita.service on port ${APP_PORT}..."
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/kavita.service
+KAVITA_BIND_HOST="$(retained_bind_address /etc/systemd/system/kavita.service 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_HOST@/${KAVITA_BIND_HOST}/g" <<'EOF' > /etc/systemd/system/kavita.service
 [Unit]
 Description=Kavita Dedicated Comic and Manga Server
 After=network.target
@@ -80,7 +85,7 @@ User=kavita
 Group=kavita
 Type=simple
 WorkingDirectory=/opt/Kavita
-Environment=ASPNETCORE_URLS=http://0.0.0.0:@AF_APP_PORT@
+Environment=ASPNETCORE_URLS=http://@AF_BIND_HOST@:@AF_APP_PORT@
 ExecStart=/opt/Kavita/Kavita
 Restart=on-failure
 RestartSec=10
@@ -91,10 +96,12 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now kavita >> "$LOGFILE" 2>&1
-python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+systemctl restart kavita >> "$LOGFILE" 2>&1
+verify_systemd_service_active kavita
+AF_BOOTSTRAP_RETAINED="$ADMIN_RETAINED" AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF'
 import os
-import sys, time, json, urllib.request
-user, pw = (sys.argv[1], sys.argv[2])
+import sys, time, json, urllib.request, urllib.error
+user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]
 for _ in range(120):
     try:
         with urllib.request.urlopen('http://127.0.0.1:5002/api/health'.replace('5002', os.environ['AF_APP_PORT']), timeout=3) as r:
@@ -103,15 +110,25 @@ for _ in range(120):
     except Exception:
         time.sleep(1)
 else:
-    print('Kavita is still starting; configure the administrator after startup.', file=sys.stderr)
-    sys.exit(0)
+    sys.exit('Kavita status endpoint did not become ready')
 req = urllib.request.Request('http://127.0.0.1:5002/api/account/register'.replace('5002', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'email': f'{user}@aether.local', 'password': pw}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
 try:
-    urllib.request.urlopen(req, timeout=10).read()
-except Exception as error:
-    print(f'Kavita administrator registration: {error}', file=sys.stderr)
+    with urllib.request.urlopen(req, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            sys.exit('Kavita account initialization failed')
+        response.read()
+except urllib.error.HTTPError as error:
+    detail = error.read(8192).decode('utf-8', errors='replace').lower()
+    retained = os.environ.get('AF_BOOTSTRAP_RETAINED') == '1'
+    exists = 'already' in detail and any(word in detail for word in ('admin', 'user', 'account', 'initializ'))
+    if error.code not in (400, 403, 409) or not (retained or exists):
+        raise
 PYEOF
 
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/health"
+systemctl is-active --quiet kavita
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Kavita installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -23,21 +23,24 @@ exec 9>/run/lock/aetherflow-calibreweb.lock
 flock -n 9 || { log_error "Another Calibre-Web installation is running."; exit 1; }
 
 require_root
+validate_config_paths /var/lib/calibre-web/app.db
 
 if [[ "$APP_PORT" != 8083 ]]; then
     if [[ ! -f /var/lib/calibre-web/app.db ]]; then
         print_error "Calibre-Web requires default port 8083 for initial setup; non-default port ${APP_PORT} requires an existing /var/lib/calibre-web/app.db."
         exit 1
     fi
-    if ! python3 - /var/lib/calibre-web/app.db "$APP_PORT" <<'PYEOF'
+    if ! safe_config_python /var/lib/calibre-web/app.db "$APP_PORT" <<'PYEOF'
 import pathlib, sqlite3, sys
 path = pathlib.Path(sys.argv[1])
 port = int(sys.argv[2])
-if not path.is_file():
-    sys.exit(1)
-with sqlite3.connect(str(path)) as conn:
-    row = conn.execute('SELECT config_port FROM settings LIMIT 1').fetchone()
-    sys.exit(0 if row and int(row[0]) == port else 1)
+with ManagedConfig(path, create_parents=False) as config:
+    if config.metadata is None:
+        sys.exit(1)
+    config.check_target()
+    with sqlite3.connect(f'file:/proc/self/fd/{config.directory}/{config.name}?mode=ro', uri=True) as conn:
+        row = conn.execute('SELECT config_port FROM settings LIMIT 1').fetchone()
+        sys.exit(0 if row and int(row[0]) == port else 1)
 PYEOF
     then
         print_error "Calibre-Web starts on port 8083 until its database setting matches ${APP_PORT}."
@@ -61,38 +64,43 @@ if [[ -f /etc/systemd/system/calibreweb.service ]] || systemctl is-active --quie
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            systemctl stop calibreweb >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback calibreweb || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /opt/calibre-web "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/calibre-web
         elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
-            rm -rf /opt/calibre-web/.venv
+            rm -rf /opt/calibre-web/.venv || restore_failed=true
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/calibre-web 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /opt/calibre-web 2>/dev/null || restore_failed=true
         elif [[ "$VENV_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/venv" /opt/calibre-web/.venv 2>/dev/null || true
+            mv "$BACKUP_DIR/venv" /opt/calibre-web/.venv 2>/dev/null || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/calibreweb.service" ]]; then
-                cp -a "$BACKUP_DIR/calibreweb.service" /etc/systemd/system/calibreweb.service
+                safe_restore_path_from_backup "$BACKUP_DIR/calibreweb.service" /etc/systemd/system/calibreweb.service || restore_failed=true
             else
-                systemctl disable calibreweb >> "$LOGFILE" 2>&1 || true
-                rm -f /etc/systemd/system/calibreweb.service
+                systemctl disable calibreweb >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f /etc/systemd/system/calibreweb.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start calibreweb >> "$LOGFILE" 2>&1 || true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start calibreweb >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -117,24 +125,26 @@ mkdir -p /var/lib/calibre-web /var/lib/calibre-library /opt /var/backups
 
 report_progress 35 "Cloning Calibre-Web repository into staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.calibre-web-build.XXXXXX)"
+chmod 755 "$BUILD_DIR"
 git clone --depth 1 https://github.com/janeczku/calibre-web.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
 test -s "$BUILD_DIR/cps.py" || { log_error "Failed to clone Calibre-Web repository"; exit 1; }
 
-CW_TAG="$(git -C "$BUILD_DIR" describe --tags --abbrev=0 2>/dev/null || true)"
-if [[ -n "$CW_TAG" ]]; then
-    printf '%s\n' "${CW_TAG#v}" > "$BUILD_DIR/.af-version"
-fi
+CW_TAG="$(git_checkout_version "$BUILD_DIR" "/opt/calibre-web/.af-version")"
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-calibreweb.XXXXXX)"
+queue_app_version "/opt/calibre-web/.af-version" "${CW_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"
 
 report_progress 60 "Setting up Python virtual environment and dependencies..."
-BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-calibreweb.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+stop_systemd_unit calibreweb
+SERVICE_STOPPED=1
+snapshot_app_state "$BACKUP_DIR" /var/lib/calibre-web /var/lib/calibre-library
 if [[ -f /etc/systemd/system/calibreweb.service ]]; then
     cp -a /etc/systemd/system/calibreweb.service "$BACKUP_DIR/calibreweb.service"
 fi
 mkdir -p /opt/calibre-web
 if [[ -e /opt/calibre-web/.venv || -L /opt/calibre-web/.venv ]]; then
     if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-        systemctl stop calibreweb >> "$LOGFILE" 2>&1 || true
+        stop_systemd_unit calibreweb
         SERVICE_STOPPED=1
     fi
     mv /opt/calibre-web/.venv "$BACKUP_DIR/venv"
@@ -150,11 +160,11 @@ if [[ ! -f /var/lib/calibre-library/metadata.db ]]; then
     sqlite3 /var/lib/calibre-library/metadata.db "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, timestamp TEXT, pubdate TEXT, series_index REAL, modify_date TEXT, path TEXT, flags INTEGER, has_cover BOOL DEFAULT 0);" >> "$LOGFILE" 2>&1 || true
 fi
 
-chown -R calibreweb:calibreweb /opt/calibre-web/.venv "$BUILD_DIR" /var/lib/calibre-web /var/lib/calibre-library
+chown -hRP calibreweb:calibreweb /opt/calibre-web/.venv "$BUILD_DIR" /var/lib/calibre-web /var/lib/calibre-library
 
 report_progress 75 "Backing up existing Calibre-Web installation and activating new build..."
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-    systemctl stop calibreweb >> "$LOGFILE" 2>&1 || true
+    stop_systemd_unit calibreweb
     SERVICE_STOPPED=1
 fi
 mv /opt/calibre-web/.venv "$BUILD_DIR/.venv"
@@ -167,12 +177,13 @@ if [[ -d /opt/calibre-web ]]; then
     fi
 fi
 mv "$BUILD_DIR" /opt/calibre-web
+chmod 755 /opt/calibre-web
 APP_ACTIVATED=1
 BUILD_DIR=""
 cd /opt/calibre-web
 
 report_progress 85 "Configuring and starting calibreweb.service on port ${APP_PORT}..."
-cat <<'EOF' > /etc/systemd/system/calibreweb.service
+cat <<EOF > /etc/systemd/system/calibreweb.service
 [Unit]
 Description=Calibre-Web E-Book Library Server
 After=network-online.target
@@ -183,7 +194,7 @@ Type=simple
 User=calibreweb
 Group=calibreweb
 WorkingDirectory=/opt/calibre-web
-Environment=CALIBRE_PORT=8083
+Environment=CALIBRE_PORT=${APP_PORT}
 ExecStart=/opt/calibre-web/.venv/bin/python /opt/calibre-web/cps.py -p /var/lib/calibre-web/app.db -g /var/lib/calibre-web/gdrive.db
 Restart=on-failure
 RestartSec=10
@@ -209,7 +220,9 @@ if [[ "$HEALTHY" -ne 1 ]]; then
     exit 1
 fi
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Calibre-Web installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

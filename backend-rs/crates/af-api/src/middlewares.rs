@@ -129,7 +129,7 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
                 job.package_id.eq_ignore_ascii_case(app)
                     && (job.status == "interrupted"
                         || (job.status != "completed"
-                            && matches!(job.action.as_str(), "install" | "remove")))
+                            && matches!(job.action.as_str(), "install" | "reinstall" | "remove")))
             })
         {
             return false;

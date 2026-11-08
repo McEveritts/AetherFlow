@@ -24,6 +24,11 @@ touch "$LOGFILE"
 chmod 600 "$LOGFILE"
 
 require_root
+validate_config_paths /etc/apt/keyrings/tailscale-archive-keyring.gpg /etc/tailscale/key
+PACKAGE_NAME="${PACKAGE_NAME:-tailscale}"
+begin_state_transaction "tailscaled.service" "0" "/" "/var/lib/tailscale" "/etc/tailscale" "/etc/default/tailscaled" "/etc/sysctl.d/99-tailscale.conf" "/etc/apt/sources.list.d/tailscale.list" "/etc/apt/keyrings/tailscale-archive-keyring.gpg" "/etc/systemd/system/tailscaled.service" "/usr/bin/tailscale" "/usr/sbin/tailscaled" "/usr/share/tailscale"
+
+prepare_apt_package_transaction /var/lib/tailscale/.af-version tailscale
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Tailscale..."
 
@@ -45,7 +50,7 @@ if [[ -f /etc/os-release ]]; then
 fi
 
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL "https://pkgs.tailscale.com/stable/${DISTRO_ID}/${CODENAME}.noarmor.gpg" -o /etc/apt/keyrings/tailscale-archive-keyring.gpg >> "$LOGFILE" 2>&1
+download_file "https://pkgs.tailscale.com/stable/${DISTRO_ID}/${CODENAME}.noarmor.gpg" /etc/apt/keyrings/tailscale-archive-keyring.gpg >> "$LOGFILE" 2>&1
 chmod a+r /etc/apt/keyrings/tailscale-archive-keyring.gpg
 
 cat <<EOF > /etc/apt/sources.list.d/tailscale.list
@@ -75,7 +80,7 @@ unset AF_TAILSCALE_AUTHKEY TAILSCALE_AUTHKEY
 if [[ -n "${AUTH_KEY}" ]]; then
     log_info "Enrolling Tailscale node using the supplied one-time key..."
     AUTH_DIR="$(mktemp -d /run/aetherflow-tailscale-auth.XXXXXX)"
-    trap 'rm -rf -- "$AUTH_DIR"' EXIT
+    trap 'status=$?; rm -rf -- "$AUTH_DIR"; cleanup_state_transaction "$status"' EXIT
     printf '%s' "$AUTH_KEY" > "${AUTH_DIR}/key"
     chmod 600 "${AUTH_DIR}/key"
     unset AUTH_KEY
@@ -85,9 +90,13 @@ if [[ -n "${AUTH_KEY}" ]]; then
         exit 1
     fi
     rm -rf -- "$AUTH_DIR"
-    trap - EXIT
+    trap 'cleanup_state_transaction $?' EXIT
 fi
 
+mkdir -p /var/lib/tailscale
+TS_VERSION="$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)"
+queue_app_version /var/lib/tailscale/.af-version "${TS_VERSION:-1.76.6}"
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Tailscale Mesh VPN installed. Open Network > Tailscale Mesh to authenticate this node if not already enrolled."
 log_info "${PACKAGE_NAME} installed successfully"

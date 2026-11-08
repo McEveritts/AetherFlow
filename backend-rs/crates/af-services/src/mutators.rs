@@ -92,7 +92,7 @@ where
                     |row| row.get(0),
                 )?;
                 anyhow::ensure!(
-                    matches!(action.as_str(), "install" | "update"),
+                    matches!(action.as_str(), "install" | "reinstall" | "update"),
                     "removal cannot own blueprint configuration mutations"
                 );
             }
@@ -122,14 +122,189 @@ pub fn resolve_config_path(raw_path: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
-/// Writes `content` atomically to `file_path` via a `.tmp.<nanos>` sibling file and rename.
+fn is_allowed_os_root_symlink(path: &Path) -> bool {
+    for var in [
+        "AETHERFLOW_CONFIG_ROOT",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+        "AETHERFLOW_PACKAGE_FS_ROOT",
+    ] {
+        if let Ok(raw) = env::var(var) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && trimmed != "/" {
+                let root = Path::new(trimmed);
+                if path.starts_with(root) {
+                    return false;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if matches!(
+        path.to_str(),
+        Some("/tmp" | "/var" | "/etc" | "/var/run" | "/bin" | "/sbin" | "/lib" | "/lib64")
+    ) {
+        return true;
+    }
+    #[cfg(not(target_os = "macos"))]
+    if matches!(
+        path.to_str(),
+        Some("/var/run" | "/bin" | "/sbin" | "/lib" | "/lib32" | "/lib64" | "/libx32")
+    ) {
+        return true;
+    }
+    false
+}
+
+/// Walks all ancestor directory components of `file_path` using `fs::symlink_metadata`
+/// and rejects any symlinked or non-directory parent component.
+fn validate_no_symlink_parents(file_path: &Path, require_exists: bool) -> Result<(), String> {
+    let Some(parent) = file_path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    let mut cur = PathBuf::new();
+    for comp in parent.components() {
+        use std::path::Component;
+        match comp {
+            Component::Prefix(p) => cur.push(p.as_os_str()),
+            Component::RootDir => cur.push(comp.as_os_str()),
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                return Err(format!(
+                    "refusing to write through parent traversal component in {}",
+                    file_path.display()
+                ));
+            }
+            Component::Normal(seg) => {
+                cur.push(seg);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            if is_allowed_os_root_symlink(&cur) {
+                                continue;
+                            }
+                            return Err(format!(
+                                "refusing to traverse symlink parent directory {} for {}",
+                                cur.display(),
+                                file_path.display()
+                            ));
+                        }
+                        if !meta.file_type().is_dir() {
+                            return Err(format!(
+                                "refusing to traverse non-directory parent {} for {}",
+                                cur.display(),
+                                file_path.display()
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !require_exists => {
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "failed to inspect parent directory {} for {}: {}",
+                            cur.display(),
+                            file_path.display(),
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true when the current process is unprivileged (`geteuid() != 0`), no test root override
+/// is active, and `err` indicates a host permission or read-only filesystem error (`EACCES`, `EPERM`, `EROFS`).
+pub fn is_unprivileged_host_write_error(err: &str) -> bool {
+    for var in [
+        "AETHERFLOW_CONFIG_ROOT",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+        "AETHERFLOW_PACKAGE_FS_ROOT",
+    ] {
+        if let Ok(raw) = env::var(var) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && trimmed != "/" {
+                return false;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        if unsafe { geteuid() == 0 } {
+            return false;
+        }
+    }
+    let lower = err.to_ascii_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("read-only file system")
+        || lower.contains("readonly file system")
+        || lower.contains("os error 13")
+        || lower.contains("os error 1")
+        || lower.contains("os error 30")
+}
+
+/// Writes `content` atomically to `file_path` via a `.tmp.<nanos>` sibling file and rename,
+/// preserving existing file permissions and ownership (or defaulting new files to mode `0o600`).
 pub fn write_file_atomic(file_path: &Path, content: &[u8]) -> Result<(), String> {
+    write_file_atomic_mode(file_path, content, None)
+}
+
+/// Writes `content` atomically to `file_path` with an optional forced permission mode (e.g. `Some(0o600)`),
+/// rejecting symlink targets and symlinked parent directories.
+pub fn write_file_atomic_mode(
+    file_path: &Path,
+    content: &[u8],
+    force_mode: Option<u32>,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    validate_no_symlink_parents(file_path, false)?;
+
     if let Some(parent) = file_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
         }
     }
+
+    validate_no_symlink_parents(file_path, true)?;
+
+    let existing_meta = match fs::symlink_metadata(file_path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to overwrite symlink config file {}",
+                    file_path.display()
+                ));
+            }
+            if !meta.file_type().is_file() {
+                return Err(format!(
+                    "refusing to overwrite non-regular file {}",
+                    file_path.display()
+                ));
+            }
+            Some(meta)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "failed to inspect metadata for {}: {}",
+                file_path.display(),
+                e
+            ));
+        }
+    };
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -139,22 +314,119 @@ pub fn write_file_atomic(file_path: &Path, content: &[u8]) -> Result<(), String>
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("config");
-    let tmp_path = file_path.with_file_name(format!("{}.tmp.{}", file_name, nanos));
 
-    fs::write(&tmp_path, content)
-        .map_err(|e| format!("failed to write temp file {}: {}", tmp_path.display(), e))?;
+    let mut attempt = 0u32;
+    let (mut tmp_file, tmp_path) = loop {
+        let suffix = if attempt == 0 {
+            format!("{}.tmp.{}", file_name, nanos)
+        } else {
+            format!("{}.tmp.{}.{}", file_name, nanos, attempt)
+        };
+        let candidate = file_path.with_file_name(suffix);
+        let mut open_opts = fs::OpenOptions::new();
+        open_opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let initial_mode = force_mode.unwrap_or(0o600);
+            #[cfg(target_os = "linux")]
+            open_opts.mode(initial_mode).custom_flags(0o400000); // O_NOFOLLOW on Linux
+            #[cfg(not(target_os = "linux"))]
+            open_opts.mode(initial_mode);
+        }
+        match open_opts.open(&candidate) {
+            Ok(f) => break (f, candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to create temp file {}: {}",
+                    candidate.display(),
+                    e
+                ));
+            }
+        }
+    };
+
+    if let Err(e) = tmp_file
+        .write_all(content)
+        .and_then(|_| tmp_file.sync_all())
+    {
+        drop(tmp_file);
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "failed to write temp file {}: {}",
+            tmp_path.display(),
+            e
+        ));
+    }
+    drop(tmp_file);
+
+    if let Some(mode) = force_mode {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(mode)).map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                format!(
+                    "failed to set {:04o} permissions on temp file {}: {}",
+                    mode,
+                    tmp_path.display(),
+                    e
+                )
+            })?;
+        }
+    } else if let Some(ref meta) = existing_meta {
+        fs::set_permissions(&tmp_path, meta.permissions()).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!(
+                "failed to preserve permissions on temp file {}: {}",
+                tmp_path.display(),
+                e
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{chown, MetadataExt};
+            let orig_uid = meta.uid();
+            let orig_gid = meta.gid();
+            if let Err(chown_err) = chown(&tmp_path, Some(orig_uid), Some(orig_gid)) {
+                let is_eperm = chown_err.raw_os_error() == Some(1) // EPERM
+                    || chown_err.kind() == std::io::ErrorKind::PermissionDenied;
+                if !is_eperm {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(format!(
+                        "failed to preserve ownership on temp file {}: {}",
+                        tmp_path.display(),
+                        chown_err
+                    ));
+                }
+            }
+            let _ = fs::set_permissions(&tmp_path, meta.permissions());
+        }
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                format!(
+                    "failed to set 0600 permissions on temp file {}: {}",
+                    tmp_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
 
     if let Err(rename_err) = fs::rename(&tmp_path, file_path) {
-        // Fallback for cross-device or Windows target-exists edge cases
-        if fs::write(file_path, content).is_err() {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(format!(
-                "atomic rename to {} failed: {}",
-                file_path.display(),
-                rename_err
-            ));
-        }
         let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "atomic rename to {} failed: {}",
+            file_path.display(),
+            rename_err
+        ));
     }
 
     Ok(())
@@ -168,8 +440,19 @@ pub fn backup_config_file(file_path: &Path) -> Result<Option<PathBuf>, String> {
     let mut bak_os = file_path.as_os_str().to_os_string();
     bak_os.push(".bak");
     let bak_path = PathBuf::from(bak_os);
-    fs::copy(file_path, &bak_path)
+    let content = fs::read(file_path)
+        .map_err(|e| format!("failed to read {} for backup: {}", file_path.display(), e))?;
+    write_file_atomic(&bak_path, &content)
         .map_err(|e| format!("failed to backup {} to {}: {}", file_path.display(), bak_path.display(), e))?;
+    if let Ok(meta) = fs::symlink_metadata(file_path) {
+        let _ = fs::set_permissions(&bak_path, meta.permissions());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{chown, MetadataExt};
+            let _ = chown(&bak_path, Some(meta.uid()), Some(meta.gid()));
+            let _ = fs::set_permissions(&bak_path, meta.permissions());
+        }
+    }
     Ok(Some(bak_path))
 }
 
@@ -239,6 +522,24 @@ pub fn mutate_xml_element(
     };
 
     let root_tag = infer_xml_root_tag(file_path, &existing);
+    if !existing.trim().is_empty() && file_path.exists() {
+        if tag_name == "KnownProxies" && root_tag == "NetworkConfiguration" {
+            let escaped_val = regex::escape(new_value.trim());
+            let known_re = Regex::new(&format!(
+                r"(?is)<KnownProxies>\s*<string>\s*{}\s*</string>\s*</KnownProxies>",
+                escaped_val
+            ))
+            .ok();
+            if known_re.is_some_and(|re| re.is_match(&existing)) {
+                return Ok(false);
+            }
+        } else if let Some(current_val) = extract_xml_tag_text(&existing, tag_name) {
+            if current_val == new_value.trim() {
+                return Ok(false);
+            }
+        }
+    }
+
     let mut content = if existing.trim().is_empty() {
         if root_tag == "NetworkConfiguration" {
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<NetworkConfiguration xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n</NetworkConfiguration>\n".to_string()
@@ -360,8 +661,11 @@ pub fn mutate_ini_key(
 
         if !key_updated && in_matching_section && !trimmed.starts_with('#') && !trimmed.starts_with(';')
         {
-            if let Some((lhs, _rhs)) = line.split_once('=') {
+            if let Some((lhs, rhs)) = line.split_once('=') {
                 if lhs.trim().eq_ignore_ascii_case(key_trimmed) {
+                    if rhs.trim() == new_value.trim() {
+                        return Ok(false);
+                    }
                     output_lines.push(format!("{}={}", lhs, new_value));
                     key_updated = true;
                     continue;
@@ -589,18 +893,31 @@ pub fn inject_arr_download_client_routes(
         .map_err(|e| format!("failed to open *arr DB {}: {}", db_path.display(), e))?;
     let _ = conn.busy_timeout(Duration::from_millis(2500));
 
-    let mut stmt = match conn.prepare("SELECT Id, Settings FROM DownloadClients") {
-        Ok(s) => s,
-        Err(_) => return Ok(0), // Table does not exist yet on fresh install
-    };
-
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| format!("failed to query DownloadClients: {}", e))?;
+    let collected_rows: Vec<(i64, String, String)> =
+        if let Ok(mut stmt) = conn.prepare("SELECT Id, Implementation, Settings FROM DownloadClients") {
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("failed to query DownloadClients: {}", e))?
+            .flatten()
+            .collect()
+        } else if let Ok(mut stmt) = conn.prepare("SELECT Id, Settings FROM DownloadClients") {
+            stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, String::new(), r.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("failed to query DownloadClients: {}", e))?
+            .flatten()
+            .collect()
+        } else {
+            return Ok(0); // Table does not exist yet on fresh install
+        };
 
     let mut updates: Vec<(i64, String)> = Vec::new();
-    for row in rows.flatten() {
-        let (id, settings_str) = row;
+    for (id, implementation, settings_str) in collected_rows {
         let Ok(mut settings_json) = serde_json::from_str::<Value>(&settings_str) else {
             continue;
         };
@@ -612,19 +929,61 @@ pub fn inject_arr_download_client_routes(
             .and_then(|v| v.as_str())
             .or_else(|| obj.get("host").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
+        let existing_port = obj
+            .get("Port")
+            .and_then(|v| v.as_i64())
+            .or_else(|| obj.get("port").and_then(|v| v.as_i64()))
+            .unwrap_or(0) as i32;
 
         if let Some(host_val) = current_host {
-            if let Some(new_host) = routes.get(&host_val) {
+            if let Some(default_host) = routes.get(&host_val) {
+                let impl_lower = implementation.trim().to_ascii_lowercase();
+                let (new_host, desired_port) = match impl_lower.as_str() {
+                    "transmission" => (
+                        "transmission.aether.local".to_string(),
+                        {
+                            let p = get_app_runtime_meta("transmission").configured_port;
+                            if p > 0 { p } else { existing_port }
+                        },
+                    ),
+                    "deluge" => (
+                        "deluge.aether.local".to_string(),
+                        {
+                            let p = get_app_runtime_meta("deluge").configured_port;
+                            if p > 0 { p } else { existing_port }
+                        },
+                    ),
+                    "sabnzbd" => (
+                        "sabnzbd.aether.local".to_string(),
+                        {
+                            let p = get_app_runtime_meta("sabnzbd").configured_port;
+                            if p > 0 { p } else { existing_port }
+                        },
+                    ),
+                    "nzbget" => (
+                        "nzbget.aether.local".to_string(),
+                        {
+                            let p = get_app_runtime_meta("nzbget").configured_port;
+                            if p > 0 { p } else { existing_port }
+                        },
+                    ),
+                    "" if existing_port == 9091 => ("transmission.aether.local".to_string(), existing_port),
+                    "" if existing_port == 8112 || existing_port == 58846 => ("deluge.aether.local".to_string(), existing_port),
+                    "" if existing_port == 8085 => ("sabnzbd.aether.local".to_string(), existing_port),
+                    "" if existing_port == 6789 => ("nzbget.aether.local".to_string(), existing_port),
+                    "qbittorrent" | "" => (default_host.clone(), target_port),
+                    _ => continue,
+                };
                 if obj.contains_key("Host") {
-                    obj.insert("Host".to_string(), Value::String(new_host.clone()));
+                    obj.insert("Host".to_string(), Value::String(new_host));
                 } else {
-                    obj.insert("host".to_string(), Value::String(new_host.clone()));
+                    obj.insert("host".to_string(), Value::String(new_host));
                 }
-                if target_port > 0 {
+                if desired_port > 0 {
                     if obj.contains_key("Port") {
-                        obj.insert("Port".to_string(), json!(target_port));
+                        obj.insert("Port".to_string(), json!(desired_port));
                     } else {
-                        obj.insert("port".to_string(), json!(target_port));
+                        obj.insert("port".to_string(), json!(desired_port));
                     }
                 }
                 if let Ok(serialized) = serde_json::to_string(&settings_json) {
@@ -633,7 +992,6 @@ pub fn inject_arr_download_client_routes(
             }
         }
     }
-    drop(stmt);
 
     let count = updates.len();
     if count > 0 {
@@ -763,6 +1121,9 @@ fn update_hosts_atomic_fallback(domains: &[String], remove: bool) -> Result<(), 
     }
 
     let final_content = format!("{}\n", final_lines.join("\n"));
+    if final_content == existing && hosts_path.exists() {
+        return Ok(());
+    }
     write_file_atomic(hosts_path, final_content.as_bytes())
 }
 
@@ -818,6 +1179,9 @@ fn update_pihole_custom_list(
     final_lines.push(PIHOLE_BLOCK_END.to_string());
 
     let content = format!("{}\n", final_lines.join("\n"));
+    if content == existing && custom_list_path.exists() {
+        return Ok(());
+    }
     write_file_atomic(custom_list_path, content.as_bytes())
 }
 
@@ -849,6 +1213,9 @@ fn update_dnsmasq_conf(
         lines.push(format!("address=/{}/{}", dom, lan_ip));
     }
     let content = format!("{}\n", lines.join("\n"));
+    if content == existing && dnsmasq_conf_path.exists() {
+        return Ok(());
+    }
     write_file_atomic(dnsmasq_conf_path, content.as_bytes())
 }
 
@@ -873,8 +1240,8 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
 
     // 1. Update /etc/hosts for .aether.local domains
     if !aether_local_domains.is_empty() {
-        if let Err(runner_err) = af_runner::update_hosts_file_local(&aether_local_domains, false) {
-            if let Err(fallback_err) = update_hosts_atomic_fallback(&aether_local_domains, false) {
+        if let Err(fallback_err) = update_hosts_atomic_fallback(&aether_local_domains, false) {
+            if let Err(runner_err) = af_runner::update_hosts_file_local(&aether_local_domains, false) {
                 return Err(format!(
                     "Local DNS synchronization failed: {runner_err}; {fallback_err}"
                 ));
@@ -979,6 +1346,7 @@ pub fn sync_apache_app_vhost(
         return Ok(false);
     }
     let sites_avail = resolve_config_path("/etc/apache2/sites-available");
+    let sites_en = resolve_config_path("/etc/apache2/sites-enabled");
     if !sites_avail.is_dir() {
         return Ok(false);
     }
@@ -992,31 +1360,336 @@ pub fn sync_apache_app_vhost(
         return Ok(false);
     }
 
+    let mut candidate_vhosts = Vec::new();
+    for dir in [&sites_avail, &sites_en] {
+        if dir.is_dir() {
+            candidate_vhosts.push(dir.join(format!("aetherflow-app-{}.conf", clean_app)));
+            candidate_vhosts.push(dir.join(format!("aetherflow-ext-{}.conf", clean_app)));
+            candidate_vhosts.push(dir.join(format!("{}.conf", clean_app)));
+        }
+    }
+    let preserved_blocks = extract_apache_custom_blocks(&candidate_vhosts);
+
+    let mut backups: Vec<(PathBuf, Option<String>)> = Vec::new();
+    let mut modified_any = false;
     let mut wrote_any = false;
+
     if !internal_domain.trim().is_empty() {
         let int_dom = validate_dns_domain(internal_domain)?;
-        let vhost = format!(
+        let default_vhost = format!(
             "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n</VirtualHost>\n"
         );
         let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
-        write_file_atomic(&conf_file, vhost.as_bytes())?;
-        wrote_any = true;
+        let prev_int = fs::read_to_string(&conf_file).ok();
+        let vhost = render_or_update_apache_vhost(
+            prev_int.as_deref(),
+            &default_vhost,
+            Some(&int_dom),
+            listen_port,
+            &preserved_blocks,
+        );
+        if prev_int.as_deref() != Some(vhost.as_str()) {
+            match write_file_atomic(&conf_file, vhost.as_bytes()) {
+                Ok(()) => {
+                    backups.push((conf_file.clone(), prev_int));
+                    modified_any = true;
+                    wrote_any = true;
+                }
+                Err(error) if is_unprivileged_host_write_error(&error) => {
+                    tracing::info!(
+                        app = %clean_app,
+                        path = %conf_file.display(),
+                        "skipping Apache internal vhost write in unprivileged API process (handled by privileged runner): {}",
+                        error
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            wrote_any = true;
+        }
     }
 
     let ext_conf_file = sites_avail.join(format!("aetherflow-ext-{}.conf", clean_app));
     if external_access && !public_domain.trim().is_empty() {
         let pub_dom = validate_dns_domain(public_domain)?;
-        let ext_vhost = format!(
+        let default_ext_vhost = format!(
             "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n</VirtualHost>\n"
         );
-        write_file_atomic(&ext_conf_file, ext_vhost.as_bytes())?;
-        wrote_any = true;
+        let prev_ext = fs::read_to_string(&ext_conf_file).ok();
+        let ext_vhost = render_or_update_apache_vhost(
+            prev_ext.as_deref(),
+            &default_ext_vhost,
+            Some(&pub_dom),
+            listen_port,
+            &preserved_blocks,
+        );
+        if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
+            match write_file_atomic(&ext_conf_file, ext_vhost.as_bytes()) {
+                Ok(()) => {
+                    backups.push((ext_conf_file.clone(), prev_ext));
+                    modified_any = true;
+                    wrote_any = true;
+                }
+                Err(error) if is_unprivileged_host_write_error(&error) => {
+                    tracing::info!(
+                        app = %clean_app,
+                        path = %ext_conf_file.display(),
+                        "skipping Apache external vhost write in unprivileged API process (handled by privileged runner): {}",
+                        error
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            wrote_any = true;
+        }
     } else if ext_conf_file.exists() {
-        fs::remove_file(&ext_conf_file)
-            .map_err(|error| format!("failed to remove external vhost: {error}"))?;
+        let prev_ext = fs::read_to_string(&ext_conf_file).ok();
+        if let Err(error) = fs::remove_file(&ext_conf_file) {
+            let err_msg = format!("failed to remove external vhost: {error}");
+            if is_unprivileged_host_write_error(&err_msg) {
+                tracing::info!(
+                    app = %clean_app,
+                    path = %ext_conf_file.display(),
+                    "skipping Apache external vhost removal in unprivileged API process: {}",
+                    err_msg
+                );
+            } else {
+                return Err(err_msg);
+            }
+        } else {
+            backups.push((ext_conf_file.clone(), prev_ext));
+            modified_any = true;
+        }
+    }
+
+    // Also update any existing regular (non-symlink) vhost files for this app in sites-available or sites-enabled
+    let mut extra_existing_paths = vec![
+        sites_avail.join(format!("{}.conf", clean_app)),
+        sites_en.join(format!("aetherflow-app-{}.conf", clean_app)),
+        sites_en.join(format!("{}.conf", clean_app)),
+    ];
+    if external_access && !public_domain.trim().is_empty() {
+        extra_existing_paths.push(sites_en.join(format!("aetherflow-ext-{}.conf", clean_app)));
+    }
+    for path in extra_existing_paths {
+        let is_symlink = fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_symlink && path.is_file() {
+            if let Ok(prev_raw) = fs::read_to_string(&path) {
+                let updated = render_or_update_apache_vhost(
+                    Some(&prev_raw),
+                    &prev_raw,
+                    None,
+                    listen_port,
+                    &preserved_blocks,
+                );
+                if prev_raw != updated {
+                    if write_file_atomic(&path, updated.as_bytes()).is_ok() {
+                        backups.push((path.clone(), Some(prev_raw)));
+                        modified_any = true;
+                        wrote_any = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if modified_any
+        && sites_avail == Path::new("/etc/apache2/sites-available")
+        && Path::new("/etc/apache2/apache2.conf").is_file()
+    {
+        if let Err(err) = verify_apache_configtest() {
+            for (path, prev_content) in backups.into_iter().rev() {
+                match prev_content {
+                    Some(raw) => {
+                        let _ = write_file_atomic(&path, raw.as_bytes());
+                    }
+                    None => {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
+            return Err(format!(
+                "apache2ctl configtest failed for {}: {}",
+                clean_app, err
+            ));
+        }
     }
 
     Ok(wrote_any)
+}
+
+fn rewrite_apache_proxy_url_port(token: &str, listen_port: i32) -> Option<String> {
+    for scheme in ["http://", "https://", "ws://", "wss://"] {
+        if let Some(rest) = token.strip_prefix(scheme) {
+            for host in ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"] {
+                if let Some(after_host) = rest.strip_prefix(host) {
+                    let digit_len = after_host
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .count();
+                    if digit_len > 0 {
+                        let suffix = &after_host[digit_len..];
+                        return Some(format!("{scheme}{host}{listen_port}{suffix}"));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_apache_custom_blocks(paths: &[PathBuf]) -> Vec<String> {
+    let mut blocks = Vec::new();
+    for path in paths {
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        let mut current_block: Option<(String, Vec<String>)> = None;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if let Some((ref end_tag, ref mut buf)) = current_block {
+                buf.push(line.to_string());
+                if lower.starts_with(end_tag.as_str()) {
+                    let joined = buf.join("\n");
+                    if !blocks.iter().any(|b: &String| b.trim() == joined.trim()) {
+                        blocks.push(joined);
+                    }
+                    current_block = None;
+                }
+                continue;
+            }
+            if lower.starts_with("<location") {
+                current_block = Some(("</location>".to_string(), vec![line.to_string()]));
+            } else if lower.starts_with("<directory") {
+                current_block = Some(("</directory>".to_string(), vec![line.to_string()]));
+            } else if lower.starts_with("<requireall") {
+                current_block = Some(("</requireall>".to_string(), vec![line.to_string()]));
+            } else if lower.starts_with("<requireany") {
+                current_block = Some(("</requireany>".to_string(), vec![line.to_string()]));
+            } else if lower.starts_with("<files") {
+                current_block = Some(("</files>".to_string(), vec![line.to_string()]));
+            } else if lower.starts_with("authtype ")
+                || lower.starts_with("authname ")
+                || lower.starts_with("authuserfile ")
+                || lower.starts_with("authgroupfile ")
+                || lower.starts_with("authbasicprovider ")
+                || lower.starts_with("require ")
+                || lower.starts_with("include ")
+                || lower.starts_with("includeoptional ")
+            {
+                let single = line.to_string();
+                if !blocks.iter().any(|b: &String| b.trim() == single.trim()) {
+                    blocks.push(single);
+                }
+            }
+        }
+    }
+    blocks
+}
+
+fn render_or_update_apache_vhost(
+    existing_raw: Option<&str>,
+    default_template: &str,
+    desired_server_name: Option<&str>,
+    listen_port: i32,
+    preserved_blocks: &[String],
+) -> String {
+    let base = match existing_raw {
+        Some(raw) if raw.to_ascii_lowercase().contains("<virtualhost") => {
+            let mut out_lines = Vec::new();
+            for line in raw.lines() {
+                let trimmed = line.trim_start();
+                let indent = &line[..line.len() - trimmed.len()];
+                let lower = trimmed.to_ascii_lowercase();
+                if let Some(dom) = desired_server_name {
+                    if lower.starts_with("servername ") || lower.starts_with("servername\t") {
+                        out_lines.push(format!("{indent}ServerName {dom}"));
+                        continue;
+                    }
+                }
+                if lower.starts_with("proxypass ")
+                    || lower.starts_with("proxypass\t")
+                    || lower.starts_with("proxypassreverse ")
+                    || lower.starts_with("proxypassreverse\t")
+                    || lower.starts_with("rewriterule ")
+                    || lower.starts_with("rewriterule\t")
+                {
+                    let tokens: Vec<String> = trimmed
+                        .split_whitespace()
+                        .map(|tok| {
+                            rewrite_apache_proxy_url_port(tok, listen_port)
+                                .unwrap_or_else(|| tok.to_string())
+                        })
+                        .collect();
+                    out_lines.push(format!("{indent}{}", tokens.join(" ")));
+                } else {
+                    out_lines.push(line.to_string());
+                }
+            }
+            let mut joined = out_lines.join("\n");
+            joined.push('\n');
+            joined
+        }
+        _ => default_template.to_string(),
+    };
+
+    if preserved_blocks.is_empty() {
+        return base;
+    }
+
+    let mut missing = Vec::new();
+    for block in preserved_blocks {
+        let trimmed_block = block.trim();
+        if !trimmed_block.is_empty() && !base.contains(trimmed_block) {
+            missing.push(block.clone());
+        }
+    }
+    if missing.is_empty() {
+        return base;
+    }
+
+    let mut final_lines = Vec::new();
+    let mut inserted = false;
+    for line in base.lines() {
+        if !inserted && line.trim().eq_ignore_ascii_case("</virtualhost>") {
+            for block in &missing {
+                final_lines.push(block.clone());
+            }
+            inserted = true;
+        }
+        final_lines.push(line.to_string());
+    }
+    if !inserted {
+        for block in &missing {
+            final_lines.push(block.clone());
+        }
+    }
+    let mut out = final_lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn verify_apache_configtest() -> Result<(), String> {
+    for bin in ["/usr/sbin/apache2ctl", "/usr/sbin/apachectl", "apache2ctl", "apachectl"] {
+        match std::process::Command::new(bin).arg("-t").output() {
+            Ok(out) => {
+                if out.status.success() {
+                    return Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(format!("{} {}", stderr.trim(), stdout.trim()).trim().to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Ok(()),
+        }
+    }
+    Ok(())
 }
 
 /// Triggers `/usr/local/bin/aetherflow-apache-cert-sync` when present on the system.
@@ -1222,6 +1895,16 @@ pub fn normalize_app_key_name(app_name: &str) -> String {
         "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
         "qbittorrent-nox" => "qbittorrent".to_string(),
         "calibreweb" => "calibre-web".to_string(),
+        "grafana-server" => "grafana".to_string(),
+        "uptimekuma" => "uptime-kuma".to_string(),
+        "adguard-home" => "adguardhome".to_string(),
+        "pyload-ng" => "pyload".to_string(),
+        "af-maintainerr" => "maintainerr".to_string(),
+        "af-palate" => "palate".to_string(),
+        "af-mcvnc" => "mcvnc".to_string(),
+        "af-piped" => "piped".to_string(),
+        "af-invidious" => "invidious".to_string(),
+        "home-assistant@homeassistant" => "homeassistant".to_string(),
         _ => clean,
     }
 }
@@ -1244,6 +1927,93 @@ fn parse_port_from_host_port(addr: &str) -> i32 {
     } else {
         parse_valid_port(clean)
     }
+}
+
+fn extract_port_from_systemd_or_apache_text(text: &str) -> i32 {
+    static ENV_PORT_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)^\s*(?:Environment\s*=\s*["']?|export\s+)?(?:[A-Z0-9_]*_PORT|PORT)\s*=\s*["']?([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static ENV_BIND_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)^\s*(?:Environment\s*=\s*["']?|export\s+)?(?:[A-Z0-9_]*_BIND|ASPNETCORE_URLS)\s*=\s*["']?(?:https?://)?[^:\s"']+:([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static CLI_PORT_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static CLI_ADDR_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?i)(?:--(?:web\.listen-address|rc-addr|bind|host|listen)|websockify[^\n]*?)(?:\s+|=)["']?(?:https?://)?(?:127\.0\.0\.1|0\.0\.0\.0|localhost|\*)?:([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static APACHE_LISTEN_VHOST_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)(?:^\s*Listen\s+(?:[0-9.]+:)?([0-9]{2,5})\b|<VirtualHost\s+[^>:]+:([0-9]{2,5})>|ProxyPass\s+/[^\s]*\s+(?:http|ws)s?://(?:127\.0\.0\.1|localhost):([0-9]{2,5})\b)"#,
+        )
+        .unwrap()
+    });
+
+    for re in [
+        &*ENV_PORT_RE,
+        &*ENV_BIND_RE,
+        &*CLI_PORT_FLAG_RE,
+        &*CLI_ADDR_FLAG_RE,
+    ] {
+        if let Some(caps) = re.captures(text) {
+            if let Some(m) = caps.get(1) {
+                let p = parse_valid_port(m.as_str());
+                if p > 0 {
+                    return p;
+                }
+            }
+        }
+    }
+    if let Some(caps) = APACHE_LISTEN_VHOST_RE.captures(text) {
+        for idx in [1, 2, 3] {
+            if let Some(m) = caps.get(idx) {
+                let p = parse_valid_port(m.as_str());
+                if p > 0 {
+                    return p;
+                }
+            }
+        }
+    }
+    0
+}
+
+fn extract_fallback_unit_or_apache_port(canonical: &str) -> i32 {
+    let mut candidates = vec![
+        format!("/etc/systemd/system/{canonical}.service"),
+        format!("/etc/systemd/system/af-{canonical}.service"),
+        format!("/etc/apache2/conf-available/aetherflow-{canonical}-listen.conf"),
+        format!("/etc/apache2/sites-available/{canonical}.conf"),
+        format!("/etc/apache2/sites-available/aetherflow-app-{canonical}.conf"),
+    ];
+    if canonical == "uptime-kuma" {
+        candidates.push("/etc/systemd/system/uptimekuma.service".to_string());
+        candidates.push("/etc/apache2/sites-available/aetherflow-app-uptimekuma.conf".to_string());
+    } else if canonical == "calibre-web" {
+        candidates.push("/etc/systemd/system/calibreweb.service".to_string());
+        candidates.push("/etc/apache2/sites-available/aetherflow-app-calibreweb.conf".to_string());
+    }
+    for raw in candidates {
+        let p = resolve_config_path(&raw);
+        if let Ok(text) = fs::read_to_string(&p) {
+            let port = extract_port_from_systemd_or_apache_text(&text);
+            if port > 0 {
+                return port;
+            }
+        }
+    }
+    0
 }
 
 pub fn extract_ini_value(content: &str, keys: &[&str]) -> Option<String> {
@@ -1673,6 +2443,12 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "ombi" => {
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/ombi.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
             for raw in [
                 "/var/lib/ombi/database.json",
                 "/etc/Ombi/database.json",
@@ -1686,7 +2462,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                             .or_else(|| val.get("Port"))
                             .and_then(|v| v.as_i64())
                         {
-                            if port > 0 {
+                            if port > 0 && meta.configured_port <= 0 {
                                 meta.configured_port = port as i32;
                             }
                         }
@@ -1871,18 +2647,28 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "filebrowser" => {
-            for raw in [
-                "/etc/filebrowser/filebrowser.json",
-                "/var/lib/filebrowser/filebrowser.json",
-                "/etc/filebrowser/.filebrowser.json",
-            ] {
-                let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                        if let Some(port) = val.get("port").and_then(|v| v.as_i64()) {
-                            if port > 0 {
-                                meta.configured_port = port as i32;
-                                break;
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/filebrowser.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                for raw in [
+                    "/etc/filebrowser/filebrowser.json",
+                    "/etc/filebrowser/config.json",
+                    "/var/lib/filebrowser/filebrowser.json",
+                    "/etc/filebrowser/.filebrowser.json",
+                    "/opt/filebrowser/filebrowser.json",
+                ] {
+                    let p = resolve_config_path(raw);
+                    if let Ok(text) = fs::read_to_string(&p) {
+                        if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                            if let Some(port) = val.get("port").and_then(|v| v.as_i64()) {
+                                if port > 0 {
+                                    meta.configured_port = port as i32;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1930,17 +2716,26 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "audiobookshelf" => {
-            for raw in [
-                "/etc/default/audiobookshelf",
-                "/var/lib/audiobookshelf/config.env",
-            ] {
-                let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if let Some(v) = extract_ini_value(&text, &["PORT"]) {
-                        let port = parse_valid_port(&v);
-                        if port > 0 {
-                            meta.configured_port = port;
-                            break;
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/audiobookshelf.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                for raw in [
+                    "/etc/default/audiobookshelf",
+                    "/var/lib/audiobookshelf/config.env",
+                    "/var/lib/audiobookshelf/config/.env",
+                ] {
+                    let p = resolve_config_path(raw);
+                    if let Ok(text) = fs::read_to_string(&p) {
+                        if let Some(v) = extract_ini_value(&text, &["PORT", "port"]) {
+                            let port = parse_valid_port(&v);
+                            if port > 0 {
+                                meta.configured_port = port;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2023,6 +2818,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "prometheus" => {
             for raw in [
+                "/etc/systemd/system/prometheus.service",
                 "/etc/default/prometheus",
                 "/etc/sysconfig/prometheus",
             ] {
@@ -2037,22 +2833,35 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                             }
                         }
                     }
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
                 }
             }
         }
         "uptime-kuma" => {
-            for raw in [
-                "/var/lib/uptime-kuma/.env",
-                "/opt/uptime-kuma/.env",
-                "/etc/default/uptime-kuma",
-            ] {
-                let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if let Some(v) = extract_ini_value(&text, &["UPTIME_KUMA_PORT", "PORT"]) {
-                        let port = parse_valid_port(&v);
-                        if port > 0 {
-                            meta.configured_port = port;
-                            break;
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/uptime-kuma.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                for raw in [
+                    "/var/lib/uptime-kuma/.env",
+                    "/opt/uptime-kuma/.env",
+                    "/etc/default/uptime-kuma",
+                ] {
+                    let p = resolve_config_path(raw);
+                    if let Ok(text) = fs::read_to_string(&p) {
+                        if let Some(v) = extract_ini_value(&text, &["UPTIME_KUMA_PORT", "PORT"]) {
+                            let port = parse_valid_port(&v);
+                            if port > 0 {
+                                meta.configured_port = port;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2060,6 +2869,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "vaultwarden" => {
             for raw in [
+                "/etc/vaultwarden/vaultwarden.env",
                 "/etc/vaultwarden.env",
                 "/var/lib/vaultwarden/.env",
                 "/etc/default/vaultwarden",
@@ -2256,11 +3066,27 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                     }
                 }
             }
+            for raw in [
+                "/etc/apache2/conf-available/aetherflow-organizr-listen.conf",
+                "/etc/apache2/sites-available/organizr.conf",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
         }
         "requestrr" => {
             for raw in [
+                "/var/lib/requestrr/config/settings.json",
+                "/opt/requestrr/config/settings.json",
                 "/var/lib/requestrr/settings.json",
                 "/opt/requestrr/settings.json",
+                "/opt/requestrr/Settings/settings.json",
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
@@ -2280,6 +3106,19 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "seedcross" => {
+            for raw in [
+                "/opt/seedcross/start-seedcross.sh",
+                "/etc/systemd/system/seedcross.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
             for raw in [
                 "/var/lib/seedcross/.env",
                 "/opt/seedcross/.env",
@@ -2327,7 +3166,414 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 }
             }
         }
+        "maintainerr" => {
+            for raw in [
+                "/etc/systemd/system/af-maintainerr.service",
+                "/etc/systemd/system/maintainerr.service",
+                "/var/lib/maintainerr/.env",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text)
+                        .max(extract_ini_value(&text, &["UI_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "flaresolverr" => {
+            for raw in [
+                "/etc/systemd/system/flaresolverr.service",
+                "/opt/flaresolverr/.env",
+                "/etc/default/flaresolverr",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text)
+                        .max(extract_ini_value(&text, &["PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "threadfin" => {
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/threadfin.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                if let Ok(text) = fs::read_to_string(resolve_config_path("/var/lib/threadfin/conf/settings.json")) {
+                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                        if let Some(port) = val.get("port").or_else(|| val.get("Port")).and_then(|v| v.as_i64()) {
+                            if port > 0 {
+                                meta.configured_port = port as i32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "flood" => {
+            for raw in [
+                "/etc/systemd/system/flood.service",
+                "/etc/default/flood",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "nextcloud" | "rutorrent" => {
+            let candidates = [
+                format!("/etc/apache2/conf-available/aetherflow-{canonical}-listen.conf"),
+                format!("/etc/apache2/sites-available/{canonical}.conf"),
+            ];
+            for raw in candidates {
+                let p = resolve_config_path(&raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "netdata" => {
+            for raw in ["/etc/netdata/netdata.conf", "/etc/systemd/system/netdata.service"] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["default port", "port"])
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "homeassistant" => {
+            for raw in [
+                "/home/homeassistant/.homeassistant/configuration.yaml",
+                "/var/lib/homeassistant/configuration.yaml",
+                "/etc/homeassistant/configuration.yaml",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_yaml_section_value(&text, "http", "server_port")
+                        .or_else(|| extract_ini_value(&text, &["server_port"]))
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "adguardhome" => {
+            for raw in [
+                "/opt/AdGuardHome/AdGuardHome.yaml",
+                "/etc/AdGuardHome/AdGuardHome.yaml",
+                "/var/lib/AdGuardHome/AdGuardHome.yaml",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_yaml_section_value(&text, "http", "address")
+                        .map(|v| parse_port_from_host_port(&v))
+                        .filter(|&p| p > 0)
+                        .or_else(|| {
+                            extract_ini_value(&text, &["bind_port"])
+                                .map(|v| parse_valid_port(&v))
+                                .filter(|&p| p > 0)
+                        })
+                        .unwrap_or(0);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "rclone" => {
+            for raw in [
+                "/etc/systemd/system/rclone.service",
+                "/etc/rclone/rclone.env",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text)
+                        .max(extract_ini_value(&text, &["RCLONE_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "autoscan" => {
+            for raw in ["/etc/autoscan/config.yml", "/var/lib/autoscan/config.yml"] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    if let Some(v) = extract_ini_value(&text, &["port"]) {
+                        let port = parse_valid_port(&v);
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        "librespeed" => {
+            for raw in ["/opt/librespeed/settings.toml", "/etc/librespeed/settings.toml"] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    if let Some(v) = extract_ini_value(&text, &["listen_port", "port"]) {
+                        let port = parse_valid_port(&v);
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        "scrutiny" => {
+            for raw in [
+                "/etc/scrutiny/scrutiny.yaml",
+                "/opt/scrutiny/config/scrutiny.yaml",
+                "/etc/systemd/system/scrutiny.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["port"])
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "n8n" => {
+            for raw in [
+                "/etc/systemd/system/n8n.service",
+                "/var/lib/n8n/.env",
+                "/etc/n8n/n8n.env",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text)
+                        .max(extract_ini_value(&text, &["N8N_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "palate" => {
+            for raw in [
+                "/etc/palate/palate.env",
+                "/etc/systemd/system/af-palate.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["PORT", "PALATE_PORT"])
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "duplicati" => {
+            for raw in [
+                "/etc/duplicati/duplicati.env",
+                "/etc/default/duplicati",
+                "/etc/systemd/system/duplicati.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["DUPLICATI_PORT", "PORT"])
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "filebot" => {
+            for raw in [
+                "/var/lib/filebot/filebot-node.env",
+                "/etc/default/filebot",
+                "/etc/systemd/system/filebot.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["FILEBOT_NODE_HTTP_PORT", "PORT"])
+                        .map(|v| parse_valid_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "novnc" => {
+            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/novnc.service")) {
+                let port = extract_port_from_systemd_or_apache_text(&text);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+        }
+        "kasmvnc" => {
+            for raw in [
+                "/var/lib/kasmvnc/.vnc/kasmvnc.yaml",
+                "/etc/kasmvnc/kasmvnc.yaml",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    if let Some(v) = extract_ini_value(&text, &["websocket_port", "port"]) {
+                        let port = parse_valid_port(&v);
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        "mcvnc" => {
+            for raw in [
+                "/etc/mcvnc/mcvnc.env",
+                "/etc/systemd/system/af-mcvnc.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["MCVNC_BIND", "MCVNC_PORT", "PORT"])
+                        .map(|v| parse_port_from_host_port(&v))
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "pyload" => {
+            for raw in [
+                "/var/lib/pyload/settings/pyload.cfg",
+                "/var/lib/pyload/.pyload/settings/pyload.cfg",
+                "/etc/systemd/system/pyload.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_ini_value(&text, &["int port", "port"])
+                        .map(|v| {
+                            let rhs = v.rsplit('=').next().unwrap_or(&v).trim();
+                            parse_valid_port(rhs)
+                        })
+                        .unwrap_or(0)
+                        .max(extract_port_from_systemd_or_apache_text(&text));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "unmanic" => {
+            for raw in [
+                "/var/lib/unmanic/.unmanic/config/settings.json",
+                "/etc/systemd/system/unmanic.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                        if let Some(port) = val.get("ui_port").or_else(|| val.get("port")).and_then(|v| v.as_i64()) {
+                            if port > 0 {
+                                meta.configured_port = port as i32;
+                                break;
+                            }
+                        }
+                    }
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "piped" => {
+            for raw in [
+                "/etc/piped/httpd.conf",
+                "/etc/af-piped/httpd.conf",
+                "/etc/systemd/system/af-piped.service",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    let port = extract_port_from_systemd_or_apache_text(&text);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+        "invidious" => {
+            for raw in [
+                "/etc/invidious/config.yml",
+                "/etc/af-invidious/config.yml",
+                "/var/lib/invidious/config/config.yml",
+            ] {
+                let p = resolve_config_path(raw);
+                if let Ok(text) = fs::read_to_string(&p) {
+                    if let Some(v) = extract_ini_value(&text, &["port"]) {
+                        let port = parse_valid_port(&v);
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
+    }
+
+    if meta.configured_port <= 0 {
+        let fallback_port = extract_fallback_unit_or_apache_port(&canonical);
+        if fallback_port > 0 {
+            meta.configured_port = fallback_port;
+        }
     }
 
     let mut confirmed = !meta.api_key.is_empty() || meta.configured_port > 0;
@@ -2527,8 +3773,9 @@ fn master_cred_paths() -> Vec<PathBuf> {
 }
 
 fn finalized_ha1(creds: &MasterCreds) -> String {
-    if creds.ha1.is_empty() {
-        md5_hex(creds.password.as_bytes())
+    let expected = md5_hex(creds.password.as_bytes());
+    if creds.ha1.is_empty() || creds.ha1 != expected {
+        expected
     } else {
         creds.ha1.clone()
     }
@@ -2556,18 +3803,8 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
         if path.as_os_str().is_empty() {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = fs::create_dir_all(parent);
-            }
-        }
-        if fs::write(&path, &raw).is_ok() {
+        if write_file_atomic_mode(&path, &raw, Some(0o600)).is_ok() {
             wrote = true;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-            }
         }
     }
     if let Ok(text) = std::str::from_utf8(&raw[..raw.len().saturating_sub(1)]) {
@@ -2924,22 +4161,40 @@ fn mutate_pihole_toml(file_path: &Path, port: i32) -> Result<bool, String> {
 }
 
 fn mutate_dispatcharr_port(file_path: &Path, port: i32) -> Result<bool, String> {
-    use std::io::Write;
     let existing = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+    let port_str = port.to_string();
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if let Some((lhs, rhs)) = trimmed.split_once('=') {
+            if lhs.trim() == "DISPATCHARR_PORT" {
+                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+                if clean_rhs == port_str {
+                    return Ok(false);
+                }
+            }
+        }
+    }
     let setting = format!("DISPATCHARR_PORT={}", port);
     let pattern = Regex::new(r"(?m)^\s*DISPATCHARR_PORT\s*=.*$").unwrap();
     let updated = if pattern.is_match(&existing) {
         pattern.replace_all(&existing, setting.as_str()).into_owned()
     } else {
-        format!("{}{}{}\n", existing, if existing.ends_with('\n') || existing.is_empty() { "" } else { "\n" }, setting)
+        format!(
+            "{}{}{}\n",
+            existing,
+            if existing.ends_with('\n') || existing.is_empty() {
+                ""
+            } else {
+                "\n"
+            },
+            setting
+        )
     };
     if updated == existing {
         return Ok(false);
     }
     backup_config_file(file_path)?;
-    let mut file = fs::OpenOptions::new().write(true).truncate(true).open(file_path)
-        .map_err(|error| error.to_string())?;
-    file.write_all(updated.as_bytes()).map_err(|error| error.to_string())?;
+    write_file_atomic(file_path, updated.as_bytes())?;
     Ok(true)
 }
 
@@ -2993,6 +4248,21 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
     let mut sqlite_routes_injected: usize = 0;
     let (master_user, master_pass, _master_ha1) = load_master_credentials();
 
+    let handle_host_mutation = |res: Result<bool, String>| -> Result<bool, String> {
+        match res {
+            Ok(changed) => Ok(changed),
+            Err(err) if is_unprivileged_host_write_error(&err) => {
+                tracing::info!(
+                    app = %canonical,
+                    "skipping host config mutation in unprivileged API process (handled by privileged runner): {}",
+                    err
+                );
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    };
+
     for raw_path in &spec.config_paths {
         let resolved = resolve_config_path(raw_path);
         if !resolved.is_file() {
@@ -3003,37 +4273,55 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
         match canonical.as_str() {
             "dispatcharr" => {
                 if effective_port > 0
-                    && mutate_dispatcharr_port(&resolved, effective_port)?
+                    && handle_host_mutation(mutate_dispatcharr_port(&resolved, effective_port))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "gitea" => {
-                if effective_port > 0 && mutate_ini_key(&resolved, "server", "HTTP_PORT", &port_str)? {
+                if effective_port > 0
+                    && handle_host_mutation(mutate_ini_key(&resolved, "server", "HTTP_PORT", &port_str))?
+                {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
-            "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
+            "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
                 let mut file_changed = false;
                 if effective_port > 0 {
-                    file_changed |= mutate_xml_element(&resolved, "Port", &port_str)?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "Port", &port_str))?;
                 }
-                file_changed |= mutate_xml_element(&resolved, "BindAddress", "*")?;
-                file_changed |= mutate_xml_element(&resolved, "AuthenticationMethod", "Forms")?;
-                file_changed |= mutate_xml_element(&resolved, "AnalyticsEnabled", "False")?;
+                let has_bind = read_xml_element(&resolved, "BindAddress")
+                    .is_some_and(|v| !v.trim().is_empty());
+                if !has_bind {
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "BindAddress", "127.0.0.1"))?;
+                }
+                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "AuthenticationMethod", "Forms"))?;
+                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "AnalyticsEnabled", "False"))?;
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "jellyfin" => {
                 let mut file_changed = false;
+                let existing_xml = fs::read_to_string(&resolved).unwrap_or_default();
+                let has_remote_access = extract_xml_tag_text(&existing_xml, "EnableRemoteAccess")
+                    .is_some_and(|v| !v.trim().is_empty());
+                let has_known_proxies = Regex::new(r"(?is)<KnownProxies>\s*(.*?)\s*</KnownProxies>")
+                    .ok()
+                    .and_then(|re| re.captures(&existing_xml))
+                    .and_then(|c| c.get(1))
+                    .is_some_and(|m| !m.as_str().trim().is_empty());
                 if effective_port > 0 {
-                    file_changed |= mutate_xml_element(&resolved, "InternalHttpPort", &port_str)?;
-                    file_changed |= mutate_xml_element(&resolved, "PublicHttpPort", &port_str)?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "InternalHttpPort", &port_str))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "PublicHttpPort", &port_str))?;
                 }
-                file_changed |= mutate_xml_element(&resolved, "EnableIPV4", "true")?;
-                file_changed |= mutate_xml_element(&resolved, "EnableRemoteAccess", "true")?;
-                file_changed |= mutate_xml_element(&resolved, "KnownProxies", "127.0.0.1")?;
+                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "EnableIPV4", "true"))?;
+                if !has_remote_access {
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "EnableRemoteAccess", "true"))?;
+                }
+                if !has_known_proxies {
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "KnownProxies", "127.0.0.1"))?;
+                }
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -3042,8 +4330,8 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 if effective_port > 0 {
                     let mut file_changed = false;
                     file_changed |=
-                        mutate_xml_element(&resolved, "HttpServerPortNumber", &port_str)?;
-                    file_changed |= mutate_xml_element(&resolved, "PublicPort", &port_str)?;
+                        handle_host_mutation(mutate_xml_element(&resolved, "HttpServerPortNumber", &port_str))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "PublicPort", &port_str))?;
                     if file_changed {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
@@ -3051,40 +4339,55 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "qbittorrent" => {
                 let mut file_changed = false;
+                let existing_ini = fs::read_to_string(&resolved).unwrap_or_default();
                 if effective_port > 0 {
-                    file_changed |=
-                        mutate_ini_key(&resolved, "Preferences", r"WebUI\Port", &port_str)?;
+                    file_changed |= handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "Preferences",
+                        r"WebUI\Port",
+                        &port_str,
+                    ))?;
                 }
-                file_changed |= mutate_ini_key(&resolved, "Preferences", r"WebUI\Address", "*")?;
-                file_changed |= mutate_ini_key(
-                    &resolved,
-                    "Preferences",
-                    r"WebUI\HostHeaderValidation",
-                    "false",
-                )?;
-                file_changed |=
-                    mutate_ini_key(&resolved, "Preferences", r"WebUI\CSRFProtection", "false")?;
+                let has_addr = extract_ini_value(&existing_ini, &[r"WebUI\Address"])
+                    .is_some_and(|v| !v.trim().is_empty());
+                if !has_addr {
+                    file_changed |= handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "Preferences",
+                        r"WebUI\Address",
+                        "127.0.0.1",
+                    ))?;
+                }
                 if !master_user.is_empty() && !master_pass.is_empty() {
-                    let qbit_hash = generate_qbittorrent_pbkdf2(&master_pass);
-                    let ha1_value = format!("@ByteArray({})", md5_hex(master_pass.as_bytes()));
-                    file_changed |= mutate_ini_key(
-                        &resolved,
-                        "Preferences",
-                        r"WebUI\Username",
-                        &master_user,
-                    )?;
-                    file_changed |= mutate_ini_key(
-                        &resolved,
-                        "Preferences",
-                        r"WebUI\Password_PBKDF2",
-                        &qbit_hash,
-                    )?;
-                    file_changed |= mutate_ini_key(
-                        &resolved,
-                        "Preferences",
-                        r"WebUI\Password_ha1",
-                        &ha1_value,
-                    )?;
+                    let has_user = extract_ini_value(&existing_ini, &[r"WebUI\Username"])
+                        .is_some_and(|v| !v.trim().is_empty());
+                    let has_pass = extract_ini_value(
+                        &existing_ini,
+                        &[r"WebUI\Password_PBKDF2", r"WebUI\Password_ha1"],
+                    )
+                    .is_some_and(|v| !v.trim().is_empty());
+                    if !has_user || !has_pass {
+                        let qbit_hash = generate_qbittorrent_pbkdf2(&master_pass);
+                        let ha1_value = format!("@ByteArray({})", md5_hex(master_pass.as_bytes()));
+                        file_changed |= handle_host_mutation(mutate_ini_key(
+                            &resolved,
+                            "Preferences",
+                            r"WebUI\Username",
+                            &master_user,
+                        ))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(
+                            &resolved,
+                            "Preferences",
+                            r"WebUI\Password_PBKDF2",
+                            &qbit_hash,
+                        ))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(
+                            &resolved,
+                            "Preferences",
+                            r"WebUI\Password_ha1",
+                            &ha1_value,
+                        ))?;
+                    }
                 }
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
@@ -3092,11 +4395,15 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "sabnzbd" => {
                 let mut file_changed = false;
+                let existing_ini = fs::read_to_string(&resolved).unwrap_or_default();
                 if effective_port > 0 {
-                    file_changed |= mutate_ini_key(&resolved, "misc", "port", &port_str)?;
+                    file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "port", &port_str))?;
                 }
-                file_changed |= mutate_ini_key(&resolved, "misc", "host", "0.0.0.0")?;
-                file_changed |= mutate_ini_key(&resolved, "misc", "inet_exposure", "4")?;
+                let has_host = extract_ini_value(&existing_ini, &["host"])
+                    .is_some_and(|v| !v.trim().is_empty());
+                if !has_host {
+                    file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "host", "127.0.0.1"))?;
+                }
                 let mut whitelist = "sabnzbd.aether.local, localhost, 127.0.0.1".to_string();
                 let base_domain = crate::resolve_base_domain();
                 if !base_domain.is_empty() {
@@ -3113,15 +4420,21 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                         }
                     }
                 }
-                file_changed |= mutate_ini_key(
+                file_changed |= handle_host_mutation(mutate_ini_key(
                     &resolved,
                     "misc",
                     "host_whitelist",
                     &whitelist,
-                )?;
+                ))?;
                 if !master_user.is_empty() && !master_pass.is_empty() {
-                    file_changed |= mutate_ini_key(&resolved, "misc", "username", &master_user)?;
-                    file_changed |= mutate_ini_key(&resolved, "misc", "password", &master_pass)?;
+                    let has_user = extract_ini_value(&existing_ini, &["username"])
+                        .is_some_and(|v| !v.trim().is_empty());
+                    let has_pass = extract_ini_value(&existing_ini, &["password"])
+                        .is_some_and(|v| !v.trim().is_empty());
+                    if !has_user || !has_pass {
+                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "username", &master_user))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "password", &master_pass))?;
+                    }
                 }
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
@@ -3129,7 +4442,7 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "tautulli" => {
                 if effective_port > 0
-                    && mutate_ini_key(&resolved, "General", "http_port", &port_str)?
+                    && handle_host_mutation(mutate_ini_key(&resolved, "General", "http_port", &port_str))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -3138,17 +4451,35 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 let mut file_changed = false;
                 if effective_port > 0 {
                     file_changed |=
-                        mutate_json_key(&resolved, "rpc-port", json!(effective_port))?;
+                        handle_host_mutation(mutate_json_key(&resolved, "rpc-port", json!(effective_port)))?;
                 }
-                file_changed |=
-                    mutate_json_key(&resolved, "rpc-whitelist-enabled", json!(false))?;
-                file_changed |=
-                    mutate_json_key(&resolved, "rpc-host-whitelist-enabled", json!(false))?;
+                let existing_json: Value = fs::read_to_string(&resolved)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| json!({}));
+                if existing_json.get("rpc-whitelist-enabled").is_none() {
+                    file_changed |=
+                        handle_host_mutation(mutate_json_key(&resolved, "rpc-whitelist-enabled", json!(false)))?;
+                }
+                if existing_json.get("rpc-host-whitelist-enabled").is_none() {
+                    file_changed |=
+                        handle_host_mutation(mutate_json_key(&resolved, "rpc-host-whitelist-enabled", json!(false)))?;
+                }
                 if !master_user.is_empty() && !master_pass.is_empty() {
-                    file_changed |=
-                        mutate_json_key(&resolved, "rpc-username", json!(master_user))?;
-                    file_changed |=
-                        mutate_json_key(&resolved, "rpc-password", json!(master_pass))?;
+                    let has_user = existing_json
+                        .get("rpc-username")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.trim().is_empty());
+                    let has_pass = existing_json
+                        .get("rpc-password")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.trim().is_empty());
+                    if !has_user || !has_pass {
+                        file_changed |=
+                            handle_host_mutation(mutate_json_key(&resolved, "rpc-username", json!(master_user)))?;
+                        file_changed |=
+                            handle_host_mutation(mutate_json_key(&resolved, "rpc-password", json!(master_pass)))?;
+                    }
                 }
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
@@ -3156,38 +4487,38 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "overseerr" | "jellyseerr" => {
                 if effective_port > 0
-                    && mutate_json_key(&resolved, "main.port", json!(effective_port))?
+                    && handle_host_mutation(mutate_json_key(&resolved, "main.port", json!(effective_port)))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "jackett" => {
                 if effective_port > 0
-                    && mutate_json_key(&resolved, "Port", json!(effective_port))?
+                    && handle_host_mutation(mutate_json_key(&resolved, "Port", json!(effective_port)))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "pihole" => {
-                if effective_port > 0 && mutate_pihole_toml(&resolved, effective_port)? {
+                if effective_port > 0 && handle_host_mutation(mutate_pihole_toml(&resolved, effective_port))? {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             _ => match spec.mutator_type {
                 "xml" if effective_port > 0 && !bp.port_config_key.is_empty() => {
-                    if mutate_xml_element(&resolved, &bp.port_config_key, &port_str)? {
+                    if handle_host_mutation(mutate_xml_element(&resolved, &bp.port_config_key, &port_str))? {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
                 }
                 "ini" if effective_port > 0 && !bp.port_config_key.is_empty() => {
-                    if mutate_ini_key(&resolved, "Preferences", &bp.port_config_key, &port_str)? {
+                    if handle_host_mutation(mutate_ini_key(&resolved, "Preferences", &bp.port_config_key, &port_str))? {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
                 }
                 "json"
                     if effective_port > 0
                         && !bp.port_config_key.is_empty()
-                        && mutate_json_key(&resolved, &bp.port_config_key, json!(effective_port))? =>
+                        && handle_host_mutation(mutate_json_key(&resolved, &bp.port_config_key, json!(effective_port)))? =>
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -3208,10 +4539,34 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 "127.0.0.1".to_string(),
                 "qbittorrent.aether.local".to_string(),
             );
-            let count = inject_arr_download_client_routes(&db_path, &routes, 8080)?;
-            sqlite_routes_injected = count;
-            if count > 0 {
-                mutated_files.push(db_path.to_string_lossy().to_string());
+            let qbit_port = {
+                let p = get_app_runtime_meta("qbittorrent").configured_port;
+                if p > 0 {
+                    p
+                } else {
+                    af_db::get_app_ingress_config("qbittorrent")
+                        .ok()
+                        .flatten()
+                        .map(|c| c.listen_port)
+                        .filter(|&p| p > 0)
+                        .unwrap_or(8180)
+                }
+            };
+            match inject_arr_download_client_routes(&db_path, &routes, qbit_port) {
+                Ok(count) => {
+                    sqlite_routes_injected = count;
+                    if count > 0 {
+                        mutated_files.push(db_path.to_string_lossy().to_string());
+                    }
+                }
+                Err(err) if is_unprivileged_host_write_error(&err) => {
+                    tracing::info!(
+                        app = %canonical,
+                        "skipping SQLite route injection in unprivileged API process: {}",
+                        err
+                    );
+                }
+                Err(err) => return Err(err),
             }
         }
     }
@@ -3248,7 +4603,17 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
         external_access_enabled,
     )?;
 
-    sync_local_dns_domains(&dns_domains).await?;
+    if let Err(err) = sync_local_dns_domains(&dns_domains).await {
+        if is_unprivileged_host_write_error(&err) {
+            tracing::info!(
+                app = %canonical,
+                "skipping local DNS hosts sync in unprivileged API process (handled by privileged runner): {}",
+                err
+            );
+        } else {
+            return Err(err);
+        }
+    }
     let dns_synced = true;
     clear_app_runtime_meta_cache();
 
@@ -3274,6 +4639,27 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_write_file_atomic_rejects_symlink_parent_directory() {
+        let dir = temp_test_dir("symlink_parent");
+        let real_target_dir = dir.join("real_target");
+        fs::create_dir_all(&real_target_dir).unwrap();
+        let symlink_parent = dir.join("linked_parent");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_target_dir, &symlink_parent).unwrap();
+            let victim_file = symlink_parent.join("victim.conf");
+            let err = write_file_atomic(&victim_file, b"pwned").unwrap_err();
+            assert!(
+                err.contains("symlink parent directory"),
+                "expected symlink parent rejection, got: {}",
+                err
+            );
+            assert!(!real_target_dir.join("victim.conf").exists());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_runner_app_meta_reads_response_payload() {
@@ -3469,5 +4855,188 @@ mod tests {
         let dk = BASE64_STD.decode(dk_b64).unwrap();
         assert_eq!(salt.len(), 16);
         assert_eq!(dk.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_afmp004_service_jellyfin_blueprint_preserves_operator_remote_access_and_known_proxies(
+    ) {
+        let dir = temp_test_dir("afmp004-jellyfin-service");
+        for subdir in ["etc/jellyfin", "etc/apache2/sites-available", "var/lib/aetherflow"] {
+            fs::create_dir_all(dir.join(subdir)).unwrap();
+        }
+        let net_xml = dir.join("etc/jellyfin/network.xml");
+        let retained_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<NetworkConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <InternalHttpPort>8096</InternalHttpPort>
+  <PublicHttpPort>8096</PublicHttpPort>
+  <EnableIPV4>true</EnableIPV4>
+  <EnableRemoteAccess>false</EnableRemoteAccess>
+  <KnownProxies><string>10.20.30.40</string></KnownProxies>
+</NetworkConfiguration>
+"#;
+        fs::write(&net_xml, retained_xml).unwrap();
+        fs::write(dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
+        let db_path = dir.join("var/lib/aetherflow/aetherflow.sqlite");
+
+        let prev_fs_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        let prev_af_db = std::env::var_os("AF_DB_PATH");
+        let prev_db = std::env::var_os("DB_PATH");
+        let prev_aether_db = std::env::var_os("AETHERFLOW_DB_PATH");
+        let prev_hosts = std::env::var_os("AETHERFLOW_HOSTS_FILE");
+        let prev_sock = std::env::var_os("AETHERFLOW_RUNNER_SOCK");
+
+        std::env::set_var("AETHERFLOW_FS_ROOT", &dir);
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &dir);
+        std::env::set_var("AF_DB_PATH", &db_path);
+        std::env::set_var("DB_PATH", &db_path);
+        std::env::set_var("AETHERFLOW_DB_PATH", &db_path);
+        std::env::set_var("AETHERFLOW_HOSTS_FILE", dir.join("hosts"));
+        std::env::set_var("AETHERFLOW_RUNNER_SOCK", dir.join("absent.sock"));
+
+        af_db::init_db().unwrap();
+        let res = apply_blueprint_app_config_admitted("jellyfin", 18096).await;
+
+        for (key, prev) in [
+            ("AETHERFLOW_FS_ROOT", prev_fs_root),
+            ("AETHERFLOW_CONFIG_ROOT", prev_cfg_root),
+            ("AF_DB_PATH", prev_af_db),
+            ("DB_PATH", prev_db),
+            ("AETHERFLOW_DB_PATH", prev_aether_db),
+            ("AETHERFLOW_HOSTS_FILE", prev_hosts),
+            ("AETHERFLOW_RUNNER_SOCK", prev_sock),
+        ] {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        res.unwrap();
+        let updated = fs::read_to_string(&net_xml).unwrap();
+        assert!(updated.contains("<InternalHttpPort>18096</InternalHttpPort>"));
+        assert!(updated.contains("<PublicHttpPort>18096</PublicHttpPort>"));
+        assert!(
+            updated.contains("<EnableRemoteAccess>false</EnableRemoteAccess>"),
+            "must preserve explicit EnableRemoteAccess=false, got:\n{updated}"
+        );
+        assert!(
+            updated.contains("<KnownProxies><string>10.20.30.40</string></KnownProxies>"),
+            "must preserve custom KnownProxies, got:\n{updated}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_afmp_sol_001_service_vhost_sync_preserves_apache_access_policy() {
+        let dir = temp_test_dir("afmp-sol-001-service-apache");
+        let sites_avail = dir.join("etc/apache2/sites-available");
+        let sites_en = dir.join("etc/apache2/sites-enabled");
+        fs::create_dir_all(&sites_avail).unwrap();
+        fs::create_dir_all(&sites_en).unwrap();
+        fs::create_dir_all(dir.join("var/lib/aetherflow")).unwrap();
+        fs::write(dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
+
+        let int_conf = sites_avail.join("aetherflow-app-qui.conf");
+        let ext_conf = sites_avail.join("aetherflow-ext-qui.conf");
+        let en_ext_conf = sites_en.join("aetherflow-ext-qui.conf");
+
+        let existing_int = "\
+# Managed by AetherFlow v3.2.6
+<VirtualHost *:80>
+    ServerName qui.aether.local
+    ProxyPreserveHost On
+    ProxyRequests Off
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteRule /(.*) ws://127.0.0.1:8376/$1 [P,L]
+    ProxyPass / http://127.0.0.1:8376/
+    ProxyPassReverse / http://127.0.0.1:8376/
+    RequestHeader set X-Forwarded-Proto \"http\"
+    <Location /qui>
+        AuthType Basic
+        AuthName \"Restricted Qui\"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require ip 192.0.2.0/24
+    </Location>
+</VirtualHost>
+";
+        let existing_ext = "\
+# Managed by AetherFlow v3.2.6 (External Ingress)
+<VirtualHost *:80>
+    ServerName qui.example.com
+    ProxyPreserveHost On
+    ProxyRequests Off
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteRule /(.*) ws://127.0.0.1:8376/$1 [P,L]
+    ProxyPass / http://127.0.0.1:8376/
+    ProxyPassReverse / http://127.0.0.1:8376/
+    <Location /qui>
+        AuthType Basic
+        AuthName \"Restricted Qui\"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require ip 192.0.2.0/24
+    </Location>
+</VirtualHost>
+";
+        fs::write(&int_conf, existing_int).unwrap();
+        fs::write(&ext_conf, existing_ext).unwrap();
+        fs::write(&en_ext_conf, existing_ext).unwrap();
+
+        let prev_fs_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        std::env::set_var("AETHERFLOW_FS_ROOT", &dir);
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &dir);
+
+        let sync_res = sync_apache_app_vhost("qui", 18376, "qui.aether.local", "qui.example.com", true);
+
+        for (key, prev) in [
+            ("AETHERFLOW_FS_ROOT", prev_fs_root),
+            ("AETHERFLOW_CONFIG_ROOT", prev_cfg_root),
+        ] {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert!(sync_res.unwrap());
+        for path in [&int_conf, &ext_conf, &en_ext_conf] {
+            let updated = fs::read_to_string(path).unwrap();
+            assert!(
+                updated.contains("ws://127.0.0.1:18376/$1"),
+                "must update websocket RewriteRule port to 18376 in {}: {updated}",
+                path.display()
+            );
+            assert!(
+                updated.contains("ProxyPass / http://127.0.0.1:18376/"),
+                "must update ProxyPass port to 18376 in {}: {updated}",
+                path.display()
+            );
+            assert!(
+                updated.contains("ProxyPassReverse / http://127.0.0.1:18376/"),
+                "must update ProxyPassReverse port to 18376 in {}: {updated}",
+                path.display()
+            );
+            assert!(
+                updated.contains("<Location /qui>"),
+                "must preserve <Location /qui> block in {}: {updated}",
+                path.display()
+            );
+            assert!(
+                updated.contains("AuthType Basic"),
+                "must preserve AuthType Basic in {}: {updated}",
+                path.display()
+            );
+            assert!(
+                updated.contains("Require ip 192.0.2.0/24"),
+                "must preserve Require ip 192.0.2.0/24 in {}: {updated}",
+                path.display()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -27,6 +27,16 @@ id() { return 0; }
 getent() { return 0; }
 useradd() { record "useradd $*"; }
 usermod() { record "usermod $*"; }
+userdel() { record "userdel $*"; }
+groupdel() { record "groupdel $*"; }
+dpkg-deb() { printf '1.5.2\n'; }
+dpkg-query() {
+    if [[ "$*" == *'db:Status-Status'* ]]; then
+        printf 'installed 1.5.2\n'
+    else
+        printf '1.5.2\n'
+    fi
+}
 chown() { :; }
 sleep() { :; }
 git() {
@@ -105,13 +115,13 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="af-desktop-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for directory in ("etc/systemd/system", "etc/xrdp", "var/lib", "var/log/aetherflow", "tmp", "install", "usr/local/bin"):
+        for directory in ("etc/systemd/system", "etc/xrdp", "var/lib", "var/log/aetherflow", "tmp", "install", "usr/local/bin", "opt", "home", "root"):
             (self.root / directory).mkdir(parents=True)
         (self.root / "etc/os-release").write_text('ID=debian\nVERSION_CODENAME=bookworm\n')
         (self.root / "etc/xrdp/startwm.sh").write_text("original session script\n")
         (self.root / "common.sh").write_text(MOCK_COMMON)
         common = (REPO / "packages/common.sh").read_text()
-        common = re.sub(r"/(?:etc|var/lib|var/log|tmp|usr/local/bin)/", lambda match: str(self.root) + match.group(), common)
+        common = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root)/", lambda match: str(self.root) + match.group(), common)
         (self.root / "real-common.sh").write_text(common)
         (self.root / "mock.py").write_text(MOCK_COMMANDS)
         self.release = {
@@ -123,7 +133,7 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
             }],
         }
         self.tags = [{"name": "v0.10.1"}]
-        self.env = dict(os.environ, TEST_ROOT=str(self.root), REAL_COMMON=str(self.root / "real-common.sh"),
+        self.env = dict(os.environ, TEST_ROOT=str(self.root), REAL_COMMON=str(self.root / "real-common.sh"), HOME=str(self.root / "home"),
                         LOCK_DIR=str(self.root / "install"), LOGFILE=str(self.root / "var/log/aetherflow/test.log"),
                         MOCK_FAIL_START="0", MOCK_FAIL_REMOVE="0", MOCK_CORRUPT="0")
 
@@ -132,8 +142,8 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         (self.root / "tags.json").write_text(json.dumps(self.tags))
         script = (PACKAGE_DIR / action / (action + "package-" + package)).read_text()
         script = 'set -euo pipefail\nsource "$TEST_ROOT/common.sh"\n' + script.split("require_root\n", 1)[1]
-        script = re.sub(r"/(?:etc|var/lib|var/log|tmp|usr/local/bin)/", lambda match: str(self.root) + match.group(), script)
-        script = script.replace("/usr/bin/kasmvncpasswd", "kasmvncpasswd")
+        script = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root)/", lambda match: str(self.root) + match.group(), script)
+        script = script.replace("| " + str(self.root) + "/usr/bin/kasmvncpasswd ", "| kasmvncpasswd ")
         script = script.replace('ARCH="$(dpkg --print-architecture)"', 'ARCH="amd64"')
         script_path = self.root / "run.sh"
         script_path.write_text(script)
@@ -174,7 +184,8 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         env_cfg = (self.root / "etc/mcvnc/mcvnc.env").read_text()
         self.assertIn("MCVNC_BIND=127.0.0.1:17004", env_cfg)
         unit_cfg = (self.root / "etc/systemd/system/af-mcvnc.service").read_text()
-        self.assertIn("--bind 127.0.0.1:17004", unit_cfg)
+        self.assertIn("EnvironmentFile=-", unit_cfg)
+        self.assertIn("--bind ${MCVNC_BIND}", unit_cfg)
         self.assertTrue((self.root / "install/.mcvnc.lock").exists())
         self.assertTrue((self.root / "usr/local/bin/mcvnc").exists())
         self.assertFalse(list((self.root / "tmp").glob("af-mcvnc-*")))
@@ -259,10 +270,13 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
                 result = self.run_script("remove", package)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue((data_dir / "keep.txt").exists())
+                self.assertNotIn(f"userdel af-{package}", self.commands())
                 result = self.run_script("remove", package, DELETE_DATA="true")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(data_dir.exists())
-                self.assertNotRegex(self.commands(), r"apt-get (remove|purge).*xfce|userdel")
+                self.assertNotRegex(self.commands(), r"apt-get (remove|purge).*xfce")
+                if package in ("kasmvnc", "mcvnc"):
+                    self.assertIn(f"userdel af-{package}", self.commands())
 
 
 if __name__ == "__main__":

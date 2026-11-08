@@ -22,7 +22,9 @@ systemctl daemon-reload
 report_progress 60 "Removing KasmVNC; keeping shared desktop dependencies..."
 DEBIAN_FRONTEND=noninteractive apt-get remove -y kasmvncserver >> "$LOGFILE" 2>&1
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
-    rm -rf /var/lib/kasmvnc /etc/kasmvnc
+    safe_rm_rf /var/lib/kasmvnc /etc/kasmvnc
+    purge_system_user "af-kasmvnc"
 fi
+rm -f /var/lib/kasmvnc/.af-version
 remove_lock kasmvnc
 report_progress 100 "KasmVNC removed."

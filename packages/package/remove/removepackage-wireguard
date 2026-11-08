@@ -33,11 +33,12 @@ DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing WireGuard keys, configuration, and sysctl rules..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/wireguard /etc/sysctl.d/99-wireguard.conf
+    safe_rm_rf /var/lib/wireguard /etc/wireguard /etc/sysctl.d/99-wireguard.conf
 fi
 sysctl --system >> "$LOGFILE" 2>&1 || true
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /etc/wireguard/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "WireGuard removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

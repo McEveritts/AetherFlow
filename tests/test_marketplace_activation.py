@@ -1,7 +1,10 @@
 """Real Emby installer activation with disposable paths and fake host commands."""
 import os
 from pathlib import Path
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_marketplace_lifecycle as lifecycle
 
 
@@ -21,6 +24,14 @@ import os,pathlib,sys
 root=pathlib.Path(os.environ['TEST_ROOT'])
 with (root/'activation-commands').open('a') as log: log.write(' '.join(sys.argv[1:])+'\\n')
 if sys.argv[1] == os.environ.get('FAIL_ACTIVATION'): sys.exit(73)
+operation = sys.argv[1]
+units = [argument for argument in sys.argv[2:] if not argument.startswith('-')]
+if operation == 'is-active':
+    sys.exit(0 if all((root / ('active-' + unit)).exists() for unit in units) else 3)
+if operation in ('start', 'restart'):
+    for unit in units: (root / ('active-' + unit)).touch()
+if operation == 'stop':
+    for unit in units: (root / ('active-' + unit)).unlink(missing_ok=True)
 ''')
         systemctl.chmod(0o755)
 

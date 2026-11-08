@@ -36,38 +36,40 @@ DATA_SAVED=0
 SUCCESS=0
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 && "$SERVICE_STOPPED" -eq 1 ]]; then
         log_error "Seerr upgrade failed; restoring the previous installation from ${BACKUP_DIR}."
-        systemctl stop jellyseerr >> "$LOGFILE" 2>&1
+        quiesce_services_for_rollback jellyseerr || { restore_failed=true; exit 1; }
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
-            mv /opt/jellyseerr "$BACKUP_DIR/failed-app"
+            mv /opt/jellyseerr "$BACKUP_DIR/failed-app" || restore_failed=true
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /opt/jellyseerr
+            mv "$BACKUP_DIR/app" /opt/jellyseerr || restore_failed=true
         fi
         if [[ "$DATA_SAVED" -eq 1 && "$APP_ACTIVATED" -eq 1 ]]; then
-            rm -rf /var/lib/jellyseerr
-            mkdir -p /var/lib/jellyseerr
-            tar -xzf "$BACKUP_DIR/data.tar.gz" -C /var/lib/jellyseerr
-            chown -R jellyseerr:jellyseerr /var/lib/jellyseerr
+            restore_app_state "$BACKUP_DIR" || restore_failed=true
+            chown -hRP jellyseerr:jellyseerr /var/lib/jellyseerr
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/jellyseerr.service" ]]; then
-                cp -a "$BACKUP_DIR/jellyseerr.service" /etc/systemd/system/jellyseerr.service
+                safe_restore_path_from_backup "$BACKUP_DIR/jellyseerr.service" /etc/systemd/system/jellyseerr.service || restore_failed=true
             else
-                rm -f /etc/systemd/system/jellyseerr.service
+                rm -f /etc/systemd/system/jellyseerr.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start jellyseerr >> "$LOGFILE" 2>&1 || log_error "Rollback service restart failed; see ${LOGFILE}."
+        if [[ "$restore_failed" == false && "$WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start jellyseerr >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $BACKUP_DIR"
     fi
     exit "$status"
 }
@@ -102,7 +104,7 @@ if [[ ! "$NODE_ARCHIVE" =~ ^node-v22\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$
     log_error "Unable to resolve the private Node.js 22 runtime."
     exit 1
 fi
-curl --fail --silent --show-error --location "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" -o "$NODE_ARCHIVE"
+download_file "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" "$NODE_ARCHIVE"
 grep -F "  ${NODE_ARCHIVE}" node-shasums.txt | sha256sum --check --status
 mkdir .runtime
 tar -xJf "$NODE_ARCHIVE" --strip-components=1 -C .runtime
@@ -127,7 +129,7 @@ if ! id -u jellyseerr >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/jellyseerr --shell /usr/sbin/nologin jellyseerr
 fi
 mkdir -p /var/lib/jellyseerr
-chown -R jellyseerr:jellyseerr "$BUILD_DIR" /var/lib/jellyseerr
+chown -hRP jellyseerr:jellyseerr "$BUILD_DIR" /var/lib/jellyseerr
 chmod 755 "$BUILD_DIR"
 
 report_progress 80 "Backing up Jellyseerr state and activating Seerr ${LATEST_TAG}..."
@@ -139,9 +141,10 @@ fi
 if systemctl is-active --quiet jellyseerr; then
     WAS_ACTIVE=1
 fi
-SERVICE_STOPPED=1
 systemctl stop jellyseerr >> "$LOGFILE" 2>&1
+SERVICE_STOPPED=1
 tar -czf "$BACKUP_DIR/data.tar.gz" -C /var/lib/jellyseerr .
+    snapshot_app_state "$BACKUP_DIR" /var/lib/jellyseerr
 DATA_SAVED=1
 if [[ -d /opt/jellyseerr ]]; then
     mv /opt/jellyseerr "$BACKUP_DIR/app"
@@ -197,10 +200,13 @@ if [[ "$HEALTHY" -ne 1 ]]; then
     exit 1
 fi
 
-printf '%s\n' "${LATEST_TAG#v}" > /opt/jellyseerr/.af-version
-chown jellyseerr:jellyseerr /opt/jellyseerr/.af-version
+queue_app_version /opt/jellyseerr/.af-version "${LATEST_TAG#v}"
 systemctl enable jellyseerr >> "$LOGFILE" 2>&1
+systemctl is-active --quiet jellyseerr
+commit_app_versions
+chown jellyseerr:jellyseerr /opt/jellyseerr/.af-version
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+retain_successful_app_backups "$PACKAGE_NAME" "$BACKUP_DIR" || print_warn "Completed backup retention needs attention; recovery copies remain in /var/backups."
 log_info "Seerr ${LATEST_TAG} verified. Previous application and state retained in ${BACKUP_DIR}."
 report_progress 100 "Seerr ${LATEST_TAG} installed and verified on port ${APP_PORT}."

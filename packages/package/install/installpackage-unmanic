@@ -55,15 +55,65 @@ if getent group render >/dev/null 2>&1; then
     usermod -aG render "${APP_USER}" || true
 fi
 
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
+RUNTIME_PATHS=("/opt/unmanic" "/var/lib/unmanic" "/etc/systemd/system/unmanic.service")
+RUNTIME_HAD_PREVIOUS=false
+RUNTIME_MUTATED=0
+[[ ! -e "/opt/unmanic" ]] || RUNTIME_HAD_PREVIOUS=true
+rollback_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback unmanic || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+            systemctl restart unmanic >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$RUNTIME_HAD_PREVIOUS" == true || -f /etc/systemd/system/unmanic.service ]] || systemctl is-active --quiet unmanic 2>/dev/null; then
+    stop_systemd_unit unmanic
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
 report_progress 55 "Creating Python virtualenv and installing Unmanic..."
+RUNTIME_MUTATED=1
 if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
     python3 -m venv "${INSTALL_DIR}/.venv" >> "$LOGFILE" 2>&1
 fi
 "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
 "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir unmanic >> "$LOGFILE" 2>&1
 
-UNMANIC_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('unmanic'))" 2>/dev/null || echo '0.4.1')"
-echo "${UNMANIC_VER}" > "${INSTALL_DIR}/.af-version"
+UNMANIC_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('unmanic'))" 2>/dev/null || true)"
+if [[ -z "${UNMANIC_VER}" ]]; then
+    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        UNMANIC_VER="0.4.1"
+    else
+        print_error "Failed to determine installed Unmanic version"
+        exit 1
+    fi
+fi
+queue_app_version "${INSTALL_DIR}/.af-version" "${UNMANIC_VER}"
 
 report_progress 75 "Configuring ${APP_NAME} on port ${APP_PORT}..."
 SETTINGS_FILE="${DATA_DIR}/.unmanic/config/settings.json"
@@ -77,11 +127,10 @@ if [[ ! -f "${SETTINGS_FILE}" ]]; then
 }
 EOF
 else
-    jq --argjson port "${APP_PORT}" '.ui_port = $port' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" && \
-        mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}" || true
+    set_config_value "$SETTINGS_FILE" json ui_port "$APP_PORT"
 fi
 
-chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -108,6 +157,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now unmanic.service >> "$LOGFILE" 2>&1
 
+systemctl restart unmanic >> "$LOGFILE" 2>&1
+systemctl is-active --quiet unmanic
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

@@ -44,11 +44,11 @@ type SharePagePhase =
     | 'expired-or-revoked'
     | 'error';
 
-export interface PublicShareViewProps {
+interface PublicShareViewProps {
     initialToken?: string | null;
 }
 
-export function PublicShareView({ initialToken }: PublicShareViewProps) {
+function PublicShareView({ initialToken }: PublicShareViewProps) {
     const searchParams = useSearchParams();
 
     const rawToken = useMemo(() => {

@@ -8,6 +8,7 @@ use tower::ServiceExt;
 
 struct Fixture {
     root: PathBuf,
+    socket: PathBuf,
     token: String,
     probe: tokio::net::UnixListener,
 }
@@ -37,9 +38,27 @@ impl Fixture {
             root.join("automation.json"),
         );
         env::set_var("AF_READINESS_CALLS", root.join("calls"));
-        let socket = root.join("p.sock");
+        let candidate = root.join("p.sock");
+        let socket = if candidate.as_os_str().len() < 95 {
+            candidate
+        } else {
+            let short_name = format!(
+                "af-sock-{}.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            let tmpdir_cand = env::var_os("TMPDIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(env::temp_dir)
+                .join(&short_name);
+            if tmpdir_cand.as_os_str().len() < 95 {
+                tmpdir_cand
+            } else {
+                PathBuf::from("/tmp").join(short_name)
+            }
+        };
         env::set_var("AF_READINESS_PROBE_SOCKET", &socket);
-        let probe = tokio::net::UnixListener::bind(socket).unwrap();
+        let probe = tokio::net::UnixListener::bind(&socket).unwrap();
         env::set_var(
             "PATH",
             format!(
@@ -74,12 +93,18 @@ impl Fixture {
             )
             .unwrap();
         let (token, _) = crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
-        Self { root, token, probe }
+        Self {
+            root,
+            socket,
+            token,
+            probe,
+        }
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _ = fs::remove_file(&self.socket);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

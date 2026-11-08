@@ -25,13 +25,24 @@ report_progress 25 "Stopping and unmounting mergerfs.service..."
 
 purge_systemd_unit "mergerfs"
 
-if mountpoint -q /mnt/unionfs 2>/dev/null; then
-    fusermount -uz /mnt/unionfs >> "$LOGFILE" 2>&1 || true
-fi
+for mount_path in /mnt/unionfs /mnt/mergerfs; do
+    if mountpoint -q "$mount_path" 2>/dev/null; then
+        fusermount -u "$mount_path" >> "$LOGFILE" 2>&1 || umount "$mount_path" >> "$LOGFILE" 2>&1
+        if mountpoint -q "$mount_path" 2>/dev/null; then
+            print_error "Cannot confirm ${mount_path} is unmounted; refusing package removal."
+            exit 1
+        fi
+    fi
+done
+
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq mergerfs >> "$LOGFILE" 2>&1
 
 report_progress 65 "Cleaning up mergerfs system configuration and version cache..."
+rm -f /var/lib/mergerfs/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/mergerfs
+    safe_rm_rf /var/lib/mergerfs /etc/mergerfs /etc/default/mergerfs
 fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 

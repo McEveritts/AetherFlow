@@ -23,6 +23,8 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /opt/librespeed/settings.toml /opt/librespeed/.af-directory-check
+validate_config_paths /opt/librespeed/settings.toml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for LibreSpeed..."
 
@@ -49,8 +51,8 @@ LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSI
 
 report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
 TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
-curl -fsSL "$LS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar --no-same-owner -xzf "$TMP_TAR" -C /opt/librespeed >> "$LOGFILE" 2>&1
+download_file "$LS_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"
 rm -f "$TMP_TAR"
 
 if [[ -f /opt/librespeed/speedtest-backend ]]; then
@@ -63,16 +65,21 @@ else
     print_error "LibreSpeed binary not found after extracting archive"
     exit 1
 fi
-printf '%s\n' "${LS_VERSION#v}" > /opt/librespeed/.af-version
+queue_app_version /opt/librespeed/.af-version "${LS_VERSION#v}"
 
 report_progress 72 "Applying Obsidian V2 theme assets to LibreSpeed..."
 mkdir -p /opt/librespeed/assets
 TMP_SRC_DIR=$(mktemp -d /tmp/librespeed-src-XXXXXX)
-if curl -fsSL "https://github.com/librespeed/speedtest-go/archive/refs/tags/v${LS_VERSION}.tar.gz" | tar -xz -C "$TMP_SRC_DIR" --strip-components=1 >> "$LOGFILE" 2>&1; then
+TMP_SRC_TAR=$(mktemp /tmp/librespeed-src-XXXXXX.tar.gz)
+LS_SOURCE_URL="https://github.com/librespeed/speedtest-go/archive/refs/tags/v${LS_VERSION}.tar.gz"
+if download_file "$LS_SOURCE_URL" "$TMP_SRC_TAR" >> "$LOGFILE" 2>&1 && \
+    verify_download_sha256 "$TMP_SRC_TAR" "$PACKAGE_NAME" "$LS_SOURCE_URL" >> "$LOGFILE" 2>&1 && \
+    tar -xzf "$TMP_SRC_TAR" -C "$TMP_SRC_DIR" --strip-components=1 >> "$LOGFILE" 2>&1; then
     if [[ -d "${TMP_SRC_DIR}/web/assets" ]]; then
         cp -rf "${TMP_SRC_DIR}/web/assets/." /opt/librespeed/assets/
     fi
 fi
+rm -f -- "$TMP_SRC_TAR" "$TMP_SRC_TAR.sha256" "$TMP_SRC_TAR.sha256sum"
 
 OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
 if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/current/packages/package/assets/librespeed" ]]; then
@@ -97,22 +104,24 @@ fi
 rm -rf "$TMP_SRC_DIR"
 
 if [[ -f /opt/librespeed/settings.toml ]]; then
-    python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+    safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
 import re, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8") as f:
-    text = f.read()
+text = safe_read_text(cfg_path)
 if re.search(r"^listen_port\s*=", text, re.MULTILINE):
     text = re.sub(r"^listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
 else:
     text += f"\nlisten_port={port}\n"
-with open(cfg_path, "w", encoding="utf-8") as f:
-    f.write(text)
+safe_write_text(cfg_path, text)
 PYEOF
 else
-    LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MASTER_PASS}")"
-    cat <<EOF > /opt/librespeed/settings.toml
-bind_address="0.0.0.0"
+    LS_STATS_PASS="$(AF_SEED_PASS="$MASTER_PASS" python3 - <<'PYEOF'
+import json, os
+print(json.dumps(os.environ["AF_SEED_PASS"]))
+PYEOF
+)"
+    write_config_file /opt/librespeed/settings.toml <<EOF
+bind_address="127.0.0.1"
 listen_port=${APP_PORT}
 url_base=""
 proxyprotocol_port=0
@@ -134,7 +143,7 @@ tls_key_file=""
 EOF
 fi
 
-chown -R librespeed:librespeed /opt/librespeed
+chown -hRP librespeed:librespeed /opt/librespeed
 chmod 755 /opt/librespeed
 chmod 640 /opt/librespeed/settings.toml
 
@@ -159,7 +168,11 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now librespeed >> "$LOGFILE" 2>&1
+systemctl is-active --quiet librespeed
 
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "LibreSpeed installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

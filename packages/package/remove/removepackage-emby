@@ -32,10 +32,11 @@ DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq emby-server >
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing Emby binaries, data directories, and user account..."
+safe_rm_rf /opt/emby-server
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/emby-server /var/lib/emby /var/lib/emby-server /etc/emby-server.conf
+    safe_rm_rf /var/lib/emby /var/lib/emby-server /etc/emby /etc/emby-server /etc/emby-server.conf
+    purge_system_user "emby"
 fi
-purge_system_user "emby"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

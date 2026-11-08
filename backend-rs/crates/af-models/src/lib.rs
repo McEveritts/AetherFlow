@@ -183,6 +183,8 @@ pub struct Package {
 
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_source: String,
+    #[serde(default)]
+    pub require_download_sha256: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_repo: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -226,6 +228,8 @@ pub struct Package {
 pub struct PackageAutomation {
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_source: String,
+    #[serde(default)]
+    pub require_download_sha256: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_repo: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]

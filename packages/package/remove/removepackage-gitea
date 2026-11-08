@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing gitea.service..."
 purge_systemd_unit "gitea"
 
 report_progress 65 "Removing Gitea binary, repositories, config, and user account..."
-rm -f /usr/local/bin/gitea
+rm -f /usr/local/bin/gitea /var/lib/gitea/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/gitea /etc/gitea
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/gitea"
+    safe_rm_rf /var/lib/gitea /etc/gitea
+    purge_system_user "gitea"
 fi
-purge_system_user "gitea"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

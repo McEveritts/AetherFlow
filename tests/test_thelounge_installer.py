@@ -27,6 +27,11 @@ with (root / "commands").open("a") as output:
     output.write(json.dumps([command, *arguments]) + "\n")
 if command in ("apt-get", "chown", "id"):
     pass
+elif command == "dpkg":
+    assert len(arguments) == 4 and arguments[0] == "--compare-versions" and arguments[2] == "ge"
+    current = tuple(int(part) for part in arguments[1].split("."))
+    previous = tuple(int(part) for part in arguments[3].split("."))
+    sys.exit(0 if current >= previous else 1)
 elif command == "node":
     mode = os.environ.get("TEST_NODE_MODE", "flagged")
     flagged = "--experimental-sqlite" in arguments
@@ -51,6 +56,15 @@ elif command == "systemctl":
         (root / "running").touch()
     elif arguments[0] == "is-active":
         sys.exit(3 if failure == "inactive" or not (root / "running").exists() else 0)
+    elif arguments[0] == "stop":
+        (root / "running").unlink(missing_ok=True)
+    elif arguments[0] == "show":
+        active = (root / "running").exists() and failure != "inactive"
+        loaded = (root / "etc/systemd/system/thelounge.service").exists()
+        print("LoadState=" + ("loaded" if loaded else "not-found"))
+        print("ActiveState=" + ("active" if active else "inactive"))
+        print("MainPID=" + ("123" if active else "0"))
+        print("UnitFileState=disabled")
 elif command == "curl":
     if failure == "http":
         sys.exit(22)
@@ -87,13 +101,16 @@ class TheLoungeInstallerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="af-thelounge-install-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for directory in ("mock-bin", "opt/AetherFlow/packages", "var/lib/thelounge", "etc/systemd/system"):
+        for directory in ("mock-bin", "opt/AetherFlow/packages", "var/lib/thelounge", "etc/systemd/system", "tmp"):
             (self.root / directory).mkdir(parents=True)
         self.state = self.root / "var/lib/thelounge"
         self.version = self.state / ".af-version"
         self.version.write_text("4.4.3\n")
         self.unit = self.root / "etc/systemd/system/thelounge.service"
         (self.root / "lounge.js").write_text(LOUNGE_FIXTURE)
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from installer_test_helpers import installer_common_functions as common_functions
         common = self.root / "opt/AetherFlow/packages/common.sh"
         common.write_text(r'''MASTER_USER=fixture-user
 MASTER_PASS="$TEST_PASSWORD"
@@ -109,12 +126,12 @@ install_npm_app() {
     cp "$TEST_ROOT/lounge.js" "$3"
 }
 write_lock() { touch "$TEST_ROOT/completed"; }
-''')
-        for command in ("apt-get", "chown", "id", "node", "sudo", "systemctl", "curl"):
+''' + common_functions("set_config_value", "write_app_version", "systemd_unit_inactive", "stop_systemd_unit"))
+        for command in ("apt-get", "dpkg", "chown", "id", "node", "sudo", "systemctl", "curl"):
             executable = self.root / "mock-bin" / command
             executable.write_text(MOCK_COMMAND)
             executable.chmod(0o755)
-        source = re.sub(r"/(?:opt|var|etc|usr/local|install)(?=/|\s|$)",
+        source = re.sub(r"/(?:opt|var|etc|usr/local|install|tmp)(?=/|\s|$)",
                         lambda match: str(self.root) + match.group(), INSTALLER.read_text())
         self.script = self.root / "installer.sh"
         self.script.write_text(source)
@@ -123,6 +140,7 @@ write_lock() { touch "$TEST_ROOT/completed"; }
         return subprocess.run(
             ["bash", str(self.script)],
             env={**os.environ, "PATH": f"{self.root}/mock-bin:{os.environ['PATH']}",
+                 "TMPDIR": str(self.root / "tmp"),
                  "TEST_ROOT": str(self.root), "TEST_REAL_NODE": REAL_NODE,
                  "TEST_PASSWORD": "fixture-password-'$ with spaces\nand a newline", **environment},
             text=True, capture_output=True, timeout=20,
@@ -170,6 +188,13 @@ write_lock() { touch "$TEST_ROOT/completed"; }
         self.assert_failed(result)
         self.assertFalse((self.root / "npm-install").exists())
         self.assertIn("node:sqlite", result.stderr)
+
+    def test_version_downgrade_preserves_previous_receipt(self):
+        self.version.write_text("5.0.0\n")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "completed").exists())
+        self.assertEqual(self.version.read_text(), "5.0.0\n")
 
     def test_dependency_install_failure_is_not_success(self):
         self.assert_failed(self.run_installer(TEST_FAILURE="install"))

@@ -19,9 +19,15 @@ describe('lastJobFailed', () => {
         expect(lastJobFailed(failedUpdate, 'uninstalling')).toBe(false);
     });
 
-    it('maps uninstall to the backend remove action', () => {
+    it('maps uninstall to the backend remove action and install/reinstall to backend install or reinstall actions', () => {
         expect(
             lastJobFailed({ last_job: { ...failedUpdate.last_job, action: 'remove' } }, 'uninstalling'),
+        ).toBe(true);
+        expect(
+            lastJobFailed({ last_job: { ...failedUpdate.last_job, action: 'reinstall' } }, 'installing'),
+        ).toBe(true);
+        expect(
+            lastJobFailed({ last_job: { ...failedUpdate.last_job, action: 'reinstall' } }, 'reinstalling'),
         ).toBe(true);
     });
 
@@ -88,7 +94,7 @@ describe('useMarketplace identity matching', () => {
         expect(jest.getTimerCount()).toBe(0);
     });
 
-    it.each(['foreign-job', 'wrong-action', 'fetch-errors'])('does not refresh the deadline from %s', variant => {
+    it.each([' foreign-job', 'wrong-action', 'fetch-errors'].map(s => s.trim()))('does not refresh the deadline from %s', variant => {
         jest.useFakeTimers();
         const { result, rerender, unmount } = renderHook(() => useMarketplace());
         act(() => result.current.markPending('fixture', 'updating'));
@@ -148,6 +154,40 @@ describe('useMarketplace identity matching', () => {
         rerender();
         expect(result.current.pendingJobs.has('fixture')).toBe(false);
         expect(mockOptions.refreshInterval(mockApps)).toBe(15000);
+    });
+
+    it.each([
+        ['installing', 'reinstall'],
+        ['reinstalling', 'reinstall'],
+        ['reinstalling', 'install'],
+    ] as const)('settles in-place reinstall receipts when pending action is %s and backend job action is %s without timing out', (pendingAction, backendAction) => {
+        jest.useFakeTimers();
+        const { result, rerender, unmount } = renderHook(() => useMarketplace());
+        act(() => result.current.markPending('fixture', pendingAction));
+        act(() => { result.current.registerJob('fixture', { job_id: 'reinstall-job-1' }); });
+        mockApps = [fixtureApp({ status: pendingAction, job_id: 'reinstall-job-1' })];
+        rerender();
+        expect(result.current.pendingJobs.get('fixture')).toBe(pendingAction);
+
+        mockApps = [
+            fixtureApp({
+                status: 'installed',
+                last_job: {
+                    job_id: 'reinstall-job-1',
+                    action: backendAction,
+                    status: 'completed',
+                    started_at: '2026-11-08T00:00:00.000Z',
+                    finished_at: '2026-11-08T00:00:05.000Z',
+                },
+            }),
+        ];
+        rerender();
+        expect(matchingJobOutcome(mockApps[0], pendingAction, 'reinstall-job-1')).toEqual(mockApps[0].last_job);
+        expect(result.current.pendingJobs.has('fixture')).toBe(false);
+        act(() => jest.advanceTimersByTime(LIFECYCLE_RECEIPT_TIMEOUT_MS));
+        expect(result.current.unconfirmedJobs.has('fixture')).toBe(false);
+        unmount();
+        expect(jest.getTimerCount()).toBe(0);
     });
 
     it('handles a result received before the acceptance response and rejects a different action', () => {

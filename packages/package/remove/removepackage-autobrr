@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing autobrr.service..."
 purge_systemd_unit "autobrr"
 
 report_progress 65 "Removing Autobrr binaries, state directories, and user account..."
-rm -f /usr/local/bin/autobrr /usr/local/bin/autobrrctl
+rm -f /usr/local/bin/autobrr /usr/local/bin/autobrrctl /var/lib/autobrr/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/autobrr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/autobrr"
+    safe_rm_rf /var/lib/autobrr
+    purge_system_user "autobrr"
 fi
-purge_system_user "autobrr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

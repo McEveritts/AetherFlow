@@ -23,20 +23,33 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-netdata}"
+begin_state_transaction "netdata" "$APP_PORT" "/api/v1/info" "/var/lib/netdata" "/etc/netdata" "/etc/apt/sources.list.d/netdata.list" "/etc/apt/keyrings/netdata.gpg" "/etc/systemd/system/netdata.service" "/usr/sbin/netdata" "/usr/lib/netdata" "/usr/libexec/netdata" "/usr/share/netdata" "/opt/netdata"
+
+prepare_apt_package_transaction /etc/netdata/.af-version netdata
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Netdata..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >> "$LOGFILE" 2>&1
 
-report_progress 45 "Running official Netdata kickstart installer..."
-if ! fetch_and_run "https://get.netdata.cloud/kickstart.sh" "SKIP" --non-interactive --stable-channel --disable-telemetry >> "$LOGFILE" 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq netdata >> "$LOGFILE" 2>&1
+report_progress 45 "Installing Netdata from the package repository..."
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq netdata >> "$LOGFILE" 2>&1; then
+    if [[ ! "${NETDATA_KICKSTART_SHA256:-}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        print_error "Netdata APT installation failed; a verified NETDATA_KICKSTART_SHA256 is required for bootstrap."
+        exit 1
+    fi
+    fetch_and_run "https://get.netdata.cloud/kickstart.sh" "$NETDATA_KICKSTART_SHA256" --non-interactive --stable-channel --disable-telemetry >> "$LOGFILE" 2>&1
 fi
 
-if [[ -f /etc/netdata/netdata.conf ]]; then
-    sed -i 's/bind socket to IP = 127.0.0.1/bind socket to IP = 0.0.0.0/g' /etc/netdata/netdata.conf || true
+NETDATA_BIN="$(command -v netdata || true)"
+if [[ -z "$NETDATA_BIN" && -x /usr/sbin/netdata ]]; then NETDATA_BIN=/usr/sbin/netdata; fi
+if [[ -z "$NETDATA_BIN" && -x /usr/local/sbin/netdata ]]; then NETDATA_BIN=/usr/local/sbin/netdata; fi
+if [[ -z "$NETDATA_BIN" ]]; then
+    print_error "Netdata installation did not provide an executable."
+    exit 1
 fi
+systemctl cat netdata.service >> "$LOGFILE" 2>&1
 
 report_progress 85 "Starting and enabling netdata.service on port ${APP_PORT}..."
 
@@ -44,8 +57,13 @@ set_config_value "/etc/netdata/netdata.conf" ini "default port" "$APP_PORT" "web
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now netdata >> "$LOGFILE" 2>&1
-systemctl restart netdata >> "$LOGFILE" 2>&1 || true
+systemctl restart netdata >> "$LOGFILE" 2>&1
+systemctl is-active --quiet netdata
+NETDATA_VERSION="$("$NETDATA_BIN" -v 2>/dev/null | sed -n 's/^netdata v\{0,1\}//p' | head -n1)"
+[[ -n "$NETDATA_VERSION" ]] || NETDATA_VERSION="$(dpkg-query -W -f='${Version}' netdata)"
+queue_app_version /etc/netdata/.af-version "$NETDATA_VERSION"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Netdata installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

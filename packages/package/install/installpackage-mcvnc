@@ -14,13 +14,47 @@ else
 fi
 
 require_root
+validate_config_paths /var/lib/mcvnc/.af-version /etc/mcvnc/mcvnc.env
 export LOGFILE="/var/log/aetherflow/install-mcvnc.log"
 APP_PORT="${AF_APP_PORT:-6900}"
 RENDER_DEVICE="${AF_MCVNC_DEVICE:-/dev/dri/renderD128}"
 DATA_DIR="/var/lib/mcvnc"
 CONFIG_DIR="/etc/mcvnc"
 TMP_DIR=""
-trap '[[ -z "$TMP_DIR" ]] || rm -rf "$TMP_DIR"' EXIT
+RUNTIME_BACKUP=""
+RUNTIME_CHANGED=false
+WAS_RUNNABLE=false
+MCVNC_BINARY=""
+RUNTIME_PATHS=(/opt/mcvnc /usr/local/bin/mcvnc "$DATA_DIR" "$CONFIG_DIR" /etc/systemd/system/af-mcvnc.service)
+cleanup() {
+    local status=$? runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
+        quiesce_services_for_rollback af-mcvnc.service || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl disable af-mcvnc.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
+            systemctl start af-mcvnc.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    [[ -z "$TMP_DIR" ]] || rm -rf -- "$TMP_DIR"
+    [[ -z "$MCVNC_BINARY" ]] || rm -f -- "$MCVNC_BINARY"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        [[ -z "$RUNTIME_BACKUP" ]] || rm -rf -- "$RUNTIME_BACKUP"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 trap 'print_error "McVNC installation failed; see ${LOGFILE}."' ERR
 
 if [[ ! "$APP_PORT" =~ ^[0-9]{4,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
@@ -55,7 +89,10 @@ fi
 report_progress 35 "Resolving latest McVNC release tag..."
 TMP_DIR="$(mktemp -d /tmp/af-mcvnc-XXXXXX)"
 chmod 755 "$TMP_DIR"
-curl -fsSL https://api.github.com/repos/McEveritts/McVNC/tags -o "${TMP_DIR}/tags.json"
+if ! curl -fsSL https://api.github.com/repos/McEveritts/McVNC/tags -o "${TMP_DIR}/tags.json"; then
+    print_error "Unable to resolve a McVNC release tag from McEveritts/McVNC."
+    exit 1
+fi
 TAG="$(jq -er '.[0].name' "${TMP_DIR}/tags.json")" || {
     print_error "Unable to resolve a McVNC release tag from McEveritts/McVNC."
     exit 1
@@ -69,7 +106,21 @@ VERSION="${TAG#v}"
 report_progress 55 "Cloning and compiling McVNC ${VERSION}..."
 git clone --depth 1 --branch "$TAG" https://github.com/McEveritts/McVNC.git "${TMP_DIR}/src" >> "$LOGFILE" 2>&1
 cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml" >> "$LOGFILE" 2>&1
-install -m 755 "${TMP_DIR}/src/target/release/mcvnc" /usr/local/bin/mcvnc
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-mcvnc-runtime.XXXXXX)"
+if [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl is-active --quiet af-mcvnc.service 2>/dev/null; then
+    WAS_RUNNABLE=true
+    stop_systemd_unit af-mcvnc.service
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_CHANGED=true
+MCVNC_BINARY="$(mktemp /usr/local/bin/.mcvnc-build.XXXXXX)"
+install -m 755 "${TMP_DIR}/src/target/release/mcvnc" "$MCVNC_BINARY"
+mv -T "$MCVNC_BINARY" /usr/local/bin/mcvnc
 
 if ! id -u af-mcvnc >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-mcvnc
@@ -83,25 +134,23 @@ install -d -m 700 -o af-mcvnc -g af-mcvnc "$DATA_DIR"
 install -d -m 700 -o af-mcvnc -g af-mcvnc "${DATA_DIR}/.local/share/mcvnc"
 install -d -m 700 -o af-mcvnc -g af-mcvnc "${DATA_DIR}/runtime"
 install -d -m 755 "$CONFIG_DIR"
-printf '%s\n' "$VERSION" > "${DATA_DIR}/.af-version"
-chown af-mcvnc:af-mcvnc "${DATA_DIR}/.af-version"
+queue_app_version "${DATA_DIR}/.af-version" "$VERSION"
 
 report_progress 75 "Configuring McVNC headless Wayland compositor and loopback dashboard..."
+validate_config_paths "${CONFIG_DIR}/mcvnc.env"
 if [[ -f "${CONFIG_DIR}/mcvnc.env" ]]; then
-    python3 - "${CONFIG_DIR}/mcvnc.env" "$APP_PORT" <<'PYEOF'
+    safe_config_python "${CONFIG_DIR}/mcvnc.env" "$APP_PORT" <<'PYEOF'
 import re, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8") as f:
-    text = f.read()
+text = safe_read_text(cfg_path)
 if re.search(r"^MCVNC_BIND=", text, re.MULTILINE):
     text = re.sub(r"^MCVNC_BIND=.*", f"MCVNC_BIND=127.0.0.1:{port}", text, flags=re.MULTILINE)
 else:
     text += f"\nMCVNC_BIND=127.0.0.1:{port}\n"
-with open(cfg_path, "w", encoding="utf-8") as f:
-    f.write(text)
+safe_write_text(cfg_path, text)
 PYEOF
 else
-    cat > "${CONFIG_DIR}/mcvnc.env" <<EOF
+    write_config_file "${CONFIG_DIR}/mcvnc.env" 0644 <<EOF
 MCVNC_BIND=127.0.0.1:${APP_PORT}
 MCVNC_DEVICE=${RENDER_DEVICE}
 MCVNC_PRESET=1080p
@@ -157,5 +206,7 @@ if [[ "$READY" != "true" ]]; then
     print_error "McVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-mcvnc and verify DRM render node ${RENDER_DEVICE}."
     exit 1
 fi
+commit_app_versions
+chown af-mcvnc:af-mcvnc "${DATA_DIR}/.af-version"
 write_lock mcvnc
 report_progress 100 "McVNC ${VERSION} installed. Access the dashboard through the AetherFlow gateway on loopback port ${APP_PORT}."

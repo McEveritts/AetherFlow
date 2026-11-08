@@ -18,6 +18,7 @@ else
 fi
 
 require_root
+validate_config_paths /etc/notifiarr/notifiarr.conf
 
 PACKAGE_NAME="notifiarr"
 APP_NAME="notifiarr"
@@ -64,7 +65,12 @@ report_progress 45 "Resolving latest Notifiarr release from GitHub..."
 RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/Notifiarr/notifiarr/releases/latest 2>/dev/null || true)"
 LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
-    LATEST_TAG="v0.7.3"
+    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        LATEST_TAG="v0.7.3"
+    else
+        print_error "Failed to discover latest GitHub release for Notifiarr/notifiarr"
+        exit 1
+    fi
 fi
 
 ASSET_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "linux.${N_ARCH}.tar.gz" '.assets[]? | select(.name | contains("linux") and endswith($arch)) | .browser_download_url' | head -n1 || true)"
@@ -75,12 +81,13 @@ fi
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 TMP_TAR="$(mktemp --suffix=.tar.gz)"
 TMP_DIR="$(mktemp -d)"
-wget -qO "${TMP_TAR}" "${ASSET_URL}" >> "$LOGFILE" 2>&1 || curl -fsSL -o "${TMP_TAR}" "${ASSET_URL}" >> "$LOGFILE" 2>&1
+download_file "${ASSET_URL}" "${TMP_TAR}" >> "$LOGFILE" 2>&1
 
 tar -xzf "${TMP_TAR}" -C "${TMP_DIR}" >> "$LOGFILE" 2>&1
-EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -perm -111 | head -n1 || find "${TMP_DIR}" -type f -name "notifiarr" | head -n1)"
+EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -print -quit)"
 if [[ -n "${EXTRACTED_BIN}" && -f "${EXTRACTED_BIN}" ]]; then
-    install -m 0755 "${EXTRACTED_BIN}" "${BIN_PATH}"
+    chmod 755 "${EXTRACTED_BIN}"
+    stage_app_archive "$TMP_DIR" "$BIN_PATH" "${EXTRACTED_BIN#"$TMP_DIR"/}" "$CONFIG_DIR" "$PACKAGE_NAME" "." "$DATA_DIR" "" binary
 else
     log_error "Failed to extract notifiarr binary"
     rm -rf "${TMP_TAR}" "${TMP_DIR}"
@@ -88,30 +95,36 @@ else
 fi
 rm -rf "${TMP_TAR}" "${TMP_DIR}"
 
-echo "${LATEST_TAG#v}" > "${CONFIG_DIR}/.af-version"
+queue_app_version "${CONFIG_DIR}/.af-version" "${LATEST_TAG#v}"
 
 report_progress 75 "Configuring ${APP_NAME} integration and credentials..."
-API_KEY_EXTRACT='
-import sys, re, xml.etree.ElementTree as ET
-path = sys.argv[1]
+extract_api_key() {
+    safe_config_python "$1" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
 try:
-    tree = ET.parse(path)
-    key = tree.findtext("ApiKey")
+    with ManagedConfig(sys.argv[1], create_parents=False) as config:
+        text = config.read_text()
+    key = ET.fromstring(text).findtext("ApiKey") if text else None
     if key: print(key.strip())
-except Exception:
+except (FileNotFoundError, ET.ParseError):
     pass
-'
-SONARR_KEY="$(python3 -c "${API_KEY_EXTRACT}" /var/lib/sonarr/config.xml 2>/dev/null || true)"
-RADARR_KEY="$(python3 -c "${API_KEY_EXTRACT}" /var/lib/radarr/config.xml 2>/dev/null || true)"
-LIDARR_KEY="$(python3 -c "${API_KEY_EXTRACT}" /var/lib/lidarr/config.xml 2>/dev/null || true)"
-READARR_KEY="$(python3 -c "${API_KEY_EXTRACT}" /var/lib/readarr/config.xml 2>/dev/null || true)"
-PROWLARR_KEY="$(python3 -c "${API_KEY_EXTRACT}" /var/lib/prowlarr/config.xml 2>/dev/null || true)"
+PYEOF
+}
+SONARR_KEY="$(extract_api_key /var/lib/sonarr/config.xml)"
+RADARR_KEY="$(extract_api_key /var/lib/radarr/config.xml)"
+LIDARR_KEY="$(extract_api_key /var/lib/lidarr/config.xml)"
+READARR_KEY="$(extract_api_key /var/lib/readarr/config.xml)"
+PROWLARR_KEY="$(extract_api_key /var/lib/prowlarr/config.xml)"
 
-if [[ ! -f "${CONFIG_DIR}/notifiarr.conf" ]]; then
-    cat > "${CONFIG_DIR}/notifiarr.conf" <<EOF
+NOTIFIARR_NEW_CONFIG=false
+validate_config_paths "${CONFIG_DIR}/notifiarr.conf"
+if [[ ! -s "${CONFIG_DIR}/notifiarr.conf" ]]; then
+    NOTIFIARR_NEW_CONFIG=true
+    {
+    cat <<EOF
 # Notifiarr configuration
 api_key = ""
-bind_addr = "0.0.0.0:${APP_PORT}"
+bind_addr = "127.0.0.1:${APP_PORT}"
 ui_password = ""
 urlbase = "/"
 quiet = false
@@ -120,7 +133,7 @@ http_log = "${LOG_DIR}/http.log"
 EOF
 
     if [[ -n "${SONARR_KEY}" ]]; then
-        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+        cat <<EOF
 
 [[sonarr]]
   name = "AetherFlow Sonarr"
@@ -130,7 +143,7 @@ EOF
     fi
 
     if [[ -n "${RADARR_KEY}" ]]; then
-        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+        cat <<EOF
 
 [[radarr]]
   name = "AetherFlow Radarr"
@@ -140,7 +153,7 @@ EOF
     fi
 
     if [[ -n "${LIDARR_KEY}" ]]; then
-        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+        cat <<EOF
 
 [[lidarr]]
   name = "AetherFlow Lidarr"
@@ -150,7 +163,7 @@ EOF
     fi
 
     if [[ -n "${READARR_KEY}" ]]; then
-        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+        cat <<EOF
 
 [[readarr]]
   name = "AetherFlow Readarr"
@@ -160,7 +173,7 @@ EOF
     fi
 
     if [[ -n "${PROWLARR_KEY}" ]]; then
-        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+        cat <<EOF
 
 [[prowlarr]]
   name = "AetherFlow Prowlarr"
@@ -168,11 +181,12 @@ EOF
   api_key = "${PROWLARR_KEY}"
 EOF
     fi
-else
-    sed -i "s|^bind_addr = .*|bind_addr = \"0.0.0.0:${APP_PORT}\"|" "${CONFIG_DIR}/notifiarr.conf" || true
+    } | write_config_file "${CONFIG_DIR}/notifiarr.conf" 0600
 fi
 
-NOTIFIARR_UI_CREDENTIALS="${ADMIN_USER}:${ADMIN_PASS}" python3 - "${CONFIG_DIR}/notifiarr.conf" <<'PYEOF'
+set_config_value "${CONFIG_DIR}/notifiarr.conf" ini bind_addr "\"127.0.0.1:${APP_PORT}\""
+if [[ "$NOTIFIARR_NEW_CONFIG" == true || ( -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ) ]]; then
+    NOTIFIARR_UI_CREDENTIALS="${ADMIN_USER}:${AF_CONFIG_PASS:-$ADMIN_PASS}" safe_config_python "${CONFIG_DIR}/notifiarr.conf" <<'PYEOF'
 import json
 import os
 from pathlib import Path
@@ -180,16 +194,17 @@ import re
 import sys
 
 config = Path(sys.argv[1])
-text = config.read_text(encoding="utf-8")
+text = safe_read_text(config)
 value = "ui_password = " + json.dumps(os.environ["NOTIFIARR_UI_CREDENTIALS"], ensure_ascii=False)
 text, count = re.subn(r"^ui_password\s*=.*$", lambda match: value, text, flags=re.MULTILINE)
 if not count:
     raise SystemExit("Missing ui_password in Notifiarr configuration")
-config.write_text(text, encoding="utf-8")
+safe_write_text(config, text, 0o600)
 PYEOF
+fi
 
 chmod 600 "${CONFIG_DIR}/notifiarr.conf"
-chown -R "${APP_USER}:${APP_USER}" "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -213,7 +228,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now notifiarr.service >> "$LOGFILE" 2>&1
+systemctl restart notifiarr.service >> "$LOGFILE" 2>&1
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/version"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

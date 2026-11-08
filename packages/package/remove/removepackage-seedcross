@@ -33,14 +33,24 @@ purge_systemd_unit "seedcross"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 60 "Removing ${APP_NAME} runtime files..."
-rm -rf "${INSTALL_DIR}"
+if [[ "${DELETE_DATA:-false}" != true ]]; then
+    retain_app_data_directory "$INSTALL_DIR/db" "$DATA_DIR/db"
+    if [[ -f "$INSTALL_DIR/csui/settings.py" ]]; then
+        cp -a "$INSTALL_DIR/csui/settings.py" "$DATA_DIR/legacy-settings.py"
+        chmod 640 "$DATA_DIR/legacy-settings.py"
+    fi
+fi
+safe_rm_rf "${INSTALL_DIR}"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${DATA_DIR}..."
-    rm -rf "${DATA_DIR}"
+    safe_rm_rf "/var/lib/seedcross"
+    purge_app_archive_backups "$PACKAGE_NAME" "$INSTALL_DIR"
 fi
 
-purge_system_user "${APP_USER}"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "${APP_USER}"
+fi
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"

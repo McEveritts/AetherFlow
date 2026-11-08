@@ -138,6 +138,7 @@ pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
     "kavita",
     "calibre",
     "calibre-web",
+    "calibreweb",
     "audiobookshelf",
     "navidrome",
     "airsonic",
@@ -155,6 +156,7 @@ pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
     "grafana",
     "prometheus",
     "uptime-kuma",
+    "uptimekuma",
     "scrutiny",
     "glances",
     "vnstat",
@@ -177,7 +179,7 @@ pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
     "wallabag",
     "paperless-ngx",
     "stirling-pdf",
-    " mealie",
+    "mealie",
     "tandoor",
     "grocy",
     "homeassistant",
@@ -189,7 +191,10 @@ pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
     "passbolt",
     "guacamole",
     "x2go",
+    "xrdp",
     "novnc",
+    "kasmvnc",
+    "mcvnc",
     "webmin",
     "cockpit",
     "phpmyadmin",
@@ -201,6 +206,23 @@ pub const KNOWN_CLI_PACKAGE_IDS: &[&str] = &[
     "ffmpeg",
     "vsftpd",
     "bbr",
+    "maintainerr",
+    "threadfin",
+    "qui",
+    "tailscale",
+    "cloudplow",
+    "autoscan",
+    "librespeed",
+    "n8n",
+    "palate",
+    "dispatcharr",
+    "duplicati",
+    "listenarr",
+    "notifiarr",
+    "requestrr",
+    "seedcross",
+    "piped",
+    "invidious",
 ];
 
 /// Parses raw CLI arguments and executes the resulting command using the default
@@ -441,10 +463,157 @@ fn execute_maintenance_command(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn resolve_install_lock_dir(global: &GlobalOptions) -> PathBuf {
-    match global.root {
-        Some(ref r) => r.join("install"),
-        None => PathBuf::from("/install"),
+    if let Some(ref r) = global.root {
+        return r.join("install");
     }
+    if let Ok(env_root) =
+        std::env::var("AETHERFLOW_INSTALL_ROOT").or_else(|_| std::env::var("AETHERFLOW_FS_ROOT"))
+    {
+        let trimmed = env_root.trim();
+        if !trimmed.is_empty() && trimmed != "/" {
+            return PathBuf::from(trimmed).join("install");
+        }
+    }
+    PathBuf::from("/install")
+}
+
+fn resolve_swizzin_lock_dir(global: &GlobalOptions) -> PathBuf {
+    if let Some(ref r) = global.root {
+        return r.join("etc/Swizzin");
+    }
+    if let Ok(env_root) =
+        std::env::var("AETHERFLOW_INSTALL_ROOT").or_else(|_| std::env::var("AETHERFLOW_FS_ROOT"))
+    {
+        let trimmed = env_root.trim();
+        if !trimmed.is_empty() && trimmed != "/" {
+            return PathBuf::from(trimmed).join("etc/Swizzin");
+        }
+    }
+    PathBuf::from("/etc/Swizzin")
+}
+
+fn resolve_package_lock_paths(global: &GlobalOptions, lock_name: &str) -> (PathBuf, PathBuf) {
+    let filename = format!(".{}.lock", lock_name);
+    (
+        resolve_install_lock_dir(global).join(&filename),
+        resolve_swizzin_lock_dir(global).join(&filename),
+    )
+}
+
+fn package_lock_exists(global: &GlobalOptions, lock_name: &str) -> bool {
+    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
+    install_lock.exists() || swizzin_lock.exists()
+}
+
+fn parse_port_from_lockfile_content(raw: &str) -> Option<i32> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Ok(p) = trimmed.parse::<i32>() {
+            if (1024..=65535).contains(&p) {
+                return Some(p);
+            }
+        }
+        if let Some((lhs, rhs)) = trimmed.split_once('=') {
+            let key = lhs.trim();
+            if matches!(
+                key,
+                "PORT" | "AF_APP_PORT" | "AETHERFLOW_APP_PORT" | "listen_port" | "port"
+            ) {
+                let clean_rhs = rhs.trim().trim_matches('"').trim_matches('\'').trim();
+                if let Ok(p) = clean_rhs.parse::<i32>() {
+                    if (1024..=65535).contains(&p) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> Option<i32> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    for table in ["app_ingress_configs", "retained_app_ingress_configs"] {
+        let sql = format!(
+            "SELECT listen_port FROM {} WHERE LOWER(app_name) = LOWER(?1) LIMIT 1",
+            table
+        );
+        if let Ok(port) = conn.query_row(&sql, [app_name], |r| r.get::<_, i32>(0)) {
+            if (1024..=65535).contains(&port) {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_cli_package_port(
+    global: &GlobalOptions,
+    pkg_id: &str,
+    explicit_port: Option<i32>,
+) -> Option<i32> {
+    if let Some(p) = explicit_port {
+        if (1024..=65535).contains(&p) {
+            return Some(p);
+        }
+    }
+
+    let lock_name = resolve_package_lock_name(pkg_id);
+    let mut candidate_dbs = Vec::new();
+    if let Some(ref r) = global.root {
+        candidate_dbs.push(r.join("var/lib/aetherflow/aetherflow.sqlite"));
+        candidate_dbs.push(r.join("opt/AetherFlow/backend/data/aetherflow.sqlite"));
+        candidate_dbs.push(r.join("data/aetherflow.sqlite"));
+    } else {
+        if let Ok(db_env) = std::env::var("AETHERFLOW_DB_PATH") {
+            let trimmed = db_env.trim();
+            if !trimmed.is_empty() && trimmed != ":memory:" && !trimmed.starts_with("file:") {
+                candidate_dbs.push(PathBuf::from(trimmed));
+            }
+        }
+        candidate_dbs.push(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"));
+        candidate_dbs.push(PathBuf::from("/opt/AetherFlow/backend/data/aetherflow.sqlite"));
+        candidate_dbs.push(PathBuf::from("data/aetherflow.sqlite"));
+    }
+
+    for db_path in &candidate_dbs {
+        if let Some(p) = query_persisted_ingress_port_from_sqlite(db_path, lock_name)
+            .or_else(|| query_persisted_ingress_port_from_sqlite(db_path, pkg_id))
+        {
+            return Some(p);
+        }
+    }
+
+    if global.root.is_none() {
+        let runtime_meta = af_runner::extract_app_runtime_meta_local(lock_name);
+        if (1024..=65535).contains(&runtime_meta.configured_port) {
+            return Some(runtime_meta.configured_port);
+        }
+    }
+
+    let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lock_name);
+    for lock_path in [install_lock, swizzin_lock] {
+        if let Ok(raw_lock) = std::fs::read_to_string(&lock_path) {
+            if let Some(p) = parse_port_from_lockfile_content(&raw_lock) {
+                return Some(p);
+            }
+        }
+    }
+
+    get_runner_package_definition(lock_name)
+        .or_else(|| get_runner_package_definition(pkg_id))
+        .map(|def| def.default_port)
+        .filter(|p| (1024..=65535).contains(p))
 }
 
 fn execute_package_command(
@@ -453,6 +622,7 @@ fn execute_package_command(
     transport: &dyn RunnerClientTransport,
 ) -> CliResult<CliResponseEnvelope> {
     let install_dir = resolve_install_lock_dir(global);
+    let swizzin_dir = resolve_swizzin_lock_dir(global);
     let emit_human_progress = !global.json;
 
     match cmd {
@@ -463,12 +633,12 @@ fn execute_package_command(
 
             for pkg in packages {
                 let lock_name = resolve_package_lock_name(pkg);
-                let lock_path = install_dir.join(format!(".{}.lock", lock_name));
-                if lock_path.exists() {
+                if package_lock_exists(global, lock_name) {
                     skipped_installed.push(pkg.clone());
                     continue;
                 }
-                let req = build_package_runner_request("install", pkg, *port)?;
+                let effective_port = resolve_cli_package_port(global, pkg, *port);
+                let req = build_package_runner_request("install", pkg, effective_port)?;
                 if global.dry_run {
                     requests.push(req);
                 } else {
@@ -508,6 +678,46 @@ fn execute_package_command(
                 })),
             ))
         }
+        PackageCommand::Reinstall { packages, port } => {
+            let mut receipts = Vec::new();
+            let mut requests = Vec::new();
+
+            for pkg in packages {
+                let effective_port = resolve_cli_package_port(global, pkg, *port);
+                let mut req = build_package_runner_request("reinstall", pkg, effective_port)?;
+                req.delete_data = false;
+                if global.dry_run {
+                    requests.push(req);
+                } else {
+                    let receipt = transport.execute_package_streaming(&req, emit_human_progress)?;
+                    receipts.push(receipt);
+                }
+            }
+
+            if global.dry_run {
+                return Ok(CliResponseEnvelope::success(
+                    "package",
+                    "reinstall",
+                    format!(
+                        "[DRY-RUN] Planned reinstall for {} package(s)",
+                        requests.len()
+                    ),
+                    Some(json!({
+                        "dry_run": true,
+                        "planned_requests": requests,
+                    })),
+                ));
+            }
+
+            Ok(CliResponseEnvelope::success(
+                "package",
+                "reinstall",
+                format!("Reinstalled {} package(s)", receipts.len()),
+                Some(json!({
+                    "receipts": receipts,
+                })),
+            ))
+        }
         PackageCommand::Remove { packages, purge } => {
             let mut receipts = Vec::new();
             let mut skipped_not_installed = Vec::new();
@@ -515,10 +725,12 @@ fn execute_package_command(
 
             for pkg in packages {
                 let lock_name = resolve_package_lock_name(pkg);
-                let lock_path = install_dir.join(format!(".{}.lock", lock_name));
-                // If an isolated root was explicitly supplied and the lockfile is absent,
-                // report `skipped_not_installed` matching `packages/system/af`'s lock check.
-                if global.root.is_some() && !lock_path.exists() {
+                // If an isolated root was explicitly supplied or the install lock directory
+                // exists on disk and the lockfile is absent, report `skipped_not_installed`
+                // matching `packages/system/af`'s lock check.
+                if (global.root.is_some() || install_dir.is_dir() || swizzin_dir.is_dir())
+                    && !package_lock_exists(global, lock_name)
+                {
                     skipped_not_installed.push(pkg.clone());
                     continue;
                 }
@@ -565,7 +777,8 @@ fn execute_package_command(
         }
         PackageCommand::Update { package, channel } => {
             if let Some(ref pkg) = package {
-                let req = build_package_runner_request("update", pkg, None)?;
+                let effective_port = resolve_cli_package_port(global, pkg, None);
+                let req = build_package_runner_request("update", pkg, effective_port)?;
                 if global.dry_run {
                     return Ok(CliResponseEnvelope::success(
                         "package",
@@ -657,8 +870,14 @@ fn execute_package_command(
                 }
                 if let Some(def) = get_runner_package_definition(id) {
                     let lock_name = resolve_package_lock_name(id).to_string();
-                    let lock_path = install_dir.join(format!(".{}.lock", lock_name));
-                    let installed = lock_path.exists();
+                    let (install_lock, swizzin_lock) =
+                        resolve_package_lock_paths(global, &lock_name);
+                    let installed = install_lock.exists() || swizzin_lock.exists();
+                    let lock_path = if !install_lock.exists() && swizzin_lock.exists() {
+                        swizzin_lock
+                    } else {
+                        install_lock
+                    };
                     if *installed_only && !installed {
                         continue;
                     }
@@ -706,8 +925,13 @@ fn execute_package_command(
                 .ok_or_else(|| {
                     CliError::Validation(format!("unknown package {:?}", package))
                 })?;
-            let lock_path = install_dir.join(format!(".{}.lock", lookup_id));
-            let installed = lock_path.exists();
+            let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lookup_id);
+            let installed = install_lock.exists() || swizzin_lock.exists();
+            let lock_path = if !install_lock.exists() && swizzin_lock.exists() {
+                swizzin_lock
+            } else {
+                install_lock
+            };
             let msg = format!(
                 "Package: {} (installed: {}, service: {}, sandbox_profile: {})",
                 def.name, installed, def.service_name, def.sandbox_profile

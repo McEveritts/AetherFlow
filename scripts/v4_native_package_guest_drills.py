@@ -85,6 +85,47 @@ PROGRESS_LINE_RE = re.compile(r"^\[PROGRESS:(\d{1,3})\]\s+(.+)$")
 RUNNER_EXIT_ERROR_PREFIX = "__RUNNER_EXIT_ERROR__:"
 
 
+@dataclass(frozen=True)
+class NativeFamilyDrillDefinition:
+    family: str
+    package_id: str
+    service_unit: str
+    version_path: str
+    config_path: str
+    config_pattern: str
+    listener_port: int = 0
+    endpoint_path: Optional[str] = None
+    accepted_http_statuses: Tuple[int, ...] = (200,)
+
+
+NATIVE_FAMILY_DRILLS: Tuple[NativeFamilyDrillDefinition, ...] = (
+    NativeFamilyDrillDefinition("media_servers", "jellyfin", "jellyfin.service", "var/lib/jellyfin/.af-version", "etc/jellyfin/network.xml", r"<InternalHttpPort>{port}</InternalHttpPort>", 8096, "/health"),
+    NativeFamilyDrillDefinition("media_automation", "sonarr", "sonarr.service", "opt/Sonarr/.af-version", "var/lib/sonarr/config.xml", r"<Port>{port}</Port>", 8989, "/ping"),
+    NativeFamilyDrillDefinition("media_requests", "overseerr", "overseerr.service", "opt/overseerr/.af-version", "etc/systemd/system/overseerr.service", r"(?m)^Environment=PORT={port}$", 5056, "/api/v1/status"),
+    NativeFamilyDrillDefinition("torrents", "transmission", "transmission-daemon.service", "var/lib/transmission-daemon/.af-version", "var/lib/transmission-daemon/.config/transmission-daemon/settings.json", r"\"rpc-port\"\s*:\s*{port}\b", 9091, "/transmission/rpc", (200, 409)),
+    NativeFamilyDrillDefinition("usenet", "nzbget", "nzbget.service", "opt/nzbget/.af-version", "var/lib/nzbget/nzbget.conf", r"(?m)^ControlPort\s*=\s*{port}\s*$", 6789, "/jsonrpc/version"),
+    NativeFamilyDrillDefinition("cloud_storage", "nextcloud", "apache2.service", "var/www/nextcloud/.af-version", "etc/apache2/conf-available/aetherflow-nextcloud-listen.conf", r"(?m)^Listen {port}$", 8088, "/status.php"),
+    NativeFamilyDrillDefinition("overlay_networking", "tailscale", "tailscaled.service", "var/lib/tailscale/.af-version", "etc/sysctl.d/99-tailscale.conf", r"(?m)^net\.ipv4\.ip_forward=1$"),
+    NativeFamilyDrillDefinition("dns_filtering", "adguardhome", "adguardhome.service", "opt/AdGuardHome/.af-version", "opt/AdGuardHome/AdGuardHome.yaml", r"address:\s*0\.0\.0\.0:{port}\b", 3080, "/login.html"),
+    NativeFamilyDrillDefinition("security", "fail2ban", "fail2ban.service", "etc/fail2ban/.af-version", "etc/fail2ban/jail.local", r"(?m)^backend\s*=\s*systemd$"),
+    NativeFamilyDrillDefinition("monitoring", "prometheus", "prometheus.service", "etc/prometheus/.af-version", "etc/systemd/system/prometheus.service", r"--web\.listen-address=[^\s]*:{port}\b", 9090, "/-/ready"),
+    NativeFamilyDrillDefinition("availability", "uptimekuma", "uptime-kuma.service", "opt/uptime-kuma/.af-version", "etc/systemd/system/uptime-kuma.service", r"(?m)^Environment=UPTIME_KUMA_PORT={port}$", 3004, "/"),
+    NativeFamilyDrillDefinition("home_automation", "homeassistant", "home-assistant@homeassistant.service", "srv/homeassistant/.af-version", "home/homeassistant/.homeassistant/configuration.yaml", r"(?m)^\s*server_port:\s*{port}\s*$", 8123, "/manifest.json"),
+    NativeFamilyDrillDefinition("filesystems", "mergerfs", "mergerfs.service", "var/lib/mergerfs/.af-version", "etc/systemd/system/mergerfs.service", r"mergerfs -o defaults,allow_other,use_ino,category\.create=epmfs"),
+    NativeFamilyDrillDefinition("extraction", "unpackerr", "unpackerr.service", "opt/unpackerr/.af-version", "etc/unpackerr/unpackerr.conf", r"(?m)^interval\s*=\s*\"2m\"$"),
+    NativeFamilyDrillDefinition("scheduled_sync", "recyclarr", "recyclarr.timer", "opt/recyclarr/.af-version", "etc/systemd/system/recyclarr.timer", r"(?m)^OnCalendar=\*-\*-\* 04:00:00$"),
+    NativeFamilyDrillDefinition("books", "kavita", "kavita.service", "opt/Kavita/.af-version", "etc/systemd/system/kavita.service", r"http://[^\s]+:{port}\b", 5002, "/"),
+    NativeFamilyDrillDefinition("messaging", "quassel", "quasselcore.service", "var/lib/quassel/.af-version", "etc/default/quasselcore", r"(?m)^PORT\s*=\s*\"{port}\"$", 4242),
+    NativeFamilyDrillDefinition("documents", "paperless-ngx", "paperless-webserver.service", "opt/paperless/.af-version", "etc/systemd/system/paperless-webserver.service", r"gunicorn -b 0\.0\.0\.0:{port}\b", 8010, "/"),
+    NativeFamilyDrillDefinition("workflows", "n8n", "n8n.service", "var/lib/n8n/.af-version", "etc/systemd/system/n8n.service", r"(?m)^Environment=N8N_PORT={port}$", 5678, "/healthz"),
+    NativeFamilyDrillDefinition("developer_tools", "gitea", "gitea.service", "var/lib/gitea/.af-version", "etc/gitea/app.ini", r"(?m)^HTTP_PORT\s*=\s*{port}\s*$", 3002, "/api/healthz"),
+    NativeFamilyDrillDefinition("remote_desktops", "novnc", "novnc.service", "etc/novnc/.af-version", "etc/systemd/system/novnc.service", r"0\.0\.0\.0:{port} 127\.0\.0\.1:5901", 6080, "/vnc.html"),
+    NativeFamilyDrillDefinition("iptv", "threadfin", "threadfin.service", "var/lib/threadfin/.af-version", "etc/systemd/system/threadfin.service", r"-port={port}\b", 34400, "/web/"),
+    NativeFamilyDrillDefinition("database_backed_streaming", "piped", "af-piped.service", "opt/piped/.af-version", "etc/piped/httpd.conf", r"(?m)^Listen 127\.0\.0\.1:{port}$", 8280, "/"),
+)
+NATIVE_FAMILY_DRILLS_BY_FAMILY = {definition.family: definition for definition in NATIVE_FAMILY_DRILLS}
+
+
 @dataclass
 class PackageUdsStreamRecord:
     socket_path: str
@@ -464,11 +505,11 @@ def wait_for_tcp_listener(
     }
 
 
-def probe_http_endpoint(url: str, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+def probe_http_endpoint(url: str, timeout_seconds: float = 10.0, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     try:
         request_obj = urllib.request.Request(
             url,
-            headers={"User-Agent": "AetherFlow-v4-NativePackageDrill/1.0"},
+            headers={"User-Agent": "AetherFlow-v4-NativePackageDrill/1.0", **(headers or {})},
         )
         with urllib.request.urlopen(request_obj, timeout=timeout_seconds) as response_obj:
             body_bytes = response_obj.read(4096)
@@ -492,6 +533,55 @@ def probe_http_endpoint(url: str, timeout_seconds: float = 10.0) -> Dict[str, An
             "body_excerpt": "",
             "error": f"{type(error_exc).__name__}: {error_exc}",
         }
+
+
+def verify_native_family_guest_drill(
+    definition: NativeFamilyDrillDefinition,
+    *,
+    work_root: Path,
+    root: Path = Path("/"),
+) -> DrillPhaseResult:
+    started_at = utc_now_iso()
+    started_mono = time.monotonic()
+    phase = DrillPhaseResult(
+        phase_id=f"family_{definition.family}_installed_verification",
+        status="passed",
+        real_execution=True,
+        started_at=started_at,
+        completed_at=started_at,
+        duration_ms=0.0,
+    )
+    phase.artifacts["definition"] = asdict(definition)
+    phase.artifacts["provisioning"] = "preinstalled_guest_package; verification_only"
+    version_path = root / definition.version_path
+    version_valid = version_path.is_file() and not version_path.is_symlink()
+    version = version_path.read_text(encoding="utf-8").strip() if version_valid else ""
+    record_phase_assertion(phase, "nonempty_active_version_receipt", bool(version), "nonempty regular .af-version", version)
+    config_path = root / definition.config_path
+    config_regular = config_path.is_file() and not config_path.is_symlink()
+    config_text = config_path.read_text(encoding="utf-8") if config_regular else ""
+    pattern = definition.config_pattern.replace("{port}", str(definition.listener_port))
+    record_phase_assertion(phase, "application_specific_configuration", config_regular and re.search(pattern, config_text) is not None, pattern, {"path": str(config_path), "regular_file": config_regular})
+    unit_state = query_systemd_unit_state(definition.service_unit, work_root)
+    phase.commands.extend(unit_state.pop("commands"))
+    phase.artifacts["unit_state"] = unit_state
+    record_phase_assertion(phase, "catalog_unit_active", unit_state["is_active_exit_code"] == 0 and unit_state["is_active_stdout"] == "active", "active", unit_state["is_active_stdout"])
+    if definition.listener_port:
+        listener = wait_for_tcp_listener("127.0.0.1", definition.listener_port)
+        phase.artifacts["listener"] = listener
+        record_phase_assertion(phase, "catalog_listener_ready", listener["listening"], definition.listener_port, listener)
+    if definition.endpoint_path is not None:
+        authorization_key = "AF_GUEST_READINESS_AUTHORIZATION_" + definition.package_id.upper().replace("-", "_")
+        authorization = os.environ.get(authorization_key)
+        headers = {"Authorization": authorization} if authorization else None
+        endpoint = probe_http_endpoint(f"http://127.0.0.1:{definition.listener_port}{definition.endpoint_path}", headers=headers)
+        endpoint.pop("body_excerpt", None)
+        phase.artifacts["endpoint"] = endpoint
+        record_phase_assertion(phase, "application_endpoint_ready", endpoint["reachable"] and endpoint["status_code"] in definition.accepted_http_statuses, definition.accepted_http_statuses, endpoint)
+    phase.status = "passed" if all(assertion.passed for assertion in phase.assertions) else "failed"
+    phase.completed_at = utc_now_iso()
+    phase.duration_ms = round((time.monotonic() - started_mono) * 1000.0, 2)
+    return phase
 
 
 def build_native_runner_daemon(
@@ -2172,7 +2262,12 @@ def execute_native_package_guest_drill_suite(
     af_bin: str,
     guest_marker_file: str = DEFAULT_GUEST_MARKER_FILE,
     keep_work_root: bool = False,
+    verify_families: Sequence[str] = (),
 ) -> Dict[str, Any]:
+    selected_families = tuple(dict.fromkeys(verify_families))
+    unknown_families = set(selected_families) - set(NATIVE_FAMILY_DRILLS_BY_FAMILY)
+    if unknown_families:
+        raise GuestSafetyError(f"Unknown guest drill families: {sorted(unknown_families)}")
     guardrail_info = verify_guest_execution_guardrails(
         confirm_disposable_guest=confirm_disposable_guest,
         work_root=work_root,
@@ -2201,6 +2296,8 @@ def execute_native_package_guest_drill_suite(
                 guardrail_info=guardrail_info,
             )
         )
+        for family in selected_families:
+            phases.append(verify_native_family_guest_drill(NATIVE_FAMILY_DRILLS_BY_FAMILY[family], work_root=work_root_path))
         phases.append(
             run_phase_2_fail2ban_lifecycle(
                 work_root=work_root_path,
@@ -2281,6 +2378,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional path to write the JSON drill report.",
     )
     parser.add_argument(
+        "--verify-family",
+        action="append",
+        choices=tuple(NATIVE_FAMILY_DRILLS_BY_FAMILY),
+        default=[],
+        help="Opt-in verification of a preinstalled family representative before the five default lifecycle phases; repeat for multiple families. Authenticated endpoints accept AF_GUEST_READINESS_AUTHORIZATION_<PACKAGE>.",
+    )
+    parser.add_argument(
         "--keep-work-root",
         action="store_true",
         help="Preserve the isolated --work-root directory after execution for post-mortem inspection.",
@@ -2299,6 +2403,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             af_bin=str(parsed_args.af_bin),
             guest_marker_file=str(parsed_args.guest_marker_file),
             keep_work_root=bool(parsed_args.keep_work_root),
+            verify_families=tuple(parsed_args.verify_family),
         )
     except GuestSafetyError as safety_exc:
         err_report = {

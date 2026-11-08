@@ -8,6 +8,7 @@ import tempfile
 import tokenize
 from typing import List, Set
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -17,6 +18,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 from v4_native_package_guest_drills import (
     ALLOWED_THREADFIN_AMD64_DIGESTS,
     MANDATORY_NATIVE_PACKAGE_PHASES,
+    NATIVE_FAMILY_DRILLS,
+    NATIVE_FAMILY_DRILLS_BY_FAMILY,
     NATIVE_PACKAGE_HARNESS_SCHEMA_VERSION,
     SUPPORTED_NATIVE_PACKAGES,
     THREADFIN_PINNED_AMD64_COMPAT_SHA256,
@@ -37,6 +40,7 @@ from v4_native_package_guest_drills import (
     validate_binary_not_in_live_host_tree,
     validate_isolated_work_root,
     verify_guest_execution_guardrails,
+    verify_native_family_guest_drill,
 )
 
 
@@ -339,6 +343,98 @@ class TestFailClosedNativeSuiteEvaluation(unittest.TestCase):
         failed_res = evaluate_native_package_suite_status(failed_assertion_phases)
         self.assertFalse(failed_res["overall_passed"])
         self.assertIn(MANDATORY_NATIVE_PACKAGE_PHASES[1], failed_res["failed_phases"])
+
+
+class TestNativeFamilyGuestDrills(unittest.TestCase):
+    def test_manifest_covers_major_families_with_explicit_config_and_receipts(self) -> None:
+        expected_families = {
+            "media_servers", "media_automation", "media_requests", "torrents", "usenet",
+            "cloud_storage", "overlay_networking", "dns_filtering", "security", "monitoring",
+            "availability", "home_automation", "filesystems", "extraction", "scheduled_sync",
+            "books", "messaging", "documents", "workflows", "developer_tools", "remote_desktops",
+            "iptv", "database_backed_streaming",
+        }
+        self.assertEqual(set(NATIVE_FAMILY_DRILLS_BY_FAMILY), expected_families)
+        self.assertEqual(len(NATIVE_FAMILY_DRILLS), len(expected_families))
+        self.assertEqual(len({definition.package_id for definition in NATIVE_FAMILY_DRILLS}), len(expected_families))
+        for definition in NATIVE_FAMILY_DRILLS:
+            with self.subTest(family=definition.family):
+                self.assertTrue(definition.service_unit.endswith((".service", ".timer")))
+                self.assertEqual(Path(definition.version_path).name, ".af-version")
+                for relative in (definition.version_path, definition.config_path):
+                    self.assertFalse(Path(relative).is_absolute())
+                    self.assertNotIn("..", Path(relative).parts)
+                self.assertTrue(definition.config_pattern)
+                self.assertEqual("{port}" in definition.config_pattern, definition.listener_port > 0)
+                if definition.endpoint_path is not None:
+                    self.assertGreater(definition.listener_port, 0)
+                    self.assertTrue(definition.endpoint_path.startswith("/"))
+                    self.assertNotIn(401, definition.accepted_http_statuses)
+                    self.assertNotIn(404, definition.accepted_http_statuses)
+        self.assertEqual(NATIVE_FAMILY_DRILLS_BY_FAMILY["torrents"].endpoint_path, "/transmission/rpc")
+        self.assertEqual(NATIVE_FAMILY_DRILLS_BY_FAMILY["developer_tools"].endpoint_path, "/api/healthz")
+        self.assertEqual(NATIVE_FAMILY_DRILLS_BY_FAMILY["usenet"].endpoint_path, "/jsonrpc/version")
+
+    def verify_observation(self, family: str = "developer_tools", *, version: str = "2.1.0\n", config: str | None = None, status: int = 200, listening: bool = True, active: bool = True) -> DrillPhaseResult:
+        definition = NATIVE_FAMILY_DRILLS_BY_FAMILY[family]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = root / definition.version_path
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(version, encoding="utf-8")
+            configuration = root / definition.config_path
+            configuration.parent.mkdir(parents=True, exist_ok=True)
+            configuration.write_text(config if config is not None else f"HTTP_PORT = {definition.listener_port}\n", encoding="utf-8")
+            with mock.patch("v4_native_package_guest_drills.query_systemd_unit_state", return_value={"commands": [], "is_active_exit_code": 0 if active else 3, "is_active_stdout": "active" if active else "inactive"}), mock.patch("v4_native_package_guest_drills.wait_for_tcp_listener", return_value={"listening": listening}) as tcp_probe, mock.patch("v4_native_package_guest_drills.probe_http_endpoint", return_value={"reachable": True, "status_code": status, "body_excerpt": "private response", "error": None}) as http_probe:
+                phase = verify_native_family_guest_drill(definition, work_root=root, root=root)
+                if definition.listener_port == 0:
+                    tcp_probe.assert_not_called()
+                    http_probe.assert_not_called()
+                return phase
+
+    def test_configured_listener_and_explicit_health_endpoint_succeed(self) -> None:
+        phase = self.verify_observation()
+        self.assertEqual(phase.status, "passed")
+        self.assertGreaterEqual(len(phase.assertions), 5)
+        self.assertNotIn("body_excerpt", phase.artifacts["endpoint"])
+        self.assertIn("verification_only", phase.artifacts["provisioning"])
+
+    def test_http_authentication_and_missing_routes_fail_closed(self) -> None:
+        for family, config in (
+            ("developer_tools", "HTTP_PORT = 3002\n"),
+            ("usenet", "ControlPort=6789\n"),
+            ("torrents", '{"rpc-port": 9091}\n'),
+        ):
+            for status in (200, 401, 404, 409, 503):
+                with self.subTest(family=family, status=status):
+                    phase = self.verify_observation(family, config=config, status=status)
+                    self.assertEqual(phase.status == "passed", status in NATIVE_FAMILY_DRILLS_BY_FAMILY[family].accepted_http_statuses)
+
+    def test_empty_receipt_wrong_port_closed_listener_and_inactive_unit_fail(self) -> None:
+        for change in ({"version": "\n"}, {"config": "HTTP_PORT = 9999\n"}, {"listening": False}, {"active": False}):
+            with self.subTest(change=change):
+                self.assertEqual(self.verify_observation(**change).status, "failed")
+
+    def test_portless_timer_verifies_schedule_and_unit_without_network_probe(self) -> None:
+        phase = self.verify_observation("scheduled_sync", config="[Timer]\nOnCalendar=*-*-* 04:00:00\nPersistent=true\n")
+        self.assertEqual(phase.status, "passed")
+        self.assertEqual(len(phase.assertions), 3)
+
+    def test_optional_family_failure_is_not_hidden_by_default_phase_success(self) -> None:
+        phases = [make_passing_native_phase(phase_id) for phase_id in MANDATORY_NATIVE_PACKAGE_PHASES]
+        phases.append(self.verify_observation(status=404))
+        result = evaluate_native_package_suite_status(phases)
+        self.assertFalse(result["overall_passed"])
+        self.assertIn(phases[-1].phase_id, result["failed_phases"])
+
+    def test_family_selection_is_opt_in_and_keeps_default_cli_contract(self) -> None:
+        parser = build_arg_parser()
+        arguments = ["--api-bin", "/tmp/api", "--af-bin", "/tmp/af"]
+        self.assertEqual(parser.parse_args(arguments).verify_family, [])
+        self.assertEqual(parser.parse_args([*arguments, "--verify-family", "developer_tools", "--verify-family", "torrents"]).verify_family, ["developer_tools", "torrents"])
+        with mock.patch("v4_native_package_guest_drills.execute_native_package_guest_drill_suite", return_value={"evaluation": {"overall_passed": True}}) as execute, mock.patch("builtins.print"):
+            self.assertEqual(main([*arguments, "--verify-family", "developer_tools"]), 0)
+        self.assertEqual(execute.call_args.kwargs["verify_families"], ("developer_tools",))
 
 
 class TestCodeHygieneConstraints(unittest.TestCase):

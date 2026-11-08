@@ -36,7 +36,7 @@ rm -f "${DATA_DIR}/.af-version"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${DATA_DIR} and /etc/x2go..."
-    rm -rf "${DATA_DIR}" /etc/x2go
+    safe_rm_rf "/var/lib/x2go" /etc/x2go
 fi
 
 remove_lock "${PACKAGE_NAME}"

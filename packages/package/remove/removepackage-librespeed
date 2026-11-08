@@ -27,9 +27,14 @@ purge_systemd_unit "librespeed"
 
 report_progress 65 "Removing LibreSpeed application directory and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/librespeed
+    safe_rm_rf "/var/lib/librespeed" "/var/www/librespeed"
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/librespeed"
+    safe_rm_rf /opt/librespeed
+    purge_system_user "librespeed"
+else
+    rm -f /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/.af-version
+    safe_rm_rf /opt/librespeed/assets
 fi
-purge_system_user "librespeed"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

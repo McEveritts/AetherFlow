@@ -23,6 +23,11 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/apt/keyrings/grafana.gpg /var/lib/grafana/.af-version
+PACKAGE_NAME="${PACKAGE_NAME:-grafana}"
+begin_state_transaction "grafana-server" "$APP_PORT" "/api/health" "/var/lib/grafana" "/etc/grafana" "/etc/apt/sources.list.d/grafana.list" "/etc/apt/keyrings/grafana.gpg" "/etc/systemd/system/grafana-server.service" "/usr/share/grafana" "/usr/sbin/grafana-server" "/usr/bin/grafana-server" "/usr/bin/grafana-cli" "/usr/share/grafana-server" "/usr/bin/grafana"
+
+prepare_apt_package_transaction /var/lib/grafana/.af-version grafana
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Grafana..."
 
@@ -31,36 +36,53 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-transport-https curl g
 
 report_progress 35 "Adding official Grafana APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/grafana.gpg >> "$LOGFILE" 2>&1
+install_apt_signing_key https://apt.grafana.com/gpg.key /etc/apt/keyrings/grafana.gpg >> "$LOGFILE" 2>&1
 chmod a+r /etc/apt/keyrings/grafana.gpg
 echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
 
 report_progress 65 "Installing Grafana server..."
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq grafana >> "$LOGFILE" 2>&1
+verify_deb_installed grafana
 
 report_progress 85 "Configuring Grafana on port ${APP_PORT} and starting service..."
-if [[ -f /etc/grafana/grafana.ini ]]; then
-    sed -i 's/^;http_port = .*/http_port = '"${APP_PORT}"'/' /etc/grafana/grafana.ini
-    sed -i 's/^http_port = .*/http_port = '"${APP_PORT}"'/' /etc/grafana/grafana.ini
-    sed -i 's/^serve_from_sub_path = true/;serve_from_sub_path = false/' /etc/grafana/grafana.ini
-    python3 - /etc/grafana/grafana.ini "${MASTER_USER}" "${MASTER_PASS}" <<'PYEOF'
-import sys, re
-path, user, pw = sys.argv[1:4]
-txt = open(path, "r", encoding="utf-8", errors="ignore").read()
-txt = re.sub(r"(?m)^;?admin_user\s*=.*$", lambda _: f"admin_user = {user}", txt)
-txt = re.sub(r"(?m)^;?admin_password\s*=.*$", lambda _: f"admin_password = {pw}", txt)
-open(path, "w", encoding="utf-8").write(txt)
-PYEOF
+GRAFANA_NEW_DB=0
+if [[ ! -s /var/lib/grafana/grafana.db ]]; then
+    GRAFANA_NEW_DB=1
 fi
+GRAFANA_ROTATE_CREDS=0
+if [[ "$GRAFANA_NEW_DB" -eq 1 ]] || ( [[ -n "${AF_CONFIG_PASS:-}" ]] && [[ "${AF_KEEP_EXISTING_SECRETS:-1}" != "1" ]] ); then
+    GRAFANA_ROTATE_CREDS=1
+fi
+AF_SEED_USER="${MASTER_USER}" AF_SEED_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}" safe_config_python /etc/grafana/grafana.ini "$GRAFANA_ROTATE_CREDS" <<'PYEOF'
+import os, sys, re
+path, rotate = sys.argv[1], sys.argv[2]
+user, pw = os.environ['AF_SEED_USER'], os.environ['AF_SEED_PASS']
+with ManagedConfig(path) as config:
+    if config.metadata is not None:
+        text = config.read_text()
+        text = re.sub(r"(?m)^;?http_port\s*=.*$", 'http_port = ' + os.environ['AF_APP_PORT'], text)
+        text = re.sub(r"(?m)^serve_from_sub_path = true$", ';serve_from_sub_path = false', text)
+        if rotate == '1':
+            text = re.sub(r"(?m)^;?admin_user\s*=.*$", lambda _: f"admin_user = {user}", text)
+            text = re.sub(r"(?m)^;?admin_password\s*=.*$", lambda _: f"admin_password = {pw}", text)
+        config.write_text(text)
+PYEOF
+
+GRAFANA_VER="$(dpkg-query -W -f='${Version}' grafana 2>/dev/null || echo "11.0.0")"
+mkdir -p /var/lib/grafana
+queue_app_version /var/lib/grafana/.af-version "${GRAFANA_VER%%-*}"
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now grafana-server >> "$LOGFILE" 2>&1
 systemctl restart grafana-server >> "$LOGFILE" 2>&1
-if command_exists grafana-cli; then
-    grafana-cli admin reset-admin-password "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
+systemctl is-active --quiet grafana-server
+if [[ "$GRAFANA_ROTATE_CREDS" -eq 1 ]] && command_exists grafana-cli; then
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | grafana-cli admin reset-admin-password --password-from-stdin >> "$LOGFILE" 2>&1 || true
 fi
 
+commit_app_versions
+chown grafana:grafana /var/lib/grafana/.af-version 2>/dev/null || true
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Grafana installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

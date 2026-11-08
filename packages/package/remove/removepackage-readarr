@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing readarr.service..."
 purge_systemd_unit "readarr"
 
 report_progress 65 "Removing Readarr binaries, state directories, and user account..."
-rm -rf /opt/Readarr
+safe_rm_rf /opt/Readarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/readarr
+    safe_rm_rf /var/lib/readarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Readarr"
+    purge_system_user "readarr"
 fi
-purge_system_user "readarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

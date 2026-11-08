@@ -23,6 +23,11 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/lib/znc/znc.pem
+PACKAGE_NAME="${PACKAGE_NAME:-znc}"
+begin_state_transaction "znc" "0" "/" "/var/lib/znc" "/etc/znc" "/etc/systemd/system/znc.service" "/usr/bin/znc" "/usr/lib/znc" "/usr/share/znc"
+
+prepare_apt_package_transaction /var/lib/znc/.af-version znc
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing ZNC packages and cryptographic libraries via apt..."
 
@@ -37,7 +42,7 @@ mkdir -p /var/lib/znc/configs /var/lib/znc/modules /var/lib/znc/users
 
 # Record version
 ZNC_VER="$(znc --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' znc 2>/dev/null || echo "1.8.2")"
-printf '%s\n' "$ZNC_VER" > /var/lib/znc/.af-version
+queue_app_version /var/lib/znc/.af-version "$ZNC_VER"
 
 report_progress 50 "Generating initial ZNC configuration and SSL certificate..."
 if [[ ! -f /var/lib/znc/znc.pem ]]; then
@@ -45,12 +50,13 @@ if [[ ! -f /var/lib/znc/znc.pem ]]; then
     chmod 600 /var/lib/znc/znc.pem
 fi
 
+validate_config_paths /var/lib/znc/configs/znc.conf
 if [[ ! -f /var/lib/znc/configs/znc.conf ]]; then
     ZNC_CFG_VER="$(printf '%s' "$ZNC_VER" | grep -oE '^[0-9]+\.[0-9]+' || echo "1.9")"
     ZNC_CFG_VER="${ZNC_CFG_VER:-1.9}"
-    ZNC_SALT="aetherflowzncsalt123"
-    ZNC_HASH="$(python3 -c 'import sys,hashlib; print(hashlib.sha256((sys.argv[1]+sys.argv[2]).encode("utf-8")).hexdigest())' "${MASTER_PASS}" "${ZNC_SALT}")"
-    cat <<EOF > /var/lib/znc/configs/znc.conf
+    ZNC_SALT="$(python3 -c 'import secrets; print(secrets.token_hex(16))' 2>/dev/null || openssl rand -hex 16)"
+    ZNC_HASH="$(AF_SEED_PASS="$MASTER_PASS" AF_SEED_SALT="$ZNC_SALT" python3 -c 'import os,hashlib; print(hashlib.sha256((os.environ["AF_SEED_PASS"]+os.environ["AF_SEED_SALT"]).encode("utf-8")).hexdigest())')"
+    write_config_file /var/lib/znc/configs/znc.conf 0600 <<EOF
 // ZNC configuration created by AetherFlow
 Version = ${ZNC_CFG_VER}
 AnonIPLimit = 10
@@ -66,6 +72,7 @@ Skin = "default"
 StatusPrefix = "*"
 
 <Listener listener0>
+    Host = 127.0.0.1
     AllowIRC = true
     AllowWeb = true
     IPv4 = true
@@ -86,7 +93,26 @@ StatusPrefix = "*"
 EOF
 fi
 
-chown -R znc:znc /var/lib/znc
+safe_config_python /var/lib/znc/configs/znc.conf "$APP_PORT" <<'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+with ManagedConfig(path) as config:
+    text = config.read_text()
+    listeners = list(re.finditer(r'(?ms)^\s*<Listener\s+([^>]+)>\s*\n(.*?)^\s*</Listener>', text))
+    selected = next((entry for entry in listeners if entry.group(1) in ('l', 'listener0')), None)
+    if selected is None and len(listeners) == 1:
+        selected = listeners[0]
+    if selected is None:
+        raise ValueError('Cannot identify the managed ZNC listener')
+    block = selected.group(2)
+    block, count = re.subn(r'(?m)^([ \t]*Port[ \t]*=[ \t]*)\d+[ \t]*$', lambda match: match.group(1) + sys.argv[2], block)
+    if count != 1:
+        raise ValueError('Expected one ZNC listener port')
+    text = text[:selected.start(2)] + block + text[selected.end(2):]
+    config.write_text(text)
+PYEOF
+
+chown -hRP znc:znc /var/lib/znc
 
 report_progress 85 "Configuring and starting znc.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/znc.service
@@ -110,7 +136,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now znc >> "$LOGFILE" 2>&1
+systemctl restart znc >> "$LOGFILE" 2>&1
+systemctl is-active --quiet znc
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "ZNC installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

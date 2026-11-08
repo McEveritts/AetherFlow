@@ -21,6 +21,11 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/lib/rtorrent/.af-directory-check /run/rtorrent/.af-directory-check
+PACKAGE_NAME="${PACKAGE_NAME:-rtorrent}"
+begin_state_transaction "rtorrent" "0" "/" "/var/lib/rtorrent" "/etc/rtorrent" "/etc/systemd/system/rtorrent.service" "/usr/bin/rtorrent" "/usr/share/rtorrent"
+
+prepare_apt_package_transaction /var/lib/rtorrent/.af-version rtorrent
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing rTorrent, screen, and dependencies via apt..."
 
@@ -78,7 +83,7 @@ EOF
     )
 fi
 
-chown -R rtorrent:www-data /var/lib/rtorrent /run/rtorrent
+chown -hRP rtorrent:www-data /var/lib/rtorrent /run/rtorrent
 chmod 775 /var/lib/rtorrent /run/rtorrent
 
 report_progress 85 "Creating and starting rtorrent.service unit..."
@@ -107,6 +112,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now rtorrent >> "$LOGFILE" 2>&1
 
+systemctl restart rtorrent >> "$LOGFILE" 2>&1
+systemctl is-active --quiet rtorrent
+queue_app_version /var/lib/rtorrent/.af-version "$(dpkg-query -W -f='${Version}' rtorrent)"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "rTorrent installed successfully (SCGI 127.0.0.1:15000 / /run/rtorrent/rpc.sock)."
 log_info "${PACKAGE_NAME} installed successfully"

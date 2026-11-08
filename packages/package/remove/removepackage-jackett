@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing jackett.service..."
 purge_systemd_unit "jackett"
 
 report_progress 65 "Removing Jackett binaries, configuration directories, and user account..."
-rm -rf /opt/Jackett
+safe_rm_rf /opt/Jackett
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/jackett
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Jackett"
+    safe_rm_rf /var/lib/jackett
+    purge_system_user "jackett"
 fi
-purge_system_user "jackett"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

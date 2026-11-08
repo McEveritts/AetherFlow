@@ -23,15 +23,20 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/apt/keyrings/syncthing-archive-keyring.gpg
+PACKAGE_NAME="${PACKAGE_NAME:-syncthing}"
+begin_state_transaction "syncthing" "$APP_PORT" "/" "/var/lib/syncthing" "/etc/syncthing" "/etc/apt/sources.list.d/syncthing.list" "/etc/apt/keyrings/syncthing-archive-keyring.gpg" "/etc/systemd/system/syncthing.service" "/usr/bin/syncthing" "/usr/share/syncthing"
+
+prepare_apt_package_transaction /var/lib/syncthing/.af-version syncthing
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Syncthing..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https apache2-utils >> "$LOGFILE" 2>&1
 
 report_progress 35 "Adding official Syncthing APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://syncthing.net/release-key.gpg -o /etc/apt/keyrings/syncthing-archive-keyring.gpg >> "$LOGFILE" 2>&1
+download_file https://syncthing.net/release-key.gpg /etc/apt/keyrings/syncthing-archive-keyring.gpg >> "$LOGFILE" 2>&1
 chmod a+r /etc/apt/keyrings/syncthing-archive-keyring.gpg
 echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
 
@@ -44,16 +49,38 @@ if ! id -u syncthing >/dev/null 2>&1; then
 fi
 
 mkdir -p /var/lib/syncthing
-chown -R syncthing:syncthing /var/lib/syncthing
-sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing --gui-user="${MASTER_USER}" --gui-password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
+chown -hRP syncthing:syncthing /var/lib/syncthing
+if [[ ! -s /var/lib/syncthing/config.xml && ! -s /var/lib/syncthing/.local/state/syncthing/config.xml ]]; then
+sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing >> "$LOGFILE" 2>&1
+ST_PASSWORD_HASH="$(printf '%s\n' "$MASTER_PASS" | htpasswd -niBC 10 "$MASTER_USER")"
+ST_PASSWORD_HASH="${ST_PASSWORD_HASH#*:}"
+for st_cfg in /var/lib/syncthing/config.xml /var/lib/syncthing/.local/state/syncthing/config.xml; do
+    [[ -f "$st_cfg" ]] || continue
+    AF_SEED_USER="$MASTER_USER" AF_SEED_HASH="$ST_PASSWORD_HASH" safe_config_python "$st_cfg" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
+with ManagedConfig(sys.argv[1]) as config:
+    document = ET.fromstring(config.read_text())
+    gui = document.find('gui')
+    if gui is None:
+        gui = ET.SubElement(document, 'gui')
+    for key, value in [('user', os.environ['AF_SEED_USER']), ('password', os.environ['AF_SEED_HASH'])]:
+        element = gui.find(key)
+        if element is None:
+            element = ET.SubElement(gui, key)
+        element.text = value
+    config.write_text(ET.tostring(document, encoding='unicode'), 0o600)
+PYEOF
+    chown syncthing:syncthing "$st_cfg"
+done
 for st_cfg in /var/lib/syncthing/config.xml /var/lib/syncthing/.local/state/syncthing/config.xml; do
     if [[ -f "$st_cfg" ]] && ! grep -q "insecureSkipHostcheck" "$st_cfg"; then
         sed -i 's|<gui \([^>]*\)>|<gui \1>\n        <insecureSkipHostcheck>true</insecureSkipHostcheck>|' "$st_cfg" || true
     fi
 done
+fi
 
 report_progress 85 "Configuring and starting syncthing.service on port ${APP_PORT}..."
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/syncthing.service
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/syncthing.service
 [Unit]
 Description=Syncthing - Open Source Continuous File Synchronization
 Documentation=man:syncthing(1)
@@ -63,7 +90,7 @@ After=network.target
 User=syncthing
 Group=syncthing
 Environment=HOME=/var/lib/syncthing
-ExecStart=/usr/bin/syncthing serve --no-browser --no-restart --logflags=0 --gui-address=0.0.0.0:@AF_APP_PORT@ --home=/var/lib/syncthing
+ExecStart=/usr/bin/syncthing serve --no-browser --no-restart --logflags=0 --gui-address=@AF_BIND_ADDRESS@:@AF_APP_PORT@ --home=/var/lib/syncthing
 Restart=on-failure
 RestartSec=5
 SuccessExitStatus=3 4
@@ -78,6 +105,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now syncthing >> "$LOGFILE" 2>&1
 
+systemctl restart syncthing >> "$LOGFILE" 2>&1
+systemctl is-active --quiet syncthing
+queue_app_version /var/lib/syncthing/.af-version "$(dpkg-query -W -f='${Version}' syncthing)"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Syncthing installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

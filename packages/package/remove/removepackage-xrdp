@@ -23,8 +23,9 @@ report_progress 60 "Removing XRDP; preserving Linux users and shared desktop dep
 DEBIAN_FRONTEND=noninteractive apt-get remove -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get purge -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
-    rm -rf /etc/xrdp /var/lib/xrdp
+    safe_rm_rf /etc/xrdp /var/lib/xrdp
 fi
 systemctl daemon-reload
+rm -f -- /var/lib/xrdp/.af-version
 remove_lock xrdp
 report_progress 100 "XRDP removed. Linux accounts and home directories were preserved."

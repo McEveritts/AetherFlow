@@ -28,13 +28,15 @@ purge_systemd_unit "thelounge"
 report_progress 65 "Uninstalling npm package and removing state directories..."
 npm uninstall -g thelounge >> "$LOGFILE" 2>&1 || true
 rm -f /usr/bin/thelounge /usr/local/bin/thelounge
-rm -rf /opt/thelounge
+safe_rm_rf /opt/thelounge
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/thelounge
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/thelounge"
+    safe_rm_rf /var/lib/thelounge
+    purge_system_user "thelounge"
 fi
-purge_system_user "thelounge"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/thelounge/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "The Lounge removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

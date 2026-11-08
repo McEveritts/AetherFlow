@@ -25,9 +25,11 @@ report_progress 25 "Stopping and removing cloudplow.service..."
 purge_systemd_unit "cloudplow"
 
 report_progress 65 "Removing Cloudplow virtualenv, configurations, and logs..."
-rm -rf /var/log/cloudplow /opt/cloudplow/.venv
+safe_rm_rf /var/log/cloudplow /opt/cloudplow/.venv
+safe_rm_rf /opt/cloudplow/{.git,core,utils,__pycache__}
+rm -f /opt/cloudplow/{cloudplow.py,requirements.txt,.af-version}
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/cloudplow
+    safe_rm_rf /var/lib/cloudplow /etc/cloudplow /opt/cloudplow
 fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 

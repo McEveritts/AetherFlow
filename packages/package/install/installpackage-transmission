@@ -23,6 +23,47 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-transmission}"
+TRANSMISSION_PASS=""
+TRANSMISSION_RETAINED_CONFIG=false
+for existing_config in /var/lib/transmission-daemon/info/settings.json /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json; do
+    if [[ -s "$existing_config" ]]; then
+        TRANSMISSION_RETAINED_CONFIG=true
+        break
+    fi
+done
+transmission_curl() {
+    if [[ -n "$TRANSMISSION_PASS" && -s "${TRANSMISSION_CONFIG:-}" ]]; then
+        AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF' | curl -K - "$@"
+import json, os, sys
+config = json.loads(safe_read_text(sys.argv[1]))
+credentials = str(config.get('rpc-username', '')) + ':' + os.environ['AF_TRANSMISSION_PASS']
+print('user = ' + json.dumps(credentials, ensure_ascii=False))
+PYEOF
+    else
+        curl "$@"
+    fi
+}
+wait_for_service_ready() {
+    local service="${1:-transmission-daemon}" port="${2:-$APP_PORT}" status
+    local url="http://127.0.0.1:${port}/transmission/rpc"
+    systemctl is-active --quiet "$service" || return 1
+    if status="$(transmission_curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
+        --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "$url" 2>> "$LOGFILE")"; then
+        :
+    else
+        status=""
+    fi
+    case "$status" in
+        200|401|409) ;;
+        [0-9][0-9][0-9]) return 1 ;;
+        *) transmission_curl -fsS --connect-timeout 2 --max-time 5 "$url" >> "$LOGFILE" 2>&1 || return 1 ;;
+    esac
+    systemctl is-active --quiet "$service"
+}
+begin_state_transaction "transmission-daemon" "$APP_PORT" "/transmission/rpc" "/var/lib/transmission" "/var/lib/transmission-daemon" "/etc/transmission-daemon" "/usr/share/transmission/web" "/etc/systemd/system/transmission-daemon.service" "/usr/bin/transmission-daemon" "/usr/bin/transmission-remote" "/usr/share/transmission" "/usr/lib/transmission"
+
+prepare_apt_package_transaction /var/lib/transmission-daemon/.af-version transmission-daemon transmission-common transmission-cli
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing transmission-daemon and transmission-cli..."
 
@@ -41,26 +82,54 @@ fi
 report_progress 45 "Configuring Transmission daemon on port ${APP_PORT}..."
 mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon /var/lib/transmission-daemon/downloads /etc/transmission-daemon
 
-python3 - "${MASTER_USER}" "${MASTER_PASS}" <<'PYEOF'
+TRANSMISSION_CONFIG=/var/lib/transmission-daemon/.config/transmission-daemon/settings.json
+if [[ -s /var/lib/transmission-daemon/info/settings.json ]]; then
+    TRANSMISSION_CONFIG=/var/lib/transmission-daemon/info/settings.json
+elif [[ ! -s "$TRANSMISSION_CONFIG" && -s /etc/transmission-daemon/settings.json ]]; then
+    TRANSMISSION_CONFIG=/etc/transmission-daemon/settings.json
+fi
+validate_config_paths "$TRANSMISSION_CONFIG"
+if [[ ! -s "$TRANSMISSION_CONFIG" ]]; then
+TRANSMISSION_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
+AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
 import os
-import sys, json, pathlib
-user, pw = (sys.argv[1], sys.argv[2])
-cfg = {'download-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir-enabled': False, 'rpc-authentication-required': True, 'rpc-username': user, 'rpc-password': pw, 'rpc-bind-address': '0.0.0.0', 'rpc-enabled': True, 'rpc-host-whitelist-enabled': False, 'rpc-port': int(os.environ['AF_APP_PORT']), 'rpc-url': '/transmission/', 'rpc-whitelist': '127.0.0.1,::1,*.*.*.*', 'rpc-whitelist-enabled': False, 'umask': 2}
-path = pathlib.Path('/var/lib/transmission-daemon/.config/transmission-daemon/settings.json')
-if path.exists():
-    existing = json.loads(path.read_text())
-    existing.update({key: value for key, value in cfg.items() if key.startswith('rpc-')})
-    cfg = existing
-path.write_text(json.dumps(cfg, indent=4))
+import sys, json
+filename = sys.argv[1]
+user, pw = os.environ['AF_TRANSMISSION_USER'], os.environ['AF_TRANSMISSION_PASS']
+cfg = {'download-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir-enabled': False, 'rpc-authentication-required': True, 'rpc-username': user, 'rpc-password': pw, 'rpc-bind-address': os.environ.get('AF_BIND_ADDRESS', '127.0.0.1'), 'rpc-enabled': True, 'rpc-host-whitelist-enabled': True, 'rpc-port': int(os.environ['AF_APP_PORT']), 'rpc-url': '/transmission/', 'rpc-whitelist': '127.0.0.1,::1', 'rpc-whitelist-enabled': True, 'umask': 2}
+if safe_read_text(filename):
+    raise ValueError('Refusing to replace an existing Transmission configuration')
+safe_write_text(filename, json.dumps(cfg, indent=4))
 PYEOF
-cp -f /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json
+else
+    TRANSMISSION_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}"
+    AF_TRANSMISSION_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_TRANSMISSION_PASS="$TRANSMISSION_PASS" AF_RETAINED="$TRANSMISSION_RETAINED_CONFIG" AF_KEEP_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_EXPLICIT_PASS="${AF_CONFIG_PASS:-}" safe_config_python "$TRANSMISSION_CONFIG" <<'PYEOF'
+import json, os, sys
+config = json.loads(safe_read_text(sys.argv[1]))
+has_user = bool(str(config.get('rpc-username') or '').strip())
+has_pass = bool(str(config.get('rpc-password') or '').strip())
+retained = os.environ.get('AF_RETAINED') == 'true'
+rotate = bool(os.environ.get('AF_EXPLICIT_PASS')) and os.environ.get('AF_KEEP_SECRETS') != '1'
+if not has_user or not has_pass or not retained or rotate:
+    config['rpc-authentication-required'] = True
+    config['rpc-username'] = os.environ['AF_TRANSMISSION_USER']
+    config['rpc-password'] = os.environ['AF_TRANSMISSION_PASS']
+    if not retained:
+        config.update({'rpc-bind-address': os.environ.get('AF_BIND_ADDRESS', '127.0.0.1'),
+                       'rpc-host-whitelist-enabled': True, 'rpc-whitelist-enabled': True,
+                       'rpc-whitelist': '127.0.0.1,::1'})
+    safe_write_text(sys.argv[1], json.dumps(config, indent=4))
+PYEOF
+fi
+set_config_value "$TRANSMISSION_CONFIG" json rpc-port "$APP_PORT"
+TRANSMISSION_CONFIG_DIR="$(dirname "$TRANSMISSION_CONFIG")"
 
 report_progress 70 "Installing Transmission Web Control UI..."
 TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
 TWC_URL="https://github.com/ronggang/transmission-web-control/archive/refs/tags/${TWC_TAG}.tar.gz"
 if [[ -n "$TWC_URL" ]]; then
     TMP_TAR=$(mktemp /tmp/twc-XXXXXX.tar.gz)
-    if curl -fsSL "$TWC_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+    if download_file "$TWC_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1; then
         WEB_DIR="/usr/share/transmission/web"
         mkdir -p "$WEB_DIR"
         if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
@@ -71,9 +140,9 @@ if [[ -n "$TWC_URL" ]]; then
     rm -f "$TMP_TAR"
 fi
 
-chown -R debian-transmission:debian-transmission /var/lib/transmission-daemon /etc/transmission-daemon
+chown -hRP debian-transmission:debian-transmission /var/lib/transmission-daemon /etc/transmission-daemon
 
-cat <<'EOF' > /etc/systemd/system/transmission-daemon.service
+cat <<EOF > /etc/systemd/system/transmission-daemon.service
 [Unit]
 Description=Transmission BitTorrent Daemon
 After=network-online.target
@@ -83,8 +152,8 @@ Wants=network-online.target
 User=debian-transmission
 Group=debian-transmission
 Type=simple
-ExecStart=/usr/bin/transmission-daemon -f --log-error --config-dir /var/lib/transmission-daemon/.config/transmission-daemon
-ExecReload=/bin/kill -s HUP $MAINPID
+ExecStart=/usr/bin/transmission-daemon -f --log-error --config-dir ${TRANSMISSION_CONFIG_DIR}
+ExecReload=/bin/kill -s HUP \$MAINPID
 NoNewPrivileges=true
 PrivateTmp=true
 Restart=on-failure
@@ -97,7 +166,11 @@ EOF
 report_progress 90 "Starting and enabling transmission-daemon.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now transmission-daemon >> "$LOGFILE" 2>&1
+systemctl restart transmission-daemon >> "$LOGFILE" 2>&1
+wait_for_service_ready transmission-daemon "$APP_PORT" "/transmission/rpc"
+queue_app_version /var/lib/transmission-daemon/.af-version "$(dpkg-query -W -f='${Version}' transmission-daemon)"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Transmission installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

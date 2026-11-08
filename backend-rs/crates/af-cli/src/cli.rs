@@ -132,12 +132,17 @@ impl AfCommand {
     }
 }
 
-/// Package lifecycle subcommands (`af package ...` and legacy `af install/remove/list/update/upgrade`).
+/// Package lifecycle subcommands (`af package ...` and legacy `af install/reinstall/remove/list/update/upgrade`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PackageCommand {
     /// Install one or more allowlisted packages via `/v1/package`.
     Install {
+        packages: Vec<String>,
+        port: Option<i32>,
+    },
+    /// Reinstall one or more allowlisted packages in-place via `/v1/package` without skipping existing lockfiles.
+    Reinstall {
         packages: Vec<String>,
         port: Option<i32>,
     },
@@ -162,6 +167,7 @@ impl PackageCommand {
     pub const fn action_name(&self) -> &'static str {
         match self {
             PackageCommand::Install { .. } => "install",
+            PackageCommand::Reinstall { .. } => "reinstall",
             PackageCommand::Remove { .. } => "remove",
             PackageCommand::Update { .. } => "update",
             PackageCommand::Upgrade { .. } => "upgrade",
@@ -568,12 +574,12 @@ pub fn build_package_runner_request(
     }
 
     let script_prefix = match action {
-        "install" => "installpackage-",
+        "install" | "reinstall" => "installpackage-",
         "remove" => "removepackage-",
         "update" => "updatepackage-",
         other => {
             return Err(CliError::Validation(format!(
-                "unsupported package action {:?} (expected install, remove, or update)",
+                "unsupported package action {:?} (expected install, reinstall, remove, or update)",
                 other
             )));
         }
@@ -865,6 +871,7 @@ where
 
         // Legacy `packages/system/af` top-level package shorthands:
         "install" => AfCommand::Package(parse_package_install_args(rest)?),
+        "reinstall" => AfCommand::Package(parse_package_reinstall_args(rest)?),
         "remove" | "uninstall" => AfCommand::Package(parse_package_remove_args(rest)?),
         "list" => AfCommand::Package(parse_package_list_args(rest)?),
         "update" => AfCommand::Package(parse_package_update_args(rest)?),
@@ -897,7 +904,7 @@ where
 
 fn parse_help_topic(raw: &str) -> HelpTopic {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "package" | "pkg" | "install" | "remove" | "list" => HelpTopic::Package,
+        "package" | "pkg" | "install" | "reinstall" | "remove" | "list" => HelpTopic::Package,
         "service" | "svc" | "systemctl" => HelpTopic::Service,
         "quota" | "setdisk" => HelpTopic::Quota,
         "sandbox" => HelpTopic::Sandbox,
@@ -914,13 +921,14 @@ fn parse_help_topic(raw: &str) -> HelpTopic {
 fn parse_package_subcommand(args: &[String]) -> CliResult<PackageCommand> {
     let Some(sub) = args.first().map(|s| s.as_str()) else {
         return Err(CliError::Usage(
-            "missing package subcommand (expected: install, remove, update, upgrade, list, info, cancel)"
+            "missing package subcommand (expected: install, reinstall, remove, update, upgrade, list, info, cancel)"
                 .to_string(),
         ));
     };
     let tail = &args[1..];
     match sub {
         "install" => parse_package_install_args(tail),
+        "reinstall" => parse_package_reinstall_args(tail),
         "remove" | "uninstall" => parse_package_remove_args(tail),
         "update" => parse_package_update_args(tail),
         "upgrade" => parse_package_upgrade_args(tail),
@@ -948,7 +956,7 @@ fn parse_package_subcommand(args: &[String]) -> CliResult<PackageCommand> {
             })
         }
         other => Err(CliError::Usage(format!(
-            "unknown package subcommand {:?} (expected: install, remove, update, upgrade, list, info, cancel)",
+            "unknown package subcommand {:?} (expected: install, reinstall, remove, update, upgrade, list, info, cancel)",
             other
         ))),
     }
@@ -1005,6 +1013,59 @@ fn parse_package_install_args(args: &[String]) -> CliResult<PackageCommand> {
     }
 
     Ok(PackageCommand::Install { packages, port })
+}
+
+fn parse_package_reinstall_args(args: &[String]) -> CliResult<PackageCommand> {
+    let mut packages = Vec::new();
+    let mut port: Option<i32> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" | "-p" => {
+                let raw_port = args.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--port requires a numeric port value".to_string())
+                })?;
+                let parsed = raw_port.parse::<i32>().map_err(|_| {
+                    CliError::Validation(format!("invalid port number {:?}", raw_port))
+                })?;
+                port = Some(parsed);
+                i += 2;
+            }
+            s if s.starts_with("--port=") => {
+                let raw_port = s.trim_start_matches("--port=");
+                let parsed = raw_port.parse::<i32>().map_err(|_| {
+                    CliError::Validation(format!("invalid port number {:?}", raw_port))
+                })?;
+                port = Some(parsed);
+                i += 1;
+            }
+            pkg => {
+                if pkg.starts_with('-') {
+                    return Err(CliError::Usage(format!(
+                        "unknown flag for package reinstall: {}",
+                        pkg
+                    )));
+                }
+                let _ = build_package_runner_request("reinstall", pkg, port)?;
+                packages.push(pkg.trim().to_string());
+                i += 1;
+            }
+        }
+    }
+
+    if packages.is_empty() {
+        return Err(CliError::Usage(
+            "usage: af [package] reinstall <pkg1> [pkg2...] [--port <port>]".to_string(),
+        ));
+    }
+
+    if packages.len() > 1 && port.is_some() {
+        return Err(CliError::Usage(
+            "--port may only be specified when reinstalling a single package".to_string(),
+        ));
+    }
+
+    Ok(PackageCommand::Reinstall { packages, port })
 }
 
 fn parse_package_remove_args(args: &[String]) -> CliResult<PackageCommand> {
@@ -2490,13 +2551,14 @@ GLOBAL OPTIONS:
 
 LEGACY COMPATIBILITY SHORTHANDS (`packages/system/af`):
   af install <pkg1> [pkg2...] [--port <port>]
+  af reinstall <pkg1> [pkg2...] [--port <port>]
   af remove <pkg1> [pkg2...] [--purge]
   af list [--installed]
   af update [pkg] [--channel <stable|nightly>]
   af upgrade [--channel <stable|nightly>]
 
 ADMINISTRATIVE DOMAINS:
-  package     Runner-mediated package install/remove/update/list/info (/v1/package)
+  package     Runner-mediated package install/reinstall/remove/update/list/info (/v1/package)
   service     Runner-mediated systemd service control (/v1/systemctl)
   quota       Runner-mediated user disk quota enforcement (/v1/quota)
   sandbox     Runner-mediated systemd unit drop-in hardening (/v1/sandbox)
@@ -2516,6 +2578,7 @@ NOTE ON UNSUPPORTED INTERACTIVE / DESTRUCTIVE FLOWS:
         HelpTopic::Package => "\
 USAGE:
   af package install <pkg1> [pkg2...] [--port <port>]
+  af package reinstall <pkg1> [pkg2...] [--port <port>]
   af package remove <pkg1> [pkg2...] [--purge]
   af package update [pkg] [--channel <stable|nightly>]
   af package upgrade [--channel <stable|nightly>]

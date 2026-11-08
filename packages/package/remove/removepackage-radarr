@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing radarr.service..."
 purge_systemd_unit "radarr"
 
 report_progress 65 "Removing Radarr binaries, state directories, and user account..."
-rm -rf /opt/Radarr
+safe_rm_rf /opt/Radarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/radarr
+    safe_rm_rf /var/lib/radarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Radarr"
+    purge_system_user "radarr"
 fi
-purge_system_user "radarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

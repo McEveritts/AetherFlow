@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing prowlarr.service..."
 purge_systemd_unit "prowlarr"
 
 report_progress 65 "Removing Prowlarr binaries, state directories, and user account..."
-rm -rf /opt/Prowlarr
+safe_rm_rf /opt/Prowlarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/prowlarr
+    safe_rm_rf /var/lib/prowlarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/Prowlarr"
+    purge_system_user "prowlarr"
 fi
-purge_system_user "prowlarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

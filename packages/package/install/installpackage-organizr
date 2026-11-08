@@ -23,6 +23,7 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/www/organizr/.af-directory-check
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Apache and PHP dependencies for Organizr..."
 
@@ -35,18 +36,72 @@ report_progress 45 "Cloning Organizr v2 repository..."
 BUILD_DIR="$(mktemp -d /var/www/.organizr-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
 git clone --depth 1 -b v2-master https://github.com/causefx/Organizr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
-replace_app_tree "$BUILD_DIR" /var/www/organizr api/config api/db
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_SNAPSHOT_READY=false
+RUNTIME_STOPPED=false
+RUNTIME_PATHS=("/var/www/organizr" "/var/lib/organizr" "/etc/apache2/sites-available/organizr.conf" "/etc/apache2/conf-available/aetherflow-organizr-listen.conf")
+rollback_web_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_SNAPSHOT_READY" == true ]]; then
+        quiesce_services_for_rollback apache2 || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+    fi
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_STOPPED" == true ]]; then
+        [[ "$restore_failed" == false ]] && apache2ctl configtest >> "$LOGFILE" 2>&1 && systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+
+trap rollback_web_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+stop_systemd_unit apache2
+RUNTIME_STOPPED=true
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_SNAPSHOT_READY=true
+if [[ -d /var/www/organizr ]]; then
+    find /var/www/organizr -mindepth 1 -maxdepth 1 -type f \
+        ! -name '*.php' ! -name '*.js' ! -name '*.css' ! -name '*.html' ! -name '*.map' \
+        ! -name .af-version ! -name composer.json ! -name composer.lock \
+        ! -name package.json ! -name package-lock.json -exec cp -a -t "$BUILD_DIR" -- {} +
+fi
+if [[ -d /var/www/organizr/api/config ]]; then
+    mkdir -p "$BUILD_DIR/api/config"
+    cp -a -- /var/www/organizr/api/config/. "$BUILD_DIR/api/config/"
+fi
+replace_app_tree "$BUILD_DIR" /var/www/organizr api/db
 BUILD_DIR=""
 ORG_VER="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || true)"
-if [[ -n "$ORG_VER" ]]; then
-    printf '%s\n' "$ORG_VER" > /var/www/organizr/.af-version
+if [[ -z "$ORG_VER" ]]; then
+    ORG_VER="$(git_checkout_version /var/www/organizr)"
 fi
-chown -R www-data:www-data /var/www/organizr
-chmod -R 775 /var/www/organizr
+queue_app_version /var/www/organizr/.af-version "${ORG_VER#v}"
+chown -hRP www-data:www-data /var/www/organizr
+find -P /var/www/organizr \( -type d -o -type f \) -exec chmod 775 -- {} +
 
 report_progress 80 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+if [[ -s /etc/apache2/sites-available/organizr.conf ]]; then
+    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/organizr.conf
+else
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/organizr.conf
 Alias /organizr "/var/www/organizr"
 
@@ -67,6 +122,7 @@ Alias /organizr "/var/www/organizr"
     </Directory>
 </VirtualHost>
 EOF
+fi
 
 a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
 a2ensite organizr.conf >> "$LOGFILE" 2>&1
@@ -74,6 +130,9 @@ systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 apache2ctl configtest >> "$LOGFILE" 2>&1
 systemctl reload apache2 >> "$LOGFILE" 2>&1
 
+systemctl is-active --quiet apache2
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Organizr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

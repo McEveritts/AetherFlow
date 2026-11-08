@@ -26,11 +26,11 @@ report_progress 25 "Stopping and removing sabnzbd.service..."
 purge_systemd_unit "sabnzbd" "sabnzbdplus"
 
 report_progress 65 "Removing SABnzbd files, state directories, and user account..."
-rm -rf /opt/SABnzbd
+safe_rm_rf /opt/SABnzbd
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/sabnzbd /etc/default/sabnzbdplus
+    safe_rm_rf /var/lib/sabnzbd /etc/default/sabnzbdplus
+    purge_system_user "sabnzbd"
 fi
-purge_system_user "sabnzbd"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

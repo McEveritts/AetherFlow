@@ -586,10 +586,20 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
+            let dir_name = format!(
                 "c11-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..10]
-            ));
+            );
+            let base = std::env::var_os("TMPDIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let candidate = base.join(&dir_name);
+            let root = if candidate.join("sync").as_os_str().len() < 95 {
+                candidate
+            } else {
+                PathBuf::from("/tmp").join(dir_name)
+            };
             fs::create_dir(&root).unwrap();
             let path = root.join("jobs").join(format!("{UNIT}.json"));
             fs::create_dir(root.join("jobs")).unwrap();

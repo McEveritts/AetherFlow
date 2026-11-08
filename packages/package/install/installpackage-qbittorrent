@@ -3,6 +3,7 @@
 # Port: 8180
 
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -23,6 +24,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-qbittorrent}"
+begin_state_transaction "qbittorrent" "$APP_PORT" "/" "/var/lib/qbittorrent" "/etc/qbittorrent" "/etc/systemd/system/qbittorrent.service" "/usr/bin/qbittorrent-nox" "/usr/lib/qbittorrent" "/usr/share/qbittorrent"
+
+prepare_apt_package_transaction /var/lib/qbittorrent/.af-version qbittorrent-nox
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing qbittorrent-nox via APT..."
 
@@ -38,6 +43,9 @@ systemctl stop qbittorrent >> "$LOGFILE" 2>&1 || true
 mkdir -p /var/lib/qbittorrent/.config/qBittorrent/config /var/lib/qbittorrent/Downloads
 
 QBT_PBKDF2="$(generate_qbittorrent_pbkdf2 "${MASTER_PASS}")"
+if [[ ! -s /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf && -s /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf ]]; then
+    cp -a /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
+fi
 if [[ ! -s /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf ]]; then
 cat <<EOF > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 [LegalNotice]
@@ -45,10 +53,10 @@ Accepted=true
 
 [Preferences]
 WebUI\Port=${APP_PORT}
-WebUI\Address=*
+WebUI\Address=127.0.0.1
 WebUI\ServerDomains=*
-WebUI\CSRFProtection=false
-WebUI\HostHeaderValidation=false
+WebUI\CSRFProtection=true
+WebUI\HostHeaderValidation=true
 WebUI\Username=${MASTER_USER}
 WebUI\Password_PBKDF2="${QBT_PBKDF2}"
 WebUI\Password_ha1=@ByteArray(${MASTER_HA1})
@@ -56,11 +64,13 @@ Downloads\SavePath=/var/lib/qbittorrent/Downloads/
 EOF
 fi
 
-cp -f /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf
-
 set_config_value "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf" ini "WebUI\Port" "$APP_PORT" "Preferences"
+if [[ -s /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf ]]; then
+    set_config_value /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf ini 'WebUI\Port' "$APP_PORT" Preferences
+fi
 
-chown -R qbittorrent:qbittorrent /var/lib/qbittorrent
+chown -hRP qbittorrent:qbittorrent /var/lib/qbittorrent
+chmod 600 /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 
 report_progress 85 "Configuring and starting qbittorrent.service on port ${APP_PORT}..."
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/qbittorrent.service
@@ -90,6 +100,10 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now qbittorrent >> "$LOGFILE" 2>&1
 systemctl restart qbittorrent >> "$LOGFILE" 2>&1
 
+systemctl is-active --quiet qbittorrent
+queue_app_version /var/lib/qbittorrent/.af-version "$(dpkg-query -W -f='${Version}' qbittorrent-nox)"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "qBittorrent installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

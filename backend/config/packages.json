@@ -63,7 +63,7 @@
     {
         "name": "readarr",
         "label": "Readarr",
-        "description": "Book and audiobook collection manager for Usenet and BitTorrent.",
+        "description": "Legacy book and audiobook manager. Upstream retired Readarr on June 27, 2025 due to unusable metadata; discovery and updates may not work. Existing lifecycle and data remain available; no unofficial fork is substituted.",
         "lock_file": "/install/.readarr.lock",
         "category": "Media",
         "service_type": "systemd",
@@ -93,7 +93,7 @@
     {
         "name": "overseerr",
         "label": "Overseerr",
-        "description": "Request management and media discovery tool for your Plex ecosystem.",
+        "description": "Legacy Plex request manager. Upstream archived Overseerr and superseded it with Seerr; no new features or major updates are planned. Existing lifecycle and data are preserved; migration is not automatic.",
         "lock_file": "/install/.overseerr.lock",
         "category": "Media",
         "service_type": "systemd",
@@ -472,7 +472,7 @@
     {
         "name": "autoscan",
         "label": "Autoscan",
-        "description": "Webhook-driven media scanner replacing default Plex/Jellyfin/Emby library scans.",
+        "description": "Legacy webhook media scanner for Plex/Jellyfin/Emby. Cloudbox Autoscan is archived and feature frozen; future integration incompatibilities will not receive upstream fixes. Existing lifecycle and data remain available.",
         "lock_file": "/install/.autoscan.lock",
         "category": "Media",
         "service_type": "systemd",

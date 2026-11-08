@@ -49,8 +49,15 @@ WEB_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scr
 COLLECTOR_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
 
 report_progress 60 "Downloading Scrutiny Web UI and Collector binaries..."
-curl -fsSL "$WEB_URL" -o "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
-curl -fsSL "$COLLECTOR_URL" -o "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+BUILD_DIR="$(mktemp -d /opt/.scrutiny-build.XXXXXX)"
+trap 'rm -rf -- "$BUILD_DIR"' EXIT
+mkdir "$BUILD_DIR/bin"
+download_file "$WEB_URL" "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+download_file "$COLLECTOR_URL" "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+test -s "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
+test -s "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+chmod +x "$BUILD_DIR/bin/"*
+stage_app_archive "$BUILD_DIR" /opt/scrutiny "bin/scrutiny-web-linux-${SCRUT_ARCH}" /etc/scrutiny "$PACKAGE_NAME" "." /var/lib/scrutiny
 
 chmod +x "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" \
          "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
@@ -63,19 +70,61 @@ if [[ "$SCRUT_ARCH" != "amd64" ]]; then
     ln -sfn "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-web-linux-amd64
 fi
 
-printf '%s\n' "${SCRUT_VER#v}" > /opt/scrutiny/.af-version
+queue_app_version /opt/scrutiny/.af-version "${SCRUT_VER#v}"
 
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/scrutiny/scrutiny.yaml
+validate_config_paths /etc/scrutiny/scrutiny.yaml
+if [[ ! -s /etc/scrutiny/scrutiny.yaml ]]; then
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file /etc/scrutiny/scrutiny.yaml
 version: 1
 web:
   listen:
     port: @AF_APP_PORT@
-    host: "0.0.0.0"
+    host: "127.0.0.1"
   database:
     location: /var/lib/scrutiny/scrutiny.db
 EOF
+fi
+safe_config_python /etc/scrutiny/scrutiny.yaml "$APP_PORT" <<'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+with ManagedConfig(path) as config:
+    lines = config.read_text().splitlines(keepends=True)
+    if lines and not lines[-1].endswith('\n'):
+        lines[-1] += '\n'
+    parents = []
+    changed = False
+    for index, line in enumerate(lines):
+        match = re.match(r'^( *)([^\s:#][^:#]*):(?:\s|$)', line)
+        if not match:
+            continue
+        indent, key = len(match.group(1)), match.group(2).strip()
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        if [entry[1] for entry in parents] + [key] == ['web', 'listen', 'port']:
+            lines[index] = match.group(1) + 'port: ' + sys.argv[2] + '\n'
+            changed = True
+        parents.append((indent, key))
+    if not changed:
+        web = next((index for index, line in enumerate(lines) if re.match(r'^web:\s*(?:#.*)?$', line.rstrip('\n'))), None)
+        if web is None:
+            if any(re.match(r'^web\s*:', line) for line in lines):
+                raise ValueError('Unsupported inline Scrutiny web mapping')
+            lines.extend(['\n', 'web:\n', '  listen:\n', '    port: ' + sys.argv[2] + '\n'])
+        else:
+            web_end = next((index for index in range(web + 1, len(lines)) if re.match(r'^[^\s#]', lines[index])), len(lines))
+            listen = next((index for index in range(web + 1, web_end) if re.match(r'^ +listen:\s*(?:#.*)?$', lines[index].rstrip('\n'))), None)
+            if listen is None:
+                if any(re.match(r'^ +listen:', line) for line in lines[web + 1:web_end]):
+                    raise ValueError('Unsupported inline Scrutiny listen mapping')
+                lines[web_end:web_end] = ['  listen:\n', '    port: ' + sys.argv[2] + '\n']
+            else:
+                indent = len(lines[listen]) - len(lines[listen].lstrip(' '))
+                listen_end = next((index for index in range(listen + 1, web_end) if lines[index].strip() and not lines[index].lstrip().startswith('#') and len(lines[index]) - len(lines[index].lstrip(' ')) <= indent), web_end)
+                lines[listen_end:listen_end] = [' ' * (indent + 2) + 'port: ' + sys.argv[2] + '\n']
+    config.write_text(''.join(lines))
+PYEOF
 
-chown -R scrutiny:scrutiny /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
+chown -hRP scrutiny:scrutiny /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
 
 report_progress 80 "Configuring scrutiny.service, collector service, and timer..."
 cat <<EOF > /etc/systemd/system/scrutiny.service
@@ -123,7 +172,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now scrutiny >> "$LOGFILE" 2>&1
 systemctl enable --now scrutiny-collector.timer >> "$LOGFILE" 2>&1
+systemctl restart scrutiny >> "$LOGFILE" 2>&1
+systemctl is-active --quiet scrutiny-collector.timer
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Scrutiny installed on port ${APP_PORT} (companion collector timer active)."
 log_info "${PACKAGE_NAME} installed successfully"

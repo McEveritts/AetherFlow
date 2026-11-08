@@ -17,8 +17,18 @@ fn subprocess(test: &str) -> bool {
 }
 
 fn fixture_root() -> PathBuf {
-    let root = env::temp_dir().join(format!("af-race-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&root).unwrap();
+    let dir_name = format!("ar-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let base = env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let candidate = base.join(&dir_name);
+    let root = if candidate.join("installer.sock").as_os_str().len() < 95 {
+        candidate
+    } else {
+        PathBuf::from("/tmp").join(dir_name)
+    };
+    fs::create_dir(&root).unwrap();
     env::set_var("AETHERFLOW_FS_ROOT", &root);
     env::set_var("AETHERFLOW_RELEASE_ROOT", &root);
     env::set_var(
@@ -1189,6 +1199,82 @@ async fn local_service_admission_types_reservation_and_updater_contention() {
     assert!(is_lifecycle_busy(&error), "{error:#}");
     drop(launch_owner);
     drop(conn);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
+    use futures::StreamExt;
+    let test = "lifecycle_tests::legacy_cancellation_after_output_eof_reaps_child_and_releases_locks";
+    if subprocess(test) {
+        return;
+    }
+    let root = fixture_root();
+    let ready_socket = root.join("ready.sock");
+    let listener = tokio::net::UnixListener::bind(&ready_socket).unwrap();
+    let scripts = root.join("packages/package/install");
+    fs::create_dir_all(&scripts).unwrap();
+    executable(
+        &scripts.join("installpackage-fixture"),
+        &format!(
+            "#!/bin/bash\nexec python3 -c 'import os, socket; open({:?}, \"w\").write(str(os.getpid())); os.close(1); os.close(2); connection=socket.socket(socket.AF_UNIX); connection.connect({:?}); connection.sendall(b\"R\"); connection.recv(1)'\n",
+            root.join("pid").to_string_lossy(),
+            ready_socket.to_string_lossy()
+        ),
+    );
+    env::set_current_dir(&root).unwrap();
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute("INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id,service_units) VALUES ('fixture','eof-owned','install','installing','now',?1,'[\"fixture.service\"]')", [&owner.id]).unwrap();
+    let request = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "install".into(),
+        script_name: "installpackage-fixture".into(),
+        lifecycle_job_id: "eof-owned".into(),
+        ..Default::default()
+    };
+    let stream = package_executor::execute_package_request_stream(request);
+    tokio::pin!(stream);
+    let (mut ready, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            connection = listener.accept() => connection.unwrap(),
+            line = stream.next() => panic!("installer exited before readiness: {line:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    let mut marker = [0];
+    ready.read_exact(&mut marker).await.unwrap();
+    assert_eq!(marker, [b'R']);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(package_executor::cancel_package_execution("fixture"));
+    let output = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>()).await;
+    let pid: i32 = fs::read_to_string(root.join("pid")).unwrap().parse().unwrap();
+    if output.is_err() {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let output = output
+        .expect("cancellation after both output pipes reach EOF must remain effective")
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<String>();
+    assert!(output.contains("operation cancelled for package 'fixture'"), "{output}");
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "cancelled child must be reaped");
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    assert!(!package_executor::is_package_execution_active("fixture"));
+    assert!(af_release::ReleaseLockGuard::acquire(
+        &af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
+        Duration::ZERO
+    )
+    .is_ok());
+    drop((ready, owner, conn));
     fs::remove_dir_all(root).unwrap();
 }
 

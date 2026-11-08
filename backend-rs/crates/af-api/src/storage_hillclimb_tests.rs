@@ -823,7 +823,25 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
     }
     ensure_shared_test_db();
     let root = Scratch::new();
-    let socket = root.0.join("runner.sock");
+    let candidate = root.0.join("runner.sock");
+    let socket = if candidate.as_os_str().len() < 95 {
+        candidate
+    } else {
+        let short_name = format!(
+            "af-sock-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        let tmpdir_cand = env::var_os("TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir)
+            .join(&short_name);
+        if tmpdir_cand.as_os_str().len() < 95 {
+            tmpdir_cand
+        } else {
+            PathBuf::from("/tmp").join(short_name)
+        }
+    };
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     env::set_var("AETHERFLOW_RUNNER_SOCK", &socket);
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -903,4 +921,5 @@ async fn quotas_use_runner_scan_and_apply_and_report_persistence_failures() {
     assert_eq!(query_user_quota_record(693).unwrap().quota_bytes, 2048);
     server.abort();
     let _ = server.await;
+    let _ = fs::remove_file(&socket);
 }

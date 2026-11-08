@@ -26,11 +26,13 @@ report_progress 25 "Stopping and removing home-assistant@homeassistant.service..
 purge_systemd_unit "home-assistant@homeassistant"
 
 report_progress 65 "Removing Home Assistant virtualenv, config, and user account..."
-rm -rf /srv/homeassistant
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /home/homeassistant
+    safe_rm_rf "/var/lib/homeassistant" "/srv/homeassistant" "/home/homeassistant"
+    purge_system_user "homeassistant"
+else
+    safe_rm_rf /srv/homeassistant/{bin,lib,lib64,include,share}
+    rm -f /srv/homeassistant/pyvenv.cfg /srv/homeassistant/.af-version
 fi
-purge_system_user "homeassistant"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

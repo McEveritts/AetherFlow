@@ -21,8 +21,8 @@ mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
-report_progress 15 "Stopping and purging companion paperless-scheduler.service..."
-purge_systemd_unit "paperless-scheduler" "paperless-worker" "paperless-webserver"
+report_progress 15 "Stopping Paperless worker and scheduler before the webserver..."
+purge_systemd_unit "paperless-worker" "paperless-scheduler" "paperless-webserver"
 
 report_progress 35 "Stopping and purging companion paperless-worker.service..."
 
@@ -30,9 +30,12 @@ report_progress 55 "Stopping and purging primary paperless-webserver.service..."
 
 report_progress 75 "Removing Paperless-ngx virtualenv, app binaries, state, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/paperless /var/lib/paperless /etc/paperless.conf
+    safe_rm_rf /var/lib/paperless-ngx /opt/paperless /var/lib/paperless /etc/paperless.conf
+    purge_system_user "paperless"
+else
+    safe_rm_rf /opt/paperless/{.git,.venv,src,static,staticfiles,scripts,node_modules}
+    rm -f /opt/paperless/{.af-version,requirements.txt,pyproject.toml,uv.lock}
 fi
-purge_system_user "paperless"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

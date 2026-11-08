@@ -33,7 +33,17 @@ systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 report_progress 65 "Removing ruTorrent web directory and symlinks..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/www/rutorrent /srv/rutorrent
+    safe_rm_rf /var/lib/rutorrent /var/www/rutorrent /srv/rutorrent
+    purge_app_archive_backups "${PACKAGE_NAME}" "/var/www/rutorrent"
+    rm -f /etc/apache2/AetherFlow/rutorrent.htpasswd
+else
+    for webroot in /var/www/rutorrent /srv/rutorrent; do
+        [[ -d "$webroot" && ! -L "$webroot" ]] || continue
+        while IFS= read -r -d '' runtime_path; do
+            safe_rm_rf "$runtime_path"
+        done < <(find "$webroot" -mindepth 1 -maxdepth 1 ! -name share ! -name conf ! -name plugins -print0)
+    done
+    if [[ -L /srv/rutorrent ]]; then rm -f /srv/rutorrent; fi
 fi
 
 remove_lock "${PACKAGE_NAME}"

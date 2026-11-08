@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from installer_test_helpers import replace_paths_once
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import common_functions, replace_paths_once
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,20 +17,32 @@ class MarketplaceConfigRetentionTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         for name in ('bin', 'opt/AetherFlow/packages', 'var/log/aetherflow', 'install',
-                     'etc/systemd/system', 'etc/ssh', 'run/rtorrent'):
+                     'etc/systemd/system', 'etc/ssh', 'run/rtorrent', 'tmp'):
             (self.root / name).mkdir(parents=True)
-        (self.root / 'opt/AetherFlow/packages/common.sh').write_text('''set -euo pipefail
+        common_sh = '''set -euo pipefail
 require_root() { :; }
 log_info() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 log_error() { printf '%s\\n' "$*" >&2; }
+print_error() { printf '%s\\n' "$*" >&2; }
 report_progress() { printf '%s\\n' "$*" >> "$TEST_ROOT/progress"; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
-''')
-        for command in ('apt-get', 'systemctl', 'id', 'usermod', 'chown', 'useradd'):
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
+lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
+''' + common_functions('queue_app_version', 'commit_app_versions', 'begin_state_transaction', 'cleanup_state_transaction',
+                       'snapshot_app_state', 'restore_app_state', 'snapshot_state_dirs', 'restore_state_snapshot',
+                       'safe_restore_path_from_backup', 'wait_for_service_ready', 'write_app_version', 'verify_systemd_service_active', 'safe_config_python', 'validate_config_paths',
+                       'systemd_unit_inactive', 'stop_systemd_unit', 'safe_rm_rf')
+        marker_root = '/var/lib/aetherflow/apt-reinstall-required/'
+        common_sh = replace_paths_once(common_sh, [(marker_root, str(self.root) + marker_root)])
+        (self.root / 'opt/AetherFlow/packages/common.sh').write_text(common_sh)
+        for command in ('apt-get', 'systemctl', 'id', 'usermod', 'chown', 'useradd', 'dpkg-query'):
             path = self.root / 'bin' / command
             path.write_text('''#!/bin/bash
 printf '%s %s\n' "${0##*/}" "$*" >> "$TEST_ROOT/commands"
 if [[ "${0##*/}" == systemctl && "$1" == "${FAIL_ACTIVATION:-}" ]]; then exit 73; fi
+if [[ "${0##*/}" == dpkg-query ]]; then
+    [[ "$*" != *'db:Status-Status'* ]] || printf 'installed '
+    printf '1.1.0\\n'
+fi
 ''')
             path.chmod(0o755)
         (self.root / 'etc/ssh/sshd_config').write_text('Port 2200\n')
@@ -47,7 +61,7 @@ if [[ "${0##*/}" == systemctl && "$1" == "${FAIL_ACTIVATION:-}" ]]; then exit 73
         script.write_text(source)
         return subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=15,
             env={**os.environ, 'PATH': str(self.root / 'bin') + ':' + os.environ['PATH'],
-                 'TEST_ROOT': str(self.root), 'AF_PACKAGE_ACTION': action, **environment})
+                 'TEST_ROOT': str(self.root), 'TMPDIR': str(self.root / 'tmp'), 'AF_PACKAGE_ACTION': action, **environment})
 
     def assert_preserved(self, package, name, content, action):
         config = self.file(name, content)

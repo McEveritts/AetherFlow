@@ -21,6 +21,10 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-mergerfs}"
+begin_state_transaction "mergerfs" "0" "/" "/var/lib/mergerfs" "/etc/fuse.conf" "/etc/systemd/system/mergerfs.service" "/usr/bin/mergerfs" "/usr/share/mergerfs"
+
+prepare_apt_package_transaction /var/lib/mergerfs/.af-version mergerfs
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing mergerfs and FUSE3 packages..."
 
@@ -36,9 +40,12 @@ if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mergerfs fuse3 >> "$L
     fi
     if [[ -n "$MFS_DEB_URL" ]]; then
         TMP_DEB=$(mktemp /tmp/mergerfs-XXXXXX.deb)
-        curl -fsSL "$MFS_DEB_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1
-        dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || apt-get install -f -y -qq >> "$LOGFILE" 2>&1
+        download_file "$MFS_DEB_URL" "$TMP_DEB" >> "$LOGFILE" 2>&1
+        install_deb_verified "$TMP_DEB" mergerfs
         rm -f "$TMP_DEB"
+    else
+        print_error "Failed to discover a compatible GitHub release for trapexit/mergerfs"
+        exit 1
     fi
 fi
 
@@ -48,9 +55,17 @@ chmod 775 /mnt/local /mnt/remote /mnt/unionfs
 
 # Record version if mergerfs binary is present
 if command -v mergerfs >/dev/null 2>&1; then
-    MFS_VER="$(mergerfs -v 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null || echo "2.39.0")"
+    MFS_VER="$(mergerfs -v 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null || true)"
+    if [[ -z "$MFS_VER" ]]; then
+        if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+            MFS_VER="2.39.0"
+        else
+            print_error "Failed to determine installed MergerFS version"
+            exit 1
+        fi
+    fi
     mkdir -p /var/lib/mergerfs
-    printf '%s\n' "$MFS_VER" > /var/lib/mergerfs/.af-version
+    queue_app_version /var/lib/mergerfs/.af-version "$MFS_VER"
 fi
 
 report_progress 80 "Configuring and starting mergerfs.service union mount unit..."
@@ -74,8 +89,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable mergerfs >> "$LOGFILE" 2>&1
-systemctl start mergerfs >> "$LOGFILE" 2>&1 || true
+systemctl start mergerfs >> "$LOGFILE" 2>&1
+systemctl is-active --quiet mergerfs
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "MergerFS installed (pooling /mnt/local & /mnt/remote into /mnt/unionfs)."
 log_info "${PACKAGE_NAME} installed successfully"

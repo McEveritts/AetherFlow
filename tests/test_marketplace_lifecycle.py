@@ -3,23 +3,35 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 import zipfile
-from installer_test_helpers import replace_paths_once
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import common_functions
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''#!/usr/bin/python3
-import os, pathlib, shutil, sys
+import hashlib, os, pathlib, shutil, subprocess, sys
 root = pathlib.Path(os.environ['TEST_ROOT'])
 command, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 with (root / 'commands').open('a') as log:
     log.write(command + ' ' + ' '.join(args) + '\n')
 if command == 'dpkg':
+    if '--compare-versions' in args:
+        sys.exit(subprocess.run(['/usr/bin/dpkg', *args]).returncode)
     print('amd64')
+elif command == 'dpkg-deb':
+    print('2.1.0')
+elif command == 'dpkg-query':
+    print('installed 2.1.0' if any('db:Status-Status' in argument for argument in args) else '2.1.0')
 elif command == 'curl':
+    if '-o' not in args:
+        print('{}')
+        sys.exit(0)
     target = pathlib.Path(args[args.index('-o') + 1])
     if os.environ.get('FAIL_STAGE') == 'download':
         sys.exit(22)
@@ -29,6 +41,7 @@ elif command == 'curl':
         target.write_text('not a binary')
     else:
         shutil.copyfile('/bin/true', target)
+    pathlib.Path(str(target) + '.sha256').write_text(hashlib.sha256(target.read_bytes()).hexdigest() + '\n')
 elif command == 'git':
     if args[0] == 'clone':
         target = pathlib.Path(args[-1])
@@ -53,16 +66,28 @@ elif command == 'mysql':
         with (root / 'sql').open('a') as output:
             output.write(sys.stdin.read())
 elif command == 'sudo':
+    if 'create' in args and '--random-password' in args and (root / 'var/lib/gitea/data/gitea.db').exists():
+        sys.exit(1)
     if 'upgrade' in args and os.environ.get('FAIL_STAGE') == 'upgrade':
         sys.exit(1)
 elif command == 'systemctl':
+    units = [argument.removesuffix('.service') for argument in args[1:] if not argument.startswith('-')]
+    if args[0] == 'is-active':
+        sys.exit(0 if all((root / ('active-' + unit)).exists() for unit in units) else 3)
+    if args[0] in ('start', 'restart') or args[0] == 'enable' and '--now' in args:
+        for unit in units:
+            (root / ('active-' + unit)).touch()
     if args[0] == 'stop':
         (root / 'stopped').touch()
+        for unit in units:
+            (root / ('active-' + unit)).unlink(missing_ok=True)
 elif command == 'apache2ctl':
     if os.environ.get('FAIL_STAGE') == 'apache-config':
         sys.exit(1)
 elif command == 'openssl':
     print('test-database-password')
+elif command == 'mysqldump':
+    print('-- fixture database backup')
 elif command in ('apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su'):
     pass
 else:
@@ -77,28 +102,34 @@ class MarketplaceLifecycleTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         for directory in ('mock-bin', 'opt/AetherFlow/packages', 'opt/AetherFlow/logs',
                           'var/log/aetherflow', 'var/www', 'etc/systemd/system',
-                          'etc/apache2/sites-available', 'usr/local/bin', 'srv', 'install'):
+                          'etc/apache2/sites-available', 'usr/local/bin', 'usr/bin', 'usr/sbin', 'usr/lib', 'usr/share', 'srv', 'install'):
             (self.root / directory).mkdir(parents=True)
-        for command in ('dpkg', 'curl', 'git', 'npm', 'mysql', 'sudo', 'systemctl',
-                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su'):
+        for command in ('dpkg', 'dpkg-deb', 'dpkg-query', 'curl', 'git', 'npm', 'mysql', 'sudo', 'systemctl',
+                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su', 'mysqldump'):
             path = self.root / 'mock-bin' / command
             path.write_text(MOCK)
             path.chmod(0o755)
+            shutil.copy2(path, self.root / 'usr/bin' / command)
         source = (ROOT / 'packages/common.sh').read_text()
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
+        helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit', 'verify_systemd_service_active', 'wait_for_service_ready')
+        helpers = self.rebase(helpers)
         user_helper = source[source.index('purge_system_user()'):source.index('load_master_credentials()')]
         user_helper = user_helper.replace('/home/', str(self.root) + '/home/')
         common = '''set -euo pipefail
 MASTER_USER=test-admin
 MASTER_PASS=test-password
 log_info() { printf '%s\\n' "$*" >> "$LOGFILE"; }
+log_warn() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 print_error() { printf '%s\\n' "$*" >&2; }
+print_warn() { printf '%s\\n' "$*" >&2; }
 report_progress() { :; }
 require_root() { :; }
 ensure_node() { :; }
 github_latest_tag() { printf '2.1.0\\n'; }
 get_base_domain() { :; }
-write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
+write_lock() { touch "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
+lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 purge_systemd_unit() { :; }
 '''
@@ -115,6 +146,11 @@ purge_systemd_unit() { :; }
         target.write_text(content)
         return target
 
+    def rebase(self, source):
+        prefixes = ('/opt', '/var', '/etc', '/usr/local', '/usr/bin', '/usr/sbin', '/usr/lib', '/usr/share', '/srv', '/mnt', '/run', '/root', '/install', '/data', '/tmp', '/home')
+        pattern = re.compile(r'(?<![\w/.-])(' + '|'.join(re.escape(prefix) for prefix in prefixes) + r')(?=/|[^\w.-]|$)')
+        return pattern.sub(lambda match: str(self.root) + match.group(0), source)
+
     def mark_dispatcharr_data_owned(self):
         marker = self.file('var/lib/dispatcharr/.aetherflow-data-owner', f'aetherflow-dispatcharr-data-v1:{self.root}/var/lib/dispatcharr\n')
         marker.chmod(0o600)
@@ -123,13 +159,14 @@ purge_systemd_unit() { :; }
     def run_script(self, package, action='install', **environment):
         source = (ROOT / f'packages/package/{action}/{action}package-{package}').read_text()
         (self.root / 'tmp').mkdir(exist_ok=True)
-        prefixes = ('/opt/', '/var/', '/etc/', '/usr/local/', '/usr/bin/', '/srv/', '/install', '/data', '/tmp/')
-        source = replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in prefixes])
+        source = self.rebase(source)
         script = self.root / 'script'
         script.write_text(source)
         return subprocess.run(['bash', str(script)], env={
             **os.environ, 'PATH': f"{self.root}/mock-bin:{os.environ['PATH']}",
-            'TEST_ROOT': str(self.root), 'AETHERFLOW_APACHE_ROOT': str(self.root / 'etc/apache2'), 'AF_PACKAGE_ACTION': 'update', **environment,
+            'TEST_ROOT': str(self.root), 'AETHERFLOW_INSTALL_ROOT': str(self.root),
+            'TMPDIR': str(self.root / 'tmp'),
+            'AETHERFLOW_APACHE_ROOT': str(self.root / 'etc/apache2'), 'AF_PACKAGE_ACTION': 'update', **environment,
         }, text=True, capture_output=True, timeout=30)
 
     def assert_success(self, result):

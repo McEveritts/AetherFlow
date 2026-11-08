@@ -27,13 +27,18 @@ purge_systemd_unit "adguardhome"
 
 report_progress 65 "Removing AdGuard Home binaries, configurations, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/AdGuardHome
+    safe_rm_rf "/var/lib/adguardhome"
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/AdGuardHome"
+    safe_rm_rf /opt/AdGuardHome
+    purge_system_user "adguardhome"
+else
+    rm -f /opt/AdGuardHome/AdGuardHome /opt/AdGuardHome/.af-version
 fi
-purge_system_user "adguardhome"
 
-if [[ -f /etc/systemd/resolved.conf ]]; then
-    sed -i 's/^DNSStubListener=no/#DNSStubListener=yes/' /etc/systemd/resolved.conf 2>/dev/null || true
-    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
+if [[ -e /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf || -L /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf ]]; then
+    validate_config_paths /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
+    rm -f -- /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
+    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1
 fi
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1

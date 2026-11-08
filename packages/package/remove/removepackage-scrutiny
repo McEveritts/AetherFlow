@@ -28,10 +28,12 @@ purge_systemd_unit "scrutiny-collector.timer" "scrutiny-collector.service" "scru
 report_progress 50 "Stopping and removing scrutiny.service dashboard..."
 
 report_progress 75 "Removing Scrutiny binaries, database, and user account..."
+safe_rm_rf /opt/scrutiny
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/scrutiny"
+    safe_rm_rf /var/lib/scrutiny /etc/scrutiny
+    purge_system_user "scrutiny"
 fi
-purge_system_user "scrutiny"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

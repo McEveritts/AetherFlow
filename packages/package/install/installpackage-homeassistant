@@ -23,6 +23,7 @@ exec 9>/run/lock/aetherflow-homeassistant.lock
 flock -n 9 || { log_error "Another Home Assistant installation is running."; exit 1; }
 
 require_root
+validate_config_paths /srv/homeassistant/.af-version
 
 BUILD_DIR=""
 BACKUP_DIR=""
@@ -38,34 +39,39 @@ if [[ -f /etc/systemd/system/home-assistant@homeassistant.service ]] || systemct
 fi
 
 cleanup() {
-    local status=$?
+    local status=$? restore_failed=false
     trap - EXIT
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            systemctl stop home-assistant@homeassistant >> "$LOGFILE" 2>&1 || true
+            quiesce_services_for_rollback home-assistant@homeassistant || { restore_failed=true; exit 1; }
+            restore_app_state "$BACKUP_DIR" || exit 1
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then
             mv /srv/homeassistant "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /srv/homeassistant
         fi
         if [[ "$APP_MOVED" -eq 1 ]]; then
-            mv "$BACKUP_DIR/app" /srv/homeassistant 2>/dev/null || true
+            mv "$BACKUP_DIR/app" /srv/homeassistant 2>/dev/null || restore_failed=true
         fi
         if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
             if [[ -f "$BACKUP_DIR/home-assistant@homeassistant.service" ]]; then
-                cp -a "$BACKUP_DIR/home-assistant@homeassistant.service" /etc/systemd/system/home-assistant@homeassistant.service
+                safe_restore_path_from_backup "$BACKUP_DIR/home-assistant@homeassistant.service" /etc/systemd/system/home-assistant@homeassistant.service || restore_failed=true
             else
-                systemctl disable home-assistant@homeassistant >> "$LOGFILE" 2>&1 || true
-                rm -f /etc/systemd/system/home-assistant@homeassistant.service
+                systemctl disable home-assistant@homeassistant >> "$LOGFILE" 2>&1 || restore_failed=true
+                rm -f /etc/systemd/system/home-assistant@homeassistant.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start home-assistant@homeassistant >> "$LOGFILE" 2>&1 || true
+        if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start home-assistant@homeassistant >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
-        rm -rf "$BUILD_DIR"
+        rm -rf "$BUILD_DIR" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "$status"
 }
@@ -95,7 +101,7 @@ if [[ ! -f /home/homeassistant/.homeassistant/configuration.yaml ]]; then
 default_config:
 
 http:
-  server_host: 0.0.0.0
+  server_host: 127.0.0.1
   server_port: 8123
   use_x_forwarded_for: true
   trusted_proxies:
@@ -105,16 +111,19 @@ EOF
 fi
 set_config_value "/home/homeassistant/.homeassistant/configuration.yaml" yaml "server_port" "$APP_PORT" "http"
 
-chown -R homeassistant:homeassistant /home/homeassistant
+chown -hRP homeassistant:homeassistant /home/homeassistant
 
 report_progress 45 "Creating Home Assistant Python virtual environment with explicit upgrade..."
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-homeassistant.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
+stop_systemd_unit home-assistant@homeassistant
+SERVICE_STOPPED=1
+snapshot_app_state "$BACKUP_DIR" /home/homeassistant/.homeassistant /var/lib/homeassistant
 if [[ -f /etc/systemd/system/home-assistant@homeassistant.service ]]; then
     cp -a /etc/systemd/system/home-assistant@homeassistant.service "$BACKUP_DIR/home-assistant@homeassistant.service"
 fi
 if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
-    systemctl stop home-assistant@homeassistant >> "$LOGFILE" 2>&1 || true
+    stop_systemd_unit home-assistant@homeassistant
     SERVICE_STOPPED=1
 fi
 if [[ -d /srv/homeassistant ]]; then
@@ -122,8 +131,16 @@ if [[ -d /srv/homeassistant ]]; then
     APP_MOVED=1
 fi
 mkdir -p /srv/homeassistant
-chown -R homeassistant:homeassistant /srv/homeassistant
+if [[ "$APP_MOVED" -eq 1 && -f "$BACKUP_DIR/app/.af-version" ]]; then
+    install -m 0644 -- "$BACKUP_DIR/app/.af-version" /srv/homeassistant/.af-version
+fi
+chown -hRP homeassistant:homeassistant /srv/homeassistant
 APP_ACTIVATED=1
+if [[ "$APP_MOVED" -eq 1 ]]; then
+    find "$BACKUP_DIR/app" -mindepth 1 -maxdepth 1 \
+        ! -name bin ! -name lib ! -name lib64 ! -name include ! -name share \
+        ! -name pyvenv.cfg ! -name .af-version -exec cp -a -t /srv/homeassistant -- {} +
+fi
 
 TARGET_HA_SPEC="homeassistant"
 TARGET_VER="${AF_PACKAGE_VERSION:-${AETHERFLOW_PACKAGE_VERSION:-${AF_TARGET_VERSION:-}}}"
@@ -142,8 +159,7 @@ if [[ -z "$HASS_VER" ]]; then
     log_error "Failed to verify Home Assistant installation in virtualenv"
     exit 1
 fi
-printf '%s\n' "$HASS_VER" > /srv/homeassistant/.af-version
-chown homeassistant:homeassistant /srv/homeassistant/.af-version
+queue_app_version /srv/homeassistant/.af-version "$HASS_VER"
 
 report_progress 85 "Configuring and starting home-assistant@homeassistant.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/home-assistant@homeassistant.service
@@ -182,7 +198,10 @@ if [[ "$HEALTHY" -ne 1 ]]; then
     exit 1
 fi
 
+commit_app_versions
+chown homeassistant:homeassistant /srv/homeassistant/.af-version
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
+rm -rf -- "$BACKUP_DIR"
 report_progress 100 "Home Assistant installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

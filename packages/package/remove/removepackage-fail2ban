@@ -32,9 +32,10 @@ DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq fail2ban >> "
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 85 "Removing Fail2ban configuration and state directories..."
-rm -rf /var/run/fail2ban
+safe_rm_rf /run/fail2ban
+rm -f /etc/fail2ban/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/fail2ban /var/lib/fail2ban
+    safe_rm_rf /etc/fail2ban /var/lib/fail2ban
 fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 

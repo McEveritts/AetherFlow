@@ -20,10 +20,63 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/af-fail2ban-runtime-XXXXXX")"
+RUNTIME_PATHS=(/etc/fail2ban /var/lib/fail2ban "/usr/bin/fail2ban-server" "/usr/bin/fail2ban-client" "/usr/lib/python3/dist-packages/fail2ban" "/usr/share/fail2ban")
+RUNTIME_HAD_PREVIOUS=0
+RUNTIME_MUTATED=0
+if [[ -d /etc/fail2ban || -f /etc/systemd/system/fail2ban.service ]] || systemctl is-active --quiet fail2ban 2>/dev/null; then
+    RUNTIME_HAD_PREVIOUS=1
+fi
+rollback_runtime() {
+    local status=$? runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback fail2ban || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$BACKUP_DIR/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        rollback_apt_packages || restore_failed=true
+        if [[ "$AF_APT_ROLLBACK_MUTATED" == true ]]; then
+            quiesce_services_for_rollback fail2ban || { restore_failed=true; exit 1; }
+            for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+                runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+                safe_restore_path_from_backup "$BACKUP_DIR/$runtime_index" "$runtime_path" || restore_failed=true
+            done
+        fi
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" -eq 1 ]]; then
+            systemctl restart fail2ban >> "$LOGFILE" 2>&1 || restore_failed=true
+        else
+            systemctl disable fail2ban >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $BACKUP_DIR"
+    else
+        rm -rf -- "$BACKUP_DIR" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export AF_TX_DIR="$BACKUP_DIR"
+stop_systemd_unit fail2ban
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$BACKUP_DIR/$runtime_index"
+    fi
+done
+prepare_apt_package_transaction /etc/fail2ban/.af-version fail2ban
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 20 "Installing fail2ban and python3-systemd backend..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+RUNTIME_MUTATED=1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fail2ban python3-systemd iptables >> "$LOGFILE" 2>&1
 
 report_progress 60 "Preparing Fail2ban configuration..."
@@ -58,7 +111,14 @@ report_progress 85 "Starting and enabling fail2ban.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now fail2ban >> "$LOGFILE" 2>&1
 systemctl restart fail2ban >> "$LOGFILE" 2>&1
+systemctl is-active --quiet fail2ban
+verify_systemd_service_active fail2ban
 
+FAIL2BAN_VER="$(dpkg-query -W -f='${Version}' fail2ban 2>/dev/null || true)"
+if [[ -n "$FAIL2BAN_VER" ]]; then
+    queue_app_version /etc/fail2ban/.af-version "$FAIL2BAN_VER"
+fi
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Fail2ban intrusion prevention installed and active."
 log_info "${PACKAGE_NAME} installed successfully"

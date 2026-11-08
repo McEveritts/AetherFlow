@@ -46,11 +46,17 @@ function _boot() {
 
 	# Ensure permissions and service user are configured before starting services
 	_harden_permissions
+	_safe_overlay_config /opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.service \
+		/etc/systemd/system/aetherflow-log-retention.service || return 1
+	_safe_overlay_config /opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.timer \
+		/etc/systemd/system/aetherflow-log-retention.timer || return 1
 	if type _mark_step &>/dev/null; then
 		_mark_step "harden_perms"
 	fi
 
 	systemctl daemon-reload >/dev/null 2>&1
+	systemctl start aetherflow-log-retention.service || return 1
+	systemctl enable --now aetherflow-log-retention.timer || return 1
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 
 	# Enable and start the privileged runner daemon and control plane single binary

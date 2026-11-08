@@ -5,6 +5,68 @@ source "${SELF_DIR}/../../common.sh"
 source "${SELF_DIR}/../../youtube-common.sh"
 
 youtube_init invidious 8281
+TMP_DIR=""
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-invidious-runtime.XXXXXX)"
+RUNTIME_PATHS=("$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR" /etc/systemd/system/af-invidious.service /etc/systemd/system/af-invidious-companion.service)
+RUNTIME_UNITS=(af-invidious.service af-invidious-companion.service)
+PREVIOUS_UNITS=()
+RUNTIME_CHANGED=false
+cleanup() {
+    local status=$? runtime_index runtime_path runtime_unit restored=true restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
+        if ! quiesce_services_for_rollback "${RUNTIME_UNITS[@]}"; then
+            restore_failed=true
+            print_error "Cannot stop Invidious; recovery retained in $RUNTIME_BACKUP"
+            exit "$status"
+        fi
+        restore_postgresql_database "$RUNTIME_BACKUP" invidious || restored=false
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        for runtime_unit in "${RUNTIME_UNITS[@]}"; do
+            [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl disable "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restored" != true || "$restore_failed" == true ]]; then
+            print_error "Invidious recovery incomplete; backups retained in $RUNTIME_BACKUP"
+            exit "$status"
+        fi
+        for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
+            systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+        done
+    elif [[ "$status" -ne 0 ]]; then
+        for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
+            systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+        done
+    fi
+    [[ -z "$TMP_DIR" ]] || rm -rf -- "$TMP_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+for runtime_unit in "${RUNTIME_UNITS[@]}"; do
+    if [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl is-active --quiet "$runtime_unit" 2>/dev/null; then
+        PREVIOUS_UNITS+=("$runtime_unit")
+        stop_systemd_unit "$runtime_unit"
+    fi
+done
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_CHANGED=true
 COMPANION_KEY="$(youtube_secret companion-key 8)"
 if [[ ! "$COMPANION_KEY" =~ ^[a-zA-Z0-9]{16}$ ]]; then
     print_error "Invidious companion key must contain exactly 16 alphanumeric characters. Back up and remove ${CONFIG_DIR}/companion-key before reinstalling to generate a compatible key."
@@ -18,36 +80,47 @@ case "$(uname -m)" in
     *) print_error "Invidious requires Linux x86_64 or aarch64."; exit 1 ;;
 esac
 TMP_DIR="$(mktemp -d /tmp/af-invidious-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 CRYSTAL_VERSION=1.22.2
 youtube_asset crystal-lang/crystal "$CRYSTAL_VERSION" "crystal-${CRYSTAL_VERSION}-1-linux-${ARCH}-bundled.tar.gz" "${TMP_DIR}/crystal.tar.gz"
 install -d "${INSTALL_DIR}/crystal"
 tar -xzf "${TMP_DIR}/crystal.tar.gz" --strip-components=1 -C "${INSTALL_DIR}/crystal"
+CRYSTAL_PATH="${INSTALL_DIR}/crystal/bin"
+for CRYSTAL_BIN in "${INSTALL_DIR}"/crystal/crystal-*/bin; do
+    [[ ! -d "$CRYSTAL_BIN" ]] || CRYSTAL_PATH="$CRYSTAL_PATH:$CRYSTAL_BIN"
+done
 youtube_asset iv-org/invidious-companion release-master "invidious_companion-${ARCH}-unknown-linux-gnu.tar.gz" "${TMP_DIR}/companion.tar.gz"
 tar -xzf "${TMP_DIR}/companion.tar.gz" -C "$TMP_DIR"
 install -m 755 "${TMP_DIR}/invidious_companion" "${INSTALL_DIR}/invidious_companion"
 
 report_progress 35 "Building Invidious as the service user..."
 youtube_source iv-org/invidious "${INSTALL_DIR}/source"
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${INSTALL_DIR}/crystal/bin:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${CRYSTAL_PATH}:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
 youtube_database
+backup_postgresql_database "$RUNTIME_BACKUP" invidious
 HMAC_KEY="$(youtube_secret hmac-key)"
 COMPANION_PORT="$(youtube_private_port companion)"
 report_progress 70 "Configuring Invidious and its private playback companion..."
-python3 - "$CONFIG_DIR" "$APP_PORT" "$APP_DOMAIN" "$DB_PASSWORD" "$HMAC_KEY" "$COMPANION_KEY" "$COMPANION_PORT" <<'PY'
+AF_DB_PASS="$DB_PASSWORD" AF_HMAC_KEY="$HMAC_KEY" AF_COMPANION_KEY="$COMPANION_KEY" safe_config_python "$CONFIG_DIR" "$APP_PORT" "$APP_DOMAIN" "$COMPANION_PORT" <<'PY'
+import os
 import pathlib
 import sys
 import yaml
 
-directory, port, domain, password, hmac, companion, companion_port = sys.argv[1:]
+directory, port, domain, companion_port = sys.argv[1:]
+password = os.environ['AF_DB_PASS']
+hmac = os.environ['AF_HMAC_KEY']
+companion = os.environ['AF_COMPANION_KEY']
 path = pathlib.Path(directory) / 'config.yml'
-config = yaml.safe_load(path.read_text()) if path.exists() else {}
+config = yaml.safe_load(safe_read_text(path))
+if not isinstance(config, dict):
+    config = {}
+config.setdefault('registration_enabled', False)
 config.update(host_binding='127.0.0.1', port=int(port), domain=domain, https_only=True, external_port=443,
               db=dict(user='invidious', password=password, host='127.0.0.1', port=5432, dbname='invidious'),
               hmac_key=hmac, invidious_companion_key=companion,
               invidious_companion=[dict(private_url=f'http://127.0.0.1:{companion_port}/companion')],
-              check_tables=True, registration_enabled=False)
-path.write_text(yaml.safe_dump(config))
+              check_tables=True)
+safe_write_text(path, yaml.safe_dump(config))
 PY
 cat > "${CONFIG_DIR}/runtime.env" <<EOF
 INVIDIOUS_CONFIG_FILE=${CONFIG_DIR}/config.yml
@@ -69,7 +142,10 @@ systemctl daemon-reload
 systemctl enable af-invidious.service >> "$LOGFILE" 2>&1
 systemctl restart af-invidious.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
+systemctl is-active --quiet af-invidious.service
 systemctl is-active --quiet af-invidious-companion.service
-runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/source" rev-parse HEAD > "${INSTALL_DIR}/.af-version"
+queue_app_version "${INSTALL_DIR}/.af-version" "$(runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/source" rev-parse HEAD)"
+commit_app_versions
 write_lock invidious
+RUNTIME_CHANGED=false
 report_progress 100 "Experimental Invidious installed. YouTube playback depends on upstream anti-bot compatibility."

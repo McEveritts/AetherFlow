@@ -25,9 +25,9 @@ report_progress 25 "Stopping and removing af-maintainerr.service..."
 purge_systemd_unit "af-maintainerr"
 
 report_progress 65 "Removing the Maintainerr application bundle..."
-rm -rf /opt/maintainerr
+safe_rm_rf /opt/maintainerr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/maintainerr
+    safe_rm_rf /var/lib/maintainerr
     purge_system_user "maintainerr"
 fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1

@@ -1274,7 +1274,7 @@ prepare_release_permissions() {
         chmod 0755 "${RELEASE_DIR}/af" || return 1
     fi
     if [[ "${DRY_RUN}" == false ]]; then
-        if [[ "${EUID}" -eq 0 ]]; then
+        if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
             if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
                 log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
                 return 1
@@ -1454,9 +1454,18 @@ restart_systemd_units() {
     if [[ -d "${CURRENT_LINK}/deploy/systemd" ]]; then
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-runner.service"
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-api.service"
+        if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
+            install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.service"
+            install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.timer"
+        fi
     fi
 
     systemctl daemon-reload
+
+    if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
+        systemctl start aetherflow-log-retention.service || return 1
+        systemctl enable --now aetherflow-log-retention.timer || return 1
+    fi
 
     systemctl stop aetherflow-frontend.service 2>/dev/null || true
     systemctl disable aetherflow-frontend.service 2>/dev/null || true

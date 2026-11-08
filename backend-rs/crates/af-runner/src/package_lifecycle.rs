@@ -155,6 +155,7 @@ mod tests {
     struct FakeBackend {
         calls: Mutex<Vec<String>>,
         fail_script: bool,
+        script_error_message: Option<String>,
         fail_stop: bool,
         fail_restore: bool,
         runtime_port: i32,
@@ -219,6 +220,9 @@ mod tests {
                     release.notified().await;
                 }
                 let _ = sender.try_send("[PROGRESS:100] Installer finished\n".into());
+                if let Some(msg) = &self.script_error_message {
+                    anyhow::bail!("{msg}");
+                }
                 if self.fail_script {
                     anyhow::bail!("simulated script failure secret-do-not-persist");
                 }
@@ -531,6 +535,239 @@ mod tests {
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn in_place_reinstall_pre_stops_active_units_and_restores_on_completion_and_failure() {
+        let (root, path, conn, mut package) = fixture();
+        let lock_path = root.join("install/.syncthing.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(&lock_path, "installed\n").unwrap();
+        package.lock_file = lock_path.to_string_lossy().into_owned();
+
+        // 1. In-place reinstall (action="install" with lock_file present on disk) pre-stops active units
+        // and starts them in reverse order after the installer script completes.
+        let backend = FakeBackend::default();
+        let (sender, _receiver) = mpsc::channel(32);
+        let mut reinstall = CoordinatedOperation::admit(
+            conn,
+            request("install"),
+            package.clone(),
+            vec!["syncthing".into(), "syncthing.timer".into()],
+        )
+        .unwrap();
+        let receipt = reinstall.execute(&backend, &sender).await.unwrap();
+        assert_eq!(receipt.status, "completed");
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![
+                "stop syncthing.timer",
+                "stop syncthing",
+                "script install port=18384 purge=false",
+                "start syncthing",
+                "start syncthing.timer",
+            ]
+        );
+        drop(reinstall);
+
+        // 2. Failed in-place reinstall still restores pre-stopped units in reverse order.
+        let fail_backend = FakeBackend {
+            fail_script: true,
+            ..Default::default()
+        };
+        let mut failed_reinstall = CoordinatedOperation::admit(
+            Connection::open(&path).unwrap(),
+            request("install"),
+            package,
+            vec!["syncthing".into(), "syncthing.timer".into()],
+        )
+        .unwrap();
+        let fail_receipt = failed_reinstall
+            .execute(&fail_backend, &sender)
+            .await
+            .unwrap();
+        assert_eq!(fail_receipt.status, "failed");
+        assert_eq!(
+            *fail_backend.calls.lock().unwrap(),
+            vec![
+                "stop syncthing.timer",
+                "stop syncthing",
+                "script install port=18384 purge=false",
+                "start syncthing",
+                "start syncthing.timer",
+            ]
+        );
+        drop(failed_reinstall);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn afmp003_stopped_or_retained_application_port_is_never_stolen_by_another_application() {
+        let (root, path, mut conn, mut package) = fixture();
+        // Reset syncthing's own saved config from fixture so we test fresh port allocation for a second app
+        conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
+        // Persist port 8384 for stopped application `radarr` and retain port 17000 for removed application `sonarr`
+        conn.execute(
+            "INSERT INTO app_ingress_configs(app_name,public_domain,external_access_enabled,listen_port,tls_enabled)
+             VALUES ('radarr','',0,8384,0)",
+            [],
+        )
+        .unwrap();
+        af_db::synchronize_lifecycle_ingress(
+            &mut conn,
+            "sonarr",
+            "remove",
+            "",
+            0,
+            false,
+            "",
+        )
+        .ok();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO retained_app_ingress_configs(app_name, config_json) VALUES ('sonarr', ?1)",
+            [serde_json::to_string(&af_models::AppIngressConfig {
+                app_name: "sonarr".into(),
+                listen_port: 17000,
+                ..Default::default()
+            })
+            .unwrap()],
+        )
+        .unwrap();
+
+        package.default_port = 8384;
+        let backend = FakeBackend::default();
+
+        // Explicit request for a port owned by stopped `radarr` (8384) or retained `sonarr` (17000) must be rejected at admission
+        let mut steal_req = request("install");
+        steal_req.app_port = 8384;
+        assert!(
+            CoordinatedOperation::admit(
+                Connection::open(&path).unwrap(),
+                steal_req,
+                package.clone(),
+                vec!["syncthing".into()],
+            )
+            .is_err(),
+            "admit must reject explicit app_port owned by stopped radarr"
+        );
+
+        // Automatic port resolution for `syncthing` (default_port = 8384) must skip 8384 (owned by radarr)
+        // and skip 17000 (retained by sonarr), allocating 17001 instead!
+        let (sender, _receiver) = mpsc::channel(32);
+        let mut op = CoordinatedOperation::admit(
+            conn,
+            request("install"),
+            package,
+            vec!["syncthing".into()],
+        )
+        .unwrap();
+        let receipt = op.execute(&backend, &sender).await.unwrap();
+        assert_eq!(receipt.status, "completed");
+        assert_eq!(receipt.app_port, 17001);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn afmp_sol_003_symlinked_sonarr_config_fails_closed_without_recording_port() {
+        let (root, _path, conn, _package) = fixture();
+        conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
+        let sonarr_dir = root.join("var/lib/sonarr");
+        std::fs::create_dir_all(&sonarr_dir).unwrap();
+        let target_cfg = root.join("var/lib/sonarr-target-config.xml");
+        std::fs::write(&target_cfg, "<Config><Port>8989</Port></Config>\n").unwrap();
+        std::os::unix::fs::symlink(&target_cfg, sonarr_dir.join("config.xml")).unwrap();
+
+        let package = Package {
+            name: "sonarr".into(),
+            service_name: "sonarr".into(),
+            service_type: "systemd".into(),
+            default_port: 8989,
+            ..Default::default()
+        };
+        let mut req = PackageRunnerRequest {
+            package_id: "sonarr".into(),
+            action: "install".into(),
+            script_name: "installpackage-sonarr".into(),
+            app_port: 18989,
+            ..Default::default()
+        };
+        let backend = FakeBackend::default();
+        let (sender, _receiver) = mpsc::channel(32);
+        let mut op = CoordinatedOperation::admit(
+            conn,
+            std::mem::take(&mut req),
+            package,
+            vec!["sonarr".into()],
+        )
+        .unwrap();
+        let receipt = op.execute(&backend, &sender).await.unwrap();
+        assert_eq!(receipt.status, "failed");
+        let (status, category): (String, String) = op
+            .conn
+            .query_row(
+                "SELECT status, failure_category FROM package_lifecycle_jobs WHERE package_id='sonarr'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(category, "configuration");
+        assert!(
+            af_db::load_lifecycle_ingress(&op.conn, "sonarr")
+                .unwrap()
+                .is_none(),
+            "app_ingress_configs must not record port 18989 when config.xml mutation fails"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target_cfg).unwrap(),
+            "<Config><Port>8989</Port></Config>\n"
+        );
+        drop(op);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_rollback_refuses_to_restart_pre_stopped_units() {
+        let (root, _path, conn, package) = fixture();
+        let backend = FakeBackend {
+            script_error_message: Some(
+                "step failed; incomplete rollback: recovery backup preserved at /var/lib/syncthing.bak"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let (sender, _receiver) = mpsc::channel(32);
+        let mut op = CoordinatedOperation::admit(
+            conn,
+            request("update"),
+            package,
+            vec!["syncthing".into(), "syncthing.timer".into()],
+        )
+        .unwrap();
+        let receipt = op.execute(&backend, &sender).await.unwrap();
+        assert_eq!(receipt.status, "failed");
+        let calls = backend.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "stop syncthing.timer",
+                "stop syncthing",
+                "script update port=18384 purge=false",
+            ],
+            "pre-stopped units must NOT be restarted after incomplete rollback"
+        );
+        let (_, status, category) = persisted(&op.conn);
+        assert_eq!(status, "failed");
+        assert_eq!(category, "service_restore");
+        drop(op);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 async fn run_direct(
@@ -708,7 +945,7 @@ impl CoordinatedOperation {
         mut conn: Connection,
         mut request: PackageRunnerRequest,
         package: Package,
-        units: Vec<String>,
+        mut units: Vec<String>,
     ) -> Result<Self> {
         anyhow::ensure!(
             request.lifecycle_job_id.is_empty(),
@@ -720,6 +957,28 @@ impl CoordinatedOperation {
         );
         conn.busy_timeout(Duration::from_secs(5))?;
         lifecycle::initialize_schema(&conn)?;
+        if request.action != "remove" {
+            let candidate_port = if request.app_port > 0 {
+                Some(request.app_port)
+            } else {
+                af_db::load_lifecycle_ingress(&conn, &request.package_id)?
+                    .map(|cfg| cfg.listen_port)
+                    .filter(|p| *p > 0)
+            };
+            if let Some(port) = candidate_port {
+                let reserved = af_db::list_reserved_ports_excluding(&conn, &request.package_id)?;
+                anyhow::ensure!(
+                    !reserved.contains(&port),
+                    "Listen port {} is already reserved by another application",
+                    port
+                );
+                if let Some(res) = lifecycle::port_resource(port) {
+                    if !units.contains(&res) {
+                        units.push(res);
+                    }
+                }
+            }
+        }
         request.lifecycle_job_id = uuid::Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now().to_rfc3339();
         let owner = lifecycle::admit_job(
@@ -740,10 +999,24 @@ impl CoordinatedOperation {
         })
     }
 
+    fn is_installed_on_disk(&self) -> bool {
+        let trimmed = self.package.lock_file.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let env_cfg = crate::PackageExecutionEnv::default();
+        let resolved = match &env_cfg.fs_root {
+            Some(root) => root.join(trimmed.trim_start_matches(['/', '\\'])),
+            None => Path::new(trimmed).to_path_buf(),
+        };
+        std::fs::symlink_metadata(&resolved).is_ok_and(|meta| meta.is_file())
+    }
+
     fn resolve_port(&self, backend: &impl LifecycleBackend) -> Result<i32> {
         if self.request.action == "remove" {
             return Ok(0);
         }
+        let reserved = af_db::list_reserved_ports_excluding(&self.conn, &self.request.package_id)?;
         let ingress = af_db::load_lifecycle_ingress(&self.conn, &self.request.package_id)?;
         let saved = ingress
             .as_ref()
@@ -756,12 +1029,22 @@ impl CoordinatedOperation {
                     (1024..=65535).contains(&runtime),
                     "Native application listen port is invalid"
                 );
+                anyhow::ensure!(
+                    !reserved.contains(&runtime),
+                    "Listen port {} is already reserved by another application",
+                    runtime
+                );
                 return Ok(runtime);
             }
             if saved > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&saved),
                     "Persisted listen port is invalid"
+                );
+                anyhow::ensure!(
+                    !reserved.contains(&saved),
+                    "Listen port {} is already reserved by another application",
+                    saved
                 );
                 return Ok(saved);
             }
@@ -776,6 +1059,11 @@ impl CoordinatedOperation {
                 (1024..=65535).contains(&self.request.app_port),
                 "Requested listen port is invalid"
             );
+            anyhow::ensure!(
+                !reserved.contains(&self.request.app_port),
+                "Listen port {} is already reserved by another application",
+                self.request.app_port
+            );
             return Ok(self.request.app_port);
         }
         if saved > 0 {
@@ -783,13 +1071,30 @@ impl CoordinatedOperation {
                 (1024..=65535).contains(&saved),
                 "Persisted listen port is invalid"
             );
+            anyhow::ensure!(
+                !reserved.contains(&saved),
+                "Listen port {} is already reserved by another application",
+                saved
+            );
             return Ok(saved);
+        }
+        if self.is_installed_on_disk() {
+            let runtime = backend.runtime_port(&self.request.package_id);
+            if runtime > 0 {
+                anyhow::ensure!(
+                    (1024..=65535).contains(&runtime),
+                    "Native application listen port is invalid"
+                );
+                if !reserved.contains(&runtime) {
+                    return Ok(runtime);
+                }
+            }
         }
         let default = self.package.default_port;
         if default <= 0 {
             return Ok(0);
         }
-        if backend.available_port(default) {
+        if !reserved.contains(&default) && backend.available_port(default) {
             return Ok(default);
         }
         anyhow::ensure!(
@@ -797,12 +1102,14 @@ impl CoordinatedOperation {
             "Fixed application port is unavailable"
         );
         (17000..=19999)
-            .find(|port| backend.available_port(*port))
+            .find(|port| !reserved.contains(port) && backend.available_port(*port))
             .context("No application listen port is available")
     }
 
     fn update_units(&self) -> Vec<String> {
-        if self.request.action != "update"
+        let is_in_place_reinstall = self.request.action == "reinstall"
+            || (self.request.action == "install" && self.is_installed_on_disk());
+        if (self.request.action != "update" && !is_in_place_reinstall)
             || self.package.service_type == "pm2"
             || matches!(
                 self.package.name.as_str(),
@@ -825,13 +1132,45 @@ impl CoordinatedOperation {
             .units
             .iter()
             .filter(|unit| {
-                !matches!(unit.as_str(), "recyclarr" | "scrutiny-collector")
+                !unit.starts_with("port:")
+                    && !matches!(unit.as_str(), "recyclarr" | "scrutiny-collector")
                     && (unit.as_str() != "rclone-vfs" || configured)
             })
             .cloned()
             .collect();
         units.sort_by_key(|unit| !unit.ends_with(".timer"));
         units
+    }
+}
+
+pub fn is_incomplete_rollback_error(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    lower.contains("incomplete rollback")
+        || lower.contains("incomplete_rollback")
+        || lower.contains("incomplete recovery")
+        || lower.contains("recovery backup preserved")
+        || lower.contains("failed to stop")
+}
+
+impl CoordinatedOperation {
+    fn effective_fs_root(&self) -> Option<std::path::PathBuf> {
+        if let Some(root) = crate::PackageExecutionEnv::default().fs_root {
+            return Some(root);
+        }
+        self.conn.path().map(Path::new).and_then(|p| {
+            p.ancestors().find_map(|anc| {
+                let rel = p.strip_prefix(anc).ok()?;
+                if anc != Path::new("/")
+                    && (rel == Path::new("var/lib/aetherflow/aetherflow.sqlite")
+                        || rel == Path::new("var/lib/aetherflow/aetherflow.db")
+                        || rel == Path::new("etc/aetherflow/aetherflow.db"))
+                {
+                    Some(anc.to_path_buf())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     async fn execute(
@@ -843,6 +1182,23 @@ impl CoordinatedOperation {
         let mut failure = "preparation";
         let execution: Result<()> = async {
             self.request.app_port = self.resolve_port(backend)?;
+            if let Some(res) = lifecycle::port_resource(self.request.app_port) {
+                if !self.units.contains(&res) {
+                    self.units.push(res);
+                    let normalized: Vec<_> =
+                        lifecycle::package_resources(&self.request.package_id, &self.units)
+                            .into_iter()
+                            .collect();
+                    self.conn.execute(
+                        "UPDATE package_lifecycle_jobs SET service_units=?1 WHERE package_id=?2 AND job_id=?3",
+                        rusqlite::params![
+                            serde_json::to_string(&normalized)?,
+                            self.request.package_id,
+                            self.request.lifecycle_job_id,
+                        ],
+                    )?;
+                }
+            }
             for unit in self.update_units() {
                 if backend.active(&unit).await? {
                     stopped.push(unit.clone());
@@ -858,6 +1214,15 @@ impl CoordinatedOperation {
             } else {
                 "configuration"
             };
+            if self.request.action != "remove" && (1024..=65535).contains(&self.request.app_port) {
+                let fs_root = self.effective_fs_root();
+                crate::package_executor::try_apply_runner_blueprint_app_config(
+                    fs_root.as_deref(),
+                    &self.request.package_id,
+                    self.request.app_port,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
             let base: Option<String> = self
                 .conn
                 .query_row(
@@ -878,14 +1243,28 @@ impl CoordinatedOperation {
             Ok(())
         }
         .await;
+        let incomplete_rollback = execution
+            .as_ref()
+            .err()
+            .is_some_and(|err| is_incomplete_rollback_error(&err.to_string()));
         let mut restore_failed = false;
-        for unit in stopped.iter().rev() {
-            if let Err(error) = backend
-                .control(unit, "start", &self.request.lifecycle_job_id)
-                .await
-            {
-                tracing::error!(unit, error = %error, "Application service restoration failed");
+        if incomplete_rollback {
+            if !stopped.is_empty() {
+                tracing::error!(
+                    package = %self.request.package_id,
+                    "Refusing to restart pre-stopped service after incomplete rollback"
+                );
                 restore_failed = true;
+            }
+        } else {
+            for unit in stopped.iter().rev() {
+                if let Err(error) = backend
+                    .control(unit, "start", &self.request.lifecycle_job_id)
+                    .await
+                {
+                    tracing::error!(unit, error = %error, "Application service restoration failed");
+                    restore_failed = true;
+                }
             }
         }
         let success = execution.is_ok() && !restore_failed;
@@ -895,7 +1274,7 @@ impl CoordinatedOperation {
         if restore_failed {
             failure = if execution.is_err() && failure == "configuration" {
                 "configuration_and_service_restore"
-            } else if execution.is_ok() {
+            } else if incomplete_rollback || execution.is_ok() {
                 "service_restore"
             } else {
                 failure

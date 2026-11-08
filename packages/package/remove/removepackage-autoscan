@@ -26,11 +26,12 @@ report_progress 25 "Stopping and removing autoscan.service..."
 purge_systemd_unit "autoscan"
 
 report_progress 65 "Removing Autoscan binary, configurations, and state directories..."
-rm -f /usr/local/bin/autoscan
+rm -f /usr/local/bin/autoscan /opt/autoscan/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /etc/autoscan /var/lib/autoscan /opt/autoscan
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/autoscan"
+    safe_rm_rf /etc/autoscan /var/lib/autoscan /opt/autoscan
+    purge_system_user "autoscan"
 fi
-purge_system_user "autoscan"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

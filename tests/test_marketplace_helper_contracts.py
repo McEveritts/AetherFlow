@@ -8,6 +8,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import common_functions
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,36 @@ FORBIDDEN_HELPERS = [
 
 
 class MarketplaceHelperContractsTest(unittest.TestCase):
+
+    def test_postgresql_restore_reads_private_backup_through_inherited_stdin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup = root / "backup"
+            backup.mkdir(mode=0o700)
+            (backup / ".af-database-ready").write_text("invidious\n")
+            database_sql = "DROP DATABASE invidious;\nCREATE DATABASE invidious;\n"
+            (backup / "invidious.sql").write_text(database_sql)
+            (backup / "invidious.sql").chmod(0o600)
+            script = common_functions("restore_postgresql_database") + r'''
+runuser() {
+    if [[ "$*" == *" -f "* ]]; then
+        [[ "${@: -1}" == "-" ]] || return 61
+        cat > "$RESTORED_SQL"
+    else
+        cat >/dev/null
+    fi
+}
+restore_postgresql_database "$DATABASE_BACKUP" invidious
+'''
+            restored = root / "restored.sql"
+            result = subprocess.run(["bash", "-euc", script], capture_output=True, text=True, env={
+                **os.environ, "DATABASE_BACKUP": str(backup), "RESTORED_SQL": str(restored),
+                "LOGFILE": str(root / "restore.log"),
+            })
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(restored.read_text(), database_sql)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((backup / "invidious.sql").stat().st_mode & 0o777, 0o600)
     def test_common_sourcing_prefers_script_release_then_current_release(self):
         scripts = [path for action in ("install", "remove", "update")
                    for path in (PACKAGES_DIR / action).glob(f"{action}package-*")
@@ -107,9 +139,9 @@ class User:
 user = User()
 def get_or_create(**values):
     user.username = values["username"]
-    return user, False
+    return user, True
 auth = types.ModuleType("django.contrib.auth")
-auth.get_user_model = lambda: types.SimpleNamespace(objects=types.SimpleNamespace(get_or_create=get_or_create))
+auth.get_user_model = lambda: types.SimpleNamespace(objects=types.SimpleNamespace(get_or_create=get_or_create, filter=lambda **values: types.SimpleNamespace(exists=lambda: False)))
 sys.modules["django.contrib.auth"] = auth
 '''
         result = subprocess.run([sys.executable, "-c", fixture + snippet], capture_output=True, text=True,
@@ -149,7 +181,8 @@ sys.modules["django.contrib.auth"] = auth
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'notifiarr.conf'
             config.write_text('ui_password = "old"\napi_key = "retain"\n')
-            result = subprocess.run([sys.executable, '-', str(config)], input=python_code,
+            adapter = common_functions("safe_config_python") + '\nsafe_config_python "$1" <<\'PYEOF\'\n' + python_code + '\nPYEOF\n'
+            result = subprocess.run(['bash', '-euc', adapter, 'fixture', str(config)],
                                     text=True, capture_output=True,
                                     env={**os.environ, 'NOTIFIARR_UI_CREDENTIALS': credentials})
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -33,7 +33,12 @@ systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 report_progress 65 "Removing Organizr webroot and reloading Apache..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/www/organizr
+    safe_rm_rf /var/lib/organizr /var/www/organizr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/var/www/organizr"
+elif [[ -d /var/www/organizr && ! -L /var/www/organizr ]]; then
+    safe_rm_rf /var/www/organizr/.git
+    find /var/www/organizr \( -path '/var/www/organizr/api/config' -o -path '/var/www/organizr/api/db' \) -prune -o \
+        \( -type f -o -type l \) \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.map' -o -name '.af-version' -o -name 'composer.json' -o -name 'composer.lock' -o -name 'package.json' -o -name 'package-lock.json' \) -exec rm -f -- {} +
 fi
 
 remove_lock "${PACKAGE_NAME}"

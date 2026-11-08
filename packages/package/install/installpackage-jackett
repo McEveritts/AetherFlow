@@ -46,13 +46,13 @@ esac
 report_progress 35 "Downloading latest Jackett (${JACKETT_ARCH})..."
 JACKETT_VERSION="$(github_latest_tag "Jackett/Jackett" "0.22.1000")"
 TMP_TAR=$(mktemp /tmp/jackett-XXXXXX.tar.gz)
-curl -fsSL "https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Jackett to /opt/Jackett..."
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Jackett" "jackett" "/var/lib/jackett" "${PACKAGE_NAME}" "Jackett" "" ""
 rm -f "$TMP_TAR"
 if [[ -n "$JACKETT_VERSION" ]]; then
-    printf '%s\n' "${JACKETT_VERSION#v}" > /opt/Jackett/.af-version
+    queue_app_version /opt/Jackett/.af-version "$(resolve_installed_binary_version /opt/Jackett/jackett "${JACKETT_VERSION#v}")"
 fi
 
 if [[ ! -s /var/lib/jackett/Jackett/ServerConfig.json ]]; then
@@ -84,7 +84,7 @@ fi
 
 set_config_value "/var/lib/jackett/Jackett/ServerConfig.json" json "Port" "$APP_PORT" ""
 
-chown -R jackett:jackett /opt/Jackett /var/lib/jackett
+chown -hRP jackett:jackett /opt/Jackett /var/lib/jackett
 
 report_progress 85 "Configuring and starting jackett.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/jackett.service
@@ -114,7 +114,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now jackett >> "$LOGFILE" 2>&1
 systemctl restart jackett >> "$LOGFILE" 2>&1
+systemctl is-active --quiet jackett
 
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Jackett installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

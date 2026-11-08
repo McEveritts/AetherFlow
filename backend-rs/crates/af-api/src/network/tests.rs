@@ -23,8 +23,27 @@ struct FakeRunner {
 }
 impl FakeRunner {
     async fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("af-network-api-{}.sock", uuid::Uuid::new_v4()));
+        let base = std::env::var_os("TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let candidate = base.join(format!("af-network-api-{}.sock", uuid::Uuid::new_v4()));
+        let path = if candidate.as_os_str().len() < 95 {
+            candidate
+        } else {
+            let short_cand = base.join(format!(
+                "af-sock-{}.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ));
+            if short_cand.as_os_str().len() < 95 {
+                short_cand
+            } else {
+                PathBuf::from(format!(
+                    "/tmp/af-sock-{}.sock",
+                    &uuid::Uuid::new_v4().simple().to_string()[..12]
+                ))
+            }
+        };
         let listener = UnixListener::bind(&path).unwrap();
         let previous = std::env::var_os("AETHERFLOW_RUNNER_SOCK");
         std::env::set_var("AETHERFLOW_RUNNER_SOCK", &path);

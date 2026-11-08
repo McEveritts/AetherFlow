@@ -30,11 +30,13 @@ report_progress 45 "Stopping and purging recyclarr.service..."
 report_progress 70 "Removing Recyclarr binaries, configurations, and user account..."
 rm -f /usr/local/bin/recyclarr
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/recyclarr /etc/recyclarr /opt/recyclarr
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/recyclarr"
+    safe_rm_rf /var/lib/recyclarr /etc/recyclarr /opt/recyclarr
+    purge_system_user "recyclarr"
 fi
-purge_system_user "recyclarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /opt/recyclarr/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Recyclarr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

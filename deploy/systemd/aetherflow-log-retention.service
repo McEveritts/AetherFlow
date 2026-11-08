@@ -1,0 +1,27 @@
+[Unit]
+Description=AetherFlow marketplace lifecycle log retention
+RequiresMountsFor=/opt/AetherFlow /var/log
+
+[Service]
+Type=oneshot
+User=root
+Group=aetherflow
+UMask=0027
+Environment=AF_LOG_RETENTION_MAX_BYTES=10485760
+Environment=AF_LOG_RETENTION_KEEP=3
+EnvironmentFile=-/etc/aetherflow/log-retention.env
+ExecStart=/usr/bin/python3 -B /opt/AetherFlow/current/deploy/log-retention.py --group aetherflow --legacy-owner aetherflow --max-bytes ${AF_LOG_RETENTION_MAX_BYTES} --keep ${AF_LOG_RETENTION_KEEP}
+TimeoutStartSec=120s
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER

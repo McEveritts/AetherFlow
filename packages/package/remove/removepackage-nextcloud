@@ -20,6 +20,59 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+NC_DB_OWNER_FILE="/opt/AetherFlow/logs/nextcloud_database_owner.json"
+NC_PURGE_MYSQL=false
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    NC_CONFIG_FILE=""
+    for candidate in /var/www/nextcloud/config/config.php /var/www/html/nextcloud/config/config.php; do
+        validate_config_paths "$candidate"
+        if [[ -f "$candidate" ]]; then
+            if [[ -n "$NC_CONFIG_FILE" ]]; then
+                print_error "Ambiguous Nextcloud configuration; purge refused"
+                exit 1
+            fi
+            NC_CONFIG_FILE="$candidate"
+        fi
+    done
+    if [[ -z "$NC_CONFIG_FILE" ]]; then
+        print_error "Nextcloud database configuration is missing; purge refused"
+        exit 1
+    fi
+    NC_RETAINED_DATABASE="$(read_app_database_config nextcloud "$NC_CONFIG_FILE")"
+    mapfile -t NC_DB_CONFIG <<< "$NC_RETAINED_DATABASE"
+    NC_DB_TYPE="${NC_DB_CONFIG[0]}"
+    NC_DB_NAME="${NC_DB_CONFIG[1]}"
+    NC_DB_HOST="${NC_DB_CONFIG[2]}"
+    NC_DB_USER="${NC_DB_CONFIG[3]}"
+    NC_DB_PASSWORD="${NC_DB_CONFIG[4]}"
+    NC_DB_DATA="${NC_DB_CONFIG[5]}"
+    case "$NC_DB_DATA" in
+        /var/lib/nextcloud/data|/var/www/nextcloud/data|/var/www/html/nextcloud/data) ;;
+        *) print_error "Nextcloud data directory has no dedicated-storage provenance; purge refused"; exit 1 ;;
+    esac
+    validate_config_paths "$NC_DB_DATA/.af-purge-check" "$NC_DB_OWNER_FILE"
+    case "$NC_DB_TYPE" in
+        sqlite|sqlite3)
+            if [[ -e "$NC_DB_OWNER_FILE" ]]; then
+                print_error "Nextcloud backend changed since provisioning; database ownership must be reconciled before purge"
+                exit 1
+            fi
+            validate_config_paths "$NC_DB_DATA/$NC_DB_NAME.db" "$NC_DB_DATA/owncloud.db" \
+                "$NC_DB_DATA/$NC_DB_NAME.db-wal" "$NC_DB_DATA/$NC_DB_NAME.db-shm" \
+                "$NC_DB_DATA/owncloud.db-wal" "$NC_DB_DATA/owncloud.db-shm"
+            ;;
+        mysql|mariadb|postgres|pgsql)
+            nextcloud_database_ownership verify "$NC_DB_OWNER_FILE" "$NC_DB_TYPE" "$NC_DB_NAME" \
+                "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_DB_DATA"
+            if ! command_exists mysql; then
+                print_error "Cannot confirm Nextcloud database removal: mysql is unavailable"
+                exit 1
+            fi
+            NC_PURGE_MYSQL=true
+            ;;
+        *) print_error "Unsupported Nextcloud database backend; purge refused"; exit 1 ;;
+    esac
+fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Disabling Apache Nextcloud site..."
 
@@ -32,24 +85,28 @@ apache2ctl configtest >> "$LOGFILE" 2>&1
 systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 report_progress 50 "Dropping Nextcloud database and user..."
-if [[ "${DELETE_DATA:-false}" == true ]]; then
-    if ! command_exists mysql; then
-        print_error "Cannot confirm Nextcloud database removal: mysql is unavailable"
-        exit 1
-    fi
-    mysql -u root <<'EOF' >> "$LOGFILE" 2>&1
-DROP DATABASE IF EXISTS nextcloud;
-DROP USER IF EXISTS 'nextclouduser'@'localhost';
+if [[ "$NC_PURGE_MYSQL" == true ]]; then
+    mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+DROP DATABASE IF EXISTS ${NC_DB_NAME};
+DROP USER IF EXISTS '${NC_DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 fi
 
 report_progress 80 "Removing Nextcloud webroot, data directory, and credentials file..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/www/nextcloud /var/www/html/nextcloud /var/lib/nextcloud
+    purge_app_archive_backups "${PACKAGE_NAME}" "/var/www/nextcloud"
+    safe_rm_rf /var/www/nextcloud /var/www/html/nextcloud /var/lib/nextcloud
+else
+    for webroot in /var/www/nextcloud /var/www/html/nextcloud; do
+        [[ -d "$webroot" && ! -L "$webroot" ]] || continue
+        safe_rm_rf "$webroot"/{3rdparty,core,dist,lib,ocs,ocs-provider,resources,settings,updater}
+        rm -f "$webroot"/occ "$webroot"/.af-version "$webroot"/composer.{json,lock} "$webroot"/package{,-lock}.json
+        find "$webroot" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.html' \) -exec rm -f -- {} +
+    done
 fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
+    rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt "$NC_DB_OWNER_FILE"
 fi
 
 remove_lock "${PACKAGE_NAME}"

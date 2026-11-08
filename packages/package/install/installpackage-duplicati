@@ -18,6 +18,7 @@ else
 fi
 
 require_root
+validate_config_paths /etc/duplicati/duplicati.env
 
 PACKAGE_NAME="duplicati"
 APP_NAME="duplicati"
@@ -47,11 +48,61 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
 fi
 mkdir -p "${DATA_DIR}" "${CONFIG_DIR}"
 
+BACKUP_DIR="$(mktemp -d /tmp/af-duplicati-runtime-XXXXXX)"
+RUNTIME_PATHS=("$CONFIG_DIR" "$DATA_DIR" "$SERVICE_FILE" "/usr/bin/duplicati-server" "/usr/lib/duplicati" "/usr/share/duplicati" "/etc/default/duplicati")
+RUNTIME_HAD_PREVIOUS=0
+RUNTIME_WAS_ACTIVE=0
+RUNTIME_QUIESCE_STARTED=0
+RUNTIME_MUTATED=0
+if systemctl is-active --quiet duplicati.service 2>/dev/null; then RUNTIME_WAS_ACTIVE=1; fi
+if [[ -f "$SERVICE_FILE" || -f "${CONFIG_DIR}/duplicati.env" || -f "${DATA_DIR}/.af-version" || "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+    RUNTIME_HAD_PREVIOUS=1
+fi
+rollback_runtime() {
+    local status=$? runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 1 ]]; then
+        quiesce_services_for_rollback duplicati.service || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$BACKUP_DIR/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" -eq 1 ]]; then
+            if [[ "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
+                systemctl restart duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            fi
+        else
+            systemctl disable duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        fi
+    elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
+        systemctl restart duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "${TMP_DEB:-}" ]] || rm -f -- "$TMP_DEB"
+    if [[ "$restore_failed" == true ]]; then
+        [[ "$RUNTIME_MUTATED" -eq 0 ]] || status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $BACKUP_DIR"
+    else
+        rm -rf -- "$BACKUP_DIR" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+
 report_progress 45 "Resolving latest Duplicati release from GitHub..."
 RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest 2>/dev/null || true)"
 LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.tag_name // empty' || true)"
 if [[ -z "${LATEST_TAG}" ]]; then
-    LATEST_TAG="v2.0.8.1-2.0.8.1_beta_2024-05-07"
+    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        LATEST_TAG="v2.0.8.1-2.0.8.1_beta_2024-05-07"
+    else
+        print_error "Failed to discover latest GitHub release for duplicati/duplicati"
+        exit 1
+    fi
 fi
 
 ARCH="$(dpkg --print-architecture)"
@@ -73,26 +124,41 @@ fi
 
 report_progress 65 "Downloading Duplicati package (${LATEST_TAG})..."
 TMP_DEB="$(mktemp --suffix=.deb)"
-wget -qO "${TMP_DEB}" "${DEB_URL}" >> "$LOGFILE" 2>&1 || curl -fsSL -o "${TMP_DEB}" "${DEB_URL}" >> "$LOGFILE" 2>&1
+download_file "${DEB_URL}" "${TMP_DEB}" >> "$LOGFILE" 2>&1
 
 report_progress 75 "Installing Duplicati deb package..."
-dpkg -i "${TMP_DEB}" >> "$LOGFILE" 2>&1 || {
-    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >> "$LOGFILE" 2>&1
-}
+if [[ "$RUNTIME_HAD_PREVIOUS" -eq 1 ]]; then
+    RUNTIME_QUIESCE_STARTED=1
+    stop_systemd_unit duplicati.service
+fi
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$BACKUP_DIR/$runtime_index"
+    fi
+done
+RUNTIME_MUTATED=1
+install_deb_verified "$TMP_DEB" duplicati
 rm -f "${TMP_DEB}"
 
-echo "${LATEST_TAG#v}" > "${DATA_DIR}/.af-version"
-
-if [[ ! -f "${CONFIG_DIR}/duplicati.env" ]]; then
-    cat > "${CONFIG_DIR}/duplicati.env" <<EOF
-DUPLICATI_PASS=${ADMIN_PASS}
-DUPLICATI_PORT=${APP_PORT}
-EOF
-else
-    sed -i "s|^DUPLICATI_PORT=.*|DUPLICATI_PORT=${APP_PORT}|" "${CONFIG_DIR}/duplicati.env" || true
+AF_SEED_PASS="$ADMIN_PASS" safe_config_python "${CONFIG_DIR}/duplicati.env" "$APP_PORT" <<'PYEOF'
+import shlex, sys
+with ManagedConfig(sys.argv[1]) as config:
+    retained = config.read_text() if config.metadata else ''
+    values = dict(line.split('=', 1) for line in retained.splitlines() if '=' in line)
+    password = values.get('DUPLICATI__WEBSERVICE_PASSWORD')
+    if password is None:
+        password = values.get('DUPLICATI_PASS', os.environ['AF_SEED_PASS'])
+    elif password.startswith(('"', "'")):
+        password = shlex.split(password)[0]
+    password = password.replace('\\', '\\\\').replace('"', '\\"')
+    config.write_text(f'DUPLICATI__WEBSERVICE_PASSWORD="{password}"\nDUPLICATI_PORT={sys.argv[2]}\n', 0o600)
+PYEOF
+if [[ -f /etc/default/duplicati ]]; then
+    validate_config_paths /etc/default/duplicati
+    chmod 600 /etc/default/duplicati
 fi
-chmod 600 "${CONFIG_DIR}/duplicati.env"
-chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
 
 SERVER_BIN="/usr/bin/duplicati-server"
 if [[ ! -x "${SERVER_BIN}" && -x "/usr/lib/duplicati/duplicati-server" ]]; then
@@ -112,7 +178,7 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
 EnvironmentFile=${CONFIG_DIR}/duplicati.env
-ExecStart=${SERVER_BIN} --webservice-port=${APP_PORT} --webservice-interface=any --webservice-password=\${DUPLICATI_PASS} --webservice-allowed-hostnames=* --server-datafolder=${DATA_DIR}
+ExecStart=${SERVER_BIN} --webservice-port=${APP_PORT} --webservice-interface=any --webservice-allowed-hostnames=* --server-datafolder=${DATA_DIR}
 Restart=on-failure
 RestartSec=5
 
@@ -122,7 +188,12 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now duplicati.service >> "$LOGFILE" 2>&1
+systemctl restart duplicati.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet duplicati.service
+wait_for_service_ready duplicati.service "$APP_PORT" "/"
 
+queue_app_version "${DATA_DIR}/.af-version" "$(dpkg-query -W -f='${Version}' duplicati)"
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

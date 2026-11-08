@@ -23,6 +23,11 @@ export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /etc/apt/keyrings/jellyfin.gpg /etc/jellyfin/network.xml
+PACKAGE_NAME="${PACKAGE_NAME:-jellyfin}"
+begin_state_transaction "jellyfin" "$APP_PORT" "/health" "/var/lib/jellyfin" "/etc/jellyfin" "/etc/apt/sources.list.d/jellyfin.list" "/etc/apt/sources.list.d/jellyfin.sources" "/etc/apt/keyrings/jellyfin.gpg" "/etc/systemd/system/jellyfin.service" "/usr/lib/jellyfin" "/usr/share/jellyfin" "/usr/bin/jellyfin"
+
+prepare_apt_package_transaction /var/lib/jellyfin/.af-version jellyfin jellyfin-server jellyfin-web
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Jellyfin..."
 
@@ -31,7 +36,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates
 
 report_progress 30 "Configuring official Jellyfin APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/jellyfin.gpg >> "$LOGFILE" 2>&1
+install_apt_signing_key https://repo.jellyfin.org/jellyfin_team.gpg.key /etc/apt/keyrings/jellyfin.gpg >> "$LOGFILE" 2>&1
 chmod a+r /etc/apt/keyrings/jellyfin.gpg
 
 # Detect Debian vs Ubuntu codename and distro ID
@@ -62,6 +67,7 @@ rm -f /etc/apt/sources.list.d/jellyfin.list
 report_progress 60 "Installing Jellyfin server..."
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jellyfin >> "$LOGFILE" 2>&1
+verify_deb_installed jellyfin
 
 report_progress 85 "Starting and enabling Jellyfin service..."
 
@@ -71,8 +77,14 @@ chown jellyfin:jellyfin /etc/jellyfin/network.xml
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now jellyfin >> "$LOGFILE" 2>&1
 systemctl restart jellyfin >> "$LOGFILE" 2>&1
+systemctl is-active --quiet jellyfin
+verify_systemd_service_active jellyfin
 seed_jellyfin_master_user ${APP_PORT}
 
+mkdir -p /var/lib/jellyfin
+VERSION_FILE=/var/lib/jellyfin/.af-version
+queue_app_version "$VERSION_FILE" "$(dpkg-query -W -f='${Version}' jellyfin-server)"
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Jellyfin installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

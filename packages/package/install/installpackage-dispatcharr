@@ -48,7 +48,7 @@ ACTIVE_UNITS=()
 SERVICE_FILES=("${SERVICE_FILE}" "${CELERY_SERVICE_FILE}" "${BEAT_SERVICE_FILE}")
 
 cleanup_dispatcharr() {
-    local status=$? service_file config_name
+    local status=$? service_file config_name restore_failed=false
     trap - ERR EXIT
     if [[ "${BASH_SUBSHELL}" -gt 0 ]]; then
         exit "${status}"
@@ -56,44 +56,57 @@ cleanup_dispatcharr() {
     set +e
     if [[ "${SUCCESS}" -ne 1 ]]; then
         if [[ "${SERVICES_STOPPED}" -eq 1 ]]; then
-            systemctl stop dispatcharr-celerybeat.service dispatcharr-celery.service dispatcharr.service >> "$LOGFILE" 2>&1
+            quiesce_services_for_rollback dispatcharr-celerybeat.service dispatcharr-celery.service dispatcharr.service || { restore_failed=true; exit 1; }
         fi
         if [[ "${APP_ACTIVATED}" -eq 1 ]]; then
-            mv -T "${INSTALL_DIR}" "${BACKUP_DIR}/failed-app"
+            mv -T "${INSTALL_DIR}" "${BACKUP_DIR}/failed-app" || restore_failed=true
         fi
         if [[ "${APP_MOVED}" -eq 1 ]]; then
-            mv -T "${BACKUP_DIR}/app" "${INSTALL_DIR}"
+            mv -T "${BACKUP_DIR}/app" "${INSTALL_DIR}" || restore_failed=true
         fi
         if [[ "${CONFIG_CHANGED}" -eq 1 ]]; then
             for config_name in dispatcharr.env db_pass secret_key; do
                 if [[ -f "${BACKUP_DIR}/${config_name}" ]]; then
-                    cp -a -- "${BACKUP_DIR}/${config_name}" "${CONFIG_DIR}/${config_name}"
+                    safe_restore_path_from_backup "${BACKUP_DIR}/${config_name}" "${CONFIG_DIR}/${config_name}" || restore_failed=true
                 else
-                    rm -f -- "${CONFIG_DIR}/${config_name}"
+                    rm -f -- "${CONFIG_DIR}/${config_name}" || restore_failed=true
                 fi
             done
             for service_file in "${SERVICE_FILES[@]}"; do
                 if [[ -f "${BACKUP_DIR}/$(basename "${service_file}")" ]]; then
-                    cp -a -- "${BACKUP_DIR}/$(basename "${service_file}")" "${service_file}"
+                    safe_restore_path_from_backup "${BACKUP_DIR}/$(basename "${service_file}")" "${service_file}" || restore_failed=true
                 else
-                    systemctl disable "$(basename "${service_file}")" >> "$LOGFILE" 2>&1
-                    rm -f -- "${service_file}"
+                    systemctl disable "$(basename "${service_file}")" >> "$LOGFILE" 2>&1 || restore_failed=true
+                    rm -f -- "${service_file}" || restore_failed=true
                 fi
             done
-            systemctl daemon-reload >> "$LOGFILE" 2>&1
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
-        if [[ -s "${BACKUP_DIR}/db.dump" && "${APP_ACTIVATED}" -eq 1 ]]; then
-            su - postgres -c 'dropdb --if-exists --force dispatcharr && createdb --owner=dispatcharr dispatcharr && pg_restore --clean --if-exists --no-owner --role=dispatcharr --dbname=dispatcharr' < "${BACKUP_DIR}/db.dump" >> "$LOGFILE" 2>&1 || log_error "Database rollback failed; snapshot retained in ${BACKUP_DIR}/db.dump"
+        if [[ -n "$BACKUP_DIR" && -f "$BACKUP_DIR/.af-database-ready" ]]; then
+            if ! restore_postgresql_database "$BACKUP_DIR" dispatcharr; then
+                print_error "Dispatcharr database recovery failed; backups retained in $BACKUP_DIR"
+    exit "$status"
+            fi
+            if [[ -d "$BACKUP_DIR/app-state" ]]; then
+                if ! safe_restore_path_from_backup "$BACKUP_DIR/app-state" "$DATA_DIR"; then
+                    print_error "Dispatcharr data recovery failed; backups retained in $BACKUP_DIR"
+    exit "$status"
+                fi
+            fi
         fi
-        if [[ "${SERVICES_STOPPED}" -eq 1 && "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
-            systemctl start "${ACTIVE_UNITS[@]}" >> "$LOGFILE" 2>&1 || log_error "Previous Dispatcharr services could not be restarted. See ${LOGFILE}."
+        if [[ "$restore_failed" == false && "${SERVICES_STOPPED}" -eq 1 && "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
+            systemctl start "${ACTIVE_UNITS[@]}" >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
     fi
     if [[ -n "${BUILD_DIR}" && -d "${BUILD_DIR}" ]]; then
-        rm -rf -- "${BUILD_DIR}"
+        rm -rf -- "${BUILD_DIR}" || restore_failed=true
     fi
     if [[ -n "${ENV_FILE_TMP}" ]]; then
-        rm -f -- "${ENV_FILE_TMP}"
+        rm -f -- "${ENV_FILE_TMP}" || restore_failed=true
+    fi
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
     fi
     exit "${status}"
 }
@@ -182,15 +195,15 @@ prepare_dispatcharr_data() {
 
 DATA_MARKER="${DATA_DIR}/.aetherflow-data-owner"
 validate_dispatcharr_data
+validate_config_paths "${CONFIG_DIR}/dispatcharr.env"
 if [[ -z "${APP_PORT_SUPPLIED}" && -f "${CONFIG_DIR}/dispatcharr.env" && ! -L "${CONFIG_DIR}/dispatcharr.env" ]]; then
-    retained_port="$(python3 - "${CONFIG_DIR}/dispatcharr.env" <<'PYEOF'
-from pathlib import Path
+    retained_port="$(safe_config_python "${CONFIG_DIR}/dispatcharr.env" <<'PYEOF'
 import re
 import shlex
 import sys
 
 port = ""
-for line in Path(sys.argv[1]).read_text().splitlines():
+for line in safe_read_text(sys.argv[1]).splitlines():
     match = re.match(r"\s*(?:export\s+)?DISPATCHARR_PORT=(.*)", line)
     if match:
         values = shlex.split(match.group(1), comments=True)
@@ -236,10 +249,10 @@ fi
 report_progress 30 "Provisioning Node.js runtime for web frontend build..."
 ensure_node 22
 
-# Dispatcharr v0.33.0 (Django 6) requires Python 3.13 or newer.
-PYTHON_BIN="$(command -v python3.13 || command -v python3)"
-if ! "${PYTHON_BIN}" -c 'import sys; sys.exit(sys.version_info < (3, 13))'; then
-    log_error "Dispatcharr v0.33.0 requires Python 3.13 or newer. Install it before retrying."
+# Dispatcharr prefers Python 3.13 or newer, falling back to Python >= 3.11 on Debian 12 / Ubuntu 24.04 LTS.
+PYTHON_BIN="$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"
+if ! "${PYTHON_BIN}" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    log_error "Dispatcharr requires Python 3.11 or newer. Install it before retrying."
     exit 1
 fi
 
@@ -300,8 +313,18 @@ printf '%s\n' "${DB_PASS}" > "${DB_PASS_FILE}"
 chown root:root "${DB_PASS_FILE}"
 chmod 600 "${DB_PASS_FILE}"
 
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='dispatcharr'\" | grep -q 1 || psql -c \"CREATE USER dispatcharr WITH PASSWORD '${DB_PASS}';\"" >> "$LOGFILE" 2>&1
-su - postgres -c "psql -c \"ALTER USER dispatcharr WITH PASSWORD '${DB_PASS}';\"" >> "$LOGFILE" 2>&1
+su - postgres -c 'psql -v ON_ERROR_STOP=1' >> "$LOGFILE" 2>&1 <<EOF
+BEGIN;
+DO \$aetherflow\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dispatcharr') THEN
+        CREATE USER dispatcharr;
+    END IF;
+END;
+\$aetherflow\$;
+ALTER USER dispatcharr WITH PASSWORD '${DB_PASS}';
+COMMIT;
+EOF
 su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='dispatcharr'\" | grep -q 1 || psql -c \"CREATE DATABASE dispatcharr OWNER dispatcharr;\"" >> "$LOGFILE" 2>&1
 su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE dispatcharr TO dispatcharr;\"" >> "$LOGFILE" 2>&1
 su - postgres -c "psql -c \"ALTER DATABASE dispatcharr OWNER TO dispatcharr;\"" >> "$LOGFILE" 2>&1
@@ -320,7 +343,14 @@ chmod 600 "${SECRET_FILE}"
 
 report_progress 45 "Fetching ${APP_NAME} release from GitHub..."
 LATEST_TAG="${AF_TARGET_VERSION:-$(curl -fsSL https://api.github.com/repos/Dispatcharr/Dispatcharr/releases/latest 2>/dev/null | jq -r '.tag_name // empty' || true)}"
-LATEST_TAG="${LATEST_TAG:-v0.33.0}"
+if [[ -z "${LATEST_TAG}" ]]; then
+    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
+        LATEST_TAG="v0.33.0"
+    else
+        print_error "Failed to discover latest GitHub release for Dispatcharr/Dispatcharr"
+        exit 1
+    fi
+fi
 [[ "${LATEST_TAG}" == v* ]] || LATEST_TAG="v${LATEST_TAG}"
 
 BUILD_DIR="$(mktemp -d "${INSTALL_DIR}.af-build.XXXXXX")"
@@ -330,14 +360,18 @@ if [[ "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
     systemctl stop "${ACTIVE_UNITS[@]}" >> "$LOGFILE" 2>&1
 fi
 su - postgres -c 'pg_dump --format=custom dispatcharr' > "${BACKUP_DIR}/db.dump" 2>> "$LOGFILE"
+backup_postgresql_database "$BACKUP_DIR" dispatcharr
 prepare_dispatcharr_data
+if [[ -d "$DATA_DIR" ]]; then
+    cp -a -- "$DATA_DIR" "$BACKUP_DIR/app-state"
+fi
 if [[ -e "${INSTALL_DIR}" ]]; then
     mv -T "${INSTALL_DIR}" "${BACKUP_DIR}/app"
     APP_MOVED=1
 fi
 mv -T "${BUILD_DIR}" "${INSTALL_DIR}"
 APP_ACTIVATED=1
-chown -R root:root "${INSTALL_DIR}"
+chown -hRP root:root "${INSTALL_DIR}"
 chmod -R go-w "${INSTALL_DIR}"
 chmod 755 "${INSTALL_DIR}"
 for relative in logo_cache media; do
@@ -379,15 +413,15 @@ DISPATCHARR_PLUGINS_DIR=/data/plugins
 DATA_DIR=${DATA_DIR}
 PYTHONUNBUFFERED=1
 EOF
-python3 - "${CONFIG_DIR}/dispatcharr.env" "${ENV_FILE_TMP}" <<'PYEOF'
+safe_config_python "${CONFIG_DIR}/dispatcharr.env" "${ENV_FILE_TMP}" <<'PYEOF'
 from pathlib import Path
 import re
 import sys
 
 existing, candidate = map(Path, sys.argv[1:])
-defaults = dict(line.split("=", 1) for line in candidate.read_text().splitlines())
+defaults = dict(line.split("=", 1) for line in safe_read_text(candidate).splitlines())
 required = {"POSTGRES_PASSWORD", "DJANGO_SECRET_KEY", "DISPATCHARR_PORT", "DISPATCHARR_LOG_DIR", "BACKUP_ROOT", "LOGOS_DIR", "UPLOADS_DIR", "PLUGINS_DIR", "DISPATCHARR_PLUGINS_DIR", "DATA_DIR"}
-lines = existing.read_text().splitlines(keepends=True) if existing.exists() else []
+lines = safe_read_text(existing).splitlines(keepends=True)
 seen = set()
 merged = []
 for line in lines:
@@ -405,11 +439,10 @@ for line in lines:
 if merged and not merged[-1].endswith("\n"):
     merged[-1] += "\n"
 merged.extend(f"{key}={value}\n" for key, value in defaults.items() if key not in seen)
-candidate.write_text("".join(merged))
+safe_write_text(existing, "".join(merged), 0o640)
 PYEOF
-chmod 640 "${ENV_FILE_TMP}"
-chown "root:${APP_USER}" "${ENV_FILE_TMP}"
-mv -f -- "${ENV_FILE_TMP}" "${CONFIG_DIR}/dispatcharr.env"
+chown "root:${APP_USER}" "${CONFIG_DIR}/dispatcharr.env"
+rm -f -- "${ENV_FILE_TMP}"
 ENV_FILE_TMP=""
 ln -sfn "${CONFIG_DIR}/dispatcharr.env" "${INSTALL_DIR}/.env"
 
@@ -618,7 +651,7 @@ async def application(scope, receive, send):
 EOF
 chmod 644 "${INSTALL_DIR}/aetherflow_asgi.py"
 
-chown -R root:root "${INSTALL_DIR}/env"
+chown -hRP root:root "${INSTALL_DIR}/env"
 chmod -R a+rX,go-w "${INSTALL_DIR}"
 chmod 755 "${INSTALL_DIR}" "${INSTALL_DIR}/env"
 
@@ -632,7 +665,8 @@ if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
         cd "${INSTALL_DIR}"
         "${INSTALL_DIR}/env/bin/python" manage.py collectstatic --noinput --clear
     ) >> "$LOGFILE" 2>&1
-    AF_ADMIN_USER="${ADMIN_USER}" AF_ADMIN_PASS="${ADMIN_PASS}" AF_ADMIN_EMAIL="${ADMIN_EMAIL}" \
+    AF_ADMIN_USER="${ADMIN_USER}" AF_ADMIN_PASS="${AF_CONFIG_PASS:-$ADMIN_PASS}" AF_ADMIN_EMAIL="${ADMIN_EMAIL}" \
+        AF_KEEP_EXISTING_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-}" \
         su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
 import os
 from django.contrib.auth import get_user_model
@@ -641,17 +675,20 @@ from django.db import transaction
 User = get_user_model()
 with transaction.atomic():
     u, created = User.objects.get_or_create(username=os.environ["AF_ADMIN_USER"])
-    u.email = os.environ["AF_ADMIN_EMAIL"]
-    u.user_level = 10
-    u.is_staff = True
-    u.is_superuser = True
-    u.is_active = True
-    u.set_password(os.environ["AF_ADMIN_PASS"])
-    u.save()
+    rotate = bool(os.environ.get("AF_CONFIG_PASS")) and os.environ.get("AF_KEEP_EXISTING_SECRETS", "1") != "1"
+    if created or rotate:
+        u.email = os.environ["AF_ADMIN_EMAIL"]
+        u.user_level = 10
+        u.is_staff = True
+        u.is_superuser = True
+        u.is_active = True
+        u.set_password(os.environ["AF_ADMIN_PASS"])
+        u.save()
 PYEOF
 fi
 
 report_progress 90 "Writing systemd service units for ${APP_NAME}..."
+DISPATCHARR_BIND_HOST="$(retained_bind_address "${SERVICE_FILE}" 'daphne\s+-b\s+([^\s"\x27]+)')"
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Dispatcharr IPTV & Stream Proxy Server (Daphne ASGI)
@@ -666,7 +703,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="PYTHONPATH=${INSTALL_DIR}"
 Environment="PATH=${INSTALL_DIR}/env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EnvironmentFile=${CONFIG_DIR}/dispatcharr.env
-ExecStart=/bin/sh -ec 'exec ${INSTALL_DIR}/env/bin/daphne -b 0.0.0.0 -p "\$\${DISPATCHARR_PORT:-9191}" aetherflow_asgi:application'
+ExecStart=/bin/sh -ec 'exec ${INSTALL_DIR}/env/bin/daphne -b ${DISPATCHARR_BIND_HOST} -p "\$\${DISPATCHARR_PORT:-9191}" aetherflow_asgi:application'
 Restart=on-failure
 RestartSec=5
 # Open live streams keep worker threads busy; don't wait 90s on restart.
@@ -722,8 +759,12 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now dispatcharr.service dispatcharr-celery.service dispatcharr-celerybeat.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet dispatcharr.service
+systemctl is-active --quiet dispatcharr-celery.service
+systemctl is-active --quiet dispatcharr-celerybeat.service
 
-echo "${LATEST_TAG#v}" > "${INSTALL_DIR}/.af-version"
+queue_app_version "${INSTALL_DIR}/.af-version" "${LATEST_TAG#v}"
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"

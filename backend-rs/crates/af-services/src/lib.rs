@@ -359,6 +359,8 @@ pub struct AppBlueprint {
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub category: String,
     pub default_port: i32,
+    #[serde(default = "default_true_bool")]
+    pub supports_dynamic_port: bool,
     #[serde(default = "default_port_range")]
     pub fallback_port_range: [i32; 2],
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -379,6 +381,10 @@ pub struct AppBlueprint {
     pub is_network_app: bool,
     #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+fn default_true_bool() -> bool {
+    true
 }
 
 fn default_port_range() -> [i32; 2] {
@@ -466,6 +472,8 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     let pkgs = get_package_catalog().ok()?;
     let p = pkgs.into_iter().find(|x| x.name == app_name)?;
     let (mutator_type, config_file_path, port_config_key) = default_blueprint_mutator_meta(&p.name);
+    let supports_dynamic_port = p.default_port > 0
+        && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
     Some(AppBlueprint {
         app_name: p.name.clone(),
         service_name: if p.service_name.is_empty() {
@@ -475,7 +483,12 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         },
         category: p.category,
         default_port: p.default_port,
-        fallback_port_range: [17000, 19999],
+        supports_dynamic_port,
+        fallback_port_range: if supports_dynamic_port {
+            [17000, 19999]
+        } else {
+            [0, 0]
+        },
         port_env_var: if p.name == "maintainerr" {
             "UI_PORT".to_string()
         } else {
@@ -579,10 +592,15 @@ pub(crate) fn resolve_app_internal_domain(app_name: &str) -> String {
 }
 
 fn package_is_physically_installed(app: &str) -> bool {
+    let clean = resolve_canonical_service_id(app);
     get_package_catalog()
         .ok()
-        .and_then(|pkgs| pkgs.into_iter().find(|p| p.name == app))
+        .and_then(|pkgs| pkgs.into_iter().find(|p| p.name == clean || p.name == app))
         .is_some_and(|p| !p.lock_file.is_empty() && resolve_filesystem_path(&p.lock_file).is_file())
+}
+
+pub fn is_package_installed(app: &str) -> bool {
+    package_is_physically_installed(app)
 }
 
 pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
@@ -1094,9 +1112,37 @@ fn resolve_service_units_with_catalog(target: &str, catalog: &[Package]) -> Vec<
             }
             vec!["qbittorrent".to_string()]
         }
-        "paperless" | "paperless-ngx" | "paperless-webserver" => {
-            vec!["paperless-webserver".to_string()]
-        }
+        "paperless" | "paperless-ngx" | "paperless-webserver" => vec![
+            "paperless-webserver".to_string(),
+            "paperless-worker".to_string(),
+            "paperless-scheduler".to_string(),
+        ],
+        "dispatcharr" => vec![
+            "dispatcharr".to_string(),
+            "dispatcharr-celery".to_string(),
+            "dispatcharr-celerybeat".to_string(),
+        ],
+        "novnc" => vec!["novnc".to_string(), "novnc-xvnc".to_string()],
+        "xrdp" => vec!["xrdp".to_string(), "xrdp-sesman".to_string()],
+        "prometheus" => vec!["prometheus".to_string(), "node_exporter".to_string()],
+        "rclone" => vec!["rclone".to_string(), "rclone-vfs".to_string()],
+        "scrutiny" => vec![
+            "scrutiny".to_string(),
+            "scrutiny-collector.timer".to_string(),
+            "scrutiny-collector".to_string(),
+        ],
+        "recyclarr" => vec!["recyclarr.timer".to_string(), "recyclarr".to_string()],
+        "piped" => vec![
+            "af-piped".to_string(),
+            "af-piped-api".to_string(),
+            "af-piped-proxy".to_string(),
+        ],
+        "invidious" => vec![
+            "af-invidious".to_string(),
+            "af-invidious-companion".to_string(),
+        ],
+        "maintainerr" => vec!["af-maintainerr".to_string()],
+        "palate" => vec!["af-palate".to_string()],
         "wireguard" => vec!["wg-quick@wg0".to_string()],
         "tailscale" => vec!["tailscaled".to_string()],
         "mysql" | "mariadb" => vec!["mariadb".to_string()],
@@ -2882,10 +2928,17 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixListener;
 
-        let sock_path = std::env::temp_dir().join(format!(
-            "af-services-runner-test-{}.sock",
-            std::process::id()
-        ));
+        let sock_name = format!("af-services-runner-test-{}.sock", std::process::id());
+        let candidate = std::env::var_os("TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(&sock_name);
+        let sock_path = if candidate.as_os_str().len() < 95 {
+            candidate
+        } else {
+            std::path::PathBuf::from("/tmp").join(sock_name)
+        };
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 

@@ -3,6 +3,7 @@
 # Port: 7474
 
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -49,35 +50,40 @@ AB_URL="https://github.com/autobrr/autobrr/releases/download/v${AB_VERSION}/auto
 
 report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."
 TMP_TAR=$(mktemp /tmp/autobrr-XXXXXX.tar.gz)
-curl -fsSL "$AB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$AB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 TMP_DIR="$(mktemp -d /tmp/autobrr-extract-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl >> "$LOGFILE" 2>&1
-systemctl stop autobrr >> "$LOGFILE" 2>&1 || true
-install_binary_atomic "$TMP_DIR/autobrr" /usr/local/bin/autobrr
-install_binary_atomic "$TMP_DIR/autobrrctl" /usr/local/bin/autobrrctl
+chmod 755 "$TMP_DIR/autobrr" "$TMP_DIR/autobrrctl"
+stage_app_archive "$TMP_DIR" /usr/local/bin/autobrr autobrr /var/lib/autobrr "$PACKAGE_NAME" "." /usr/local/bin/autobrrctl "" binary
+install_binary_atomic "$AF_ARCHIVE_BACKUP/release/prepared/autobrrctl" /usr/local/bin/autobrrctl
+rm -rf "$TMP_DIR"
 rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/autobrr /usr/local/bin/autobrrctl
-printf '%s\n' "${AB_VERSION#v}" > /var/lib/autobrr/.af-version
+queue_app_version /var/lib/autobrr/.af-version "${AB_VERSION#v}"
 
 if [[ ! -f /var/lib/autobrr/config.toml ]]; then
     SESSION_SECRET="$(openssl rand -hex 16)"
     cat <<EOF > /var/lib/autobrr/config.toml
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = ${APP_PORT}
 logLevel = "INFO"
 sessionSecret = "${SESSION_SECRET}"
 EOF
 fi
 
-systemctl stop autobrr >> "$LOGFILE" 2>&1 || true
-printf '%s\n' "${MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" >> "$LOGFILE" 2>&1 \
-    || printf '%s\n' "${MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr change-password "${MASTER_USER}" >> "$LOGFILE" 2>&1 \
-    || true
+stop_systemd_unit autobrr
+if [[ ! -s /var/lib/autobrr/autobrr.db ]]; then
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" >> "$LOGFILE" 2>&1
+elif [[ -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != "1" ]]; then
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" >> "$LOGFILE" 2>&1 \
+        || printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr change-password "${MASTER_USER}" >> "$LOGFILE" 2>&1
+fi
 
 set_config_value "/var/lib/autobrr/config.toml" ini "port" "$APP_PORT" ""
 
-chown -R autobrr:autobrr /var/lib/autobrr
+chown -hRP autobrr:autobrr /var/lib/autobrr
+chmod 600 /var/lib/autobrr/config.toml
 
 report_progress 85 "Configuring and starting autobrr.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/autobrr.service
@@ -101,7 +107,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now autobrr >> "$LOGFILE" 2>&1
 systemctl restart autobrr >> "$LOGFILE" 2>&1
+systemctl is-active --quiet autobrr
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/healthz"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Autobrr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

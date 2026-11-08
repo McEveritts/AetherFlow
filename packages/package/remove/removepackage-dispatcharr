@@ -71,7 +71,7 @@ purge_systemd_unit "dispatcharr-celerybeat" "dispatcharr-celery" "dispatcharr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 55 "Removing ${APP_NAME} runtime files..."
-rm -rf "${INSTALL_DIR}"
+safe_rm_rf "${INSTALL_DIR}"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and PostgreSQL database..."
@@ -80,7 +80,7 @@ if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
     su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP USER IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
     if [[ "${DATA_OWNED}" -eq 1 ]]; then
-        rm -rf -- "${DATA_DIR}"
+        safe_rm_rf "/var/lib/dispatcharr"
         [[ ! -e "${DATA_DIR}" && ! -L "${DATA_DIR}" ]]
     fi
     if [[ "${COMPATIBILITY_OWNED}" -eq 1 ]]; then
@@ -89,7 +89,7 @@ if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     elif [[ -e /data || -L /data ]]; then
         log_info "Unowned /data path retained; no shared contents were adopted or purged."
     fi
-    rm -rf "${CONFIG_DIR}"
+    safe_rm_rf "${CONFIG_DIR}"
     [[ ! -e "${CONFIG_DIR}" && ! -L "${CONFIG_DIR}" ]]
 else
     log_info "Retaining Dispatcharr data, configuration, database, account and compatibility path; legacy ownership is not inferred."

@@ -20,9 +20,44 @@ PACKAGE_NAME="nextcloud"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8088}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
+mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+validate_config_paths /var/www/nextcloud/config/config.php
+EXISTING_INSTALL=0
+NC_DB_CONFIG=(mysql nextcloud localhost "" "" /var/www/nextcloud/data)
+if [[ -f /var/www/nextcloud/config/config.php ]]; then
+    EXISTING_INSTALL=1
+    NC_RETAINED_DATABASE="$(read_app_database_config nextcloud /var/www/nextcloud/config/config.php)" || exit 1
+    mapfile -t NC_DB_CONFIG <<< "$NC_RETAINED_DATABASE"
+elif [[ "${AF_PACKAGE_ACTION:-install}" == update ]]; then
+    print_error "Existing Nextcloud configuration is missing; refusing to reinitialize its database"
+    exit 1
+fi
+NC_DB_TYPE="${NC_DB_CONFIG[0]}"
+NC_DB_NAME="${NC_DB_CONFIG[1]}"
+NC_DB_HOST="${NC_DB_CONFIG[2]}"
+NC_DB_USER="${NC_DB_CONFIG[3]}"
+NC_DB_PASSWORD="${NC_DB_CONFIG[4]}"
+NC_DB_DATA="${NC_DB_CONFIG[5]}"
+NC_DB_OWNER_FILE="/opt/AetherFlow/logs/nextcloud_database_owner.json"
+NC_SQLITE_PATH=""
+if [[ "$NC_DB_TYPE" == sqlite || "$NC_DB_TYPE" == sqlite3 ]]; then
+    for database_path in "$NC_DB_DATA/$NC_DB_NAME.db" "$NC_DB_DATA/owncloud.db"; do
+        [[ -e "$database_path" || -L "$database_path" ]] || continue
+        [[ -z "$NC_SQLITE_PATH" || "$NC_SQLITE_PATH" == "$database_path" ]] || { print_error "Ambiguous Nextcloud SQLite database"; exit 1; }
+        validate_config_paths "$database_path" "${database_path}-wal" "${database_path}-shm" || exit 1
+        NC_SQLITE_PATH="$database_path"
+    done
+    [[ -n "$NC_SQLITE_PATH" ]] || { print_error "Nextcloud SQLite database is missing"; exit 1; }
+fi
+validate_config_paths /opt/AetherFlow/logs/nextcloud_credentials.txt
+validate_config_paths "$NC_DB_OWNER_FILE"
+install -d -m 0700 /opt/AetherFlow/logs
+if [[ "$EXISTING_INSTALL" == 0 && -e "$NC_DB_OWNER_FILE" ]]; then
+    print_error "Nextcloud database ownership exists without config.php; restore its configuration before installing"
+    exit 1
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Apache, MariaDB, and PHP extensions for Nextcloud..."
 
@@ -36,62 +71,159 @@ systemctl enable --now mariadb >> "$LOGFILE" 2>&1
 systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 
 report_progress 30 "Provisioning MariaDB database for Nextcloud..."
-EXISTING_INSTALL=0
-if [[ -f /var/www/nextcloud/config/config.php ]]; then
-    EXISTING_INSTALL=1
-elif [[ "${AF_PACKAGE_ACTION:-install}" == update ]]; then
-    print_error "Existing Nextcloud configuration is missing; refusing to reinitialize its database"
-    exit 1
-fi
 ADMIN_USER="${MASTER_USER}"
 ADMIN_PASS="${MASTER_PASS}"
 
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
-if [[ "$(mysql -u root -Nse "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nextcloud';")" == nextcloud ]]; then
+if [[ -n "$(mysql -u root --host=localhost --protocol=SOCKET -Nse "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nextcloud';")" ]]; then
     print_error "Nextcloud database already exists without config.php; restore its configuration before installing"
     exit 1
 fi
-DB_PASS="$(openssl rand -hex 16)"
-mysql -u root <<EOF >> "$LOGFILE" 2>&1
-CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-CREATE USER IF NOT EXISTS 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
-ALTER USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';
-FLUSH PRIVILEGES;
-EOF
+if [[ -n "$(mysql -u root --host=localhost --protocol=SOCKET -Nse "SELECT User FROM mysql.user WHERE User='nextclouduser';")" ]]; then
+    print_error "Nextcloud database account already exists without config.php; refusing to adopt or reset it"
+    exit 1
 fi
+fi
+
+RUNTIME_BACKUP="$(mktemp -d /tmp/af-web-runtime-XXXXXX)"
+RUNTIME_PATHS=("/var/www/nextcloud" "/etc/apache2/sites-available/nextcloud.conf" "/etc/apache2/sites-enabled/nextcloud.conf" "/etc/apache2/conf-available/aetherflow-nextcloud-listen.conf" "/etc/apache2/conf-enabled/aetherflow-nextcloud-listen.conf" "/var/lib/nextcloud" "/opt/AetherFlow/logs/nextcloud_credentials.txt" "$NC_DB_OWNER_FILE")
+RUNTIME_CHANGED=false
+INSTALL_COMMITTED=false
+CREATED_FRESH_DB=false
+CREATED_FRESH_DB_USER=false
+BUILD_DIR=""
+APACHE_STOPPED=false
+rollback_web_runtime() {
+    local status="$?" runtime_index runtime_path restore_failed=false
+    trap - EXIT INT TERM
+    set +e
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
+        quiesce_services_for_rollback apache2 || { restore_failed=true; exit 1; }
+        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+        done
+        if [[ -f "$RUNTIME_BACKUP/database/.af-database-ready" ]]; then
+            if ! restore_configured_database "$RUNTIME_BACKUP/database" "$NC_DB_TYPE" "$NC_DB_NAME" "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_SQLITE_PATH"; then
+                print_error "Nextcloud database recovery failed; backups retained in $RUNTIME_BACKUP"
+                exit "$status"
+            fi
+        fi
+        if [[ "$EXISTING_INSTALL" -eq 1 && -f /var/www/nextcloud/occ ]]; then
+            sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1 || true
+            if [[ -f "$RUNTIME_BACKUP/0/config/config.php" ]]; then
+                safe_restore_path_from_backup "$RUNTIME_BACKUP/0/config/config.php" /var/www/nextcloud/config/config.php || restore_failed=true
+            fi
+        fi
+        [[ "$restore_failed" == false ]] && apache2ctl configtest >> "$LOGFILE" 2>&1 && systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$APACHE_STOPPED" == true ]]; then
+        systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$CREATED_FRESH_DB" == true ]]; then
+        mysql -u root --host=localhost --protocol=SOCKET -e 'DROP DATABASE IF EXISTS nextcloud;' >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "$CREATED_FRESH_DB_USER" == true ]]; then
+        mysql -u root --host=localhost --protocol=SOCKET -e "DROP USER IF EXISTS 'nextclouduser'@'localhost';" >> "$LOGFILE" 2>&1 || restore_failed=true
+    fi
+    [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
+    if [[ "$restore_failed" == true ]]; then
+        status=1
+        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    else
+        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+    fi
+    exit "$status"
+}
+trap rollback_web_runtime EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 report_progress 50 "Downloading and extracting latest Nextcloud Server..."
 BUILD_DIR="$(mktemp -d /var/www/.nextcloud-build.XXXXXX)"
 TMP_ZIP="$BUILD_DIR/nextcloud.zip"
-trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
-curl -fsSL "https://download.nextcloud.com/server/releases/latest.zip" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
-mkdir -p /var/www /var/lib/nextcloud/data
+download_file "https://download.nextcloud.com/server/releases/latest.zip" "$TMP_ZIP" >> "$LOGFILE" 2>&1
+mkdir -p /var/www
 unzip -qo "$TMP_ZIP" -d "$BUILD_DIR" >> "$LOGFILE" 2>&1
-if [[ "$EXISTING_INSTALL" == 1 ]]; then
+stop_systemd_unit apache2
+APACHE_STOPPED=true
+for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+    if [[ -e "$runtime_path" || -L "$runtime_path" ]]; then
+        cp -a -- "$runtime_path" "$RUNTIME_BACKUP/$runtime_index"
+    fi
+done
+RUNTIME_CHANGED=true
+mkdir -p /var/lib/nextcloud/data
+if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
+    if [[ -f /var/www/nextcloud/occ ]]; then
+        sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on >> "$LOGFILE" 2>&1
+    fi
+    if ! backup_configured_database "$RUNTIME_BACKUP/database" "$NC_DB_TYPE" "$NC_DB_NAME" "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_SQLITE_PATH" 2>> "$LOGFILE"; then
+        if [[ -f /var/www/nextcloud/occ ]]; then
+            sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1 || true
+        fi
+        print_error "Cannot back up Nextcloud database; refusing to migrate"
+        exit 1
+    fi
+fi
+if [[ "$EXISTING_INSTALL" == 0 ]]; then
+DB_PASS="$(openssl rand -hex 16)"
+mysql -u root --host=localhost --protocol=SOCKET -e 'CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;' >> "$LOGFILE" 2>&1
+CREATED_FRESH_DB=true
+mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+CREATE USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
+EOF
+CREATED_FRESH_DB_USER=true
+mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+nextcloud_database_ownership create "$NC_DB_OWNER_FILE" mysql nextcloud localhost nextclouduser "$DB_PASS" /var/lib/nextcloud/data
+fi
+
+if [[ "$EXISTING_INSTALL" == 1 && -f /var/www/nextcloud/occ ]]; then
     sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on >> "$LOGFILE" 2>&1
 fi
+for app_directory in /var/www/nextcloud/apps/*; do
+    [[ -d "$app_directory" && ! -L "$app_directory" ]] || continue
+    app_name="$(basename "$app_directory")"
+    if [[ ! -e "$BUILD_DIR/nextcloud/apps/$app_name" ]]; then
+        mkdir -p "$BUILD_DIR/nextcloud/apps"
+        cp -a -- "$app_directory" "$BUILD_DIR/nextcloud/apps/$app_name"
+    fi
+done
 replace_app_tree "$BUILD_DIR/nextcloud" /var/www/nextcloud config custom_apps themes data
 rm -rf "$BUILD_DIR"
 BUILD_DIR=""
 
-chown -R www-data:www-data /var/www/nextcloud /var/lib/nextcloud
+chown -hRP www-data:www-data /var/www/nextcloud /var/lib/nextcloud
 
 report_progress 75 "Running unattended Nextcloud initialization..."
 if [[ "$EXISTING_INSTALL" == 1 ]]; then
     sudo -u www-data php /var/www/nextcloud/occ upgrade >> "$LOGFILE" 2>&1
     sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1
 else
-sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
+(
+export AF_NEXTCLOUD_DB_PASS="$DB_PASS" AF_NEXTCLOUD_ADMIN_PASS="$ADMIN_PASS"
+sudo --preserve-env=AF_NEXTCLOUD_DB_PASS,AF_NEXTCLOUD_ADMIN_PASS -u www-data php -f /dev/stdin -- maintenance:install \
     --database "mysql" \
     --database-name "nextcloud" \
     --database-user "nextclouduser" \
-    --database-pass "${DB_PASS}" \
     --admin-user "${ADMIN_USER}" \
-    --admin-pass "${ADMIN_PASS}" \
-    --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1
+    --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1 <<'PHPEOF'
+<?php
+$_SERVER['argv'][0] = '/var/www/nextcloud/occ';
+$_SERVER['argv'][] = '--database-pass=' . getenv('AF_NEXTCLOUD_DB_PASS');
+$_SERVER['argv'][] = '--admin-pass=' . getenv('AF_NEXTCLOUD_ADMIN_PASS');
+$_SERVER['argc'] = count($_SERVER['argv']);
+$argv = $_SERVER['argv'];
+$argc = $_SERVER['argc'];
+require '/var/www/nextcloud/occ';
+PHPEOF
+)
 fi
 
+if [[ "$EXISTING_INSTALL" == 0 ]]; then
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
 BASE_DOMAIN="$(get_base_domain || true)"
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost" >> "$LOGFILE" 2>&1
@@ -104,26 +236,30 @@ if [[ -n "$BASE_DOMAIN" ]]; then
 fi
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1" >> "$LOGFILE" 2>&1
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1" >> "$LOGFILE" 2>&1
+fi
 
 NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"
 if [[ -n "$NC_VER" ]]; then
-    printf '%s\n' "$NC_VER" > /var/www/nextcloud/.af-version
+    queue_app_version /var/www/nextcloud/.af-version "$NC_VER"
 fi
 
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
-cat <<EOF > /opt/AetherFlow/logs/nextcloud_credentials.txt
+(umask 077; write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
 Nextcloud Admin User: ${ADMIN_USER}
 Nextcloud Admin Pass: ${ADMIN_PASS}
 Database Name: nextcloud
 Database User: nextclouduser
 Database Pass: ${DB_PASS}
 EOF
-chmod 600 /opt/AetherFlow/logs/nextcloud_credentials.txt
+)
 fi
 
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+if [[ -s /etc/apache2/sites-available/nextcloud.conf ]]; then
+    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/nextcloud.conf
+else
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
 Alias /nextcloud "/var/www/nextcloud/"
 
@@ -148,12 +284,20 @@ Alias /nextcloud "/var/www/nextcloud/"
     </Directory>
 </VirtualHost>
 EOF
+fi
 
 a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
 a2ensite nextcloud.conf >> "$LOGFILE" 2>&1
 apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl start apache2 >> "$LOGFILE" 2>&1
+APACHE_STOPPED=false
 systemctl reload apache2 >> "$LOGFILE" 2>&1
 
+systemctl is-active --quiet apache2
+wait_for_service_ready apache2 "$APP_PORT" /status.php
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
+RUNTIME_CHANGED=false
 report_progress 100 "Nextcloud installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

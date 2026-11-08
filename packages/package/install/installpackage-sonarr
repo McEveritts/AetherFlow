@@ -46,17 +46,17 @@ esac
 report_progress 35 "Downloading Sonarr v4 (${SONARR_ARCH})..."
 SONARR_VERSION="$(github_latest_tag "Sonarr/Sonarr" "4.0.12.2823")"
 TMP_TAR=$(mktemp /tmp/sonarr-XXXXXX.tar.gz)
-curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Sonarr to /opt/Sonarr..."
-tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/Sonarr" "Sonarr" "/var/lib/sonarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
 if [[ -n "$SONARR_VERSION" ]]; then
-    printf '%s\n' "${SONARR_VERSION#v}" > /opt/Sonarr/.af-version
+    queue_app_version /opt/Sonarr/.af-version "$(resolve_installed_binary_version /opt/Sonarr/Sonarr "${SONARR_VERSION#v}")"
 fi
 set_config_value "/var/lib/sonarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
-chown -R sonarr:sonarr /opt/Sonarr /var/lib/sonarr
+chown -hRP sonarr:sonarr /opt/Sonarr /var/lib/sonarr
 
 report_progress 85 "Configuring and starting sonarr.service..."
 cat <<'EOF' > /etc/systemd/system/sonarr.service
@@ -83,8 +83,11 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now sonarr >> "$LOGFILE" 2>&1
 systemctl restart sonarr >> "$LOGFILE" 2>&1
+READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "sonarr" ${APP_PORT} "v3"
 
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Sonarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

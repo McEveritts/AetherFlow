@@ -4,6 +4,7 @@
 # Installs noVNC HTML5 WebSocket VNC proxy paired with TigerVNC and XFCE4 desktop.
 #
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -18,6 +19,7 @@ else
 fi
 
 require_root
+validate_config_paths /var/lib/novnc/.vnc/passwd /var/lib/novnc/.vnc/xstartup
 
 PACKAGE_NAME="novnc"
 APP_NAME="novnc"
@@ -32,6 +34,10 @@ export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
+PACKAGE_NAME="${PACKAGE_NAME:-novnc}"
+begin_state_transaction "novnc-xvnc.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "/usr/local/bin/af-novnc-start" "/usr/local/bin/af-novnc-xvnc-start" "/etc/systemd/system/novnc-xvnc.service" "/etc/systemd/system/novnc.service" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/x11vnc" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
+
+prepare_apt_package_transaction /etc/novnc/.af-version novnc websockify tigervnc-standalone-server x11vnc
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
@@ -51,6 +57,7 @@ fi
 mkdir -p "${DATA_DIR}/.vnc" "${CONFIG_DIR}"
 
 report_progress 65 "Configuring VNC session credentials and XFCE4 startup..."
+validate_config_paths "${DATA_DIR}/.vnc/passwd" "${DATA_DIR}/.vnc/xstartup"
 if [[ ! -f "${DATA_DIR}/.vnc/passwd" ]]; then
     printf '%s\n' "${ADMIN_PASS}" | vncpasswd -f > "${DATA_DIR}/.vnc/passwd"
     chmod 600 "${DATA_DIR}/.vnc/passwd"
@@ -65,10 +72,10 @@ exec dbus-launch --exit-with-session startxfce4
 EOF
     chmod 755 "${DATA_DIR}/.vnc/xstartup"
 fi
-chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' novnc 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '1.5.0')"
-echo "${INSTALLED_VER}" > "${CONFIG_DIR}/.af-version"
+queue_app_version "${CONFIG_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 85 "Creating systemd units for TigerVNC (:1) and noVNC WebSocket proxy..."
 cat > "${XVNC_SERVICE_FILE}" <<EOF
@@ -103,7 +110,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:${APP_PORT} 127.0.0.1:${VNC_PORT}
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc ${AF_BIND_ADDRESS:-127.0.0.1}:${APP_PORT} 127.0.0.1:${VNC_PORT}
 Restart=on-failure
 RestartSec=5
 
@@ -114,6 +121,10 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now novnc-xvnc.service novnc.service >> "$LOGFILE" 2>&1
 
+systemctl restart novnc-xvnc.service novnc.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet novnc-xvnc.service novnc.service
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
 log_info "${PACKAGE_NAME} installed successfully"

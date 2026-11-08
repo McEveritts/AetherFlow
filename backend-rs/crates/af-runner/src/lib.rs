@@ -200,7 +200,7 @@ fn resolve_package_script_in_roots(
         return None;
     }
     let subdir = match action {
-        "install" => "install",
+        "install" | "reinstall" => "install",
         "remove" | "uninstall" => "remove",
         "update" => "update",
         _ => return None,
@@ -729,7 +729,7 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
 }
 
 async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
-    if !matches!(req.action.as_str(), "install" | "remove" | "update") {
+    if !matches!(req.action.as_str(), "install" | "reinstall" | "remove" | "update") {
         return (StatusCode::BAD_REQUEST, "disallowed package action").into_response();
     }
     if !SAFE_SCRIPT_NAME.is_match(&req.script_name) || !SAFE_SCRIPT_NAME.is_match(&req.package_id) {
@@ -746,6 +746,13 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
         return (
             StatusCode::BAD_REQUEST,
             "data purge is only valid for package removal",
+        )
+            .into_response();
+    }
+    if !script_matches_package_identity(&req.action, &req.package_id, &req.script_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "script_name does not match package_id and action",
         )
             .into_response();
     }
@@ -1731,8 +1738,28 @@ async fn acquire_package_maintenance_guard(
     job_id: &str,
     action: Option<&str>,
 ) -> anyhow::Result<af_release::ReleaseLockGuard> {
-    let conf = af_release::resolve_release_manager_conf_for_root(root);
-    let cfg = af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?;
+    let conf = af_release::resolve_release_manager_conf_for_root(root).filter(|conf_path| {
+        root.map(|explicit_root| conf_path.starts_with(explicit_root))
+            .unwrap_or(true)
+    });
+    let cfg = if let Some(explicit_root) = root {
+        let mut env_map: HashMap<String, String> = env::vars().collect();
+        env_map.remove("AETHERFLOW_RELEASE_ROOT");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            if let Some(val) = env_map.get(key) {
+                if !Path::new(val.trim()).starts_with(explicit_root) {
+                    env_map.remove(key);
+                }
+            }
+        }
+        af_release::ReleaseConfig::load_for_root_with_env(
+            Some(explicit_root),
+            conf.as_deref(),
+            &env_map,
+        )?
+    } else {
+        af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?
+    };
     let path = af_release::ensure_interoperable_maintenance_lock_file(&cfg)?;
     let owned_restore = !job_id.is_empty()
         && matches!(target, af_release::lifecycle::ReservationTarget::Service(_));
@@ -3031,7 +3058,7 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
     apply_package_sandbox_reserved(pkg_id, &guard).await
 }
 
-async fn apply_package_sandbox_reserved(
+pub(crate) async fn apply_package_sandbox_reserved(
     pkg_id: &str,
     guard: &af_release::ReleaseLockGuard,
 ) -> anyhow::Result<String> {
@@ -3066,7 +3093,19 @@ async fn apply_package_sandbox_reserved(
     let systemd_root_override = env::var("AETHERFLOW_SYSTEMD_ROOT")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            env::var("AETHERFLOW_INSTALL_ROOT")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != "/")
+                .map(|root| {
+                    Path::new(&root)
+                        .join("etc/systemd/system")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+        });
 
     // 1. If systemd root override is set (or on Linux when writing drop-ins directly), write drop-in files
     if let Some(ref sys_root) = systemd_root_override {
@@ -3594,6 +3633,14 @@ pub fn normalize_runner_app_name(app_name: &str) -> String {
         "calibreweb" => "calibre-web".to_string(),
         "grafana-server" => "grafana".to_string(),
         "uptimekuma" => "uptime-kuma".to_string(),
+        "adguard-home" => "adguardhome".to_string(),
+        "pyload-ng" => "pyload".to_string(),
+        "af-maintainerr" => "maintainerr".to_string(),
+        "af-palate" => "palate".to_string(),
+        "af-mcvnc" => "mcvnc".to_string(),
+        "af-piped" => "piped".to_string(),
+        "af-invidious" => "invidious".to_string(),
+        "home-assistant@homeassistant" => "homeassistant".to_string(),
         _ => clean,
     }
 }
@@ -4178,6 +4225,24 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "ombi" => {
+            if let Some(content) = read_runner_config_text("/etc/systemd/system/ombi.service") {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            for raw_path in &[
+                "/var/lib/ombi/database.json",
+                "/etc/Ombi/database.json",
+                "/var/lib/ombi/appsettings.json",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (_, port) = extract_runner_json_key_and_port(&content);
+                    if port > 0 && meta.configured_port <= 0 {
+                        meta.configured_port = port;
+                    }
+                }
+            }
             let db_paths = [
                 "/var/lib/ombi/OmbiSettings.db",
                 "/etc/Ombi/OmbiSettings.db",
@@ -4269,8 +4334,17 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "audiobookshelf" => {
+            if let Some(content) =
+                read_runner_config_text("/etc/systemd/system/audiobookshelf.service")
+            {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
             let env_paths = [
                 "/etc/default/audiobookshelf",
+                "/var/lib/audiobookshelf/config.env",
                 "/var/lib/audiobookshelf/config/.env",
             ];
             for raw_path in &env_paths {
@@ -4434,7 +4508,10 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
 
         "requestrr" => {
             let candidates = [
+                "/var/lib/requestrr/config/settings.json",
+                "/opt/requestrr/config/settings.json",
                 "/var/lib/requestrr/settings.json",
+                "/opt/requestrr/settings.json",
                 "/opt/requestrr/Settings/settings.json",
             ];
             for raw_path in &candidates {
@@ -4451,13 +4528,33 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "seedcross" => {
+            for raw_path in &[
+                "/opt/seedcross/start-seedcross.sh",
+                "/etc/systemd/system/seedcross.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
             let candidates = [
                 "/var/lib/seedcross/.env",
                 "/opt/seedcross/.env",
                 "/etc/seedcross/seedcross.env",
+                "/etc/seedcross/config.json",
             ];
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
+                    let (json_key, json_port) = extract_runner_json_key_and_port(&content);
+                    if meta.api_key.is_empty() && !json_key.is_empty() {
+                        meta.api_key = json_key;
+                    }
+                    if meta.configured_port <= 0 && json_port > 0 {
+                        meta.configured_port = json_port;
+                    }
                     if meta.api_key.is_empty() {
                         meta.api_key = extract_runner_ini_value(
                             &content,
@@ -4589,17 +4686,30 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "filebrowser" => {
-            let candidates = [
-                "/etc/filebrowser/config.json",
-                "/var/lib/filebrowser/filebrowser.json",
-                "/var/lib/filebrowser/.filebrowser.json",
-            ];
-            for raw_path in &candidates {
-                if let Some(content) = read_runner_config_text(raw_path) {
-                    let (_, port) = extract_runner_json_key_and_port(&content);
-                    if port > 0 {
-                        meta.configured_port = port;
-                        break;
+            if let Some(content) =
+                read_runner_config_text("/etc/systemd/system/filebrowser.service")
+            {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                let candidates = [
+                    "/etc/filebrowser/filebrowser.json",
+                    "/etc/filebrowser/config.json",
+                    "/var/lib/filebrowser/filebrowser.json",
+                    "/var/lib/filebrowser/.filebrowser.json",
+                    "/etc/filebrowser/.filebrowser.json",
+                    "/opt/filebrowser/filebrowser.json",
+                ];
+                for raw_path in &candidates {
+                    if let Some(content) = read_runner_config_text(raw_path) {
+                        let (_, port) = extract_runner_json_key_and_port(&content);
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
                     }
                 }
             }
@@ -4649,7 +4759,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
-        "calibre-web" => {
+        "calibre-web" | "calibreweb" => {
             let db_paths = ["/var/lib/calibre-web/app.db", "/opt/calibre-web/app.db"];
             for raw_path in &db_paths {
                 let port_str = query_runner_sqlite_single_string(
@@ -4681,13 +4791,19 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "prometheus" => {
-            let candidates = ["/etc/default/prometheus", "/etc/prometheus/prometheus.yml"];
+            let candidates = [
+                "/etc/systemd/system/prometheus.service",
+                "/etc/default/prometheus",
+                "/etc/sysconfig/prometheus",
+                "/etc/prometheus/prometheus.yml",
+            ];
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     let port = parse_valid_runner_port(&extract_runner_ini_value(
                         &content,
                         &["PORT", "port"],
-                    ));
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -4697,20 +4813,28 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "uptime-kuma" => {
-            let candidates = [
-                "/var/lib/uptime-kuma/.env",
-                "/opt/uptime-kuma/.env",
-                "/etc/default/uptime-kuma",
-            ];
-            for raw_path in &candidates {
-                if let Some(content) = read_runner_config_text(raw_path) {
-                    let port = parse_valid_runner_port(&extract_runner_ini_value(
-                        &content,
-                        &["UPTIME_KUMA_PORT", "PORT", "port"],
-                    ));
-                    if port > 0 {
-                        meta.configured_port = port;
-                        break;
+            if let Some(content) = read_runner_config_text("/etc/systemd/system/uptime-kuma.service") {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                let candidates = [
+                    "/var/lib/uptime-kuma/.env",
+                    "/opt/uptime-kuma/.env",
+                    "/etc/default/uptime-kuma",
+                ];
+                for raw_path in &candidates {
+                    if let Some(content) = read_runner_config_text(raw_path) {
+                        let port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["UPTIME_KUMA_PORT", "PORT", "port"],
+                        ));
+                        if port > 0 {
+                            meta.configured_port = port;
+                            break;
+                        }
                     }
                 }
             }
@@ -4738,10 +4862,509 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
+        "maintainerr" => {
+            for raw_path in &[
+                "/etc/systemd/system/af-maintainerr.service",
+                "/etc/systemd/system/maintainerr.service",
+                "/var/lib/maintainerr/.env",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content).max(
+                        parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["UI_PORT", "PORT"],
+                        )),
+                    );
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "flaresolverr" => {
+            for raw_path in &[
+                "/etc/systemd/system/flaresolverr.service",
+                "/opt/flaresolverr/.env",
+                "/etc/default/flaresolverr",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content).max(
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["PORT"])),
+                    );
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "threadfin" => {
+            if let Some(content) = read_runner_config_text("/etc/systemd/system/threadfin.service")
+            {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            if meta.configured_port <= 0 {
+                if let Some(content) =
+                    read_runner_config_text("/var/lib/threadfin/conf/settings.json")
+                {
+                    let (_, port) = extract_runner_json_key_and_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                    }
+                }
+            }
+        }
+
+        "flood" => {
+            for raw_path in &["/etc/systemd/system/flood.service", "/etc/default/flood"] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "nextcloud" | "rutorrent" => {
+            for raw_path in &[
+                format!("/etc/apache2/conf-available/aetherflow-{canonical}-listen.conf"),
+                format!("/etc/apache2/sites-available/{canonical}.conf"),
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "netdata" => {
+            for raw_path in &[
+                "/etc/netdata/netdata.conf",
+                "/etc/systemd/system/netdata.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["default port", "port"],
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "homeassistant" => {
+            for raw_path in &[
+                "/home/homeassistant/.homeassistant/configuration.yaml",
+                "/var/lib/homeassistant/configuration.yaml",
+                "/etc/homeassistant/configuration.yaml",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let mut port = parse_valid_runner_port(&extract_runner_yaml_key_in_section(
+                        &content,
+                        "http",
+                        "server_port",
+                    ));
+                    if port <= 0 {
+                        port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["server_port"],
+                        ));
+                    }
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "adguardhome" => {
+            for raw_path in &[
+                "/opt/AdGuardHome/AdGuardHome.yaml",
+                "/etc/AdGuardHome/AdGuardHome.yaml",
+                "/var/lib/AdGuardHome/AdGuardHome.yaml",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let addr = extract_runner_yaml_key_in_section(&content, "http", "address");
+                    let mut port = parse_host_port_or_port(&addr);
+                    if port <= 0 {
+                        port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["bind_port"],
+                        ));
+                    }
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "rclone" => {
+            for raw_path in &[
+                "/etc/systemd/system/rclone.service",
+                "/etc/rclone/rclone.env",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content).max(
+                        parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["RCLONE_PORT", "PORT"],
+                        )),
+                    );
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "autoscan" => {
+            for raw_path in &["/etc/autoscan/config.yml", "/var/lib/autoscan/config.yml"] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "librespeed" => {
+            for raw_path in &["/opt/librespeed/settings.toml", "/etc/librespeed/settings.toml"] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["listen_port", "port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "scrutiny" => {
+            for raw_path in &[
+                "/etc/scrutiny/scrutiny.yaml",
+                "/opt/scrutiny/config/scrutiny.yaml",
+                "/etc/systemd/system/scrutiny.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]))
+                        .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "n8n" => {
+            for raw_path in &[
+                "/etc/systemd/system/n8n.service",
+                "/var/lib/n8n/.env",
+                "/etc/n8n/n8n.env",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content).max(
+                        parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["N8N_PORT", "PORT"],
+                        )),
+                    );
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "palate" => {
+            for raw_path in &[
+                "/etc/palate/palate.env",
+                "/etc/systemd/system/af-palate.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["PORT", "PALATE_PORT"],
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "duplicati" => {
+            for raw_path in &[
+                "/etc/duplicati/duplicati.env",
+                "/etc/default/duplicati",
+                "/etc/systemd/system/duplicati.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["DUPLICATI_PORT", "PORT"],
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "filebot" => {
+            for raw_path in &[
+                "/var/lib/filebot/filebot-node.env",
+                "/etc/default/filebot",
+                "/etc/systemd/system/filebot.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["FILEBOT_NODE_HTTP_PORT", "PORT"],
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "novnc" => {
+            if let Some(content) = read_runner_config_text("/etc/systemd/system/novnc.service") {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+        }
+
+        "kasmvnc" => {
+            for raw_path in &[
+                "/var/lib/kasmvnc/.vnc/kasmvnc.yaml",
+                "/etc/kasmvnc/kasmvnc.yaml",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["websocket_port", "port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "mcvnc" => {
+            for raw_path in &[
+                "/etc/mcvnc/mcvnc.env",
+                "/etc/systemd/system/af-mcvnc.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_host_port_or_port(&extract_runner_ini_value(
+                        &content,
+                        &["MCVNC_BIND", "MCVNC_PORT", "PORT"],
+                    ))
+                    .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "pyload" => {
+            for raw_path in &[
+                "/var/lib/pyload/settings/pyload.cfg",
+                "/var/lib/pyload/.pyload/settings/pyload.cfg",
+                "/etc/systemd/system/pyload.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let raw_val = extract_runner_ini_value(&content, &["int port", "port"]);
+                    let rhs = raw_val.rsplit('=').next().unwrap_or(&raw_val).trim();
+                    let port = parse_valid_runner_port(rhs)
+                        .max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "unmanic" => {
+            for raw_path in &[
+                "/var/lib/unmanic/.unmanic/config/settings.json",
+                "/etc/systemd/system/unmanic.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (_, json_port) = extract_runner_json_key_and_port(&content);
+                    let port = json_port.max(extract_runner_systemd_or_apache_port(&content));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "piped" => {
+            for raw_path in &[
+                "/etc/piped/httpd.conf",
+                "/etc/af-piped/httpd.conf",
+                "/etc/systemd/system/af-piped.service",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = extract_runner_systemd_or_apache_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "invidious" => {
+            for raw_path in &[
+                "/etc/invidious/config.yml",
+                "/etc/af-invidious/config.yml",
+                "/var/lib/invidious/config/config.yml",
+            ] {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
         _ => {}
     }
 
+    if meta.configured_port <= 0 {
+        let mut fallback_candidates = vec![
+            format!("/etc/systemd/system/{canonical}.service"),
+            format!("/etc/systemd/system/af-{canonical}.service"),
+            format!("/etc/apache2/conf-available/aetherflow-{canonical}-listen.conf"),
+            format!("/etc/apache2/sites-available/{canonical}.conf"),
+            format!("/etc/apache2/sites-available/aetherflow-app-{canonical}.conf"),
+        ];
+        if canonical == "uptime-kuma" {
+            fallback_candidates.push("/etc/systemd/system/uptimekuma.service".to_string());
+            fallback_candidates
+                .push("/etc/apache2/sites-available/aetherflow-app-uptimekuma.conf".to_string());
+        } else if canonical == "calibre-web" {
+            fallback_candidates.push("/etc/systemd/system/calibreweb.service".to_string());
+            fallback_candidates
+                .push("/etc/apache2/sites-available/aetherflow-app-calibreweb.conf".to_string());
+        }
+        for raw_path in &fallback_candidates {
+            if let Some(content) = read_runner_config_text(raw_path) {
+                let port = extract_runner_systemd_or_apache_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                    break;
+                }
+            }
+        }
+    }
+
     meta
+}
+
+fn extract_runner_systemd_or_apache_port(text: &str) -> i32 {
+    static ENV_PORT_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)^\s*(?:Environment\s*=\s*["']?|export\s+)?(?:[A-Z0-9_]*_PORT|PORT)\s*=\s*["']?([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static ENV_BIND_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)^\s*(?:Environment\s*=\s*["']?|export\s+)?(?:[A-Z0-9_]*_BIND|ASPNETCORE_URLS)\s*=\s*["']?(?:https?://)?[^:\s"']+:([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static CLI_PORT_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static CLI_ADDR_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?i)(?:--(?:web\.listen-address|rc-addr|bind|host|listen)|websockify[^\n]*?)(?:\s+|=)["']?(?:https?://)?(?:127\.0\.0\.1|0\.0\.0\.0|localhost|\*)?:([0-9]{2,5})\b"#,
+        )
+        .unwrap()
+    });
+    static APACHE_LISTEN_VHOST_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?im)(?:^\s*Listen\s+(?:[0-9.]+:)?([0-9]{2,5})\b|<VirtualHost\s+[^>:]+:([0-9]{2,5})>|ProxyPass\s+/[^\s]*\s+(?:http|ws)s?://(?:127\.0\.0\.1|localhost):([0-9]{2,5})\b)"#,
+        )
+        .unwrap()
+    });
+
+    for re in [
+        &*ENV_PORT_RE,
+        &*ENV_BIND_RE,
+        &*CLI_PORT_FLAG_RE,
+        &*CLI_ADDR_FLAG_RE,
+    ] {
+        if let Some(caps) = re.captures(text) {
+            if let Some(m) = caps.get(1) {
+                let p = parse_valid_runner_port(m.as_str());
+                if p > 0 {
+                    return p;
+                }
+            }
+        }
+    }
+    if let Some(caps) = APACHE_LISTEN_VHOST_RE.captures(text) {
+        for idx in [1, 2, 3] {
+            if let Some(m) = caps.get(idx) {
+                let p = parse_valid_runner_port(m.as_str());
+                if p > 0 {
+                    return p;
+                }
+            }
+        }
+    }
+    0
 }
 
 fn dispatcharr_runtime_port(content: &str) -> i32 {
@@ -5269,6 +5892,9 @@ where
     if app_port != 0 && !(1024..=65535).contains(&app_port) {
         anyhow::bail!("invalid application port");
     }
+    if !script_matches_package_identity(action, pkg_id, script_name) {
+        anyhow::bail!("script_name does not match package_id and action");
+    }
     if !can_resolve_package_operation(action, pkg_id, script_name) {
         anyhow::bail!("package script not found");
     }
@@ -5636,6 +6262,10 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5673,8 +6303,18 @@ mod tests {
     #[tokio::test]
     async fn runner_shutdown_drains_inflight_response_before_exiting() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let root = env::temp_dir().join(format!("af-drain-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let dir_name = format!("ad-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let base = env::var_os("TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir);
+        let candidate = base.join(&dir_name);
+        let root = if candidate.join("runner.sock").as_os_str().len() < 95 {
+            candidate
+        } else {
+            PathBuf::from("/tmp").join(dir_name)
+        };
+        fs::create_dir(&root).unwrap();
         let path = root.join("runner.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         // Test auth in a child so process-global peer settings cannot affect other tests.
@@ -6118,8 +6758,6 @@ mod tests {
         assert!(ok_resp.output.contains("cancellation signalled"));
         assert!(tok.is_cancelled());
     }
-
-    static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
     #[tokio::test]
     async fn test_update_discovery_and_admission_survive_api_restart_and_fail_closed() {

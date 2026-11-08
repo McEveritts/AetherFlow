@@ -27,7 +27,12 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Navidrome..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates python3-toml >> "$LOGFILE" 2>&1
+
+ND_DATABASE="$(read_navidrome_database_path /var/lib/navidrome/navidrome.toml)" || exit 1
+validate_config_paths "$ND_DATABASE" "${ND_DATABASE}-wal" "${ND_DATABASE}-shm" || exit 1
+ADMIN_RETAINED=0
+[[ ! -s "$ND_DATABASE" ]] || ADMIN_RETAINED=1
 
 if ! id -u navidrome >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/navidrome --shell /usr/sbin/nologin navidrome
@@ -49,17 +54,17 @@ ND_URL="https://github.com/navidrome/navidrome/releases/download/v${ND_VERSION}/
 
 report_progress 60 "Downloading and extracting Navidrome ${ND_VERSION}..."
 TMP_TAR=$(mktemp /tmp/navidrome-XXXXXX.tar.gz)
-curl -fsSL "$ND_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /opt/navidrome navidrome >> "$LOGFILE" 2>&1
+download_file "$ND_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+stage_app_archive "$TMP_TAR" "/opt/navidrome" "navidrome" "/var/lib/navidrome/navidrome.toml" "${PACKAGE_NAME}" "." "$ND_DATABASE" ""
 rm -f "$TMP_TAR"
 chmod +x /opt/navidrome/navidrome
-printf '%s\n' "${ND_VERSION#v}" > /opt/navidrome/.af-version
+queue_app_version /opt/navidrome/.af-version "${ND_VERSION#v}"
 
 if [[ ! -s /var/lib/navidrome/navidrome.toml ]]; then
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/navidrome/navidrome.toml
 MusicFolder = "/var/lib/navidrome/music"
 DataFolder = "/var/lib/navidrome"
-Address = "0.0.0.0"
+Address = "127.0.0.1"
 Port = @AF_APP_PORT@
 LogLevel = "info"
 EOF
@@ -67,7 +72,7 @@ fi
 
 set_config_value "/var/lib/navidrome/navidrome.toml" ini "Port" "$APP_PORT" ""
 
-chown -R navidrome:navidrome /opt/navidrome /var/lib/navidrome
+chown -hRP navidrome:navidrome /opt/navidrome /var/lib/navidrome
 
 report_progress 85 "Configuring and starting navidrome.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/navidrome.service
@@ -94,9 +99,9 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now navidrome >> "$LOGFILE" 2>&1
 systemctl restart navidrome >> "$LOGFILE" 2>&1
-MASTER_USER="${MASTER_USER}" MASTER_PASS="${MASTER_PASS}" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF' || true
-import os
-import os, time, json, urllib.request
+verify_systemd_service_active navidrome
+AF_BOOTSTRAP_RETAINED="$ADMIN_RETAINED" MASTER_USER="${MASTER_USER}" MASTER_PASS="${MASTER_PASS}" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF'
+import os, time, json, urllib.request, urllib.error
 user, pw = (os.environ.get('MASTER_USER', ''), os.environ.get('MASTER_PASS', ''))
 for _ in range(30):
     try:
@@ -105,10 +110,25 @@ for _ in range(30):
                 break
     except Exception:
         time.sleep(1)
+else:
+    raise SystemExit('Navidrome status endpoint did not become ready')
 req = urllib.request.Request('http://127.0.0.1:4533/auth/createAdmin'.replace('4533', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'password': pw, 'name': user}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
-urllib.request.urlopen(req, timeout=10).read()
+try:
+    with urllib.request.urlopen(req, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            raise SystemExit('Navidrome account initialization failed')
+        response.read()
+except urllib.error.HTTPError as error:
+    detail = error.read(8192).decode('utf-8', errors='replace').lower()
+    retained = os.environ.get('AF_BOOTSTRAP_RETAINED') == '1'
+    exists = 'already' in detail and any(word in detail for word in ('admin', 'user', 'account', 'initializ'))
+    if error.code not in (400, 403, 409) or not (retained or exists):
+        raise
 PYEOF
 
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/ping"
+
+commit_app_versions
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Navidrome installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

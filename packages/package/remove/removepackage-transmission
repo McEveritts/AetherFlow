@@ -32,14 +32,17 @@ DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq transmission-
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing Transmission configuration, state directories, and user account..."
-rm -rf /usr/share/transmission
+safe_rm_rf /usr/share/transmission
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /var/lib/transmission-daemon /var/lib/transmission /etc/transmission-daemon
+    safe_rm_rf /var/lib/transmission-daemon /var/lib/transmission /etc/transmission-daemon
+    purge_system_user "debian-transmission"
 fi
-purge_system_user "debian-transmission"
-purge_system_user "transmission"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    purge_system_user "transmission"
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
+rm -f -- /var/lib/transmission-daemon/.af-version
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Transmission removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

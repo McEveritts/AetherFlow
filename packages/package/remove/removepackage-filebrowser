@@ -26,14 +26,16 @@ report_progress 25 "Stopping and removing filebrowser.service..."
 purge_systemd_unit "filebrowser"
 
 report_progress 65 "Removing File Browser binary, database, and user account..."
-rm -f /usr/local/bin/filebrowser
+rm -f /usr/local/bin/filebrowser /opt/filebrowser/.af-version
 if [[ "${DELETE_DATA:-false}" == true ]]; then
+    safe_rm_rf "/var/lib/filebrowser" "/etc/filebrowser"
     rm -f /opt/AetherFlow/logs/filebrowser_credentials.txt
 fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/filebrowser
+    purge_app_archive_backups "${PACKAGE_NAME}" "/usr/local/bin/filebrowser"
+    safe_rm_rf /opt/filebrowser
+    purge_system_user "filebrowser"
 fi
-purge_system_user "filebrowser"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

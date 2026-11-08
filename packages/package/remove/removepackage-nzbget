@@ -26,11 +26,14 @@ report_progress 25 "Stopping and removing nzbget.service..."
 purge_systemd_unit "nzbget"
 
 report_progress 65 "Removing NZBGet binaries, state directories, and user account..."
-rm -rf /usr/local/share/nzbget /usr/local/bin/nzbget
+safe_rm_rf /usr/local/share/nzbget /usr/local/bin/nzbget
+rm -f /opt/nzbget/{nzbget,unrar,7za,7zr,par2,.af-version}
+safe_rm_rf /opt/nzbget/webui
 if [[ "${DELETE_DATA:-false}" == true ]]; then
-    rm -rf /opt/nzbget /var/lib/nzbget /etc/nzbget.conf
+    purge_app_archive_backups "${PACKAGE_NAME}" "/opt/nzbget"
+    safe_rm_rf /opt/nzbget /var/lib/nzbget /etc/nzbget.conf
+    purge_system_user "nzbget"
 fi
-purge_system_user "nzbget"
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"

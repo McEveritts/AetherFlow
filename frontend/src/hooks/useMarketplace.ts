@@ -57,19 +57,20 @@ export interface App {
 export interface MarketplaceJobOutcome {
     job_id?: string;
     message?: string;
-    action: 'install' | 'update' | 'remove' | string;
+    action: 'install' | 'reinstall' | 'update' | 'remove' | string;
     status: 'completed' | 'failed' | string;
     started_at: string;
     finished_at: string;
 }
 
-export type PendingAction = 'installing' | 'uninstalling' | 'updating';
+export type PendingAction = 'installing' | 'reinstalling' | 'uninstalling' | 'updating';
 export const LIFECYCLE_RECEIPT_TIMEOUT_MS = 120000;
 
-const PENDING_TO_JOB_ACTION: Record<PendingAction, string> = {
-    installing: 'install',
-    updating: 'update',
-    uninstalling: 'remove',
+const PENDING_TO_JOB_ACTIONS: Record<PendingAction, readonly string[]> = {
+    installing: ['install', 'reinstall'],
+    reinstalling: ['reinstall', 'install'],
+    updating: ['update'],
+    uninstalling: ['remove'],
 };
 
 /** A receipt is authoritative only when its identity and action both match. */
@@ -78,19 +79,25 @@ export function lifecycleIdentity(job: { job_id?: string; started_at?: string } 
 }
 export function matchingJobOutcome(app: Pick<App, 'last_job'>, action: PendingAction, identity?: string): MarketplaceJobOutcome | undefined {
     const job = app.last_job;
-    return identity && lifecycleIdentity(job) === identity && job?.action === PENDING_TO_JOB_ACTION[action]
+    const allowedActions = PENDING_TO_JOB_ACTIONS[action];
+    return identity && lifecycleIdentity(job) === identity && job?.action && allowedActions?.includes(job.action)
         ? job : undefined;
 }
 export function lastJobFailed(app: Pick<App, 'last_job'>, pending: string | undefined): boolean {
-    return Boolean(pending && app.last_job?.status === 'failed' && app.last_job.action === PENDING_TO_JOB_ACTION[pending as PendingAction]);
+    const allowedActions = pending ? PENDING_TO_JOB_ACTIONS[pending as PendingAction] : undefined;
+    return Boolean(allowedActions && app.last_job?.status === 'failed' && allowedActions.includes(app.last_job.action));
 }
 /** Only a fresh observation of the accepted job and action renews its deadline. */
 export function matchingActiveJob(job: { job_id?: string; started_at?: string; status?: string; job_status?: string }, action: PendingAction, identity?: string): boolean {
     const phase = isLifecycleStatus(job.job_status) ? job.job_status : job.status;
-    return Boolean(identity && lifecycleIdentity(job) === identity && phase === action);
+    const phaseMatches =
+        action === 'installing' || action === 'reinstalling'
+            ? phase === 'installing' || phase === 'reinstalling'
+            : phase === action;
+    return Boolean(identity && lifecycleIdentity(job) === identity && phaseMatches);
 }
 export function isLifecycleStatus(status?: string): status is PendingAction {
-    return status === 'installing' || status === 'updating' || status === 'uninstalling';
+    return status === 'installing' || status === 'reinstalling' || status === 'updating' || status === 'uninstalling';
 }
 
 export function useMarketplace() {
@@ -120,7 +127,7 @@ export function useMarketplace() {
                 if (!currentData) return 15000;
                 // Keep polling while ANY app is in a transient state
                 const hasActiveJobs = currentData.some(
-                    app => app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating'
+                    app => isLifecycleStatus(app.status)
                 );
                 return hasActiveJobs ? 2000 : 15000;
             },

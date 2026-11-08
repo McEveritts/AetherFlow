@@ -40,7 +40,9 @@ class ModernStackEnvGenerationTests(unittest.TestCase):
         # Stage only systemd templates into isolated install_root so REPO_ROOT is never mutated
         templates_dst = self.install_root / "setup" / "templates" / "sysd"
         templates_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(REPO_ROOT / "setup" / "templates" / "sysd", templates_dst)
+        shutil.copytree(REPO_ROOT / "setup" / "templates" / "sysd", templates_dst,
+                        copy_function=shutil.copyfile)
+        templates_dst.chmod(templates_dst.stat().st_mode | 0o700)
 
     def test_duplicate_assignments_preserve_last_effective_keys_across_reruns(self):
         existing = (
