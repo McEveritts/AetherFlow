@@ -1192,7 +1192,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(portLabel).toHaveClass('@[720px]:hidden');
         expect(uptimeLabel).toHaveClass('@[720px]:hidden');
 
-        const portValueContainer = within(sonarrArticle).getByText(':8989').parentElement;
+        const portValueContainer = within(sonarrArticle).getByText(':8989').parentElement?.parentElement;
         expect(portValueContainer).toHaveClass('min-w-0', 'flex-wrap');
         expect(portValueContainer).toHaveClass('flex');
         expect(portValueContainer).toHaveClass('items-center');
@@ -1345,7 +1345,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         render(<ServicesTab />);
 
         const audiobookshelfArticle = screen.getByRole('article', { name: 'Audiobookshelf service' });
-        const portContainer = within(audiobookshelfArticle).getByText(':13378').parentElement;
+        const portContainer = within(audiobookshelfArticle).getByText(':13378').parentElement?.parentElement;
 
         expect(portContainer).toHaveClass('flex-wrap');
         expect(portContainer).toHaveClass('min-w-0', 'gap-x-2');
@@ -2597,7 +2597,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const portContainer = portNumeral.parentElement;
         expect(portContainer).toHaveClass('gap-x-2', 'gap-y-1', 'flex', 'items-center', 'min-w-0', 'flex-wrap');
 
-        const portColumn = portContainer?.parentElement;
+        const portColumn = portContainer?.parentElement?.parentElement;
         expect(portColumn).toHaveClass('relative', 'min-w-0', 'flex-col');
 
         const accessButton = within(sonarrArticle).getByRole('button', { name: 'Connection details for Sonarr' });

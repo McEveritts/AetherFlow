@@ -1683,20 +1683,22 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         <div className="relative min-w-0 flex flex-col justify-center gap-1 min-h-[40px]" data-access-menu={name}>
                             <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[720px]:hidden">Port</span>
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 max-w-full">
-                                {effectivePort != null ? (
-                                    <>
-                                        <span className="text-xs font-mono font-medium text-slate-100 whitespace-nowrap shrink-0 inline-block min-w-[6ch]">:{effectivePort}</span>
-                                        {reassigned && defaultPort && (
-                                            <span className="text-xs text-indigo-300 font-mono whitespace-nowrap" title={`Default ${defaultPort}`}>
-                                                def :{defaultPort}
-                                            </span>
-                                        )}
-                                    </>
-                                ) : (
-                                    <span className="text-xs font-medium text-slate-400 whitespace-nowrap inline-block min-w-[6ch]">Headless</span>
-                                )}
+                                <div className="flex min-w-0 basis-16 grow shrink-0 flex-wrap items-center gap-x-2 gap-y-1">
+                                    {effectivePort != null ? (
+                                        <>
+                                            <span className="text-xs font-mono font-medium text-slate-100 whitespace-nowrap shrink-0 inline-block min-w-[6ch]">:{effectivePort}</span>
+                                            {reassigned && defaultPort && (
+                                                <span className="text-xs text-indigo-300 font-mono whitespace-nowrap" title={`Default ${defaultPort}`}>
+                                                    def :{defaultPort}
+                                                </span>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <span className="text-xs font-medium text-slate-400 whitespace-nowrap inline-block min-w-[6ch]">Headless</span>
+                                    )}
+                                </div>
                                 {(webAvailable || isCore || Boolean(data.public_domain || data.internal_domain)) && (
-                                    <div className="inline-flex shrink-0">
+                                    <div className="ml-auto inline-flex shrink-0">
                                         <button
                                             type="button"
                                             id={`connection-trigger-${appId || name}`}
