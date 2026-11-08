@@ -23,39 +23,41 @@ export default function DiskIOWidget({ diskIoData, history, density = 'compact',
     const readBytesPerSecond = diskIoData?.read_bytes_sec || 0;
     const writeBytesPerSecond = diskIoData?.write_bytes_sec || 0;
     const totalBytesPerSecond = readBytesPerSecond + writeBytesPerSecond;
+    const readShare = totalBytesPerSecond > 0 ? (readBytesPerSecond / totalBytesPerSecond) * 100 : null;
+    const writeShare = readShare === null ? null : 100 - readShare;
 
     return (
-        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`obs-telemetry-surface obs-vital-card relative overflow-hidden flex flex-col ${isImmersive ? 'p-6' : 'p-5'}`}>
             <div>
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3.5 border-b border-slate-800/80">
+                <div className="obs-vital-header">
                     <div className="flex items-center gap-2.5 min-w-0">
                         <div className="h-8 w-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
                             <HardDrive size={16} />
                         </div>
                         <div className="min-w-0">
                             <h2 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Disk I/O</h2>
-                            <p className="text-[13px] text-slate-300 mt-1">
+                            <p className="text-xs text-slate-400 mt-1">
                                 Total throughput <span className="font-semibold text-slate-200 tabular-nums">{formatBytesPerSec(totalBytesPerSecond)}</span>
                             </p>
                         </div>
                     </div>
-                    <div className="flex flex-col items-end text-right shrink-0">
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-[13px] font-semibold text-amber-400">Read</span>
-                            <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white tabular-nums">
+                    <div className="grid grid-cols-2 gap-2">
+                        <div className="min-w-0 flex flex-col gap-0.5">
+                            <span className="text-xs font-medium text-amber-400">Read</span>
+                            <span className="text-base font-bold tracking-tight text-amber-300 tabular-nums break-words">
                                 {formatBytesPerSec(readBytesPerSecond)}
                             </span>
                         </div>
-                        <div className="flex items-baseline gap-1.5 mt-0.5">
-                            <span className="text-[13px] font-semibold text-sky-400">Write</span>
-                            <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white tabular-nums">
+                        <div className="min-w-0 flex flex-col gap-0.5">
+                            <span className="text-xs font-medium text-sky-400">Write</span>
+                            <span className="text-base font-bold tracking-tight text-sky-300 tabular-nums break-words">
                                 {formatBytesPerSec(writeBytesPerSecond)}
                             </span>
                         </div>
                     </div>
                 </div>
 
-                <div className="rounded-xl overflow-hidden bg-slate-950/60 border border-slate-800/60">
+                <div className="obs-vital-plot">
                     <Sparkline
                         data={history.diskRead.length > 0 ? history.diskRead : [readBytesPerSecond]}
                         data2={history.diskWrite.length > 0 ? history.diskWrite : [writeBytesPerSecond]}
@@ -75,6 +77,22 @@ export default function DiskIOWidget({ diskIoData, history, density = 'compact',
                         currentValue2={formatBytesPerSec(writeBytesPerSecond)}
                         hasSharedSummary={hasSharedSummary}
                     />
+                </div>
+            </div>
+            <div className="obs-vital-footer">
+                <div role="group" className="grid w-full grid-cols-2 divide-x divide-white/[0.06]" aria-label="Current disk throughput share">
+                    <div className="min-w-0 flex flex-col gap-0.5 pr-3">
+                        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Read share</span>
+                        <span className="text-xs font-mono font-bold text-amber-300 tabular-nums">
+                            {readShare === null ? 'Idle' : `${readShare.toFixed(0)}%`}
+                        </span>
+                    </div>
+                    <div className="min-w-0 flex flex-col gap-0.5 pl-3">
+                        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Write share</span>
+                        <span className="text-xs font-mono font-bold text-sky-300 tabular-nums">
+                            {writeShare === null ? 'Idle' : `${writeShare.toFixed(0)}%`}
+                        </span>
+                    </div>
                 </div>
             </div>
         </div>

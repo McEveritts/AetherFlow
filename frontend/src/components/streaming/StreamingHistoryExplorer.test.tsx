@@ -4,16 +4,16 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import StreamingHistoryExplorer, { parseInitialQueryFromUrl, syncHistoryStateToWindowUrl } from '@/components/streaming/StreamingHistoryExplorer';
 import { apiFetch } from '@/lib/fetcher';
-import { StreamingHistoryPage, CanonicalStreamingHistoryItem } from '@/lib/streaming-history';
+import { StreamingHistoryPage, StreamingHistoryQuery, CanonicalStreamingHistoryItem } from '@/lib/streaming-history';
 
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
-jest.mock('@/components/streaming/StreamingInsights', () => ({ __esModule: true, default: ({ onDrilldown }: { onDrilldown: (patch: { userId?: string; itemId?: string; serverId?: string }) => void }) => <div>
+jest.mock('@/components/streaming/StreamingInsights', () => ({ __esModule: true, default: ({ onDrilldown, embedded }: { embedded?: boolean; onDrilldown: (patch: { userId?: string; itemId?: string; serverId?: string }) => void }) => <div data-testid="embedded-insights" data-embedded={embedded}>
     <button onClick={() => onDrilldown({ userId: 'drilled-user', serverId: 'scoped-server' })}>Test user drilldown</button>
     <button onClick={() => onDrilldown({ itemId: 'drilled-item', serverId: '' })}>Test item drilldown</button>
 </div> }));
-jest.mock('@/components/streaming/StreamingPortability', () => ({ __esModule: true, default: () => null }));
-jest.mock('@/components/streaming/StreamingHistoryAdmin', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/components/streaming/StreamingPortability', () => ({ __esModule: true, default: ({ embedded }: { embedded?: boolean }) => <div data-testid="embedded-portability" data-embedded={embedded} /> }));
+jest.mock('@/components/streaming/StreamingHistoryAdmin', () => ({ __esModule: true, default: ({ embedded }: { embedded?: boolean }) => <div data-testid="embedded-admin" data-embedded={embedded} /> }));
 
 jest.mock('@/lib/fetcher', () => ({
     apiFetch: jest.fn(),
@@ -131,10 +131,167 @@ function makeHistoryPage(
 }
 
 describe('StreamingHistoryExplorer', () => {
+    it('lazily discloses specialist sections in the embedded archive and preserves visited panels', async () => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+        const archive = screen.getByTestId('streaming-history-explorer');
+        expect(archive).toHaveClass('border-b', 'border-white/[0.07]', 'py-6', 'min-w-0', 'max-w-full');
+        expect(archive).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'border', 'shadow-xl');
+        expect(screen.getByRole('region', { name: 'Streaming history records table' })).toHaveClass('border-y', 'border-white/[0.07]', 'overflow-x-auto', 'min-w-0', 'max-w-full');
+        expect(screen.getByTestId('history-cohort-summary-grid')).toHaveClass('border-b', 'border-white/[0.07]', 'grid-cols-2', 'sm:grid-cols-4');
+        const tools = screen.getByRole('group', { name: 'Archive specialist tools' });
+        expect(tools).toHaveClass('border-y', 'border-white/[0.07]', 'xl:divide-x');
+        expect(tools).not.toHaveClass('rounded-xl', 'border', 'bg-white/[0.02]');
+        const panels = [
+            { label: 'Cohort & Trend Insights', testId: 'embedded-insights' },
+            { label: 'Archive Portability & Backup', testId: 'embedded-portability' },
+            { label: 'Retention & Administration', testId: 'embedded-admin' },
+        ];
+        for (const panel of panels) {
+            expect(screen.getByRole('button', { name: panel.label })).toHaveAttribute('aria-expanded', 'false');
+            expect(screen.queryByTestId(panel.testId)).not.toBeInTheDocument();
+        }
+        for (const panel of panels) {
+            const toggle = screen.getByRole('button', { name: panel.label });
+            fireEvent.click(toggle);
+            expect(toggle).toHaveAttribute('aria-expanded', 'true');
+            expect(screen.getByRole('region', { name: panel.label })).toHaveAttribute('id', toggle.getAttribute('aria-controls'));
+            expect(screen.getByTestId(panel.testId)).toHaveAttribute('data-embedded', 'true');
+            expect(screen.getByTestId(panel.testId)).toBeVisible();
+            for (const otherPanel of panels.filter((otherPanel) => otherPanel !== panel)) {
+                expect(screen.queryByRole('region', { name: otherPanel.label })).not.toBeInTheDocument();
+            }
+            fireEvent.click(toggle);
+            expect(toggle).toHaveAttribute('aria-expanded', 'false');
+            expect(screen.getByTestId(panel.testId)).not.toBeVisible();
+        }
+    });
+
+    it('keeps advanced filters collapsed by default and preserves filters when hidden', async () => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+        const toggle = screen.getByRole('button', { name: 'Advanced Filters' });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByLabelText('IANA Timezone')).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/active advanced filters/)).not.toBeInTheDocument();
+        fireEvent.click(toggle);
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        fireEvent.change(screen.getByLabelText('Provider User ID'), { target: { value: 'selected-user' } });
+        await waitFor(() => expect(mockedApiFetch.mock.calls.at(-1)?.[0]).toContain('userId=selected-user'));
+        fireEvent.click(toggle);
+        expect(screen.queryByLabelText('Provider User ID')).not.toBeInTheDocument();
+        expect(screen.getByLabelText('1 active advanced filters')).toBeVisible();
+        fireEvent.click(toggle);
+        expect(screen.getByLabelText('Provider User ID')).toHaveValue('selected-user');
+        fireEvent.click(screen.getByText('Provenance & scope details'));
+        fireEvent.click(screen.getByRole('button', { name: 'Reset Filters' }));
+        expect(screen.queryByLabelText(/active advanced filters/)).not.toBeInTheDocument();
+    });
+
+    it.each<Partial<StreamingHistoryQuery>>([
+        { timezone: 'Europe/Berlin' }, { provenance: 'observed_session' },
+        { provider: 'jellyfin' }, { playMethod: 'Transcode' }, { mediaType: 'Movie' },
+        { serverId: 'server-2' }, { userId: 'user-2' }, { client: 'Web' }, { device: 'TV' },
+        { itemId: 'item-2' }, { libraryId: 'library-2' }, { genre: 'Sci-Fi' },
+        { sort: 'startedAsc' }, { pageSize: 100 }, { includeExcluded: true },
+    ])('counts non-default secondary filters without expanding the bookmarked query: %j', async (initialQuery) => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer initialQuery={initialQuery} />);
+        await screen.findByText('Dune: Part Two');
+        expect(screen.getByLabelText('1 active advanced filters')).toBeVisible();
+        expect(screen.getByTestId('toggle-advanced-filters-btn')).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByLabelText('IANA Timezone')).not.toBeInTheDocument();
+    });
+
+    it('withholds administrative specialist tools from linked users', async () => {
+        mockAuthUser = { id: 2, username: 'linked_user', role: 'user' };
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+        expect(screen.getByRole('button', { name: 'Cohort & Trend Insights' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Archive Portability & Backup' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Retention & Administration' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('embedded-portability')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('embedded-admin')).not.toBeInTheDocument();
+    });
+
+    it('puts search, time window and compact metrics before records, with secondary tools after records', async () => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+
+        const records = screen.getByRole('region', { name: 'Streaming history records table' });
+        const summary = screen.getByTestId('history-cohort-summary-grid');
+        expect(summary).toHaveClass('grid-cols-2', 'sm:grid-cols-4');
+        expect(summary.children).toHaveLength(4);
+        for (const control of [screen.getByLabelText('Literal Archive Search'), screen.getByLabelText('Time Window'), summary]) {
+            expect(control.compareDocumentPosition(records) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        }
+        for (const secondary of [
+            screen.getByRole('button', { name: 'Advanced Filters' }),
+            screen.getByRole('button', { name: 'Cohort & Trend Insights' }),
+            screen.getByRole('button', { name: 'Archive Portability & Backup' }),
+            screen.getByRole('button', { name: 'Retention & Administration' }),
+        ]) {
+            expect(records.compareDocumentPosition(secondary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        }
+        fireEvent.click(screen.getByRole('button', { name: 'Advanced Filters' }));
+        expect(screen.getByLabelText('Record Provenance')).toBeInTheDocument();
+        expect(screen.getByLabelText('IANA Timezone')).toBeInTheDocument();
+    });
+
+    it('discloses provenance methodology on demand and gives archive controls standard touch targets', async () => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+
+        const disclosure = screen.getByText('Provenance & scope details');
+        const details = disclosure.closest('details');
+        expect(details).not.toHaveAttribute('open');
+        expect(disclosure).toHaveClass('obs-touch-target-standard', 'min-h-[44px]');
+        fireEvent.click(disclosure);
+        expect(details).toHaveAttribute('open');
+        expect(screen.getByText(/Item summaries and legacy records remain inspectable/)).toBeVisible();
+
+        for (const testId of ['toggle-advanced-filters-btn', 'reset-history-filters-btn', 'refresh-history-snapshot-btn', 'export-full-history-btn', 'history-prev-page-btn', 'history-next-page-btn']) {
+            expect(screen.getByTestId(testId)).toHaveClass('obs-touch-target-standard');
+        }
+        expect(screen.getByLabelText('Literal Archive Search')).toHaveClass('obs-touch-target-standard');
+        expect(screen.getByLabelText('Time Window')).toHaveClass('obs-touch-target-standard');
+    });
+
+    it('bounds and wraps the real insights facet strip without another padded card', async () => {
+        const { StreamingInsights: ActualInsights } = jest.requireActual<typeof import('@/components/streaming/StreamingInsights')>('@/components/streaming/StreamingInsights');
+        mockedApiFetch.mockImplementation(async (input) => createJsonResponse(String(input).includes('/patterns') ? null : {
+            cohortDistinctPlays: 0, cohortTotalWatchTimeSecs: 0, cohortTotalEstimatedBytes: 0,
+            cohortDistinctUsers: 0, cohortDistinctItems: 0,
+            users: [], clients: [], items: [], libraries: [], genres: [],
+            libraryMetrics: { cohortDistinctPlays: 0, sumOfLabelPlays: 0, isOverlapping: false, unlabeledPlays: 0 },
+            genreMetrics: { cohortDistinctPlays: 0, sumOfLabelPlays: 0, isOverlapping: false, unlabeledPlays: 0 },
+        }));
+        const { rerender } = render(<ActualInsights embedded query={{ window: '30d' }} snapshot="test-snapshot" onDrilldown={jest.fn()} />);
+        const facets = await screen.findByRole('tablist', { name: 'Drilldown facets' });
+        expect(facets).toHaveClass('flex-wrap', 'min-w-0', 'max-w-full');
+        expect(facets).not.toHaveClass('shrink-0');
+        expect(facets.parentElement).toHaveClass('flex-wrap', 'min-w-0');
+        for (const tab of Array.from(facets.querySelectorAll('button'))) {
+            expect(tab).toHaveClass('obs-touch-target-standard');
+        }
+        const section = screen.getByTestId('streaming-insights');
+        expect(section).toHaveClass('border-t', 'border-white/[0.07]', 'pt-5', 'min-w-0', 'max-w-full');
+        expect(section).not.toHaveClass('p-5', 'rounded-2xl', 'obs-telemetry-surface');
+        rerender(<ActualInsights query={{ window: '30d' }} snapshot="test-snapshot" onDrilldown={jest.fn()} />);
+        expect(screen.getByTestId('streaming-insights')).toHaveClass('border-b', 'border-white/[0.07]', 'py-5');
+        expect(screen.getByTestId('streaming-insights')).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl');
+    });
+
     it('replaces prior drilldown facets and reveals effective all-instance filters', async () => {
         mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
         render(<StreamingHistoryExplorer />);
         await screen.findByText('Dune: Part Two');
+        fireEvent.click(screen.getByRole('button', { name: 'Cohort & Trend Insights' }));
         fireEvent.click(screen.getByRole('button', { name: 'Test user drilldown' }));
         expect(screen.getByLabelText('Provider User ID')).toHaveValue('drilled-user');
         fireEvent.click(screen.getByRole('button', { name: 'Test item drilldown' }));
@@ -319,6 +476,7 @@ describe('StreamingHistoryExplorer', () => {
             expect(screen.getByText('Page Two Title')).toBeInTheDocument();
         });
 
+        fireEvent.click(screen.getByTestId('toggle-advanced-filters-btn'));
         fireEvent.change(screen.getByLabelText(/Play Method/i), {
             target: { value: 'Transcode' },
         });
@@ -696,6 +854,7 @@ describe('StreamingHistoryExplorer', () => {
         });
 
         // Trigger a 400 error via invalid timezone
+        fireEvent.click(screen.getByTestId('toggle-advanced-filters-btn'));
         fireEvent.change(screen.getByLabelText(/IANA Timezone/i), {
             target: { value: 'Invalid/Zone' },
         });

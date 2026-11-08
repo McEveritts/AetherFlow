@@ -60,6 +60,8 @@ describe('ProcessWidget CPU sorting and contract regressions', () => {
         render(<ProcessWidget processes={initialProcesses} />);
 
         expect(screen.getByText('Top Processes')).toBeInTheDocument();
+        expect(screen.getByTestId('mock-data-grid').closest('.obs-telemetry-surface')).toBeInTheDocument();
+        expect(screen.getByTestId('mock-data-grid').parentElement).not.toHaveClass('border', 'bg-slate-950/60');
         expect(screen.getByText('5 Tasks')).toBeInTheDocument();
 
         expect(capturedGridProcesses).toHaveLength(5);

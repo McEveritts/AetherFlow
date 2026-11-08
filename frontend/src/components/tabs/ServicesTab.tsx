@@ -20,6 +20,9 @@ import { ProgressRing } from '@/components/ui/ProgressRing';
 import { Modal } from '@/components/ui/Modal';
 import { isLifecycleStatus, lifecycleIdentity, matchingActiveJob, matchingJobOutcome, MarketplaceJobOutcome, PendingAction, LIFECYCLE_RECEIPT_TIMEOUT_MS } from '@/hooks/useMarketplace';
 
+const SERVICE_ROW_TRACKS = '@[720px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,2fr)]';
+const SERVICE_CARD_GRID = 'min-w-0 rounded-none shadow-none bg-transparent border-y border-white/[0.07] grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 divide-y divide-white/[0.07] md:divide-y-0 md:[&>*]:border-t md:[&>*]:border-white/[0.07] md:[&>*:nth-child(-n+2)]:border-t-0 md:max-xl:[&>*:nth-child(even)]:border-l xl:[&>*:nth-child(-n+3)]:border-t-0 xl:[&>*:not(:nth-child(3n+1))]:border-l';
+
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'plexmediaserver': 32400,
     'jellyfin': 8096,
@@ -1058,65 +1061,12 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         const humanName = getHumanDisplayName(name, data);
 
         return (
-            <div key={name} role="article" aria-label={`${name} service`} className="relative bg-slate-900/60 border border-slate-800 hover:border-slate-700/80 rounded-2xl p-5 transition-all group overflow-hidden">
+            <div key={name} role="article" aria-label={`${name} service`} className="relative min-w-0 p-5 hover:bg-white/[0.02] transition-colors group overflow-hidden">
                 <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (hasUpdate ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : 'bg-slate-600'))))} transition-colors z-20`} />
 
-                {isUpdating && (
-                    <div className="mb-4 min-w-0 max-w-full rounded-xl bg-slate-950/90 p-4 text-center border border-amber-500/20">
-                        <ProgressRing
-                            progress={data.progress || 10}
-                            status={isLifecycleStatus(data.job_status) ? data.job_status : 'updating'}
-                            logLine={data.log_line || `Updating ${name}...`}
-                            startedAt={data.started_at}
-                        />
-                    </div>
-                )}
-
-                {failedInstall && (
-                    <div role="status" className="mb-4 min-w-0 max-w-full rounded-xl border border-slate-700/80 bg-slate-950/80 p-3 text-xs text-slate-200 shadow-inner">
-                        <div className="font-semibold flex items-center gap-1.5 mb-1 text-rose-300">
-                            <AlertCircle size={14} className="shrink-0 text-rose-300" />
-                            Install failed — rollback/recovery unconfirmed
-                        </div>
-                        <p className="text-slate-200 text-xs sm:text-[13px] leading-relaxed break-words">
-                            {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
-                        </p>
-                    </div>
-                )}
-
-                {!failedInstall && data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
-                    <div role="status" className="mb-4 min-w-0 max-w-full break-words rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
-                        Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
-                    </div>
-                )}
-
-                {data.components && data.components.length > 1 && (
-                    <ul aria-label="Service components" className="mb-4 min-w-0 max-w-full space-y-1 text-xs text-slate-400">
-                        {data.components.map((component) => (
-                            <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2 p-1.5 rounded-lg bg-slate-950/40 border border-white/5">
-                                <span className="min-w-0 break-all text-[11px]">
-                                    {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
-                                </span>
-                                <button
-                                    type="button"
-                                    disabled={!canControlServices}
-                                    title={`View logs for ${component.unit}`}
-                                    onClick={() => {
-                                        setLogsModalUnits(serviceLogUnits);
-                                        setLogsModalService(component.unit);
-                                    }}
-                                    className="shrink-0 rounded p-1.5 text-indigo-300 hover:text-indigo-200 hover:bg-white/5 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
-                                >
-                                    <Terminal size={13} />
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
-                )}
-
-                <div className="flex justify-between items-start mb-4 relative z-10 gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                        <div className="h-11 w-11 shrink-0 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-center shadow-inner overflow-hidden">
+                <div className="flex flex-wrap justify-between items-start mb-4 relative z-10 gap-3">
+                    <div className="flex flex-1 basis-[220px] items-start gap-3 min-w-0">
+                        <div className="h-11 w-11 shrink-0 bg-white/[0.04] rounded-xl border border-white/[0.08] flex items-center justify-center shadow-inner overflow-hidden">
                             {isCore ? (
                                 <Cpu size={22} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-rose-300' : 'text-slate-500')} />
                             ) : data.id ? (
@@ -1138,7 +1088,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         </div>
                         <div className="min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                                <h3 className="text-sm font-semibold text-slate-100 truncate max-w-[220px]" title={humanName !== name ? `${humanName} (${name})` : name}>
+                                <h3 className="w-full text-sm font-semibold text-slate-100 line-clamp-2 break-words leading-snug" title={humanName !== name ? `${humanName} (${name})` : name}>
                                     {humanName}
                                 </h3>
                                 {humanName !== name && (
@@ -1147,7 +1097,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     </span>
                                 )}
                                 {hasUpdate && (
-                                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
                                         <ArrowUpCircle size={11} className="text-amber-400" />
                                         {latestVer ? `Update ${formatVersion(latestVer)}` : 'Update Available'}
                                     </span>
@@ -1190,7 +1140,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             </div>
                         </div>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="ml-auto flex flex-wrap items-center gap-2 shrink-0">
                         <button
                             type="button"
                             onClick={() => {
@@ -1239,8 +1189,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
                     return (
                         <div className="mb-4 space-y-2.5">
-                            <div className="grid grid-cols-3 gap-2 text-left">
-                                <div className={`bg-slate-950/60 rounded-xl p-2.5 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-slate-800'}`}>
+                            <div className="grid grid-cols-3 divide-x divide-white/[0.06] border-y border-white/[0.06] py-3 text-left">
+                                <div className={`min-w-0 pr-3 ${hasUpdate ? 'text-amber-300' : ''}`}>
                                     <div className="flex items-center justify-between">
                                         <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Version</span>
                                         {!isCore && data.id && canControlServices && (
@@ -1249,7 +1199,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                 onClick={() => handleCheckSingleUpdate(name, data)}
                                                 disabled={isBusy || isCheckingThis}
                                                 title="Check for updates"
-                                                className="text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40 min-h-[24px] min-w-[24px] flex items-center justify-center"
+                                                className="obs-touch-target-standard text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40 min-h-[36px] sm:min-h-[32px] min-w-[44px] flex items-center justify-center"
                                             >
                                                 <RefreshCw size={11} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
                                             </button>
@@ -1278,7 +1228,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         {!hasUpdate && updateError && (
                                             <span
                                                 className="inline-flex items-center gap-1 text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded"
-                                                title={`Update check failed: ${updateError}`}
+                                                aria-label={`Update check failed: ${updateError}`}
                                             >
                                                 <AlertCircle size={10} />
                                                 Check failed
@@ -1286,7 +1236,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         )}
                                     </div>
                                 </div>
-                                <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
+                                <div className="min-w-0 px-3">
                                     <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Port</span>
                                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                         {effectivePort != null ? (
@@ -1306,19 +1256,19 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         )}
                                     </div>
                                 </div>
-                                <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
+                                <div className="min-w-0 pl-3">
                                     <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Uptime</span>
                                     <p className="text-xs font-medium text-slate-300 mt-0.5 truncate" title={resolveUptimeDisplay(data)}>{resolveUptimeDisplay(data)}</p>
                                 </div>
                             </div>
 
                             {apiKey && (
-                                <div className="bg-slate-950/60 rounded-xl px-3 py-2 border border-slate-800 flex items-center justify-between gap-2">
+                                <div className="bg-white/[0.04] rounded-xl px-3 py-2 border border-white/[0.08] flex items-center justify-between gap-2">
                                     <div className="flex items-center gap-2 min-w-0 flex-1">
                                         <Key size={12} className="text-indigo-400 shrink-0" />
                                         <span className="text-xs uppercase font-bold text-slate-400 tracking-wider shrink-0">API Key</span>
                                         <code
-                                            className="text-xs font-mono text-slate-300 truncate select-all bg-slate-900 px-2 py-0.5 rounded border border-white/5"
+                                            className="text-xs font-mono text-slate-300 truncate select-all bg-white/[0.04] px-2 py-0.5 rounded border border-white/5"
                                             title={isKeyRevealed ? apiKey : 'Click eye icon to reveal API key'}
                                         >
                                             {isKeyRevealed ? apiKey : formatMaskedApiKey(apiKey)}
@@ -1330,7 +1280,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             onClick={() => toggleRevealKey(name)}
                                             title={isKeyRevealed ? 'Hide API key' : 'Reveal API key'}
                                             aria-label={isKeyRevealed ? `Hide ${name} API key` : `Reveal ${name} API key`}
-                                            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                            className="obs-touch-target-standard p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
                                         >
                                             {isKeyRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
                                         </button>
@@ -1339,7 +1289,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             onClick={() => handleCopyApiKey(name, apiKey)}
                                             title="Copy API key"
                                             aria-label={`Copy ${name} API key`}
-                                            className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                            className="obs-touch-target-standard p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
                                         >
                                             {isKeyCopied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
                                         </button>
@@ -1349,6 +1299,65 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         </div>
                     );
                 })()}
+
+                {updateError && (
+                    <p role="note" className="mb-3 min-w-0 break-words text-xs text-rose-300">
+                        Update check failed: {updateError}
+                    </p>
+                )}
+
+                {data.components && data.components.length > 1 && (
+                    <ul aria-label="Service components" className="mb-4 min-w-0 max-w-full divide-y divide-white/[0.06] text-xs text-slate-400">
+                        {data.components.map((component) => (
+                            <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2 py-1">
+                                <span className="min-w-0 break-all text-xs">
+                                    {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
+                                </span>
+                                <button
+                                    type="button"
+                                    disabled={!canControlServices}
+                                    title={`View logs for ${component.unit}`}
+                                    onClick={() => {
+                                        setLogsModalUnits(serviceLogUnits);
+                                        setLogsModalService(component.unit);
+                                    }}
+                                    className="obs-touch-target-standard shrink-0 rounded p-1.5 text-indigo-300 hover:text-indigo-200 hover:bg-white/5 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                >
+                                    <Terminal size={13} />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+
+                {isUpdating && (
+                    <div className="mb-4 min-w-0 max-w-full border-y border-amber-500/20 bg-amber-500/[0.04] p-4 text-center">
+                        <ProgressRing
+                            progress={data.progress || 10}
+                            status={isLifecycleStatus(data.job_status) ? data.job_status : 'updating'}
+                            logLine={data.log_line || `Updating ${name}...`}
+                            startedAt={data.started_at}
+                        />
+                    </div>
+                )}
+
+                {failedInstall && (
+                    <div role="status" className="mb-4 min-w-0 max-w-full border-t border-rose-500/20 bg-rose-500/[0.07] p-3 text-xs text-slate-200">
+                        <div className="font-semibold flex items-center gap-1.5 mb-1 text-rose-300">
+                            <AlertCircle size={14} className="shrink-0 text-rose-300" />
+                            Install failed — rollback/recovery unconfirmed
+                        </div>
+                        <p className="text-slate-200 text-xs sm:text-[13px] leading-relaxed break-words">
+                            {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
+                        </p>
+                    </div>
+                )}
+
+                {!failedInstall && data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
+                    <div role="status" className="mb-4 min-w-0 max-w-full break-words border-y border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+                        Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
+                    </div>
+                )}
 
                 {hasUpdate && data.id && (
                     <RequireClaim>
@@ -1420,7 +1429,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     onClick={() => setGuardedStartConfirmService({ name, data })}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : 'Start service (warning: install failed and recovery state is unconfirmed)'}
-                                    className="obs-touch-target-standard py-2 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800/90 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[40px]"
+                                    className="obs-touch-target-standard py-2 px-3 bg-white/[0.04] hover:bg-slate-800 text-slate-300 hover:text-white border border-white/[0.08] rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[40px]"
                                 >
                                     <Play size={13} className="fill-current" /> Start Service (Guarded)
                                 </button>
@@ -1498,11 +1507,11 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 key={name}
                 role="article"
                 aria-label={`${name} service`}
-                className="bg-slate-900/40 hover:bg-slate-900/80 border border-slate-800/80 rounded-xl p-2.5 sm:py-1.5 sm:px-3.5 transition-colors flex flex-col gap-2 @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:items-center @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4"
+                className={`min-w-0 max-w-full hover:bg-white/[0.025] p-3 sm:p-4 @[720px]:px-3 @[720px]:py-2 transition-colors flex flex-col gap-3 @[720px]:grid @[720px]:items-center @[720px]:gap-x-2 @[720px]:gap-y-0 ${SERVICE_ROW_TRACKS}`}
             >
-                <div className="grid grid-cols-[1fr_auto] items-start gap-x-3 gap-y-1.5 sm:flex sm:items-center sm:justify-between @[960px]:contents @[1250px]:contents min-w-0 w-full">
+                <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 sm:flex sm:items-center sm:justify-between @[720px]:contents min-w-0 w-full">
                     <div className="col-start-1 flex items-start gap-2.5 min-w-0 w-full sm:flex-1">
-                    <div className="h-8 w-8 shrink-0 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-center overflow-hidden">
+                    <div className="h-8 w-8 shrink-0 bg-white/[0.04] rounded-lg border border-white/[0.08] flex items-center justify-center overflow-hidden">
                         {isCore ? (
                             <Cpu size={18} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-red-400' : 'text-slate-500')} />
                         ) : data.id ? (
@@ -1546,36 +1555,12 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             ) : null}
                         </div>
 
-                        {data.components && data.components.length > 1 && (
-                            <ul aria-label="Service components" className="mt-1 space-y-0.5 text-xs text-slate-400">
-                                {data.components.map((component) => (
-                                    <li key={component.unit} className="flex min-w-0 items-center gap-2">
-                                        <span className="min-w-0 break-all text-xs">
-                                            {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
-                                        </span>
-                                        <button
-                                            type="button"
-                                            disabled={!canControlServices}
-                                            title={`View logs for ${component.unit}`}
-                                            onClick={() => {
-                                                setLogsModalUnits(serviceLogUnits);
-                                                setLogsModalService(component.unit);
-                                            }}
-                                            className="shrink-0 rounded p-1 text-indigo-300 hover:text-indigo-200 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
-                                        >
-                                            <Terminal size={12} />
-                                        </button>
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
-
                             {apiKey && (
                             <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                                 <Key size={12} className="text-indigo-400 shrink-0" />
                                 <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">API Key</span>
                                 <code
-                                    className="text-xs font-mono text-slate-300 truncate select-all bg-slate-950 px-2 py-0.5 rounded border border-white/5"
+                                    className="text-xs font-mono text-slate-300 truncate select-all bg-white/[0.04] px-2 py-0.5 rounded border border-white/5"
                                     title={isKeyRevealed ? apiKey : 'Click eye icon to reveal API key'}
                                 >
                                     {isKeyRevealed ? apiKey : formatMaskedApiKey(apiKey)}
@@ -1585,7 +1570,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     onClick={() => toggleRevealKey(name)}
                                     title={isKeyRevealed ? 'Hide API key' : 'Reveal API key'}
                                     aria-label={isKeyRevealed ? `Hide ${name} API key` : `Reveal ${name} API key`}
-                                    className="p-1 text-slate-400 hover:text-slate-200 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                    className="obs-touch-target-standard p-1 text-slate-400 hover:text-slate-200 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
                                 >
                                     {isKeyRevealed ? <EyeOff size={12} /> : <Eye size={12} />}
                                 </button>
@@ -1594,7 +1579,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     onClick={() => handleCopyApiKey(name, apiKey)}
                                     title="Copy API key"
                                     aria-label={`Copy ${name} API key`}
-                                    className="p-1 text-slate-400 hover:text-indigo-400 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                    className="obs-touch-target-standard p-1 text-slate-400 hover:text-indigo-400 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
                                 >
                                     {isKeyCopied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                                 </button>
@@ -1603,8 +1588,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     </div>
                 </div>
 
-                    <div className="col-start-1 sm:col-auto flex flex-col justify-center gap-0.5 shrink-0 min-w-0 pl-[42px] sm:pl-0 sm:items-end @[960px]:items-start @[960px]:w-[95px] @[1250px]:w-[120px] min-h-[20px] sm:min-h-[40px]">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                    <div className="col-start-1 sm:col-auto flex flex-col justify-center gap-1 min-w-0 pl-[42px] sm:pl-0 sm:items-end @[720px]:items-start min-h-[20px] sm:min-h-[40px]">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                             <span className="relative flex h-2 w-2 shrink-0">
                                 {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
                                 <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
@@ -1613,13 +1598,56 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 {isUpdating ? (data.job_status || 'updating') : (isDegraded ? 'degraded' : data.status)}
                             </span>
                             {isDegraded && unhealthyUnits.length > 0 && (
-                                <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono shrink-0">
+                                <span className="min-w-0 break-all text-xs text-amber-300 font-mono">
                                     {unhealthyUnits.join(', ')} down
                                 </span>
                             )}
                         </div>
+                        <div className={`min-w-0 w-full text-xs gap-x-2 gap-y-0.5 @[720px]:flex @[720px]:flex-wrap ${expandedDetailsServices.has(name) ? 'flex flex-wrap' : 'hidden sm:flex sm:flex-wrap'}`}>
+                        <div className="min-w-0 flex flex-col justify-center gap-1 min-h-[40px] @[720px]:min-h-0">
+                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[720px]:hidden">Version</span>
+                            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                                <span className="min-w-0 break-all text-xs sm:text-[13px] font-medium text-slate-300">{formatVersion(installedVer)}</span>
+                                {hasUpdate && latestVer && (
+                                    data.update_url && /^https?:\/\//i.test(data.update_url) ? (
+                                        <a
+                                            href={data.update_url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex min-w-0 break-all items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300"
+                                            title="View release notes"
+                                        >
+                                            → {formatVersion(latestVer)}
+                                            <ExternalLink size={10} />
+                                        </a>
+                                    ) : (
+                                        <span className="min-w-0 break-all text-xs font-semibold text-amber-400">
+                                            → {formatVersion(latestVer)}
+                                        </span>
+                                    )
+                                )}
+                                {!hasUpdate && updateError && (
+                                    <span
+                                        className="inline-flex max-w-full items-center gap-1 text-xs font-semibold text-rose-300"
+                                        aria-label={`Update check failed: ${updateError}`}
+                                    >
+                                        <AlertCircle size={10} />
+                                        Check failed
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="min-w-0 flex flex-col justify-center gap-1 min-h-[40px] @[720px]:min-h-0">
+                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[720px]:hidden">Uptime</span>
+                            <div className="min-w-0">
+                                <span className="break-words text-xs sm:text-[13px] font-medium text-slate-300" title={resolveUptimeDisplay(data)}>{resolveUptimeDisplay(data)}</span>
+                            </div>
+                        </div>
+
+                        </div>
                         {data.managed_by && (
-                            <span className="hidden sm:inline-flex text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
+                            <span className="hidden sm:inline-flex @[720px]:hidden text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
                                 {data.managed_by}
                             </span>
                         )}
@@ -1650,50 +1678,16 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     </div>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0 w-full pt-1 border-t border-slate-800/40 @[960px]:border-t-0 @[960px]:pt-0 @[960px]:contents @[1250px]:border-t-0 @[1250px]:pt-0 @[1250px]:contents">
-                    <div className={`items-center gap-3 sm:gap-4 text-xs @[960px]:contents @[1250px]:contents min-w-0 shrink-0 ${expandedDetailsServices.has(name) ? 'flex flex-wrap w-full pt-1.5 border-t border-slate-800/40 sm:flex-nowrap sm:border-t-0 sm:pt-0' : 'hidden sm:flex sm:flex-nowrap'}`}>
-                        <div className="min-w-0 sm:w-[130px] @[960px]:w-[100px] @[1250px]:w-[130px] shrink-0 flex items-center gap-1.5 min-h-[40px]">
-                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Version</span>
-                            <div className="flex items-center gap-1.5 min-h-[40px] flex-nowrap min-w-0">
-                                <span className="text-xs sm:text-[13px] font-medium text-slate-300 truncate">{formatVersion(installedVer)}</span>
-                                {hasUpdate && latestVer && (
-                                    data.update_url && /^https?:\/\//i.test(data.update_url) ? (
-                                        <a
-                                            href={data.update_url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 shrink-0"
-                                            title="View release notes"
-                                        >
-                                            → {formatVersion(latestVer)}
-                                            <ExternalLink size={10} />
-                                        </a>
-                                    ) : (
-                                        <span className="text-xs font-semibold text-amber-400 shrink-0">
-                                            → {formatVersion(latestVer)}
-                                        </span>
-                                    )
-                                )}
-                                {!hasUpdate && updateError && (
-                                    <span
-                                        className="inline-flex items-center gap-1 text-xs font-semibold text-rose-300 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded shrink-0"
-                                        title={`Update check failed: ${updateError}`}
-                                    >
-                                        <AlertCircle size={10} />
-                                        Check failed
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="relative min-w-0 sm:w-[180px] @[960px]:w-[140px] @[1250px]:w-[180px] shrink-0 flex items-center min-h-[40px]" data-access-menu={name}>
-                            <div className="flex flex-wrap @[1250px]:flex-nowrap items-center gap-3 min-h-[40px] shrink-0 max-w-full">
-                                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Port</span>
+                <div className="flex flex-col gap-3 min-w-0 w-full pt-3 border-t border-white/[0.06] @[720px]:contents">
+                    <div className={`gap-4 text-xs @[720px]:contents min-w-0 w-full ${expandedDetailsServices.has(name) ? 'grid grid-cols-1 @[520px]:grid-cols-3' : 'hidden sm:grid sm:grid-cols-3'}`}>
+                        <div className="relative min-w-0 flex flex-col justify-center gap-1 min-h-[40px]" data-access-menu={name}>
+                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[720px]:hidden">Port</span>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 max-w-full">
                                 {effectivePort != null ? (
                                     <>
                                         <span className="text-xs font-mono font-medium text-slate-100 whitespace-nowrap shrink-0 inline-block min-w-[6ch]">:{effectivePort}</span>
                                         {reassigned && defaultPort && (
-                                            <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300 font-mono whitespace-nowrap shrink-0 hidden @[1250px]:inline-block" title={`Default ${defaultPort}`}>
+                                            <span className="text-xs text-indigo-300 font-mono whitespace-nowrap" title={`Default ${defaultPort}`}>
                                                 def :{defaultPort}
                                             </span>
                                         )}
@@ -1712,13 +1706,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             aria-controls={`connection-menu-${appId || name}`}
                                             aria-label={`Connection details for ${name}`}
                                             title={`Connection details for ${name}`}
-                                            className={`obs-touch-target-standard py-1 px-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 min-h-[44px] sm:min-h-[40px] shrink-0 ${
+                                            className={`obs-touch-target-standard py-1 px-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 ${
                                                 openAccessMenuService === name
                                                     ? 'bg-slate-700 text-white border-slate-500'
-                                                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
+                                                    : 'bg-white/[0.03] hover:bg-white/[0.07] text-slate-200 border-white/[0.08]'
                                             }`}
                                         >
-                                            <span>Connection</span>
+                                            <span className="@[720px]:sr-only @[1100px]:not-sr-only">Connection</span>
                                             <ChevronDown size={14} className={`transition-transform ${openAccessMenuService === name ? 'rotate-180' : ''}`} />
                                         </button>
                                     </div>
@@ -1729,11 +1723,11 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     id={`connection-menu-${appId || name}`}
                                     role="menu"
                                     aria-label={`Connection details for ${name}`}
-                                    className="absolute left-0 top-full mt-1.5 z-30 min-w-[200px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                    className="absolute left-0 top-full mt-1.5 z-30 min-w-[200px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                 >
                                     {(data.public_domain || data.internal_domain) && (
-                                        <div className="px-2.5 py-1.5 border-b border-slate-800 text-xs">
-                                            <span className="text-[11px] uppercase font-bold text-slate-400 tracking-wider block">Endpoint</span>
+                                        <div className="px-2.5 py-1.5 border-b border-white/[0.08] text-xs">
+                                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block">Endpoint</span>
                                             {data.public_domain && (
                                                 <span className="font-mono text-indigo-300 break-all select-all block mt-0.5" title={data.public_domain}>
                                                     {data.public_domain}
@@ -1785,15 +1779,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             )}
                         </div>
 
-                        <div className="min-w-0 sm:w-[90px] @[960px]:w-[65px] @[1250px]:w-[90px] shrink-0 flex items-center gap-1.5 min-h-[40px]">
-                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Uptime</span>
-                            <div className="flex items-center min-h-[40px]">
-                                <span className="text-xs sm:text-[13px] font-medium text-slate-300 truncate" title={resolveUptimeDisplay(data)}>{resolveUptimeDisplay(data)}</span>
-                            </div>
-                        </div>
-
                         {expandedDetailsServices.has(name) && (data.managed_by || data.public_domain || data.internal_domain) && (
-                            <div className="sm:hidden min-w-0 w-full flex items-center gap-2 flex-wrap text-xs pt-1 border-t border-slate-800/40">
+                            <div className="sm:hidden min-w-0 w-full flex items-center gap-2 flex-wrap text-xs pt-1 border-t border-white/[0.08]">
                                 <span className="text-xs uppercase font-bold text-slate-400 tracking-wider shrink-0">Runtime</span>
                                 {data.managed_by && (
                                     <span className="text-xs px-2 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
@@ -1815,7 +1802,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     </div>
 
                     {!failedInstall || isOperational ? (
-                        <div className="grid grid-cols-3 gap-1.5 w-full sm:flex sm:flex-wrap sm:w-auto sm:items-center sm:justify-end sm:gap-2 @[960px]:w-[280px] @[960px]:justify-end @[1250px]:w-[280px] @[1250px]:min-w-[280px] @[1250px]:justify-start min-w-0 pt-0.5 @[960px]:pt-0 shrink-0">
+                        <div role="group" aria-label={`${name} actions`} className="flex flex-wrap items-center gap-2 min-w-0 w-full @[720px]:justify-end">
                     {hasUpdate && data.id && !failedInstall && (
                         <RequireClaim>
                             <button
@@ -1823,9 +1810,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 onClick={() => handleUpdateService(name, data)}
                                 disabled={controlDisabled}
                                 title={canControlServices ? `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}` : 'Admin access required'}
-                                className="col-span-3 sm:w-full obs-touch-target-standard py-2 px-3 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 border border-amber-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0"
+                                className="obs-touch-target-standard py-2 px-3 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 border border-amber-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0"
                             >
-                                <ArrowUpCircle size={14} /> Update
+                                <ArrowUpCircle size={14} /> <span className="@[720px]:sr-only @[1100px]:not-sr-only">Update</span>
                             </button>
                         </RequireClaim>
                     )}
@@ -1837,13 +1824,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     type="button"
                                     onClick={() => handleOpenWebUI(name, data)}
                                     title={remoteLoopbackBlocked ? remoteLoopbackMessage : `Open ${name} Web UI`}
-                                    className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 hover:text-white border border-indigo-500/40 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1 sm:gap-1.5 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-[88px]"
+                                    className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 hover:text-white border border-indigo-500/40 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1 sm:gap-1.5 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full"
                                     disabled={isBusy || remoteLoopbackBlocked}
                                 >
-                                    <Globe size={14} /> Web UI
+                                    <Globe size={14} /> <span className="@[720px]:sr-only @[1100px]:not-sr-only">Web UI</span>
                                 </button>
                             ) : (
-                                <div className="hidden sm:block sm:w-[88px] shrink-0" aria-hidden="true" />
+                                null
                             )}
                             <button
                                 type="button"
@@ -1853,13 +1840,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 }}
                                 disabled={!canControlServices}
                                 title={canControlServices ? 'View live logs' : 'Admin access required'}
-                                className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-[74px] ${
+                                className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full ${
                                     webAvailable ? 'col-span-1' : 'col-span-2'
                                 }`}
                             >
-                                <Terminal size={14} /> Logs
+                                <Terminal size={14} /> <span className="@[720px]:sr-only @[1100px]:not-sr-only">Logs</span>
                             </button>
-                            <div className="relative inline-flex col-span-1 w-full sm:w-[94px] shrink-0" data-manage-menu={name}>
+                            <div className="relative inline-flex min-w-0 max-w-full shrink-0" data-manage-menu={name}>
                                 <button
                                     type="button"
                                     id={`manage-trigger-${appId || name}`}
@@ -1869,7 +1856,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     aria-controls={`manage-menu-${appId || name}`}
                                     aria-label={`Manage ${name} service actions`}
                                     title={!canControlServices ? 'Admin access required' : `Manage ${name} service actions`}
-                                    className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full ${
+                                    className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 w-full ${
                                         openManageMenuService === name
                                             ? 'bg-slate-700 text-white border-slate-500'
                                             : 'bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80'
@@ -1882,7 +1869,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         id={`manage-menu-${appId || name}`}
                                         role="menu"
                                         aria-label={`${name} service actions`}
-                                        className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                        className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                     >
                                         <RequireClaim>
                                             <button
@@ -1938,7 +1925,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     onClick={() => handleServiceControl(name, data, 'start')}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Start service')}
-                                    className={`obs-touch-target-standard py-2 px-2 sm:px-3 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 border border-indigo-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto ${
+                                    className={`obs-touch-target-standard py-2 px-2 sm:px-3 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 border border-indigo-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full ${
                                         !isCore && data.id ? 'col-span-1' : 'col-span-2 sm:col-span-1'
                                     }`}
                                 >
@@ -1953,12 +1940,12 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 }}
                                 disabled={!canControlServices}
                                 title={canControlServices ? 'View live logs' : 'Admin access required'}
-                                className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-3 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto"
+                                className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-3 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full"
                             >
-                                <Terminal size={14} /> Logs
+                                <Terminal size={14} /> <span className="@[720px]:sr-only @[1100px]:not-sr-only">Logs</span>
                             </button>
                             {!isCore && data.id && (
-                                <div className="relative inline-flex col-span-1 w-full sm:w-auto" data-manage-menu={name}>
+                                <div className="relative inline-flex min-w-0 max-w-full" data-manage-menu={name}>
                                     <button
                                         type="button"
                                         id={`manage-trigger-${appId || name}`}
@@ -1968,7 +1955,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         aria-controls={`manage-menu-${appId || name}`}
                                         aria-label={`Manage ${name} service actions`}
                                         title={!canControlServices ? 'Admin access required' : `Manage ${name} service actions`}
-                                        className={`obs-touch-target-standard py-2 px-2 sm:px-3 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto ${
+                                        className={`obs-touch-target-standard py-2 px-2 sm:px-3 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full ${
                                             openManageMenuService === name
                                                 ? 'bg-slate-700 text-white border-slate-500'
                                                 : 'bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80'
@@ -1981,7 +1968,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             id={`manage-menu-${appId || name}`}
                                             role="menu"
                                             aria-label={`${name} service actions`}
-                                            className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                            className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                         >
                                             <RequireClaim>
                                                 <button
@@ -2007,7 +1994,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     )}
                 </div>
             ) : (
-                <div className="w-full sm:flex sm:flex-wrap sm:w-auto sm:items-center sm:justify-start sm:gap-2 @[960px]:w-[280px] @[960px]:justify-start @[1250px]:w-[280px] @[1250px]:min-w-[280px] @[1250px]:justify-start min-w-0 pt-0.5 @[960px]:pt-0 shrink-0">
+                <div role="group" aria-label={`${name} actions`} className="flex flex-wrap items-center gap-2 min-w-0 w-full @[720px]:justify-end">
                     <button
                         type="button"
                         onClick={() => {
@@ -2016,7 +2003,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         }}
                         disabled={!canControlServices}
                         title={canControlServices ? 'Review installation failure logs' : 'Admin access required'}
-                        className="obs-touch-target-standard py-2 px-3 bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto"
+                        className="obs-touch-target-standard py-2 px-3 bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] sm:min-h-[40px] min-w-[40px] shrink-0 max-w-full"
                     >
                         <Terminal size={14} className="shrink-0" />
                         <span>Review installation failure</span>
@@ -2025,10 +2012,40 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             )}
                 </div>
 
+                {data.components && data.components.length > 1 && (
+                    <ul aria-label="Service components" className="col-span-full min-w-0 grid grid-cols-1 @[640px]:grid-cols-2 gap-x-6 border-t border-white/[0.06] pt-2 text-xs text-slate-400">
+                        {data.components.map((component) => (
+                            <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2">
+                                <span className="min-w-0 break-all">
+                                    {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
+                                </span>
+                                <button
+                                    type="button"
+                                    disabled={!canControlServices}
+                                    title={`View logs for ${component.unit}`}
+                                    onClick={() => {
+                                        setLogsModalUnits(serviceLogUnits);
+                                        setLogsModalService(component.unit);
+                                    }}
+                                    className="obs-touch-target-standard shrink-0 rounded-lg p-2 text-indigo-300 hover:text-indigo-200 hover:bg-white/5 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                >
+                                    <Terminal size={12} />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+
+                {updateError && (
+                    <p role="note" className="col-span-full min-w-0 break-words text-xs text-rose-300">
+                        Update check failed: {updateError}
+                    </p>
+                )}
+
                 {failedInstall && (
                     <div
                         role="status"
-                        className="w-full order-last @[960px]:col-span-full @[960px]:order-last @[1250px]:col-span-full @[1250px]:order-last rounded-lg border border-slate-700/80 bg-slate-950/80 p-2.5 text-xs text-slate-200 break-words shadow-inner flex flex-col gap-2"
+                        className="w-full min-w-0 order-last col-span-full border-t border-rose-500/20 bg-rose-500/[0.07] p-3 text-xs text-slate-200 break-words flex flex-col gap-2"
                     >
                         <div className="font-semibold flex items-center gap-1.5 text-rose-300 mb-1">
                             <AlertCircle size={14} className="shrink-0 text-rose-300" />
@@ -2037,7 +2054,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         <p className="text-slate-200 text-sm leading-relaxed">
                             {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
                         </p>
-                        {isOperational ? <p className="text-xs text-amber-300/90">The daemon is running; installation recovery remains unconfirmed.</p> : <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3 pt-2 border-t border-slate-800/80 w-full">
+                        {isOperational ? <p className="text-xs text-amber-300/90">The daemon is running; installation recovery remains unconfirmed.</p> : <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3 pt-2 border-t border-white/[0.08] w-full">
                             <span className="text-xs sm:text-[13px] text-amber-300/90 flex items-center gap-1.5">
                                 <AlertTriangle size={13} className="shrink-0 text-amber-400" />
                                 <span>Confirmation required; starting does not repair the failed installation.</span>
@@ -2048,7 +2065,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     onClick={() => setGuardedStartConfirmService({ name, data })}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : 'Start service (warning: install failed and recovery state is unconfirmed)'}
-                                    className="obs-touch-target-standard py-2 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-800/90 rounded-lg text-xs sm:text-[13px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] shrink-0 w-full sm:w-auto text-center"
+                                    className="obs-touch-target-standard py-2 px-3 bg-white/[0.04] hover:bg-slate-800 text-slate-200 hover:text-white border border-white/[0.08] rounded-lg text-xs sm:text-[13px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] shrink-0 max-w-full text-center"
                                 >
                                     <Play size={13} className="fill-current shrink-0" /> <span>Start Service (Guarded)</span>
                                 </button>
@@ -2060,7 +2077,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 {!failedInstall && data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
                     <div
                         role="status"
-                        className="w-full order-last @[960px]:col-span-full @[960px]:order-last @[1250px]:col-span-full @[1250px]:order-last mt-1 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-md p-2 break-words"
+                        className="w-full min-w-0 order-last col-span-full text-xs text-amber-300 bg-amber-500/[0.07] border-t border-amber-500/20 p-3 break-words"
                     >
                         Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
                     </div>
@@ -2072,7 +2089,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     if (services === undefined && inventoryError) {
         return (
             <section className="w-full min-h-[50vh] flex items-center justify-center px-4">
-                <div role="alert" className="w-full max-w-xl rounded-2xl border border-rose-500/30 bg-rose-950/30 p-5 sm:p-6 text-center space-y-3">
+                <div role="alert" className="w-full border-y border-rose-500/30 bg-gradient-to-r from-rose-500/[0.08] to-transparent px-4 py-6 text-center space-y-3">
                     <AlertCircle size={28} className="mx-auto text-rose-300" />
                     <h2 className="text-base font-semibold text-rose-100">Service inventory unavailable</h2>
                     <p className="text-sm text-rose-200/90">
@@ -2097,16 +2114,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     }
 
     return (
-        <div className="space-y-3 sm:space-y-4 relative z-10 w-full min-h-screen">
-            <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                    <h2 className="text-xl sm:text-2xl font-bold text-slate-100 flex items-center gap-2">
-                        Services
-                        <span className="text-xs font-semibold px-2 py-0.5 bg-white/10 rounded-full text-slate-300 border border-white/5">
-                            {allEntries.length} Total
-                        </span>
-                    </h2>
-                    <p className="hidden sm:block text-slate-400 text-xs mt-0.5">
+        <div className="relative z-10 min-w-0 max-w-full w-full">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-4">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-500/10 rounded-full text-indigo-200 border border-indigo-400/20">
+                        {allEntries.length} Total
+                    </span>
+                    <p className="text-slate-400 text-xs leading-relaxed">
                         Monitor daemon health, inspect logs, and manage application lifecycles across the fleet.
                     </p>
                 </div>
@@ -2125,13 +2139,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             </div>
 
             {Boolean(inventoryError) && (
-                <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                <div role="status" className="border-b border-amber-500/25 bg-gradient-to-r from-amber-500/[0.08] to-transparent px-4 py-3 text-xs text-amber-100">
                     Service refresh failed. Showing the most recently available inventory; newer WebSocket service updates remain visible when received.
                     <button
                         type="button"
                         onClick={() => void mutate()}
                         disabled={isValidating}
-                        className="ml-2 min-h-[40px] px-2 underline underline-offset-2 disabled:opacity-50"
+                        className="obs-touch-target-standard ml-2 min-h-[40px] px-2 underline underline-offset-2 disabled:opacity-50"
                     >
                         {isValidating ? 'Retrying…' : 'Retry'}
                     </button>
@@ -2139,7 +2153,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             )}
 
             {attentionCount > 0 && (
-                <div role="region" aria-label="Fleet attention required" className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2 sm:p-2.5 text-slate-200">
+                <div role="region" aria-label="Fleet attention required" className="border-y border-amber-500/25 bg-gradient-to-r from-amber-500/[0.08] via-rose-500/[0.05] to-transparent px-4 py-3 text-slate-200">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                         <div className="flex items-start gap-2.5 w-full min-w-0 flex-1">
                             <AlertTriangle className="text-red-400 shrink-0 mt-0.5" size={16} />
@@ -2202,7 +2216,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 </div>
             )}
 
-            <div className="space-y-2 p-2 sm:p-2.5 bg-slate-900/60 border border-slate-800 rounded-xl">
+            <div role="group" aria-label="Service search and filters" className="flex min-w-0 flex-col gap-3 border-b border-white/[0.07] py-4">
                 <div className="flex items-center gap-2">
                     <div className="relative flex-1 min-w-0">
                         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
@@ -2212,7 +2226,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             onChange={(event) => setSearchQuery(event.target.value)}
                             placeholder="Name, domain or port"
                             aria-label="Search services by name, domain, port"
-                            className="w-full h-11 min-h-[44px] pl-9 pr-8 bg-slate-950 border border-slate-800 rounded-lg text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                            className="w-full h-11 min-h-[44px] pl-9 pr-12 bg-white/[0.03] border border-white/[0.08] rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                         />
                         {searchQuery.length > 0 && (
                             <button
@@ -2225,12 +2239,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             </button>
                         )}
                     </div>
-                    <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 h-11 min-h-[44px] items-center shrink-0">
+                    <div className="flex min-h-[44px] items-center shrink-0 gap-1">
                         <button
                             type="button"
                             onClick={() => setViewMode('list')}
                             title="Compact list view"
                             aria-label="Compact list view"
+                            aria-pressed={viewMode === 'list'}
                             className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'list' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                         >
                             <LayoutList size={14} /> <span className="hidden sm:inline">List</span>
@@ -2240,6 +2255,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             onClick={() => setViewMode('card')}
                             title="Card grid view"
                             aria-label="Card grid view"
+                            aria-pressed={viewMode === 'card'}
                             className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'card' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                         >
                             <LayoutGrid size={14} /> <span className="hidden sm:inline">Cards</span>
@@ -2254,7 +2270,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         aria-expanded={isMobileFiltersOpen}
                         aria-controls="services-status-filter-group"
                         aria-label={`Status filter: ${activeFilterLabel} (${activeFilterCount})${attentionCount > 0 ? `, ${attentionCount} need attention` : ''}${updatesAvailableCount > 0 ? `, ${updatesAvailableCount} ${updatesAvailableCount === 1 ? 'update' : 'updates'} available` : ''}. Tap to change filter.`}
-                        className="obs-touch-target-standard w-full flex items-center justify-between gap-2 flex-wrap px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs font-medium text-slate-200 min-h-[44px]"
+                        className="obs-touch-target-standard w-full flex items-center justify-between gap-2 flex-wrap px-3 py-2 bg-white/[0.03] border border-white/[0.08] rounded-lg text-xs font-medium text-slate-200 min-h-[44px]"
                     >
                         <span className="flex items-center gap-1.5 flex-wrap min-w-0">
                             <span className="text-slate-400 font-normal">Filter:</span>
@@ -2290,7 +2306,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             setStatusFilter('all');
                             setIsMobileFiltersOpen(false);
                         }}
-                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-white/[0.08]'}`}
                     >
                         All ({allEntries.length})
                     </button>
@@ -2300,7 +2316,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             setStatusFilter('running');
                             setIsMobileFiltersOpen(false);
                         }}
-                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'running' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'running' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-white/[0.08]'}`}
                     >
                         Running ({runningCount})
                     </button>
@@ -2310,7 +2326,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             setStatusFilter('stopped');
                             setIsMobileFiltersOpen(false);
                         }}
-                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'stopped' ? 'bg-slate-700 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'stopped' ? 'bg-slate-700 text-white shadow-sm' : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-white/[0.08]'}`}
                     >
                         Stopped ({stoppedCount})
                     </button>
@@ -2320,7 +2336,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             setStatusFilter('attention');
                             setIsMobileFiltersOpen(false);
                         }}
-                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'attention' ? 'bg-red-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'attention' ? 'bg-red-600 text-white shadow-sm' : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-white/[0.08]'}`}
                     >
                         {attentionCount > 0 && <AlertTriangle size={12} className={statusFilter === 'attention' ? 'text-white' : 'text-red-400'} />}
                         Needs Attention ({attentionCount})
@@ -2331,7 +2347,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             setStatusFilter('updates');
                             setIsMobileFiltersOpen(false);
                         }}
-                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'updates' ? 'bg-amber-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'updates' ? 'bg-amber-600 text-white shadow-sm' : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-white/[0.08]'}`}
                     >
                         {updatesAvailableCount > 0 && <ArrowUpCircle size={12} className={statusFilter === 'updates' ? 'text-white' : 'text-amber-400'} />}
                         Updates ({updatesAvailableCount})
@@ -2360,22 +2376,20 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
             {filteredCoreServices.length > 0 && (
                 <div>
-                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider py-4 flex items-center gap-2">
                         <Server size={14} className="text-indigo-400" /> Core Platform
                     </h3>
                     {viewMode === 'card' ? (
-                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                        <div aria-label="Core platform service grid" className={SERVICE_CARD_GRID}>
                             {filteredCoreServices.map(([name, data]) => renderServiceCard(name, data))}
                         </div>
                     ) : (
-                        <div className="@container space-y-2">
-                            <div className="hidden @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4 items-center px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/80">
+                        <div aria-label="Core platform service list" className="@container min-w-0 rounded-none shadow-none bg-transparent border-y border-white/[0.07] divide-y divide-white/[0.07]">
+                            <div className={`hidden @[720px]:grid ${SERVICE_ROW_TRACKS} gap-x-2 items-center px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400`}>
                                 <div>Service</div>
-                                <div>Status</div>
-                                <div>Version</div>
-                                <div>Port & Access</div>
-                                <div>Uptime</div>
-                                <div className="text-right @[1250px]:text-left pr-2 @[1250px]:pr-0">Actions</div>
+                                <div>Status &amp; Version</div>
+                                <div>Endpoint</div>
+                                <div className="text-right">Actions</div>
                             </div>
                             {filteredCoreServices.map(([name, data]) => renderServiceRow(name, data))}
                         </div>
@@ -2385,22 +2399,20 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
             {filteredAppServices.length > 0 && (
                 <div>
-                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider py-4 flex items-center gap-2">
                         <Box size={14} className="text-emerald-400" /> Installed Applications
                     </h3>
                     {viewMode === 'card' ? (
-                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                        <div aria-label="Installed application service grid" className={SERVICE_CARD_GRID}>
                             {filteredAppServices.map(([name, data]) => renderServiceCard(name, data))}
                         </div>
                     ) : (
-                        <div className="@container space-y-2">
-                            <div className="hidden @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4 items-center px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/80">
+                        <div aria-label="Installed application service list" className="@container min-w-0 rounded-none shadow-none bg-transparent border-y border-white/[0.07] divide-y divide-white/[0.07]">
+                            <div className={`hidden @[720px]:grid ${SERVICE_ROW_TRACKS} gap-x-2 items-center px-3 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400`}>
                                 <div>Service</div>
-                                <div>Status</div>
-                                <div>Version</div>
-                                <div>Port & Access</div>
-                                <div>Uptime</div>
-                                <div className="text-right @[1250px]:text-left pr-2 @[1250px]:pr-0">Actions</div>
+                                <div>Status &amp; Version</div>
+                                <div>Endpoint</div>
+                                <div className="text-right">Actions</div>
                             </div>
                             {filteredAppServices.map(([name, data]) => renderServiceRow(name, data))}
                         </div>
@@ -2417,7 +2429,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             )}
 
             {allEntries.length > 0 && sortedFilteredEntries.length === 0 && (
-                <div role="status" className="text-center py-12 px-4 bg-slate-900/30 rounded-2xl border border-slate-800">
+                <div role="status" className="text-center py-12 px-4 border-b border-white/[0.07]">
                     <Box size={36} className="mx-auto text-slate-500 mb-2" />
                     <h3 className="text-sm font-semibold text-slate-200 mb-1">No matching services found</h3>
                     <p className="text-xs text-slate-400 mb-3">
@@ -2454,7 +2466,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     returnFocusRef={stopDialogReturnFocusRef}
                     onClose={() => setStopConfirmService(null)}
                 >
-                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-white/[0.08] bg-white/[0.04] shadow-2xl space-y-4">
                         <div className="flex items-center gap-3 text-rose-300">
                             <AlertCircle size={22} className="shrink-0" />
                             <h3 id="stop-service-title" className="text-base font-bold text-white">
@@ -2497,7 +2509,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     returnFocusRef={restartDialogReturnFocusRef}
                     onClose={() => setRestartConfirmService(null)}
                 >
-                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-white/[0.08] bg-white/[0.04] shadow-2xl space-y-4">
                         <div className="flex items-center gap-3 text-amber-300">
                             <AlertCircle size={22} className="shrink-0" />
                             <h3 id="restart-service-title" className="text-base font-bold text-white">
@@ -2530,7 +2542,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     name={`Start ${guardedStartConfirmService.name} (Guarded)`}
                     onClose={() => setGuardedStartConfirmService(null)}
                 >
-                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-white/[0.08] bg-white/[0.04] shadow-2xl space-y-4">
                         <div className="flex items-center gap-3 text-rose-300">
                             <AlertCircle size={22} className="shrink-0" />
                             <h3 id="guarded-start-title" className="text-base font-bold text-white">

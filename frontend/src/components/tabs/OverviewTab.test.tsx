@@ -1,8 +1,14 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import OverviewTab from '@/components/tabs/OverviewTab';
+import Header from '@/components/layout/Header';
 import { SystemMetrics, MetricsHistory, HardwareReport } from '@/types/dashboard';
 import { useConnectionStore } from '@/store/useConnectionStore';
+
+jest.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: null, logout: jest.fn() }) }));
+jest.mock('@/contexts/ToastContext', () => ({ useToast: () => ({ toasts: [], toggleDrawer: jest.fn() }) }));
 
 jest.mock('@/components/widgets/CpuWidget', () => function MockCpuWidget(widgetProps: { hasSharedSummary?: boolean }) {
     return <div data-testid="cpu-widget" data-has-shared-summary={String(Boolean(widgetProps.hasSharedSummary))} />;
@@ -77,7 +83,12 @@ const mockHardware: HardwareReport = {
 
 describe('OverviewTab', () => {
     beforeEach(() => {
-        useConnectionStore.setState({ connectionState: 'CONNECTED' });
+        useConnectionStore.setState({
+            connectionState: 'CONNECTED',
+            dashboardDensity: 'compact',
+            showGpuWidget: true,
+            showDataUsageWidget: true,
+        });
     });
 
     it('updates topology when only terminal-job or degraded-component metadata changes', () => {
@@ -114,8 +125,8 @@ describe('OverviewTab', () => {
 
         expect(screen.getByText(/Service Exception:/)).toBeInTheDocument();
         expect(screen.getByText(/qBittorrent/)).toBeInTheDocument();
-        expect(screen.getByText('Clean stops are not failures.')).toBeInTheDocument();
-        expect(screen.getByText(/Clean stopped daemons remain on standby and are not treated as failures/)).toBeInTheDocument();
+        expect(screen.queryByText(/Clean stop/)).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Open Services tab for exception triage' })).toHaveClass('min-h-[44px]');
 
         expect(screen.getAllByText(/Supermicro/)[0]).toBeInTheDocument();
         expect(screen.getAllByText(/Xeon E-2278G/)[0]).toBeInTheDocument();
@@ -172,12 +183,16 @@ describe('OverviewTab', () => {
         expect(screen.getByText('Load (1/5/15)')).toBeInTheDocument();
         expect(screen.getByText('0.50 · 0.40 · 0.30')).toBeInTheDocument();
         expect(screen.getByText('Kernel load avg')).toBeInTheDocument();
-        expect(screen.getByText('CPU Clock')).toBeInTheDocument();
-        expect(screen.getByText('3.60 GHz')).toBeInTheDocument();
-        expect(screen.getByText(/logical threads/)).toBeInTheDocument();
-        expect(screen.getByText('Connections')).toBeInTheDocument();
-        expect(screen.getByText('5')).toBeInTheDocument();
-        expect(screen.getByText('Active sockets')).toBeInTheDocument();
+        expect(screen.getByText('Services')).toBeInTheDocument();
+        expect(screen.getByText('1 / 1')).toBeInTheDocument();
+        expect(screen.getByText('Running / managed')).toBeInTheDocument();
+        expect(screen.getByText('Processes / Threads')).toBeInTheDocument();
+        expect(screen.getByText('0 / 2')).toBeInTheDocument();
+        expect(screen.getByText('Observed tasks / logical threads')).toBeInTheDocument();
+        expect(screen.queryByText('CPU Clock')).not.toBeInTheDocument();
+        expect(screen.queryByText('Connections')).not.toBeInTheDocument();
+        expect(screen.getByTestId('cpu-widget').parentElement).toHaveClass('xl:grid-cols-4');
+        expect(screen.getByTestId('topology-widget').parentElement).toHaveClass('xl:col-span-6');
 
         expect(screen.queryByText('Downloaded')).not.toBeInTheDocument();
         expect(screen.queryByText('Uploaded')).not.toBeInTheDocument();
@@ -403,7 +418,7 @@ describe('OverviewTab', () => {
         expect(screen.getByTestId('disk-io-widget')).toHaveAttribute('data-has-shared-summary', 'false');
     });
 
-    it('ensures host metadata, standby policy, and triage in services controls meet mobile min-h-[44px] touch targets', () => {
+    it('keeps exception triage compact and retains accessible mobile metadata without repeated standby policy', () => {
         const metricsWithException = createMockMetrics({
             qbittorrent: { status: 'error', uptime: '0m', version: '4.6.0' },
         });
@@ -419,18 +434,16 @@ describe('OverviewTab', () => {
         const hostMetadataSummary = screen.getByTestId('host-metadata-summary');
         expect(hostMetadataSummary).toHaveClass('min-h-[44px]');
 
-        const failureCriteriaSummary = screen.getByTestId('failure-criteria-summary');
-        expect(failureCriteriaSummary).toHaveClass('min-h-[44px]');
-        expect(failureCriteriaSummary).toHaveTextContent('Failure criteria');
+        expect(screen.queryByText(/Clean stop/)).not.toBeInTheDocument();
+        expect(screen.queryByText('Failure criteria')).not.toBeInTheDocument();
 
         const triageButton = screen.getByRole('button', { name: /Open Services tab for exception triage/i });
         expect(triageButton).toHaveClass('min-h-[44px]');
 
-        expect(triageButton.parentElement).toContainElement(failureCriteriaSummary.parentElement);
-        expect(triageButton.parentElement?.className).toContain('flex-wrap');
+        expect(triageButton.parentElement?.parentElement).toHaveClass('flex', 'flex-wrap', 'items-center');
     });
 
-    it('ensures primary vitals grid aligns cards at top without artificial stretch', () => {
+    it('embeds stretched vitals and the system ribbon without a containing card', () => {
         const normalMetrics = createMockMetrics();
 
         render(
@@ -443,7 +456,89 @@ describe('OverviewTab', () => {
 
         const cpuWidget = screen.getByTestId('cpu-widget');
         const gridContainer = cpuWidget.parentElement;
-        expect(gridContainer).toHaveClass('items-start');
-        expect(gridContainer?.className).not.toContain('md:items-stretch');
+        expect(gridContainer).toHaveClass('obs-vitals-grid', 'items-stretch', 'border-b', 'border-white/[0.07]');
+        const cockpit = screen.getByRole('region', { name: 'System telemetry cockpit' });
+        expect(cockpit).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'shadow-lg');
+        expect(gridContainer?.parentElement).toBe(cockpit);
+        const ribbon = screen.getByText('Uptime').parentElement?.parentElement?.parentElement;
+        expect(ribbon?.parentElement).toBe(cockpit);
+        expect(ribbon).toHaveClass('border-b', 'bg-white/[0.01]', 'divide-y', 'sm:divide-y-0', 'sm:divide-x', 'divide-white/[0.07]');
+    });
+
+    it('embeds every lower panel in contiguous, responsive divided bands', () => {
+        const { container } = render(<OverviewTab metrics={createMockMetrics()} hardware={mockHardware} history={mockHistory} />);
+        const overview = container.firstElementChild;
+        const topologyBand = screen.getByTestId('topology-widget').parentElement?.parentElement;
+        const resourcesBand = screen.getByTestId('storage-widget').parentElement?.parentElement;
+        const planningBand = screen.getByTestId('predictions-card').parentElement?.parentElement;
+
+        expect(overview).not.toHaveClass('space-y-5');
+        expect(overview?.firstElementChild).toHaveClass('border-b', 'border-white/[0.07]', 'pb-4');
+        for (const band of [topologyBand, resourcesBand, planningBand]) {
+            expect(band).toHaveClass('obs-telemetry-band', 'grid', 'grid-cols-1', 'border-b', 'border-white/[0.07]', 'divide-y', 'divide-white/[0.07]', 'items-stretch');
+            expect(band).not.toHaveClass('gap-4', 'rounded-2xl', 'shadow-lg');
+        }
+        expect(topologyBand).toHaveClass('xl:grid-cols-12', 'xl:divide-y-0', 'xl:divide-x');
+        expect(topologyBand).toContainElement(screen.getByTestId('data-usage-widget'));
+        expect(resourcesBand).toHaveClass('xl:grid-cols-12', 'xl:divide-y-0', 'xl:divide-x');
+        expect(resourcesBand).toContainElement(screen.getByTestId('process-widget'));
+        expect(planningBand).toHaveClass('lg:grid-cols-2', 'lg:divide-y-0', 'lg:divide-x');
+        expect(planningBand).toContainElement(screen.getByTestId('bandwidth-card'));
+        expect(screen.getByRole('region', { name: 'AI Telemetry & Capacity Planning' })).toContainElement(planningBand ?? null);
+    });
+
+    it('keeps optional panels in the same flush grid without empty columns', () => {
+        const metrics = createMockMetrics();
+        metrics.gpus = [{ index: 0, name: 'GPU', usage_pct: 35, memory_total: 8192, memory_used: 2048, temp: 58 }];
+        const view = render(<OverviewTab metrics={metrics} hardware={mockHardware} history={mockHistory} />);
+
+        expect(screen.getByTestId('gpu-widget').parentElement).toHaveClass('min-w-0', 'xl:col-span-4');
+        expect(screen.getByTestId('storage-widget').parentElement).toHaveClass('xl:col-span-4');
+        expect(screen.getByTestId('process-widget').parentElement).toHaveClass('xl:col-span-4');
+
+        act(() => {
+            useConnectionStore.setState({ showGpuWidget: false, showDataUsageWidget: false });
+        });
+        view.rerender(<OverviewTab metrics={metrics} hardware={mockHardware} history={mockHistory} />);
+
+        expect(screen.queryByTestId('gpu-widget')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('data-usage-widget')).not.toBeInTheDocument();
+        expect(screen.getByTestId('topology-widget').parentElement).toHaveClass('min-w-0', 'xl:col-span-12');
+        expect(screen.getByTestId('storage-widget').parentElement).toHaveClass('xl:col-span-5');
+        expect(screen.getByTestId('process-widget').parentElement).toHaveClass('xl:col-span-7');
+    });
+
+    it('keeps shared telemetry surfaces transparent and lets the band own its outer separator', () => {
+        const stylesheet = readFileSync(join(__dirname, '../../app/globals.css'), 'utf8');
+        const surface = stylesheet.match(/\.obs-telemetry-surface\s*\{([^}]+)\}/)?.[1];
+        const surfaceEdge = stylesheet.match(/\.obs-telemetry-surface::after\s*\{([^}]+)\}/)?.[1];
+        const embeddedSurface = stylesheet.match(/\.obs-telemetry-band > div > \.obs-telemetry-surface\s*\{([^}]+)\}/)?.[1];
+
+        expect(surface).toContain('background: transparent;');
+        expect(surface).toContain('backdrop-filter: none;');
+        expect(surface).toContain('border: 0;');
+        expect(surface).toContain('border-bottom: 1px solid rgba(255, 255, 255, 0.07);');
+        expect(surface).toContain('border-radius: 0;');
+        expect(surface).toContain('box-shadow: none;');
+        expect(surfaceEdge).toContain('content: none;');
+        expect(surfaceEdge).not.toMatch(/mask|gradient/);
+        expect(embeddedSurface).toContain('border-bottom: 0;');
+    });
+});
+
+describe('Header command shortcut hints', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it.each([
+        ['Linux x86_64', 'Ctrl+K'],
+        ['Win32', 'Ctrl+K'],
+        ['MacIntel', '⌘K'],
+        ['iPad', '⌘K'],
+    ])('matches its title and keyboard badge on %s', (platform, shortcut) => {
+        jest.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
+        render(<Header />);
+        const commandButton = screen.getByRole('button', { name: 'Open Command Palette' });
+        expect(commandButton).toHaveAttribute('title', `Command Palette (${shortcut})`);
+        expect(commandButton.querySelector('kbd')).toHaveTextContent(shortcut);
     });
 });

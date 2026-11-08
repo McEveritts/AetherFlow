@@ -30,6 +30,7 @@ import {
 } from '@/components/streaming/StreamingHistoryExplorer';
 
 export interface StreamingInsightsProps {
+    embedded?: boolean;
     query: StreamingHistoryQuery;
     snapshot: string;
     onDrilldown: (filters: Partial<StreamingHistoryQuery>) => void;
@@ -367,6 +368,7 @@ function buildScopeFilterPatch(
 }
 
 export function StreamingInsights({
+    embedded = false,
     query,
     snapshot,
     onDrilldown,
@@ -638,13 +640,13 @@ export function StreamingInsights({
         <section
             aria-label="Streaming Activity Patterns & Cohort Drilldowns"
             data-testid="streaming-insights"
-            className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 space-y-5 w-full min-w-0"
+            className={`space-y-5 w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}
         >
             {/* ===================================================================== */}
             {/* 1. HEADER & SNAPSHOT / TIMEZONE / HONESTY DISCLOSURES                 */}
             {/* ===================================================================== */}
             <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
-                <div className="space-y-1">
+                <div className="space-y-1 min-w-0 max-w-full">
                     <div className="flex flex-wrap items-center gap-2.5">
                         <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
                             <BarChart3 size={18} className="text-indigo-400 shrink-0" />
@@ -682,7 +684,7 @@ export function StreamingInsights({
                         disabled={isLoading || customRangeIncomplete}
                         aria-label="Reload streaming insights"
                         data-testid="refresh-insights-btn"
-                        className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:opacity-50 border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:opacity-50 border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
                     >
                         <RefreshCw size={13} className={isLoading ? 'animate-spin text-indigo-400' : ''} />
                         <span>Reload Insights</span>
@@ -697,7 +699,7 @@ export function StreamingInsights({
                 <div
                     role="alert"
                     data-testid="insights-custom-range-incomplete"
-                    className="p-3.5 rounded-xl border border-amber-500/30 bg-amber-950/30 text-xs text-amber-200 flex items-center gap-2.5"
+                    className="p-3.5 border-y border-amber-500/30 bg-amber-950/30 text-xs text-amber-200 flex items-center gap-2.5"
                 >
                     <AlertTriangle size={16} className="text-amber-400 shrink-0" />
                     <span>
@@ -712,7 +714,7 @@ export function StreamingInsights({
                     data-testid={
                         isConflict409 ? 'insights-conflict-banner' : 'insights-error-banner'
                     }
-                    className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                    className={`p-4 border-y flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
                         isConflict409
                             ? 'border-amber-500/40 bg-amber-950/35 text-amber-100'
                             : 'border-rose-500/40 bg-rose-950/35 text-rose-100'
@@ -737,7 +739,7 @@ export function StreamingInsights({
                         type="button"
                         onClick={handleRetry}
                         data-testid="retry-insights-btn"
-                        className="px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold shrink-0 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold shrink-0 transition-all"
                     >
                         Retry Insights
                     </button>
@@ -749,7 +751,7 @@ export function StreamingInsights({
                     role="status"
                     aria-live="polite"
                     data-testid="insights-loading-state"
-                    className="py-10 px-4 rounded-xl border border-white/[0.06] bg-black/25 text-center text-xs text-slate-400"
+                    className="py-10 px-4 border-y border-white/[0.07] text-center text-xs text-slate-400"
                 >
                     <Loader2 size={20} className="animate-spin text-indigo-400 mx-auto mb-2" />
                     <p>Computing timezone-aware activity, sampled concurrency, and cohort drilldowns...</p>
@@ -764,7 +766,7 @@ export function StreamingInsights({
                     {/* 3A. TIMEZONE-AWARE ACTIVITY PATTERNS */}
                     <div
                         data-testid="activity-patterns-card"
-                        className="rounded-xl border border-white/[0.06] bg-black/25 p-4 space-y-4 min-w-0"
+                        className="border-t border-white/[0.06] pt-4 space-y-4 min-w-0 max-w-full"
                     >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div>
@@ -782,7 +784,7 @@ export function StreamingInsights({
                             <div
                                 role="tablist"
                                 aria-label="Activity grouping mode"
-                                className="inline-flex rounded-xl bg-slate-950/80 border border-white/10 p-1 shrink-0"
+                                className="inline-flex flex-wrap min-w-0 max-w-full rounded-xl bg-white/[0.04] border border-white/[0.08] p-1"
                             >
                                 {(
                                     [
@@ -800,7 +802,7 @@ export function StreamingInsights({
                                             aria-selected={selected}
                                             data-testid={`activity-mode-${tab.id}-btn`}
                                             onClick={() => setActivityMode(tab.id)}
-                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                                            className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                                                 selected
                                                     ? 'bg-indigo-600 text-white shadow'
                                                     : 'text-slate-300 hover:text-white'
@@ -817,7 +819,7 @@ export function StreamingInsights({
                         {activity && activity.dstTransitionsObserved.length > 0 && (
                             <div
                                 data-testid="activity-dst-notice"
-                                className="px-3 py-2 rounded-xl border border-indigo-500/30 bg-indigo-950/25 text-xs text-indigo-200 flex items-start gap-2"
+                                className="px-3 py-2 border-y border-indigo-500/30 bg-indigo-950/25 text-xs text-indigo-200 flex items-start gap-2"
                             >
                                 <Clock size={14} className="text-indigo-400 shrink-0 mt-0.5" />
                                 <div className="space-y-0.5">
@@ -831,7 +833,7 @@ export function StreamingInsights({
                         {activity && activity.undatedRecords > 0 && (
                             <div
                                 data-testid="activity-undated-notice"
-                                className="px-3 py-2 rounded-xl border border-amber-500/25 bg-amber-950/20 text-xs text-amber-200 flex items-center gap-2"
+                                className="px-3 py-2 border-y border-amber-500/25 bg-amber-950/20 text-xs text-amber-200 flex items-center gap-2"
                             >
                                 <Info size={14} className="text-amber-400 shrink-0" />
                                 <span>
@@ -844,7 +846,7 @@ export function StreamingInsights({
                         {activity && activity.totalConfirmedPlays === 0 ? (
                             <div
                                 data-testid="activity-empty-state"
-                                className="py-8 px-4 rounded-xl border border-white/[0.05] bg-slate-950/40 text-center text-xs text-slate-400"
+                                className="py-8 px-4 border-y border-white/[0.07] text-center text-xs text-slate-400"
                             >
                                 No dated confirmed plays recorded in this window and filter scope.
                             </div>
@@ -853,7 +855,7 @@ export function StreamingInsights({
                                 role="list"
                                 aria-label={`Activity bars (${activityMode})`}
                                 data-testid={`activity-bars-${activityMode}`}
-                                className="max-h-72 overflow-y-auto pr-1 space-y-1.5"
+                                className="max-h-72 overflow-y-auto pr-1 divide-y divide-white/[0.07] border-y border-white/[0.07]"
                             >
                                 {activityBars.map((bar) => {
                                     const widthPct =
@@ -868,7 +870,7 @@ export function StreamingInsights({
                                             key={bar.key}
                                             role="listitem"
                                             data-testid={`activity-bar-row-${bar.key}`}
-                                            className="rounded-lg border border-white/[0.05] bg-slate-950/60 px-3 py-2 text-xs"
+                                            className="px-3 py-3 text-xs hover:bg-white/[0.025]"
                                         >
                                             <div className="flex items-center justify-between gap-2 mb-1">
                                                 <span className="font-mono font-semibold text-slate-200">
@@ -907,7 +909,7 @@ export function StreamingInsights({
                     {/* 3B. SAMPLED CONCURRENCY & EXPLICIT 15s / 90d / GAP / NULL LIMITS */}
                     <div
                         data-testid="concurrency-patterns-card"
-                        className="rounded-xl border border-white/[0.06] bg-black/25 p-4 space-y-4 min-w-0"
+                        className="border-t border-white/[0.06] pt-4 space-y-4 min-w-0 max-w-full"
                     >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                             <div>
@@ -935,8 +937,8 @@ export function StreamingInsights({
                         </div>
 
                         {/* Concurrency Summary KPIs */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                            <div className="rounded-xl border border-white/[0.06] bg-slate-950/60 p-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 border-y border-white/[0.07] divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
+                            <div className="min-w-0 p-3">
                                 <span className="text-xs font-bold text-slate-400 block">
                                     Peak Concurrent Streams
                                 </span>
@@ -955,7 +957,7 @@ export function StreamingInsights({
                                 </p>
                             </div>
 
-                            <div className="rounded-xl border border-white/[0.06] bg-slate-950/60 p-3">
+                            <div className="min-w-0 p-3">
                                 <span className="text-xs font-bold text-slate-400 block">
                                     Avg Active Sampled
                                 </span>
@@ -972,7 +974,7 @@ export function StreamingInsights({
                                 </p>
                             </div>
 
-                            <div className="rounded-xl border border-white/[0.06] bg-slate-950/60 p-3">
+                            <div className="min-w-0 p-3">
                                 <span className="text-xs font-bold text-slate-400 block">
                                     Peak Sampled Bitrate
                                 </span>
@@ -993,7 +995,7 @@ export function StreamingInsights({
                         {/* Honest Sampling, Retention & Null-Concurrency Disclosures */}
                         <div
                             data-testid="concurrency-limitations-box"
-                            className="rounded-xl border border-amber-500/25 bg-amber-950/20 p-3 text-xs text-amber-100 space-y-1.5"
+                            className="border-y border-amber-500/25 bg-amber-950/20 p-3 text-xs text-amber-100 space-y-1.5"
                         >
                             <div className="font-bold flex items-center gap-1.5 text-amber-300">
                                 <ShieldAlert size={14} className="shrink-0" />
@@ -1023,7 +1025,7 @@ export function StreamingInsights({
                             role="list"
                             aria-label="Sampled concurrency buckets"
                             data-testid="concurrency-buckets-list"
-                            className="max-h-56 overflow-y-auto pr-1 space-y-1.5"
+                            className="max-h-56 overflow-y-auto pr-1 divide-y divide-white/[0.07] border-y border-white/[0.07]"
                         >
                             {(concurrency?.buckets ?? []).map((bucket, idx) => {
                                 const meta = getConcurrencyStatusMeta(bucket.status);
@@ -1042,7 +1044,7 @@ export function StreamingInsights({
                                         key={`${bucket.bucketStart}-${idx}`}
                                         role="listitem"
                                         data-testid={`concurrency-bucket-${idx}`}
-                                        className="rounded-lg border border-white/[0.05] bg-slate-950/60 px-3 py-2 text-xs"
+                                        className="px-3 py-3 text-xs hover:bg-white/[0.025]"
                                     >
                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                             <span className="font-mono text-slate-200">
@@ -1086,11 +1088,11 @@ export function StreamingInsights({
             {drilldownData && !errorMessage && (
                 <div
                     data-testid="cohort-drilldown-section"
-                    className="rounded-xl border border-white/[0.06] bg-black/25 p-4 space-y-4 min-w-0"
+                    className="border-t border-white/[0.06] pt-4 space-y-4 min-w-0 max-w-full"
                 >
                     {/* Cohort Denominator Banner & Top-N Truncation Disclosure */}
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-white/[0.06]">
-                        <div className="space-y-1">
+                    <div className="flex flex-wrap items-start justify-between gap-3 min-w-0 pb-3 border-b border-white/[0.06]">
+                        <div className="space-y-1 min-w-0 max-w-full">
                             <div className="flex flex-wrap items-center gap-2">
                                 <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Filter size={15} className="text-indigo-400 shrink-0" />
@@ -1120,7 +1122,7 @@ export function StreamingInsights({
                         <div
                             role="tablist"
                             aria-label="Drilldown facets"
-                            className="flex flex-wrap gap-1.5 rounded-xl bg-slate-950/80 border border-white/10 p-1 shrink-0"
+                            className="flex flex-wrap gap-1.5 min-w-0 max-w-full rounded-xl bg-white/[0.04] border border-white/[0.08] p-1"
                         >
                             {(
                                 [
@@ -1166,14 +1168,14 @@ export function StreamingInsights({
                                         aria-selected={selected}
                                         data-testid={`drilldown-tab-${tab.id}`}
                                         onClick={() => setActiveTab(tab.id)}
-                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all ${
+                                        className={`obs-touch-target-standard min-h-[40px] min-w-0 max-w-full px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all ${
                                             selected
                                                 ? 'bg-indigo-600 text-white shadow'
                                                 : 'text-slate-300 hover:text-white hover:bg-white/[0.05]'
                                         }`}
                                     >
                                         <Icon size={13} />
-                                        <span>{tab.label}</span>
+                                        <span className="min-w-0 break-words">{tab.label}</span>
                                     </button>
                                 );
                             })}
@@ -1186,7 +1188,7 @@ export function StreamingInsights({
                             {drilldownData.cohortDistinctUsers > drilldownData.users.length && (
                                 <div
                                     data-testid="users-truncation-notice"
-                                    className="px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
+                                    className="px-3 py-2 border-y border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
                                 >
                                     <Info size={14} className="text-amber-400 shrink-0" />
                                     <span>
@@ -1218,7 +1220,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">
@@ -1267,7 +1269,7 @@ export function StreamingInsights({
                             {drilldownData.clients.length >= topLimit && (
                                 <div
                                     data-testid="clients-truncation-notice"
-                                    className="px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
+                                    className="px-3 py-2 border-y border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
                                 >
                                     <Info size={14} className="text-amber-400 shrink-0" />
                                     <span>
@@ -1308,7 +1310,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">
@@ -1359,7 +1361,7 @@ export function StreamingInsights({
                             {drilldownData.cohortDistinctItems > drilldownData.items.length && (
                                 <div
                                     data-testid="items-truncation-notice"
-                                    className="px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
+                                    className="px-3 py-2 border-y border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
                                 >
                                     <Info size={14} className="text-amber-400 shrink-0" />
                                     <span>
@@ -1391,7 +1393,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">
@@ -1439,7 +1441,7 @@ export function StreamingInsights({
                         <div data-testid="drilldown-panel-libraries" className="space-y-3">
                             <div
                                 data-testid="library-label-metrics-banner"
-                                className="px-3.5 py-2.5 rounded-xl border border-indigo-500/25 bg-indigo-950/20 text-xs text-indigo-100 flex flex-wrap items-center justify-between gap-2"
+                                className="px-3.5 py-2.5 border-y border-indigo-500/25 bg-indigo-950/20 text-xs text-indigo-100 flex flex-wrap items-center justify-between gap-2"
                             >
                                 <div>
                                     <strong>Many-to-Many Library Labels:</strong> Cohort denominator is{' '}
@@ -1466,7 +1468,7 @@ export function StreamingInsights({
                             {drilldownData.libraries.length >= topLimit && (
                                 <div
                                     data-testid="libraries-truncation-notice"
-                                    className="px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
+                                    className="px-3 py-2 border-y border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
                                 >
                                     <Info size={14} className="text-amber-400 shrink-0" />
                                     <span>
@@ -1497,7 +1499,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">
@@ -1541,7 +1543,7 @@ export function StreamingInsights({
                         <div data-testid="drilldown-panel-genres" className="space-y-3">
                             <div
                                 data-testid="genre-label-metrics-banner"
-                                className="px-3.5 py-2.5 rounded-xl border border-indigo-500/25 bg-indigo-950/20 text-xs text-indigo-100 flex flex-wrap items-center justify-between gap-2"
+                                className="px-3.5 py-2.5 border-y border-indigo-500/25 bg-indigo-950/20 text-xs text-indigo-100 flex flex-wrap items-center justify-between gap-2"
                             >
                                 <div>
                                     <strong>Many-to-Many Genre Labels:</strong> Cohort denominator is{' '}
@@ -1568,7 +1570,7 @@ export function StreamingInsights({
                             {drilldownData.genres.length >= topLimit && (
                                 <div
                                     data-testid="genres-truncation-notice"
-                                    className="px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
+                                    className="px-3 py-2 border-y border-amber-500/30 bg-amber-950/25 text-xs text-amber-200 flex items-center gap-2"
                                 >
                                     <Info size={14} className="text-amber-400 shrink-0" />
                                     <span>
@@ -1599,7 +1601,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">
@@ -1664,7 +1666,7 @@ export function StreamingInsights({
                                                         )
                                                     )
                                                 }
-                                                className="w-full text-left rounded-xl border border-white/[0.06] bg-slate-950/70 hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.04] hover:bg-indigo-950/30 hover:border-indigo-500/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 p-3 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                             >
                                                 <div className="space-y-0.5 min-w-0">
                                                     <div className="flex flex-wrap items-center gap-2">

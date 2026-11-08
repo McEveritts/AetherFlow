@@ -29,6 +29,9 @@ describe('GpuWidget content sizing and canonical source honesty', () => {
         expect(screen.queryByText('Transcode API')).not.toBeInTheDocument();
 
         const rootElement = container.firstElementChild as HTMLElement;
+        expect(rootElement).toHaveClass('obs-telemetry-surface');
+        expect(container.querySelector('.divide-y')).toBeInTheDocument();
+        expect(container.querySelector('.bg-slate-950\\/60')).not.toBeInTheDocument();
         expect(rootElement).not.toHaveClass('justify-between');
         expect(rootElement).not.toHaveClass('h-full');
     });
@@ -36,5 +39,13 @@ describe('GpuWidget content sizing and canonical source honesty', () => {
     it('returns null when no GPUs are provided', () => {
         const { container } = render(<GpuWidget gpus={[]} density="compact" />);
         expect(container.firstChild).toBeNull();
+    });
+
+    it('renders zero-width utilization and dedicated VRAM bars when the GPU is idle', () => {
+        const { container } = render(<GpuWidget gpus={[{ ...mockGpus[0], usage_pct: 0, memory_used: 0 }]} density="compact" />);
+        const bars = container.querySelectorAll<HTMLElement>('[style*="width"]');
+        expect(bars).toHaveLength(2);
+        bars.forEach(bar => expect(bar.style.width).toBe('0%'));
+        expect(screen.getByText('0 / 24576 MB (0%)')).toBeInTheDocument();
     });
 });

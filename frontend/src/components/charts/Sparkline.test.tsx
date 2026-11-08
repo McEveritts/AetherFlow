@@ -10,10 +10,13 @@ import Sparkline, {
 } from "@/components/charts/Sparkline";
 import OverviewTab from "@/components/tabs/OverviewTab";
 import { SystemMetrics, MetricsHistory } from "@/types/dashboard";
+import { apiFetch } from "@/lib/fetcher";
 
 const renderedChartFrames: Array<Array<{ name: string; index?: number; val1?: number; val2?: number; timestamp?: number; timeLabel?: string }>> = [];
 const renderedYAxisDomains: Array<[number, number] | undefined> = [];
 const renderedXAxisProps: Array<{ dataKey?: string; type?: string; domain?: [number, number]; hide?: boolean }> = [];
+
+jest.mock("@/lib/fetcher", () => ({ apiFetch: jest.fn() }));
 
 jest.mock("recharts", () => ({
   ResponsiveContainer: function MockResponsiveContainer({ children }: { children: React.ReactNode }) {
@@ -137,6 +140,80 @@ function buildMetrics(cores: number[], usage = 25): SystemMetrics {
   };
 }
 
+describe("Forecast cards and mini sparkline integration", () => {
+  const PredictionsCard = jest.requireActual<typeof import("@/components/cards/PredictionsCard")>("@/components/cards/PredictionsCard").default;
+  const BandwidthCard = jest.requireActual<typeof import("@/components/cards/BandwidthCard")>("@/components/cards/BandwidthCard").default;
+
+  beforeEach(() => jest.mocked(apiFetch).mockReset());
+
+  it("renders four bounded mini trends and hairline rows without nested dark wells", async () => {
+    const report = {
+      trend_summary: "Capacity remains within normal bounds.",
+      cpu_trend: "increasing",
+      memory_trend: "stable",
+      disk_io_trend: "decreasing",
+      network_trend: "critical",
+      warnings: [],
+      recommendations: ["Review network saturation."],
+      predicted_bottleneck: "network",
+      confidence_score: 0.9,
+    };
+    const history = [10, 20, 30].map((value, index) => ({
+      id: index,
+      timestamp: String(index),
+      cpu_avg: value,
+      mem_used_gb: value,
+      mem_total_gb: 64,
+      disk_read_bps: value,
+      disk_write_bps: value,
+      net_rx_bytes: value,
+      net_tx_bytes: value,
+    }));
+    jest.mocked(apiFetch).mockImplementation(async input => ({
+      ok: true,
+      json: async () => String(input).includes("history") ? history : report,
+    } as Response));
+    const { container } = render(<PredictionsCard />);
+    await screen.findByText("Bottleneck");
+    expect(container.firstElementChild).toHaveClass("obs-telemetry-surface");
+    expect(container.querySelector('[class*="bg-black/30"]')).toBeNull();
+    expect(screen.getAllByTestId("area-chart")).toHaveLength(4);
+    screen.getAllByTestId("responsive-container").forEach(chart => {
+      const plot = chart.parentElement?.parentElement;
+      expect(plot).toHaveStyle({ height: "32px" });
+      expect(plot?.parentElement?.children).toHaveLength(1);
+    });
+    expect(screen.getByText("CPU").closest(".grid")).toHaveClass("grid-cols-1", "sm:grid-cols-2");
+    expect(screen.queryByText(/Sample 1|3 samples/)).not.toBeInTheDocument();
+    const disclosure = screen.getByRole("button", { name: "Show Forecast Details" });
+    expect(disclosure).toHaveClass("min-h-[40px]", "obs-touch-target-standard");
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(disclosure);
+    expect(screen.getByText(report.trend_summary)).toBeInTheDocument();
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps bandwidth readiness and recommendations on the same glass surface", async () => {
+    jest.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({
+      recommended_upload_kbps: 1024,
+      recommended_download_kbps: 2048,
+      reasoning: "Leave capacity for peer discovery.",
+      confidence: 0.85,
+      swarm_health: "healthy",
+      suggestions: [],
+    }) } as Response);
+    const { container } = render(<BandwidthCard />);
+    expect(screen.getByText("Swarm Rate Optimizer Ready")).toBeInTheDocument();
+    expect(container.firstElementChild).toHaveClass("obs-telemetry-surface");
+    expect(container.querySelector('[class*="bg-black/30"]')).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    await screen.findByText("2.0 MB/s");
+    expect(screen.getByText("1.0 MB/s")).toBeInTheDocument();
+    expect(container.querySelector('[class*="bg-black/30"]')).toBeNull();
+    expect(screen.getByRole("button", { name: "Apply Recommendations" })).toHaveClass("obs-touch-target-standard");
+  });
+});
+
 describe("Sparkline component and regression coverage", () => {
   beforeEach(() => {
     renderedChartFrames.length = 0;
@@ -187,6 +264,31 @@ describe("Sparkline component and regression coverage", () => {
     ]);
   });
 
+  it.each(["touchEnd", "touchCancel"] as const)("freezes both series and time/magnitude geometry during touch inspection until %s", (releaseEvent) => {
+    const initialTimestamps = [1700000000000, 1700000001000];
+    const updatedTimestamps = [1700000005000, 1700000007000, 1700000010000];
+    const { container, rerender } = render(
+      <Sparkline data={[10, 20]} data2={[4, 8]} timestamps={initialTimestamps} selectedWindow="5m" />
+    );
+    const rootElement = container.firstElementChild!;
+    const initialPoints = screen.getByTestId("area-chart").getAttribute("data-points");
+    const initialXDomain = screen.getByTestId("x-axis").getAttribute("data-domain");
+    const initialYDomain = screen.getByTestId("y-axis").getAttribute("data-domain");
+
+    fireEvent.touchStart(rootElement);
+    rerender(<Sparkline data={[100, 200, 300]} data2={[40, 80, 120]} timestamps={updatedTimestamps} selectedWindow="5m" />);
+    expect(screen.getByTestId("area-chart")).toHaveAttribute("data-points", initialPoints);
+    expect(screen.getByTestId("x-axis")).toHaveAttribute("data-domain", initialXDomain);
+    expect(screen.getByTestId("y-axis")).toHaveAttribute("data-domain", initialYDomain);
+    expect(screen.getByText(formatTimeEndpoint(initialTimestamps[0]))).toBeInTheDocument();
+
+    fireEvent[releaseEvent](rootElement);
+    expect(screen.getByTestId("area-chart")).not.toHaveAttribute("data-points", initialPoints);
+    expect(screen.getByTestId("x-axis")).not.toHaveAttribute("data-domain", initialXDomain);
+    expect(screen.getByTestId("y-axis")).not.toHaveAttribute("data-domain", initialYDomain);
+    expect(screen.getByText(formatTimeEndpoint(updatedTimestamps[0]))).toBeInTheDocument();
+  });
+
   it("applies fixed 0-100 domain for percentage scale even with constant samples", () => {
     render(<Sparkline data={[14.8, 14.8, 14.8]} isPercentage={true} showMagnitudeReferences={true} />);
     const yAxisElement = screen.getByTestId("y-axis");
@@ -226,7 +328,7 @@ describe("Sparkline component and regression coverage", () => {
     expect(screen.getByText("30 samples (30s)")).toBeInTheDocument();
   });
 
-  it("uses content-driven outer height, fixed chart height, wrapping header, and readable magnitude references in dedicated gutter", () => {
+  it("uses content-driven height and a dedicated legible magnitude gutter outside the plot", () => {
     const { container } = render(
       <Sparkline
         data={[100, 200]}
@@ -246,21 +348,51 @@ describe("Sparkline component and regression coverage", () => {
     expect(rootElement.style.height).toBe("");
     expect(rootElement).toHaveClass("flex-col");
 
-    const chartRow = rootElement.querySelector(".w-full.flex.items-stretch") as HTMLElement;
+    const chartRow = screen.getByTestId("responsive-container").parentElement?.parentElement as HTMLElement;
     expect(chartRow.style.height).toBe("80px");
 
     const timeContextElement = screen.getByText("60 samples (60s)");
-    expect(timeContextElement).toHaveClass("text-xs");
+    expect(timeContextElement).toHaveClass("text-xs", "text-slate-400");
 
     const downLabelElement = screen.getByText("Down");
     expect(downLabelElement).toHaveClass("text-xs");
+    expect(screen.getByText("200 B/s")).toHaveClass("sr-only");
+    expect(screen.getByText("150 B/s")).toHaveClass("sr-only");
 
-    const magnitudeGutter = rootElement.querySelector(".shrink-0.flex.flex-col") as HTMLElement;
-    expect(magnitudeGutter).toBeInTheDocument();
-    expect(magnitudeGutter).toHaveClass("text-xs");
+    const magnitudeReferences = screen.getByText("230 B/s").parentElement;
+    expect(magnitudeReferences).toHaveClass("shrink-0", "text-xs", "text-slate-300", "font-mono");
+    expect(magnitudeReferences).not.toHaveClass("absolute");
+    expect(chartRow).toHaveClass("flex", "gap-2");
+    expect(rootElement).not.toHaveClass("border", "bg-slate-950/60");
     expect(screen.getByText("230 B/s")).toBeInTheDocument();
     expect(screen.getByText("115 B/s")).toBeInTheDocument();
     expect(screen.getByText("0 B/s")).toBeInTheDocument();
+  });
+
+  it("keeps mini trends within their plot height without metadata, endpoints, or magnitude strips", () => {
+    const { container } = render(
+      <Sparkline data={[10, 30, 20]} height={32} variant="mini" label="CPU trend" showMagnitudeReferences />
+    );
+    const rootElement = container.firstElementChild as HTMLElement;
+    expect(rootElement.children).toHaveLength(1);
+    expect(rootElement.firstElementChild).toHaveStyle({ height: '32px' });
+    expect(screen.getByTestId('area-chart')).toBeInTheDocument();
+    expect(screen.queryByText(/Sample 1|Sample 3|CPU trend|3 samples/)).not.toBeInTheDocument();
+  });
+
+  it.each([{ data: [] }, { data: [10] }])("keeps sparse mini trends honest and bounded for $data", ({ data }) => {
+    const { container } = render(<Sparkline data={data} height={32} variant="mini" />);
+    expect(container.firstElementChild).toHaveStyle({ height: '32px' });
+    expect(screen.getByText(/Collecting/)).toHaveClass('sr-only');
+    expect(screen.queryByTestId('area-chart')).not.toBeInTheDocument();
+  });
+
+  it("keeps shared mature history metadata available to screen readers without repeating it visually", () => {
+    render(<Sparkline data={[10, 30]} timestamps={[1000, 4000]} selectedWindow="5m" hasSharedSummary />);
+    const metadata = screen.getByText('2 samples (3s span of 5m max)');
+    expect(metadata).toHaveClass('sr-only');
+    expect(metadata.parentElement).toHaveClass('sr-only');
+    expect(screen.getByTestId('area-chart')).toBeInTheDocument();
   });
 
   it("encodes honest sparse data without fabricating zeros or duplicate points", () => {

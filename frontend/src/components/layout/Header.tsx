@@ -9,10 +9,19 @@ import { useTaskStore } from '@/store/useTaskStore';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { triggerHaptic } from '@/lib/design';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Image from 'next/image';
 
+function subscribeToPlatform() {
+    return () => {};
+}
+
+function getCommandShortcut() {
+    return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent) ? '⌘K' : 'Ctrl+K';
+}
+
 export default function Header() {
+    const commandShortcut = useSyncExternalStore(subscribeToPlatform, getCommandShortcut, () => 'Ctrl+K');
     const {
         activeTab,
         isMobileMenuOpen,
@@ -148,7 +157,7 @@ export default function Header() {
     const status = statusConfig[connectionState] || statusConfig.DISCONNECTED;
 
     return (
-        <header className="h-16 md:h-20 px-3 sm:px-4 md:px-8 flex items-center justify-between border-b border-white/[0.08] bg-[#0a0e18]/95 backdrop-blur-md sticky top-0 z-30 min-w-0">
+        <header className="h-16 md:h-20 px-3 sm:px-4 md:px-8 flex items-center justify-between border-b border-white/[0.06] bg-slate-950/45 backdrop-blur-2xl sticky top-0 z-30 min-w-0">
             <div className="flex items-center gap-2 sm:gap-3 md:gap-5 min-w-0 flex-1 mr-2">
                 <button
                     type="button"
@@ -195,13 +204,13 @@ export default function Header() {
                         triggerHaptic(8, hapticFeedback);
                         setIsCommandPaletteOpen(true);
                     }}
-                    className="min-h-[40px] obs-gpu-120hz-interactive flex items-center gap-2 px-2.5 sm:px-3 py-2 text-slate-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] obs-gpu-120hz-interactive flex items-center justify-center gap-2 px-2.5 sm:px-3 py-2 text-slate-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                     aria-label="Open Command Palette"
-                    title="Command Palette (Ctrl+K)"
+                    title={`Command Palette (${commandShortcut})`}
                 >
                     <Search size={16} className="text-slate-400" />
                     <span className="hidden lg:inline text-xs font-medium text-slate-300">Command</span>
-                    <kbd className="hidden lg:inline-block rounded bg-white/5 px-1.5 py-0.5 text-xs font-mono text-slate-400 border border-white/10">⌘K</kbd>
+                    <kbd className="hidden lg:inline-block rounded bg-white/5 px-1.5 py-0.5 text-xs font-mono text-slate-400 border border-white/10">{commandShortcut}</kbd>
                 </button>
 
                 <button
@@ -210,7 +219,7 @@ export default function Header() {
                         triggerHaptic(8, hapticFeedback);
                         toggleDrawer();
                     }}
-                    className="min-h-[40px] min-w-[40px] obs-gpu-120hz-interactive relative p-2.5 text-slate-300 hover:text-white hover:bg-white/[0.08] border border-transparent hover:border-white/10 rounded-xl flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] obs-gpu-120hz-interactive relative p-2.5 text-slate-300 hover:text-white hover:bg-white/[0.08] border border-transparent hover:border-white/10 rounded-xl flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                     aria-label="Notifications"
                 >
                     <Bell size={18} />
@@ -225,7 +234,7 @@ export default function Header() {
                             type="button"
                             ref={tasksTriggerRef}
                             onClick={() => { setDropdownOpen(false); setTasksOpen(!tasksOpen); }}
-                            className="min-h-[40px] relative flex items-center gap-2 px-3 py-2 bg-indigo-500/10 text-indigo-300 hover:text-white hover:bg-indigo-500/20 border border-indigo-500/30 rounded-xl transition-colors"
+                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] relative flex items-center gap-2 px-3 py-2 bg-indigo-500/10 text-indigo-300 hover:text-white hover:bg-indigo-500/20 border border-indigo-500/30 rounded-xl transition-colors"
                             aria-label="Background Tasks"
                             aria-expanded={tasksOpen}
                             aria-controls="header-background-tasks"
@@ -272,7 +281,7 @@ export default function Header() {
                         type="button"
                         ref={dropdownTriggerRef}
                         onClick={() => { setTasksOpen(false); setDropdownOpen(!dropdownOpen); }}
-                        className="min-h-[40px] flex items-center gap-2.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 hover:border-indigo-500/40 pl-1 pr-3 md:pr-4 py-1 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                        className="obs-touch-target-standard min-h-[44px] min-w-[44px] flex items-center gap-2.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 hover:border-indigo-500/40 pl-1 pr-3 md:pr-4 py-1 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                         aria-label="User Menu"
                         aria-expanded={dropdownOpen}
                         aria-controls="header-user-menu"
@@ -286,7 +295,7 @@ export default function Header() {
                         </div>
                         <div className="hidden md:block text-left">
                             <div className="text-xs font-semibold text-slate-200">{user?.username || 'Admin'}</div>
-                            <div className="text-[11px] text-slate-400 uppercase tracking-wider">{user?.role || 'User'}</div>
+                            <div className="text-xs text-slate-400 uppercase tracking-wider">{user?.role || 'User'}</div>
                         </div>
                         <ChevronDown size={14} className={`text-slate-400 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
                     </button>

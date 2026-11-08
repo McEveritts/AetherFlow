@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import useSWR from 'swr';
-import { Terminal, Loader2, Play, Download, Sparkles, AlertCircle, Wrench, CheckCircle } from 'lucide-react';
+import { Terminal, Loader2, Play, Pause, Download, Sparkles, AlertCircle, Wrench, CheckCircle } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { apiFetch } from '@/lib/fetcher';
 import { useState } from 'react';
@@ -53,6 +53,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
     const bottomRef = useRef<HTMLDivElement>(null);
     const { addToast } = useToast();
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [followLogs, setFollowLogs] = useState(true);
     const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: AIProposedAction } | null>(null);
     const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
     const diagnosticRequest = useRef<AbortController | null>(null);
@@ -67,10 +68,11 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
     const logs = rawData && !error ? { logs: rawData.logs.map(l => l.message) } : null;
 
     useEffect(() => {
-        if (logs?.logs && bottomRef.current) {
-            bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        if (followLogs && logs?.logs && bottomRef.current) {
+            const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+            bottomRef.current.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth' });
         }
-    }, [logs?.logs]);
+    }, [logs?.logs, followLogs]);
 
     if (!serviceName) return null;
 
@@ -138,14 +140,14 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
             title={`${serviceName} Daemon Matrix`}
             className="max-w-4xl w-full"
         >
-            <div className="flex items-center justify-between mb-4 mt-2">
-                <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex flex-col gap-3 mb-4 mt-2 min-w-0">
+                <div className="flex items-center gap-3 flex-wrap min-w-0">
                     <span className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest bg-white/5 border border-white/10 px-3 py-1 rounded-lg">
                         <Terminal size={14} className="text-indigo-400" />
                         Live STDOUT / STDERR
                     </span>
                     {normalizedUnits.length > 1 && (
-                        <div className="flex items-center gap-1.5 flex-wrap" role="tablist" aria-label="Service components">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0 max-w-full" role="tablist" aria-label="Service components">
                             {normalizedUnits.map((unit) => {
                                 const isSelected = unit === activeUnit;
                                 return (
@@ -155,7 +157,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
                                         role="tab"
                                         aria-selected={isSelected}
                                         onClick={() => onSelectUnit(unit)}
-                                        className={`px-2.5 py-1 rounded-md text-xs font-mono transition-colors border ${
+                                        className={`min-h-[40px] min-w-[40px] max-w-full break-all px-2.5 py-1 rounded-md text-xs font-mono transition-colors border ${
                                             isSelected
                                                 ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 font-semibold'
                                                 : 'bg-white/5 text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/10'
@@ -170,29 +172,41 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
                     {isLoading && <Loader2 size={14} className="animate-spin text-slate-500" />}
                 </div>
                 
-                <div className="flex items-center gap-2">
+                <div role="group" aria-label="Log controls" className="flex flex-wrap items-center gap-2 min-w-0 border-t border-white/[0.08] pt-3">
                     <button 
                         onClick={runAiDiagnostic}
                         disabled={isAnalyzing || !logs?.logs.length}
-                        className="flex items-center gap-2 px-3 py-1.5 text-indigo-300 hover:text-white bg-indigo-500/10 hover:bg-indigo-500/20 rounded-lg transition-colors border border-indigo-500/30 disabled:opacity-50 text-xs font-bold tracking-wide"
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center gap-2 px-3 py-1.5 whitespace-nowrap text-indigo-300 hover:text-white bg-indigo-500/10 hover:bg-indigo-500/20 rounded-lg transition-colors border border-indigo-500/30 disabled:opacity-50 text-xs font-bold"
                         title="Run FlowAI Log Diagnostic"
+                        aria-label="FlowAI Auto-Debug"
                     >
                         {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                        FlowAI Auto-Debug
+                        <span>Auto-Debug</span>
                     </button>
-                    <div className="w-px h-6 bg-white/10 mx-1"></div>
+                    <button
+                        type="button"
+                        onClick={() => setFollowLogs((following) => !following)}
+                        aria-pressed={followLogs}
+                        aria-label={followLogs ? 'Pause log following' : 'Follow logs'}
+                        className="min-h-[40px] min-w-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.04] text-xs text-slate-300 hover:text-white"
+                    >
+                        {followLogs ? <Pause size={14} /> : <Play size={14} />}
+                        <span>{followLogs ? 'Pause' : 'Follow'}</span>
+                    </button>
                     <button 
                         onClick={() => mutate()}
-                        className="p-1.5 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center p-2 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/[0.08]"
                         title="Force sync"
+                        aria-label="Sync logs"
                     >
                         <Play size={14} />
                     </button>
                     <button 
                         onClick={handleDownload}
                         disabled={!logs?.logs}
-                        className="p-1.5 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center p-2 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/[0.08]"
                         title="Export Matrix"
+                        aria-label="Download logs"
                     >
                         <Download size={14} />
                     </button>
@@ -200,15 +214,15 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
             </div>
 
             {aiAnalysis && (
-                <div className="mb-4 bg-slate-900 border border-indigo-500/30 p-4 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.05)] animate-fade-in relative overflow-hidden">
+                <div className="mb-4 bg-white/[0.04] border border-white/[0.08] p-3 sm:p-4 rounded-xl animate-fade-in motion-reduce:animate-none relative overflow-hidden min-w-0">
                     <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 blur-3xl pointer-events-none translate-x-1/2 -translate-y-1/2"></div>
                     <div className="flex gap-3 relative z-10">
                         <div className="h-10 w-10 shrink-0 bg-indigo-500/20 border border-indigo-500/30 rounded-lg flex items-center justify-center">
                             <Sparkles size={18} className="text-indigo-400" />
                         </div>
-                        <div className="flex-1">
+                        <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between">
-                                <h4 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                                <h4 className="text-sm font-bold text-slate-200 flex flex-wrap items-center gap-2">
                                     FlowAI Diagnostic Result
                                     {aiAnalysis.rootCause.includes('No critical') ? (
                                         <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/30 tracking-wider">HEALTHY</span>
@@ -217,7 +231,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
                                     )}
                                 </h4>
                             </div>
-                            <div className="text-xs text-slate-300 mt-2 leading-relaxed bg-black/20 p-3 rounded-lg border border-white/5">
+                            <div className="text-xs text-slate-300 mt-2 leading-relaxed pt-3 border-t border-white/[0.08] break-words">
                                 <span className="text-slate-500 font-sans font-semibold mb-1.5 block">Root Cause Pattern:</span>
                                 <FlowAiMarkdown content={aiAnalysis.rootCause} />
                             </div>
@@ -243,7 +257,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
                 </div>
             )}
 
-            <div className="bg-slate-950 border border-white/10 rounded-xl p-4 overflow-y-auto font-mono text-xs text-slate-300 relative" style={{ height: '50vh', maxHeight: '500px' }}>
+            <div className="bg-white/[0.03] border border-white/[0.08] rounded-xl p-3 sm:p-4 overflow-y-auto min-w-0 max-w-full font-mono text-xs text-slate-300 relative" style={{ height: '50vh', maxHeight: '500px' }}>
                 {error ? (
                     <div className="text-red-400 text-center py-10 font-sans">
                         Unable to bridge local log socket. Core daemon may be unresponsive.
@@ -294,7 +308,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
                         The remediation was automatically forwarded to your Approval Inbox. No autonomous action has occurred.
                     </p>
 
-                    <div className="bg-black/20 border border-white/5 rounded-xl w-full p-4 mb-6 text-left relative overflow-hidden">
+                    <div className="bg-white/[0.04] border border-white/[0.08] rounded-xl w-full p-4 mb-6 text-left relative overflow-hidden">
                         <div className="absolute top-0 right-0 p-2 opacity-10">
                             <Wrench size={48} />
                         </div>

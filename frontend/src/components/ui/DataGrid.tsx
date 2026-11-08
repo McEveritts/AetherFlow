@@ -77,7 +77,7 @@ export function DataGrid<TData, TValue>({
       style={{ maxHeight: '600px' }}
     >
       <table className="w-full text-left border-collapse min-w-0">
-        <thead className="sticky top-0 z-20 bg-slate-950/90 backdrop-blur-md border-b border-white/[0.08] shadow-sm">
+        <thead className="sticky top-0 z-20 bg-slate-900/65 backdrop-blur-md border-b border-white/[0.07] shadow-sm">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => {

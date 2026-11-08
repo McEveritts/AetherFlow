@@ -3,6 +3,29 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { Modal } from './Modal';
 
 describe('Modal', () => {
+    it('portals above shell stacking contexts and restores the original body overflow on close and unmount', () => {
+        document.body.style.overflow = 'auto';
+        const { container, rerender, unmount } = render(
+            <main className="relative z-10">
+                <Modal isOpen title="Layered dialog" onClose={jest.fn()}>Content</Modal>
+            </main>
+        );
+        const dialog = screen.getByRole('dialog', { name: 'Layered dialog' });
+        expect(container).not.toContainElement(dialog);
+        expect(dialog.parentElement?.parentElement).toBe(document.body);
+        expect(dialog.parentElement).toHaveClass('z-[90]');
+        expect(dialog).toHaveClass('glass-panel', 'obs-telemetry-surface');
+        expect(document.body.style.overflow).toBe('hidden');
+
+        rerender(<Modal isOpen={false} onClose={jest.fn()}>Content</Modal>);
+        expect(document.body.style.overflow).toBe('auto');
+        rerender(<Modal isOpen onClose={jest.fn()}>Content</Modal>);
+        expect(document.body.style.overflow).toBe('hidden');
+        unmount();
+        expect(document.body.style.overflow).toBe('auto');
+        document.body.style.overflow = '';
+    });
+
     it('announces its title, traps keyboard focus, and restores focus after Escape', () => {
         function ModalHarness() {
             const [isOpen, setIsOpen] = useState(false);
@@ -75,10 +98,12 @@ describe('Modal', () => {
 
         fireEvent.keyDown(document, { key: 'Escape' });
         expect(screen.queryByRole('dialog', { name: 'Remediation proposed' })).not.toBeInTheDocument();
+        expect(document.body.style.overflow).toBe('hidden');
         expect(screen.getByRole('dialog', { name: 'Service logs' })).toBeInTheDocument();
         expect(document.activeElement).toBe(remediationTrigger);
         fireEvent.keyDown(document, { key: 'Escape' });
         expect(screen.queryByRole('dialog', { name: 'Service logs' })).not.toBeInTheDocument();
         expect(document.activeElement).toBe(logsTrigger);
+        expect(document.body.style.overflow).toBe('');
     });
 });

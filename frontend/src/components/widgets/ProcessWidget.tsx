@@ -141,8 +141,8 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
     ], [services, setActiveTab]);
 
     return (
-        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
-            <div className="flex items-center justify-between pb-3 mb-3.5 border-b border-slate-800/80 shrink-0">
+        <div className={`obs-telemetry-surface relative overflow-hidden flex flex-col h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div className="flex items-center justify-between pb-3 mb-3.5 border-b border-white/[0.06] shrink-0">
                 <div className="flex items-center gap-2.5">
                     <div className="h-8 w-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0">
                         <Activity size={16} />
@@ -152,17 +152,17 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
                         <p className="text-xs text-slate-400 mt-1">Active kernel tasks ordered by CPU load</p>
                     </div>
                 </div>
-                <span className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-wider bg-slate-800/60 border border-slate-700/60 px-2.5 py-1 rounded-lg">
+                <span className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-wider bg-white/[0.03] px-2.5 py-1 rounded-full">
                     {sortedProcesses.length} Tasks
                 </span>
             </div>
 
-            <div className="flex-1 overflow-hidden rounded-xl border border-slate-800/60 bg-slate-950/60">
+            <div className="flex-1 min-w-0 overflow-hidden">
                 <DataGrid
                     initialSorting={[{ id: 'cpu', desc: true }]}
                     columns={columns}
                     data={sortedProcesses}
-                    className="h-full !max-h-full border-none shadow-none rounded-xl"
+                    className="h-full !max-h-full !bg-transparent border-none shadow-none rounded-none"
                     rowHeight={isImmersive ? 48 : 42}
                 />
             </div>

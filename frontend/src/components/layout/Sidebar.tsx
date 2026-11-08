@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import useSWR from 'swr';
 import { useShallow } from 'zustand/react/shallow';
 import { TabId } from '@/types/dashboard';
@@ -23,12 +23,12 @@ import {
     ClipboardList,
     Film,
     Tv,
-    ChevronLeft,
-    ChevronRight,
     Menu,
     X,
     Radio,
-    Boxes
+    Boxes,
+    ChevronLeft,
+    ChevronRight
 } from 'lucide-react';
 
 export const NAVIGATION = [
@@ -58,11 +58,25 @@ export const MOBILE_DOCK_ITEMS: { id: TabId; label: string; icon: React.ReactNod
     { id: 'streaming', label: 'Streaming', icon: <Tv size={20} /> },
 ];
 
+function subscribeSidebarPin(onChange: () => void) {
+    window.addEventListener('storage', onChange);
+    return () => window.removeEventListener('storage', onChange);
+}
+
+function readSidebarPin() {
+    try {
+        return window.localStorage.getItem('aetherflow-sidebar-pinned') === 'true';
+    } catch {
+        return false;
+    }
+}
+
 export default function Sidebar() {
     const { user, logout } = useAuth();
     const {
         activeTab,
         setActiveTab,
+        isSidebarHovered,
         setIsSidebarHovered,
         isMobileMenuOpen,
         setIsMobileMenuOpen,
@@ -71,6 +85,7 @@ export default function Sidebar() {
         useShallow((state) => ({
             activeTab: state.activeTab,
             setActiveTab: state.setActiveTab,
+            isSidebarHovered: state.isSidebarHovered,
             setIsSidebarHovered: state.setIsSidebarHovered,
             isMobileMenuOpen: state.isMobileMenuOpen,
             setIsMobileMenuOpen: state.setIsMobileMenuOpen,
@@ -86,7 +101,11 @@ export default function Sidebar() {
     const drawerRef = useRef<HTMLElement | null>(null);
     const closeButtonRef = useRef<HTMLButtonElement | null>(null);
     const previouslyFocusedElementRef = useRef<HTMLElement | null>(null);
-    const [isCollapsed, setIsCollapsed] = useState(false);
+    const savedPin = useSyncExternalStore(subscribeSidebarPin, readSidebarPin, () => false);
+    const [pinOverride, setPinOverride] = useState<boolean | null>(null);
+    const isPinned = pinOverride ?? savedPin;
+    const [isFocusWithin, setIsFocusWithin] = useState(false);
+    const isExpanded = isSidebarHovered || isPinned || isFocusWithin;
 
     useEffect(() => {
         if (!isMobileMenuOpen) return;
@@ -162,9 +181,15 @@ export default function Sidebar() {
 
     const handleToggleCollapse = () => {
         triggerHaptic(6, hapticFeedback);
-        const nextCollapsed = !isCollapsed;
-        setIsCollapsed(nextCollapsed);
-        setIsSidebarHovered(!nextCollapsed);
+        const nextPinned = !isPinned;
+        setPinOverride(nextPinned);
+        setIsSidebarHovered(nextPinned);
+        setIsFocusWithin(false);
+        try {
+            localStorage.setItem('aetherflow-sidebar-pinned', String(nextPinned));
+        } catch {
+            return;
+        }
     };
 
     return (
@@ -234,15 +259,15 @@ export default function Sidebar() {
                         aria-modal="true"
                         aria-label="Navigation Menu"
                         tabIndex={-1}
-                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel bg-[#0a0e18]/98 p-5 flex flex-col z-50 border-r border-white/10 shadow-2xl overflow-y-auto no-scrollbar outline-none"
+                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] obs-sidebar-surface p-5 flex flex-col z-50 overflow-y-auto no-scrollbar outline-none"
                         onClick={(clickEvent) => clickEvent.stopPropagation()}
                         onTouchStart={handleDrawerTouchStart}
                         onTouchEnd={handleDrawerTouchEnd}
                     >
                         <div className="flex items-center justify-between pb-4 mb-4 border-b border-white/10">
                             <div className="flex items-center gap-3">
-                                <div className="w-9 h-9 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
-                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-6 h-6" />
+                                <div className="obs-brand-logo w-10 h-10 shrink-0 flex items-center justify-center">
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="obs-brand-mark w-8 h-8" />
                                 </div>
                                 <div>
                                     <h2 className="text-base font-bold text-white tracking-tight">AetherFlow</h2>
@@ -283,7 +308,7 @@ export default function Sidebar() {
                                                 : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
                                         }`}
                                     >
-                                        <div className={isActive ? 'text-indigo-400' : 'text-slate-400'}>
+                                        <div className={isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.45)]' : 'text-slate-400'}>
                                             {item.icon}
                                         </div>
                                         <span className="font-medium text-sm">{item.label}</span>
@@ -336,50 +361,74 @@ export default function Sidebar() {
             )}
 
             <div
-                className={`hidden md:block shrink-0 relative z-40 transition-all duration-200 ${
-                    isCollapsed ? 'md:w-16' : 'md:w-52'
+                className={`hidden md:block shrink-0 relative z-40 obs-gpu-120hz-rail ${
+                    isExpanded ? 'md:w-64' : 'md:w-[4.5rem]'
                 }`}
             >
                 <aside
                     id="desktop-sidebar-navigation"
-                    className={`fixed inset-y-0 left-0 z-40 flex flex-col transition-all duration-200 ${
-                        isCollapsed ? 'md:w-16' : 'md:w-52'
+                    onMouseEnter={() => setIsSidebarHovered(true)}
+                    onMouseLeave={() => {
+                        if (!isPinned) setIsSidebarHovered(false);
+                    }}
+                    onFocusCapture={() => setIsFocusWithin(true)}
+                    onBlurCapture={(event) => {
+                        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+                            setIsFocusWithin(false);
+                        }
+                    }}
+                    className={`fixed inset-y-0 left-0 z-40 flex flex-col obs-gpu-120hz-rail ${
+                        isExpanded ? 'md:w-64' : 'md:w-[4.5rem]'
                     }`}
                 >
                     <div className="w-full h-full obs-sidebar-surface overflow-hidden flex flex-col">
                         <div
                             className={`flex h-16 md:h-20 items-center border-b border-white/[0.08] relative shrink-0 ${
-                                isCollapsed ? 'justify-center px-0' : 'px-4 justify-between'
+                                !isExpanded ? 'justify-center px-0' : 'px-4 justify-between'
                             }`}
                         >
-                            <div className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-2.5 min-w-0'}`}>
+                            <div className={`flex items-center ${!isExpanded ? 'justify-center' : 'gap-2.5 min-w-0'}`}>
                                 <button
                                     type="button"
                                     onClick={handleToggleCollapse}
-                                    aria-label={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-                                    aria-expanded={!isCollapsed}
+                                    aria-label={isPinned ? 'Collapse Sidebar' : isExpanded ? 'Pin Sidebar' : 'Expand Sidebar'}
+                                    aria-expanded={isExpanded}
                                     aria-controls="desktop-sidebar-navigation"
-                                    title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-                                    className="w-10 h-10 min-h-[40px] min-w-[40px] shrink-0 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.35)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+                                    title={isPinned ? 'Collapse Sidebar' : 'Pin Sidebar'}
+                                    className="obs-brand-logo w-10 h-10 min-h-[40px] min-w-[40px] shrink-0 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                                 >
-                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="obs-brand-mark w-8 h-8" />
                                 </button>
-                                {!isCollapsed && (
+                                {isExpanded && (
                                     <div className="flex flex-col min-w-0">
-                                        <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap leading-tight truncate">
+                                        <span className="text-base font-bold tracking-tight text-white whitespace-nowrap leading-tight truncate">
                                             AetherFlow
                                         </span>
-                                        <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider truncate">
-                                            Nexus OS
-                                        </span>
+                                        <div className="flex items-center gap-1.5 mt-0.5">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399] shrink-0" />
+                                            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider truncate">
+                                                Nexus OS
+                                            </span>
+                                        </div>
                                     </div>
                                 )}
                             </div>
+                            {isExpanded && (
+                                <button
+                                    type="button"
+                                    onClick={handleToggleCollapse}
+                                    aria-label={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
+                                    title={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
+                                    className="obs-touch-target-standard shrink-0 flex items-center justify-center rounded-lg text-slate-400 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                >
+                                    {isPinned ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+                                </button>
+                            )}
                         </div>
 
                         <nav className="flex-1 px-2.5 py-3 flex flex-col overflow-y-auto no-scrollbar relative z-10">
                             <div className="space-y-1">
-                                {!isCollapsed && (
+                                {isExpanded && (
                                     <div className="px-2.5 pb-1 text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap select-none">
                                         Workspace
                                     </div>
@@ -396,9 +445,9 @@ export default function Sidebar() {
                                             }}
                                             aria-label={item.label}
                                             aria-current={isActive ? 'page' : undefined}
-                                            title={isCollapsed ? item.label : undefined}
+                                            title={!isExpanded ? item.label : undefined}
                                             className={`flex items-center relative rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
-                                                !isCollapsed
+                                                isExpanded
                                                     ? 'w-full min-h-[40px] px-2.5 py-2 gap-3 justify-start'
                                                     : 'w-10 h-10 min-h-[40px] min-w-[40px] mx-auto justify-center'
                                             } ${
@@ -408,13 +457,13 @@ export default function Sidebar() {
                                             }`}
                                         >
                                             {isActive && (
-                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full" />
+                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full shadow-[0_0_8px_#6366f1]" />
                                             )}
 
                                             <div
                                                 className={`shrink-0 flex items-center justify-center transition-colors ${
                                                     isActive
-                                                        ? 'text-indigo-400'
+                                                        ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.45)]'
                                                         : item.id === 'ai'
                                                         ? 'text-indigo-400/80'
                                                         : 'text-slate-400'
@@ -423,26 +472,28 @@ export default function Sidebar() {
                                                 {item.icon}
                                             </div>
 
-                                            {!isCollapsed && (
+                                            {isExpanded && (
                                                 <span className="font-medium whitespace-nowrap text-sm tracking-tight truncate">
                                                     {item.label}
                                                 </span>
                                             )}
 
                                             {item.id === 'inbox' && pendingCount > 0 && (
-                                                !isCollapsed ? (
+                                                isExpanded ? (
                                                     <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold px-2 py-0.5 rounded-full shrink-0">
                                                         {pendingCount}
                                                     </span>
                                                 ) : (
-                                                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-indigo-400" />
+                                                    <span className="absolute top-1 right-1 min-w-4 h-4 px-0.5 rounded-full bg-indigo-500 text-[10px] font-semibold text-white flex items-center justify-center">
+                                                        {pendingCount}
+                                                    </span>
                                                 )
                                             )}
 
                                             {isActive && item.id === 'ai' && (
                                                 <span
                                                     className={`rounded-full bg-indigo-400 ${
-                                                        !isCollapsed ? 'ml-auto w-1.5 h-1.5' : 'absolute top-1.5 right-1.5 w-1.5 h-1.5'
+                                                        isExpanded ? 'ml-auto w-1.5 h-1.5' : 'absolute top-1.5 right-1.5 w-1.5 h-1.5'
                                                     }`}
                                                 />
                                             )}
@@ -452,7 +503,7 @@ export default function Sidebar() {
                             </div>
 
                             <div className="mt-auto pt-3 border-t border-white/[0.08] relative z-10 shrink-0 space-y-1">
-                                {!isCollapsed && (
+                                {isExpanded && (
                                     <div className="px-2.5 pb-1 text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap select-none">
                                         System
                                     </div>
@@ -476,9 +527,9 @@ export default function Sidebar() {
                                             }}
                                             aria-label={item.label}
                                             aria-current={isActive ? 'page' : undefined}
-                                            title={isCollapsed ? item.label : undefined}
+                                            title={!isExpanded ? item.label : undefined}
                                             className={`flex items-center relative rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
-                                                !isCollapsed
+                                                isExpanded
                                                     ? 'w-full min-h-[40px] px-2.5 py-2 gap-3 justify-start'
                                                     : 'w-10 h-10 min-h-[40px] min-w-[40px] mx-auto justify-center'
                                             } ${
@@ -490,12 +541,12 @@ export default function Sidebar() {
                                             }`}
                                         >
                                             {isActive && (
-                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full" />
+                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full shadow-[0_0_8px_#6366f1]" />
                                             )}
                                             <div
                                                 className={`shrink-0 flex items-center justify-center transition-colors ${
                                                     isActive
-                                                        ? 'text-indigo-400'
+                                                        ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.45)]'
                                                         : isLogout
                                                         ? 'text-slate-400'
                                                         : 'text-slate-400'
@@ -503,7 +554,7 @@ export default function Sidebar() {
                                             >
                                                 {item.icon}
                                             </div>
-                                            {!isCollapsed && (
+                                            {isExpanded && (
                                                 <span className="text-sm font-medium tracking-tight whitespace-nowrap truncate">
                                                     {item.label}
                                                 </span>

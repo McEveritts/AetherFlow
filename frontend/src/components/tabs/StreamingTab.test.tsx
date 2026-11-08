@@ -400,6 +400,34 @@ import {
 import { waitFor } from '@testing-library/react';
 
 describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry', () => {
+    it('embeds telemetry, charts, breakdowns, leaderboards and records in continuous hairline bands', () => {
+        const { container } = render(<StreamingTab />);
+        expect(container.firstElementChild).not.toHaveClass('space-y-3', 'sm:space-y-6');
+        expect(container.firstElementChild?.firstElementChild).toHaveClass('border-b', 'border-white/[0.07]', 'pb-4');
+        expect(screen.getByRole('navigation', { name: 'Streaming views' }).lastElementChild).not.toHaveClass('border', 'rounded-xl', 'bg-white/[0.03]');
+        for (const testId of ['live-summary-surface', 'historical-summary-surface', 'historical-trends-surface', 'telemetry-breakdowns-surface', 'streaming-leaderboards-surface']) {
+            const band = screen.getByTestId(testId);
+            expect(band).toHaveClass('border-b', 'border-white/[0.07]', 'divide-y', 'divide-white/[0.07]', 'rounded-none', 'shadow-none', 'bg-transparent');
+            expect(band).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'border', 'shadow-xl');
+        }
+        expect(screen.getByTestId('historical-summary-surface')).toHaveClass('md:divide-y-0', 'md:divide-x');
+        for (const testId of ['historical-trends-surface', 'telemetry-breakdowns-surface', 'streaming-leaderboards-surface']) {
+            expect(screen.getByTestId(testId)).toHaveClass('xl:divide-y-0', 'xl:divide-x');
+        }
+        const sessions = screen.getByTestId('active-sessions-grid');
+        expect(sessions).toHaveClass('divide-y', 'divide-white/[0.07]');
+        expect(sessions).not.toHaveClass('gap-4');
+        for (const session of within(sessions).getAllByRole('article')) {
+            expect(session).toHaveClass('self-stretch', 'bg-transparent', 'justify-start');
+            expect(session).not.toHaveClass('rounded-xl', 'border', 'obs-telemetry-surface');
+        }
+        const records = screen.getByTestId('recent-playback-section');
+        expect(records).toHaveClass('border-b', 'border-white/[0.07]');
+        expect(records).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'p-5');
+        expect(within(records).getByRole('button', { name: 'Explore Full Watch History Archive' })).toHaveClass('obs-touch-target-standard', 'min-h-[44px]');
+        expect(container.querySelector('.obs-telemetry-surface')).not.toBeInTheDocument();
+    });
+
     it('withholds server-wide KPIs and onboarding from ordinary viewers', () => {
         mockRole = 'user';
         render(<StreamingTab />);
@@ -475,6 +503,28 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         currentSwrState.data?.activeSessions.forEach(session => { session.supportsMediaControl = true; session.canSendMessage = true; });
     });
 
+    it('keeps recent preview controls in reading order and pipeline metadata unboxed', () => {
+        render(<StreamingTab />);
+        expect(screen.getByRole('heading', { name: 'Recent Playback & Data Usage' })).toBeInTheDocument();
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(/Loaded Preview · Showing/);
+
+        const controls = screen.getByRole('group', { name: 'Recent playback controls' });
+        const search = within(controls).getByRole('textbox', { name: 'Search playback history' });
+        const method = within(controls).getByRole('combobox', { name: 'Filter history by play method' });
+        const pageSize = within(controls).getByRole('combobox', { name: 'History rows per page' });
+        const exportButton = within(controls).getByRole('button', { name: /Export .*CSV/ });
+        expect(Boolean(search.compareDocumentPosition(method) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+        expect(Boolean(method.compareDocumentPosition(pageSize) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+        expect(Boolean(pageSize.compareDocumentPosition(exportButton) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+
+        const pipeline = screen.getByText('4K UHD · HEVC / TRUEHD');
+        expect(pipeline).not.toHaveClass('bg-white/[0.06]', 'rounded');
+        expect(pipeline.parentElement).toHaveTextContent('Direct Play');
+        const titlesCard = screen.getByRole('heading', { name: 'Most Watched Media Titles' }).parentElement?.parentElement as HTMLElement;
+        expect(within(titlesCard).getByText('4K UHD · HEVC')).not.toHaveClass('border', 'rounded');
+        expect(within(screen.getByRole('list', { name: 'Play method metrics' })).getAllByRole('listitem')).toHaveLength(3);
+    });
+
     it('renders Jellyfin online status alongside single neutral planned integration treatment in configuration modal', () => {
         render(<StreamingTab />);
         expect(screen.getByText(/Streaming Dashboard/i)).toBeInTheDocument();
@@ -491,17 +541,13 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getByText(/Planned integration · Staged telemetry/i)).toBeInTheDocument();
     });
 
-    it.each(['Dashboard', 'Playback Analytics', 'Watch History'])('keeps the paginated archive below the primary sections in %s', (view) => {
+    it.each(['Dashboard', 'Playback Analytics'])('opens the canonical archive on demand without duplicating it in %s', (view) => {
         render(<StreamingTab />);
         fireEvent.click(screen.getByRole('button', { name: view }));
 
-        const explorer = screen.getByText('Canonical Streaming History Explorer').closest('section')!;
-        const filters = screen.getByRole('group', { name: 'Time Window Filter' });
-        expect(filters.compareDocumentPosition(explorer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.queryByTestId('streaming-history-explorer')).not.toBeInTheDocument();
 
-        const primarySections = view === 'Watch History'
-            ? [/Playback & Stream Data Usage Log/i]
-            : [
+        const primarySections = [
                 /Stream Data Usage & Bandwidth Over Time/i,
                 /Play Sessions & Watch Time Activity/i,
                 /Play Method Breakdown/i,
@@ -509,14 +555,57 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
                 /Source Codec Telemetry/i,
                 /Top Watchers & Data Usage by User/i,
                 /Most Watched Media Titles/i,
-                ...(view === 'Dashboard' ? [/Playback & Stream Data Usage Log/i] : []),
+                /Recent Playback & Data Usage/i,
             ];
         for (const title of primarySections) {
-            expect(screen.getByText(title).compareDocumentPosition(explorer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+            expect(screen.getByText(title)).toBeInTheDocument();
         }
-        expect(explorer.nextElementSibling).toBeNull();
+        const openArchive = screen.getByRole('button', { name: 'Explore Full Watch History Archive' });
+        expect(openArchive).toHaveClass('obs-touch-target-standard', 'min-h-[44px]');
+        fireEvent.click(openArchive);
+        expect(screen.getAllByTestId('streaming-history-explorer')).toHaveLength(1);
+        expect(screen.getByLabelText('Select streaming view')).toHaveValue('history');
+        expect(screen.queryByRole('heading', { name: 'Recent Playback & Data Usage' })).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Previous history page' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Next history page' })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: view }));
+        expect(screen.queryByTestId('streaming-history-explorer')).not.toBeInTheDocument();
+    });
+
+    it.each(['desktop', 'mobile'])('leads Watch History with the archive instead of live telemetry or analytics on %s', (navigationMode) => {
+        render(<StreamingTab />);
+        if (navigationMode === 'mobile') {
+            fireEvent.change(screen.getByLabelText('Select streaming view'), { target: { value: 'history' } });
+        } else {
+            fireEvent.click(screen.getByRole('button', { name: 'Watch History' }));
+        }
+
+        const explorer = screen.getByTestId('streaming-history-explorer');
+        expect(explorer.previousElementSibling).toContainElement(screen.getByRole('navigation', { name: 'Streaming views' }));
+        expect(screen.queryByRole('heading', { name: 'Recent Playback & Data Usage' })).not.toBeInTheDocument();
+        expect(screen.getAllByTestId('streaming-history-explorer')).toHaveLength(1);
+        expect(screen.queryByRole('region', { name: 'Live Stream Overview' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: /Historical Analytics/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole('group', { name: 'Time Window Filter' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: /Stream Data Usage & Bandwidth Over Time/ })).not.toBeInTheDocument();
+    });
+
+    it('keeps Live and Playback Analytics focused and restores the Dashboard overview', () => {
+        render(<StreamingTab />);
+        fireEvent.click(screen.getByRole('button', { name: /^Live \(/ }));
+        expect(screen.getByRole('region', { name: 'Live Stream Overview' })).toBeInTheDocument();
+        expect(screen.queryByTestId('streaming-history-explorer')).not.toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: /Historical Analytics/ })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Playback Analytics' }));
+        expect(screen.queryByRole('region', { name: 'Live Stream Overview' })).not.toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: /Historical Analytics/ })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Recent Playback & Data Usage' })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Dashboard' }));
+        expect(screen.getByRole('region', { name: 'Live Stream Overview' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: /Historical Analytics/ })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Recent Playback & Data Usage' })).toBeInTheDocument();
     });
 
     it('renders real-time bandwidth, data usage, and play statistics KPI cards', () => {
@@ -526,6 +615,26 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getByText(/Data Usage \(30d\)/i)).toBeInTheDocument();
         expect(screen.getByText(/Confirmed Play Statistics \(30d\)/i)).toBeInTheDocument();
         expect(screen.getByText(/Jellyfin Library/i)).toBeInTheDocument();
+    });
+
+    it('embeds telemetry, trends and rankings into hairline-divided page bands', () => {
+        render(<StreamingTab />);
+        for (const [testId, panelCount, breakpoint] of [
+            ['live-summary-surface', 2, 'sm'],
+            ['historical-summary-surface', 3, 'md'],
+            ['historical-trends-surface', 2, 'xl'],
+            ['telemetry-breakdowns-surface', 3, 'xl'],
+            ['streaming-leaderboards-surface', 2, 'xl'],
+        ] as const) {
+            const surface = screen.getByTestId(testId);
+            expect(surface).toHaveClass('border-b', 'border-white/[0.07]', 'divide-y', `${breakpoint}:divide-y-0`, `${breakpoint}:divide-x`, 'divide-white/[0.07]');
+            expect(surface).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'shadow-xl');
+            expect(surface.children).toHaveLength(panelCount);
+            for (const panel of Array.from(surface.children)) {
+                expect(panel).not.toHaveClass('obs-telemetry-surface');
+                expect(panel).not.toHaveClass('rounded-2xl');
+            }
+        }
     });
 
     it('keeps imported estimates visible alongside confirmed statistics and preserves member privacy', () => {
@@ -553,7 +662,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
     it('renders watch history rows and safely falls back to bitrateBps when bandwidthMbps is omitted', () => {
         render(<StreamingTab />);
-        expect(screen.getByText(/Playback & Stream Data Usage Log/i)).toBeInTheDocument();
+        expect(screen.getByText(/Recent Playback & Data Usage/i)).toBeInTheDocument();
         expect(screen.getAllByText('28.4 Mbps').length).toBeGreaterThan(0);
         expect(screen.getByText('8.4 Mbps')).toBeInTheDocument();
     });
@@ -1231,8 +1340,8 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         const modalContainer = screen.getByText(/Media Server Providers/i).closest('.rounded-2xl') as HTMLElement;
         expect(modalContainer).toBeInTheDocument();
 
-        const plexPlannedCard = within(modalContainer).getByText('Plex').closest('.rounded-xl') as HTMLElement;
-        const embyPlannedCard = within(modalContainer).getByText('Emby').closest('.rounded-xl') as HTMLElement;
+        const plexPlannedCard = within(modalContainer).getByText('Plex').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
+        const embyPlannedCard = within(modalContainer).getByText('Emby').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
         expect(plexPlannedCard).toBeInTheDocument();
         expect(embyPlannedCard).toBeInTheDocument();
 
@@ -1263,7 +1372,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
         fireEvent.click(screen.getByRole('button', { name: /Configure Server/i }));
         const updatedModal = screen.getByText(/Media Server Providers/i).closest('.rounded-2xl') as HTMLElement;
-        const updatedPlexCard = within(updatedModal).getByText('Plex').closest('.rounded-xl') as HTMLElement;
+        const updatedPlexCard = within(updatedModal).getByText('Plex').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
         expect(within(updatedPlexCard).getByText('Observed')).toBeInTheDocument();
         expect(within(updatedModal).getByText('Emby')).toBeInTheDocument();
     });
@@ -1372,8 +1481,8 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         const providerDialog = screen.getByRole('dialog', { name: 'Media Server Providers' });
         expect(providerDialog).toBeInTheDocument();
 
-        const plexProviderCard = within(providerDialog).getByText('Plex').closest('.rounded-xl') as HTMLElement;
-        const embyProviderCard = within(providerDialog).getByText('Emby').closest('.rounded-xl') as HTMLElement;
+        const plexProviderCard = within(providerDialog).getByText('Plex').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
+        const embyProviderCard = within(providerDialog).getByText('Emby').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
         expect(plexProviderCard).toBeInTheDocument();
         expect(embyProviderCard).toBeInTheDocument();
 
@@ -1407,7 +1516,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(cardsGrid).toHaveClass('grid-cols-1');
         expect(cardsGrid).toHaveClass('min-[360px]:grid-cols-3');
 
-        const embyCard = within(cardsGrid).getByText('Emby').closest('.rounded-xl') as HTMLElement;
+        const embyCard = within(cardsGrid).getByText('Emby').closest('.rounded-2xl, .rounded-xl') as HTMLElement;
         const embyStatusHeader = within(embyCard).getByText('Emby').parentElement as HTMLElement;
         expect(embyStatusHeader).toHaveClass('flex-wrap');
         expect(within(embyCard).getByText('Planned')).toBeInTheDocument();
@@ -1446,15 +1555,13 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
     it('verifies Candidate L decoupled single-quantity plots render explicit visible series-matched measure and unit headings without dual-axis bookkeeping', () => {
         render(<StreamingTab />);
-        const transferChartHeading = screen.getByText('Stream Data Usage & Bandwidth Over Time');
-        const transferChartContainer = transferChartHeading.closest('.rounded-xl') as HTMLElement;
+        const transferChartContainer = screen.getByRole('group', { name: 'Transfer trends' });
         expect(within(transferChartContainer).queryByText('Left axis:')).not.toBeInTheDocument();
         expect(within(transferChartContainer).queryByText('Right axis:')).not.toBeInTheDocument();
         expect(within(transferChartContainer).getAllByText('Transferred data (GB)').length).toBeGreaterThanOrEqual(1);
         expect(within(transferChartContainer).getAllByText('Recorded peak bitrate (Mbps)').length).toBeGreaterThanOrEqual(1);
 
-        const activityChartHeading = screen.getByText('Play Sessions & Watch Time Activity');
-        const activityChartContainer = activityChartHeading.closest('.rounded-xl') as HTMLElement;
+        const activityChartContainer = screen.getByRole('group', { name: 'Playback activity trends' });
         expect(within(activityChartContainer).queryByText('Left axis:')).not.toBeInTheDocument();
         expect(within(activityChartContainer).queryByText('Right axis:')).not.toBeInTheDocument();
         expect(within(activityChartContainer).getByText('Play sessions')).toBeInTheDocument();
@@ -1463,8 +1570,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
     it('verifies Candidate H Top Watchers uses native numeric rank badges without medal emojis', () => {
         render(<StreamingTab />);
-        const topWatchersHeading = screen.getByText('Top Watchers & Data Usage by User');
-        const topWatchersContainer = topWatchersHeading.closest('.rounded-xl') as HTMLElement;
+        const topWatchersContainer = screen.getByRole('group', { name: 'Top watchers' });
         expect(topWatchersContainer).toBeInTheDocument();
 
         expect(within(topWatchersContainer).queryByText('🥇')).not.toBeInTheDocument();
@@ -1473,7 +1579,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
         const numericBadge = within(topWatchersContainer).getByText('1');
         expect(numericBadge).toBeInTheDocument();
-        expect(numericBadge).toHaveClass('w-6', 'h-6', 'rounded-lg');
+        expect(numericBadge).toHaveClass('tabular-nums', 'text-slate-400');
     });
 
     it('verifies Candidate H active session hierarchy with deliberate pipeline disclosure and readable transcode summary', () => {
@@ -1509,6 +1615,23 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(methodologySummary).not.toHaveClass('sm:min-h-0');
     });
 
+    it('embeds expanded measurement methodology into the full-width analytics canvas', () => {
+        render(<StreamingTab />);
+
+        const heading = screen.getByRole('heading', { name: 'Measurement methodology, overlap & nonadditivity details', hidden: true });
+        const panel = heading.parentElement as HTMLElement;
+        const disclosure = panel.closest('details') as HTMLElement;
+
+        expect(disclosure).toHaveClass('group/methodology', 'min-w-0', 'open:w-full', 'open:basis-full');
+        expect(disclosure.querySelector('summary svg')).toHaveClass('group-open/methodology:rotate-180');
+        expect(disclosure.querySelector('summary svg')).not.toHaveClass('group-open:rotate-180');
+        expect(panel).toHaveClass('min-w-0', 'border-t', 'border-white/[0.07]', 'pt-3');
+        expect(panel).not.toHaveClass('rounded-xl', 'border', 'bg-slate-900/60', 'p-3', 'max-w-xl');
+        fireEvent.click(within(disclosure).getByText('How these metrics are measured'));
+        expect(panel).toBeInTheDocument();
+        expect(within(panel).getByRole('note')).toHaveTextContent('Confirmed statistics use included observed sessions and imported events across all recorded providers.');
+    });
+
     it('verifies Candidate H idle and live KPI alignment and structure symmetry', () => {
         const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
         customData.activeSessions = [];
@@ -1519,8 +1642,9 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         currentSwrState = { ...currentSwrState, data: customData };
 
         render(<StreamingTab />);
-        const activeStreamsCard = screen.getByText(/Active streams:/i).closest('.rounded-xl') as HTMLElement;
-        const liveBandwidthCard = screen.getByText(/Bandwidth:/i).closest('.rounded-xl') as HTMLElement;
+        const activeStreamsCard = screen.getByRole('region', { name: 'Live Stream Overview' });
+        const liveBandwidthCard = screen.getByRole('region', { name: 'Live Stream Overview' });
+        expect(screen.getByTestId('idle-live-summary-band')).toHaveClass('grid-cols-1', 'sm:grid-cols-2', 'sm:divide-x', 'divide-white/[0.07]');
 
         expect(within(activeStreamsCard).queryByText('0 concurrent sessions')).not.toBeInTheDocument();
         expect(within(activeStreamsCard).queryByText('Connected idle · Standing by')).not.toBeInTheDocument();
@@ -1687,7 +1811,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
     it('verifies Candidate H Live KPI stream delivery badges use >=12px text with honest wrapping', () => {
         render(<StreamingTab />);
-        const activeStreamsCard = screen.getByText('Active Streams').closest('.rounded-xl') as HTMLElement;
+        const activeStreamsCard = screen.getByRole('group', { name: 'Active streams summary' });
         expect(activeStreamsCard).toBeInTheDocument();
 
         const directPlayBadge = within(activeStreamsCard).getByText(/Direct Play/i);
@@ -1877,12 +2001,10 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
         expect(screen.getByText('Playback 45.4%')).toBeInTheDocument();
 
-        const transferChartHeading = screen.getByText('Stream Data Usage & Bandwidth Over Time');
-        const transferChartContainer = transferChartHeading.closest('.rounded-xl') as HTMLElement;
+        const transferChartContainer = screen.getByRole('group', { name: 'Transfer trends' });
         expect(within(transferChartContainer).getAllByText('Estimated').length).toBe(1);
 
-        const activityChartHeading = screen.getByText('Play Sessions & Watch Time Activity');
-        const activityChartContainer = activityChartHeading.closest('.rounded-xl') as HTMLElement;
+        const activityChartContainer = screen.getByRole('group', { name: 'Playback activity trends' });
         const watchTimeLegendElement = within(activityChartContainer).getByText('Watch time (hours)');
         expect(watchTimeLegendElement.previousElementSibling).toHaveClass('border-dashed');
 
@@ -1917,8 +2039,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
         render(<StreamingTab />);
 
-        const transferHeading = screen.getByText('Stream Data Usage & Bandwidth Over Time');
-        const transferCard = transferHeading.closest('.rounded-xl') as HTMLElement;
+        const transferCard = screen.getByRole('group', { name: 'Transfer trends' });
         expect(transferCard).toBeInTheDocument();
 
         expect(within(transferCard).queryByText('Left axis:')).not.toBeInTheDocument();
@@ -1938,8 +2059,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(transferCardContainers[1]).toHaveAttribute('data-sync-id', 'stream-transfer-bandwidth');
         expect(transferCardContainers[1]).toHaveAttribute('data-sync-method', 'value');
 
-        const activityHeading = screen.getByText('Play Sessions & Watch Time Activity');
-        const activityCard = activityHeading.closest('.rounded-xl') as HTMLElement;
+        const activityCard = screen.getByRole('group', { name: 'Playback activity trends' });
         expect(activityCard).toBeInTheDocument();
 
         expect(within(activityCard).queryByText('Left axis:')).not.toBeInTheDocument();
@@ -1968,14 +2088,14 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
         expect(watchHoursTitle.previousElementSibling).toHaveClass('border-dashed');
 
-        const resolutionCard = screen.getByText('Resolution Mix · Share of Plays').closest('.rounded-xl') as HTMLElement;
+        const resolutionCard = screen.getByRole('group', { name: 'Resolution mix' });
         const resolutionAnnotations = within(resolutionCard).getAllByText(/est\./i);
         expect(resolutionAnnotations.length).toBeGreaterThan(0);
         for (const annotationElement of resolutionAnnotations) {
             expect(annotationElement).toHaveClass('text-[13px]', 'text-slate-300');
         }
 
-        const codecCard = screen.getByText('Source Codec Telemetry · Share of Plays').closest('.rounded-xl') as HTMLElement;
+        const codecCard = screen.getByRole('group', { name: 'Source codec telemetry' });
         const codecAnnotations = within(codecCard).getAllByText(/est\./i);
         expect(codecAnnotations.length).toBeGreaterThan(0);
         for (const annotationElement of codecAnnotations) {
@@ -2056,7 +2176,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
             expect(containerLabel).toHaveClass('text-[13px]', 'text-slate-300');
         }
 
-        const resolutionCard = screen.getByText('Resolution Mix · Share of Plays').closest('.rounded-xl') as HTMLElement;
+        const resolutionCard = screen.getByRole('group', { name: 'Resolution mix' });
         const resolutionLabels = within(resolutionCard).getAllByText(/^(1080p|4K UHD)$/);
         expect(resolutionLabels.length).toBe(2);
         expect(resolutionLabels[0]).toHaveTextContent('1080p');
@@ -2250,9 +2370,11 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         }
 
         const directPlayBox = screen.getAllByText('Direct Play').find((elementNode) => elementNode.classList.contains('text-emerald-400'))?.closest('div') as HTMLElement;
-        expect(directPlayBox).toHaveClass('p-3');
+        expect(directPlayBox).toHaveAttribute('role', 'listitem');
+        expect(directPlayBox).toHaveClass('flex', 'flex-wrap', 'py-2.5');
+        expect(directPlayBox).not.toHaveClass('border', 'bg-slate-950/60');
 
-        const resolutionCard = screen.getByText('Resolution Mix · Share of Plays').closest('.rounded-xl') as HTMLElement;
+        const resolutionCard = screen.getByRole('group', { name: 'Resolution mix' });
         const countElements = within(resolutionCard).getAllByText(/\d+\s+plays/);
         expect(countElements.length).toBeGreaterThan(0);
         for (const countElement of countElements) {
@@ -2380,6 +2502,26 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         unmountUnobserved();
     });
 
+    it('wraps live telemetry and stacks its shared summary surface on mobile with reduced-motion support', () => {
+        const transferData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        transferData.liveSummary.activeSessionBytes = 2469606195;
+        currentSwrState = { ...currentSwrState, data: transferData };
+        render(<StreamingTab />);
+        const heading = screen.getByRole('heading', { name: 'Live Stream Telemetry' });
+        const headerRow = heading.parentElement?.parentElement;
+        expect(headerRow).toHaveClass('flex-wrap', 'gap-2', 'min-w-0');
+        expect(headerRow?.querySelector('.animate-ping')).toHaveClass('motion-reduce:animate-none');
+        const bandwidthCard = screen.getByText('Live Bandwidth').parentElement?.parentElement;
+        expect(bandwidthCard).not.toHaveClass('obs-telemetry-surface');
+        expect(bandwidthCard?.parentElement).toHaveClass('border-b', 'border-white/[0.07]', 'grid-cols-1', 'sm:grid-cols-2', 'sm:divide-x');
+        expect(bandwidthCard?.parentElement).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl');
+        const explanation = screen.getByText(/Accumulated from observed playing intervals/i);
+        const disclosure = explanation.closest('details');
+        expect(disclosure).not.toHaveAttribute('open');
+        fireEvent.click(screen.getByText('Estimate, not metered traffic · Methodology'));
+        expect(disclosure).toHaveAttribute('open');
+    });
+
     it('verifies Candidate P estimated active transfer accumulation formula and active streams population basis', () => {
         const transferData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
         transferData.liveSummary.activeSessionBytes = 2469606195;
@@ -2411,23 +2553,20 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         const confirmedPlaysSecondary = screen.getByText(/confirmed plays ·/i);
         expect(confirmedPlaysSecondary).toHaveClass('text-[13px]', 'text-slate-300');
 
-        const libraryHeading = screen.getByText('Jellyfin Library');
-        const libraryCard = libraryHeading.closest('.rounded-xl') as HTMLElement;
+        const libraryCard = screen.getByRole('group', { name: 'Jellyfin library' });
         const libraryGrid = libraryCard.querySelector('.grid') as HTMLElement;
         expect(libraryGrid).toHaveClass('text-[13px]', 'gap-y-1.5');
 
         const moviesLabel = within(libraryCard).getByText('Movies');
         expect(moviesLabel).toHaveClass('text-slate-300');
 
-        const topWatchersHeading = screen.getByText('Top Watchers & Data Usage by User');
-        const topWatchersCard = topWatchersHeading.closest('.rounded-xl') as HTMLElement;
+        const topWatchersCard = screen.getByRole('group', { name: 'Top watchers' });
         const userSubtitles = within(topWatchersCard).getAllByText(/unique titles ·/i);
         for (const userSubtitle of userSubtitles) {
             expect(userSubtitle).toHaveClass('text-[13px]', 'text-slate-300');
         }
 
-        const mostWatchedHeading = screen.getByText('Most Watched Media Titles');
-        const mostWatchedCard = mostWatchedHeading.closest('.rounded-xl') as HTMLElement;
+        const mostWatchedCard = screen.getByRole('group', { name: 'Most watched titles' });
         const mostWatchedSubtitles = within(mostWatchedCard).getAllByText(/viewer.*·/i);
         for (const mostWatchedSubtitle of mostWatchedSubtitles) {
             expect(mostWatchedSubtitle).toHaveClass('text-[13px]', 'text-slate-300');

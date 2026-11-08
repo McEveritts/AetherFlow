@@ -1,4 +1,4 @@
-import { Clock, Activity, Zap, Wifi, Server, Settings2, Sparkles, Layers, Cpu, AlertTriangle, ExternalLink, ChevronDown } from 'lucide-react';
+import { Clock, Activity, Zap, Server, Settings2, Sparkles, Layers, Cpu, AlertTriangle, ExternalLink, ChevronDown } from 'lucide-react';
 import { SystemMetrics, HardwareReport, MetricsHistory, ProcessInfo, DiskPartition, GpuMetric } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
@@ -244,8 +244,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
         : '';
 
     return (
-        <div className="space-y-5 animate-fade-in pb-10 relative z-10 w-full min-w-0">
-            <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3 sm:gap-4 pb-3 sm:pb-4 border-b border-slate-800/80 relative z-30 shrink-0">
+        <div className="animate-fade-in pb-10 relative z-10 w-full min-w-0">
+            <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3 sm:gap-4 px-5 pt-5 pb-4 border-b border-white/[0.07] relative z-30 shrink-0">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 min-w-0 w-full 2xl:w-auto">
                     <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
                         <div className="h-9 w-9 sm:h-11 sm:w-11 rounded-xl sm:rounded-2xl flex items-center justify-center border bg-indigo-500/15 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400 shrink-0">
@@ -258,25 +258,25 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                     AetherNexus
                                 </h2>
                                 <span
-                                    className={`inline-flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full border ${
+                                    className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full border ${
                                         connectionState === 'CONNECTED'
                                             ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
                                             : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
-                                    }`}
+                                        }`}
                                 >
                                     <span
                                         className={`h-1.5 w-1.5 sm:h-2 sm:w-2 rounded-full ${
                                             connectionState === 'CONNECTED'
                                                 ? 'bg-emerald-400 shadow-[0_0_6px_#34d399] animate-pulse'
                                                 : 'bg-amber-400 animate-pulse'
-                                        }`}
+                                            }`}
                                     />
                                     {{ CONNECTED: 'Live Telemetry', CONNECTING: 'Connecting', RECONNECTING: 'Reconnecting', FALLBACK: 'HTTP Fallback', DEGRADED: 'Degraded', DISCONNECTED: 'Disconnected' }[connectionState]}
                                     <span className="hidden sm:inline"> · 1.0s Interval</span>
                                 </span>
 
                                 {platformIdentity && (
-                                    <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border bg-slate-800/80 text-slate-200 border-slate-700/60">
+                                    <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border bg-white/[0.03] text-slate-200 border-white/[0.08]">
                                         <Server size={13} className="text-indigo-400" />
                                         {platformIdentity}
                                     </span>
@@ -295,20 +295,20 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     <details className="sm:hidden w-full group text-xs">
                         <summary
                             data-testid="host-metadata-summary"
-                            className="min-h-[44px] cursor-pointer list-none flex items-center justify-between px-3 py-2.5 rounded-xl bg-slate-950/70 border border-slate-800 text-slate-300 font-semibold hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                            className="min-h-[44px] cursor-pointer list-none flex items-center justify-between px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.08] backdrop-blur-md text-slate-300 font-semibold hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                         >
                             <span className="flex items-center gap-2">
                                 <Settings2 size={13} className="text-indigo-400" />
                                 <span>Host Metadata &amp; Controls</span>
                             </span>
                             <div className="flex items-center gap-2">
-                                <span className="text-[11px] font-mono font-semibold text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
+                                <span className="text-xs font-mono font-semibold text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
                                     {timeWindow.toUpperCase()} Window
                                 </span>
                                 <ChevronDown size={14} className="text-indigo-400 group-open:rotate-180 transition-transform" />
                             </div>
                         </summary>
-                        <div className="pt-2.5 pb-1 space-y-2 border-t border-slate-800/60 mt-2">
+                        <div className="pt-2.5 pb-1 space-y-2 border-t border-white/[0.06] mt-2">
                             {platformIdentity && (
                                 <div className="flex items-center gap-2 text-slate-300 text-xs px-1">
                                     <Server size={13} className="text-indigo-400 shrink-0" />
@@ -316,13 +316,13 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                 </div>
                             )}
                             {computeIdentity && (
-                                <div className="text-[11px] text-slate-400 px-1 truncate">
+                                <div className="text-xs text-slate-400 px-1 truncate">
                                     {computeIdentity}
                                 </div>
                             )}
                             <div className="flex flex-wrap items-center gap-2 pt-1">
                                 <div
-                                    className="flex items-center gap-1 p-1 bg-slate-950/70 border border-slate-800 rounded-xl"
+                                    className="flex items-center gap-1 p-1 bg-white/[0.03] border border-white/[0.08] backdrop-blur-md rounded-xl"
                                     role="group"
                                     aria-label="Telemetry History Window"
                                 >
@@ -337,7 +337,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                                 timeWindow === timeOption.id
                                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                                     : 'text-slate-400 hover:text-white'
-                                            }`}
+                                                }`}
                                         >
                                             {timeOption.label}
                                         </button>
@@ -350,7 +350,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                         setActiveSettingsTab('dashboard');
                                     }}
                                     aria-label="Configure Display and Telemetry Preferences"
-                                    className="min-h-[36px] flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-950/70 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+                                    className="min-h-[36px] flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.03] border border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
                                 >
                                     <Settings2 size={13} className="text-indigo-400" />
                                     <span>Configure</span>
@@ -363,8 +363,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                         className={`min-h-[36px] flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                             failedServices.length > 0
                                                 ? 'bg-rose-950/40 border-rose-800/80 text-rose-200 hover:bg-rose-900/50'
-                                                : 'bg-slate-950/70 border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
-                                        }`}
+                                                : 'bg-white/[0.03] border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                                            }`}
                                     >
                                         <Cpu size={13} className={failedServices.length > 0 ? 'text-rose-400' : 'text-emerald-400'} />
                                         <span>{runningServicesCount}/{serviceEntries.length} Running</span>
@@ -377,7 +377,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 <div className="hidden sm:flex flex-wrap items-center gap-2.5 max-w-full shrink-0">
                     <div
-                        className="flex items-center gap-1 p-1 bg-slate-950/70 border border-slate-800 rounded-xl"
+                        className="flex items-center gap-1 p-1 bg-white/[0.03] border border-white/[0.08] backdrop-blur-md rounded-xl"
                         role="group"
                         aria-label="Telemetry History Window"
                     >
@@ -393,14 +393,14 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                     timeWindow === timeOption.id
                                         ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                         : 'text-slate-400 hover:text-white'
-                                }`}
+                                    }`}
                             >
                                 {timeOption.label}
                             </button>
                         ))}
                     </div>
 
-                    <div className="flex items-center gap-1 p-1 bg-slate-950/70 border border-slate-800 rounded-xl" role="group" aria-label="Dashboard Density Mode">
+                    <div className="flex items-center gap-1 p-1 bg-white/[0.03] border border-white/[0.08] backdrop-blur-md rounded-xl" role="group" aria-label="Dashboard Density Mode">
                         <button
                             type="button"
                             onClick={() => setDashboardDensity('compact')}
@@ -409,7 +409,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                 dashboardDensity === 'compact'
                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                     : 'text-slate-400 hover:text-white'
-                            }`}
+                                }`}
                         >
                             <Layers size={14} />
                             <span>Standard</span>
@@ -422,7 +422,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                 dashboardDensity === 'immersive'
                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                     : 'text-slate-400 hover:text-white'
-                            }`}
+                                }`}
                         >
                             <Activity size={14} />
                             <span>Expanded</span>
@@ -437,8 +437,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             className={`min-h-[40px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                 failedServices.length > 0
                                     ? 'bg-rose-950/40 border-rose-800/80 text-rose-200 hover:bg-rose-900/50'
-                                    : 'bg-slate-950/70 border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
-                            }`}
+                                    : 'bg-white/[0.03] border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                                }`}
                             title={`Inspect ${serviceEntries.length} managed ${serviceEntries.length === 1 ? 'service' : 'services'} (${runningServicesCount} running)`}
                         >
                             <Cpu size={14} className={failedServices.length > 0 ? 'text-rose-400' : 'text-emerald-400'} />
@@ -453,7 +453,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             setActiveSettingsTab('dashboard');
                         }}
                         aria-label="Configure Display and Telemetry Preferences"
-                        className="min-h-[40px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-950/70 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+                        className="min-h-[40px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.03] border border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
                         title="Configure Display & Telemetry Preferences"
                     >
                         <Settings2 size={15} className="text-indigo-400" />
@@ -463,7 +463,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             </div>
 
             {failedServices.length > 0 && (
-                <div className="bg-rose-950/35 border border-rose-800/80 rounded-2xl p-3 sm:p-4 text-rose-200 space-y-2.5">
+                <div className="bg-rose-500/[0.06] border-b border-rose-400/20 px-5 py-3 text-rose-200 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-start gap-2.5 sm:gap-3 min-w-0">
                         <div className="h-8 w-8 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0 mt-0.5">
                             <AlertTriangle size={16} />
@@ -483,13 +483,10 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                     }).join(', ')}
                                 </span>
                             </div>
-                            <p className="text-xs text-rose-200/90 font-medium mt-1">
-                                Clean stops are not failures.
-                            </p>
                         </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <div className="flex shrink-0 items-center">
                         <button
                             type="button"
                             onClick={() => setActiveTab('services')}
@@ -499,18 +496,6 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             <span>Triage in Services</span>
                             <ExternalLink size={13} />
                         </button>
-                        <details className="text-xs text-rose-200 group/policy">
-                            <summary
-                                data-testid="failure-criteria-summary"
-                                className="min-h-[44px] cursor-pointer font-semibold hover:text-white select-none inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-rose-800/60 bg-rose-900/30 hover:bg-rose-900/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
-                            >
-                                <span>Failure criteria</span>
-                                <ChevronDown size={14} className="text-rose-300 group-open/policy:rotate-180 transition-transform" />
-                            </summary>
-                            <div className="pt-2 text-xs text-rose-200/90 font-medium pl-2.5 border-l-2 border-rose-500/40">
-                                Clean stopped daemons remain on standby and are not treated as failures.
-                            </div>
-                        </details>
                     </div>
                 </div>
             )}
@@ -518,7 +503,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             {sharedTelemetryInfo.sharedTelemetry && (
                 <div
                     data-testid="shared-telemetry-summary"
-                    className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 py-0.5 text-xs text-slate-300"
+                    className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-3 border-b border-white/[0.07] text-xs text-slate-300"
                 >
                     <div className="flex items-center gap-2 font-medium">
                         <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 shrink-0" />
@@ -532,106 +517,108 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 </div>
             )}
 
-            <div className={`grid gap-4 items-start ${
+            <section aria-label="System telemetry cockpit" className="min-w-0">
+                <div className={`obs-vitals-grid grid items-stretch border-b border-white/[0.07] ${
                 dashboardDensity === 'immersive'
-                    ? 'grid-cols-1 2xl:grid-cols-2'
-                    : 'grid-cols-1 md:grid-cols-2 2xl:grid-cols-4'
-            }`}>
-                <MemoCpuWidget
-                    cpuData={{ usage: metrics.cpu_usage, freq: metrics.cpu_freq_mhz, cores: metrics.per_core_cpu }}
-                    hardware={hardware}
-                    history={history}
-                    density={dashboardDensity}
-                    selectedWindow={timeWindow}
-                    hasSharedSummary={sharedTelemetryInfo.isCpuShared}
-                />
-                <MemoMemoryWidget
-                    memoryData={{ memory: metrics.memory, swap: metrics.swap }}
-                    hardware={hardware}
-                    history={history}
-                    density={dashboardDensity}
-                    selectedWindow={timeWindow}
-                    hasSharedSummary={sharedTelemetryInfo.isMemoryShared}
-                />
-                <MemoNetworkWidget
-                    networkData={{ network: metrics.network, total: metrics.total_net_bytes }}
-                    hardware={hardware}
-                    history={history}
-                    density={dashboardDensity}
-                    selectedWindow={timeWindow}
-                    hasSharedSummary={sharedTelemetryInfo.isNetworkShared}
-                />
-                <MemoDiskIOWidget
-                    diskIoData={metrics.disk_io}
-                    history={history}
-                    density={dashboardDensity}
-                    selectedWindow={timeWindow}
-                    hasSharedSummary={sharedTelemetryInfo.isDiskIoShared}
-                />
-            </div>
+                        ? 'obs-vitals-grid--immersive grid-cols-1 xl:grid-cols-2'
+                        : 'obs-vitals-grid--compact grid-cols-1 md:grid-cols-2 xl:grid-cols-4'
+                    }`}>
+                    <MemoCpuWidget
+                        cpuData={{ usage: metrics.cpu_usage, freq: metrics.cpu_freq_mhz, cores: metrics.per_core_cpu }}
+                        hardware={hardware}
+                        history={history}
+                        density={dashboardDensity}
+                        selectedWindow={timeWindow}
+                        hasSharedSummary={sharedTelemetryInfo.isCpuShared}
+                    />
+                    <MemoMemoryWidget
+                        memoryData={{ memory: metrics.memory, swap: metrics.swap }}
+                        hardware={hardware}
+                        history={history}
+                        density={dashboardDensity}
+                        selectedWindow={timeWindow}
+                        hasSharedSummary={sharedTelemetryInfo.isMemoryShared}
+                    />
+                    <MemoNetworkWidget
+                        networkData={{ network: metrics.network, total: metrics.total_net_bytes }}
+                        hardware={hardware}
+                        history={history}
+                        density={dashboardDensity}
+                        selectedWindow={timeWindow}
+                        hasSharedSummary={sharedTelemetryInfo.isNetworkShared}
+                    />
+                    <MemoDiskIOWidget
+                        diskIoData={metrics.disk_io}
+                        history={history}
+                        density={dashboardDensity}
+                        selectedWindow={timeWindow}
+                        hasSharedSummary={sharedTelemetryInfo.isDiskIoShared}
+                    />
+                </div>
 
-            <div className="rounded-2xl border border-slate-800/80 bg-slate-800/50 backdrop-blur-xl grid grid-cols-2 md:grid-cols-4 gap-px overflow-hidden">
-                <TelemetryCell
-                    icon={<Clock size={16} />}
-                    iconColor="text-blue-400"
-                    iconBg="bg-blue-500/10 border-blue-500/20"
-                    label="Uptime"
-                    value={metrics.uptime}
-                    sublabel="Continuous runtime"
-                />
-                <TelemetryCell
-                    icon={<Activity size={16} />}
-                    iconColor="text-emerald-400"
-                    iconBg="bg-emerald-500/10 border-emerald-500/20"
-                    label="Load (1/5/15)"
-                    value={metrics.load_average.map((loadValue) => loadValue.toFixed(2)).join(' · ')}
-                    sublabel="Kernel load avg"
-                />
-                <TelemetryCell
-                    icon={<Zap size={16} />}
-                    iconColor="text-amber-400"
-                    iconBg="bg-amber-500/10 border-amber-500/20"
-                    label="CPU Clock"
-                    value={metrics.cpu_freq_mhz > 0 ? `${(metrics.cpu_freq_mhz / 1000).toFixed(2)} GHz` : 'N/A'}
-                    sublabel={`${metrics.per_core_cpu?.length || hardware?.cpu?.threads || 1} logical threads`}
-                />
-                <TelemetryCell
-                    icon={<Wifi size={16} />}
-                    iconColor="text-indigo-400"
-                    iconBg="bg-indigo-500/10 border-indigo-500/20"
-                    label="Connections"
-                    value={String(metrics.network.active_connections)}
-                    sublabel="Active sockets"
-                />
-            </div>
+                <div className="grid grid-cols-1 sm:grid-cols-4 border-b border-white/[0.07] bg-white/[0.01] divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
+                    <TelemetryCell
+                        icon={<Clock size={16} />}
+                        iconColor="text-blue-400"
+                        iconBg="bg-blue-500/10 border-blue-500/20"
+                        label="Uptime"
+                        value={metrics.uptime}
+                        sublabel="Continuous runtime"
+                    />
+                    <TelemetryCell
+                        icon={<Activity size={16} />}
+                        iconColor="text-emerald-400"
+                        iconBg="bg-emerald-500/10 border-emerald-500/20"
+                        label="Load (1/5/15)"
+                        value={metrics.load_average.map((loadValue) => loadValue.toFixed(2)).join(' · ')}
+                        sublabel="Kernel load avg"
+                    />
+                    <TelemetryCell
+                        icon={<Server size={16} />}
+                        iconColor="text-amber-400"
+                        iconBg="bg-amber-500/10 border-amber-500/20"
+                        label="Services"
+                        value={`${runningServicesCount} / ${serviceEntries.length}`}
+                        sublabel="Running / managed"
+                    />
+                    <TelemetryCell
+                        icon={<Layers size={16} />}
+                        iconColor="text-indigo-400"
+                        iconBg="bg-indigo-500/10 border-indigo-500/20"
+                        label="Processes / Threads"
+                        value={`${metrics.processes?.length || 0} / ${metrics.per_core_cpu?.length || hardware?.cpu?.threads || 1}`}
+                        sublabel="Observed tasks / logical threads"
+                    />
+                </div>
+            </section>
 
-            <div className="grid grid-cols-1 2xl:grid-cols-12 gap-4 items-stretch">
-                <div className={showDataUsageWidget ? '2xl:col-span-6' : '2xl:col-span-12'}>
+            <div className="obs-telemetry-band grid grid-cols-1 xl:grid-cols-12 border-b border-white/[0.07] divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07] items-stretch">
+                <div className={`min-w-0 ${showDataUsageWidget ? 'xl:col-span-6' : 'xl:col-span-12'}`}>
                     <MemoAppTopologyMap topologyData={metrics.services} density={dashboardDensity} />
                 </div>
                 {showDataUsageWidget && (
-                    <div className="2xl:col-span-6">
+                    <div className="min-w-0 xl:col-span-6">
                         <DataUsageHistoryWidget density={dashboardDensity} />
                     </div>
                 )}
             </div>
 
-            <div className="grid grid-cols-1 2xl:grid-cols-12 gap-4 items-start">
-                <div className={hasGpuPanel ? '2xl:col-span-4' : '2xl:col-span-5'}>
+            <div className="obs-telemetry-band grid grid-cols-1 xl:grid-cols-12 border-b border-white/[0.07] divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07] items-stretch">
+                <div className={`min-w-0 ${hasGpuPanel ? 'xl:col-span-4' : 'xl:col-span-5'}`}>
                     <MemoStorageWidget storageData={metrics.disks} hardware={hardware} density={dashboardDensity} />
                 </div>
                 {hasGpuPanel && (
-                    <div className="2xl:col-span-4">
+                    <div className="min-w-0 xl:col-span-4">
                         <MemoGpuWidget gpus={metrics.gpus || []} density={dashboardDensity} />
                     </div>
                 )}
-                <div className={hasGpuPanel ? '2xl:col-span-4' : '2xl:col-span-7'}>
+                <div className={`min-w-0 ${hasGpuPanel ? 'xl:col-span-4' : 'xl:col-span-7'}`}>
                     <MemoProcessWidget processes={metrics.processes || []} density={dashboardDensity} />
                 </div>
             </div>
 
-            <div className="pt-2 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+            <section aria-label="AI Telemetry & Capacity Planning" className="min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 border-b border-white/[0.07]">
                     <div className="flex items-center gap-2.5">
                         <div className="h-7 w-7 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center text-fuchsia-400">
                             <Sparkles size={14} />
@@ -645,11 +632,15 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                         FlowAI Engine
                     </span>
                 </div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
-                    <PredictionsCard />
-                    <BandwidthCard />
+                <div className="obs-telemetry-band grid grid-cols-1 lg:grid-cols-2 border-b border-white/[0.07] divide-y lg:divide-y-0 lg:divide-x divide-white/[0.07] items-stretch">
+                    <div className="min-w-0">
+                        <PredictionsCard />
+                    </div>
+                    <div className="min-w-0">
+                        <BandwidthCard />
+                    </div>
                 </div>
-            </div>
+            </section>
         </div>
     );
 }
@@ -670,9 +661,9 @@ function TelemetryCell({
     sublabel: string;
 }) {
     return (
-        <div className="p-3 sm:p-4 flex items-center justify-between gap-2 sm:gap-3 bg-slate-900/90 hover:bg-slate-800/30 transition-colors min-w-0">
+        <div className="px-5 py-4 flex items-center justify-between gap-2 sm:gap-3 hover:bg-white/[0.02] transition-colors min-w-0">
             <div className="min-w-0 flex-1">
-                <p className="text-[11px] sm:text-xs text-slate-400 uppercase font-semibold tracking-wider truncate">{label}</p>
+                <p className="text-xs text-slate-400 uppercase font-semibold tracking-wider truncate">{label}</p>
                 <p className="text-sm sm:text-base font-extrabold text-slate-100 truncate mt-0.5 tabular-nums">{value}</p>
                 <p className="text-[13px] text-slate-300 truncate mt-0.5 font-medium">{sublabel}</p>
             </div>

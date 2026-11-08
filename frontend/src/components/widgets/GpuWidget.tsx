@@ -15,8 +15,8 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
     const isImmersive = density === 'immersive';
 
     return (
-        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col ${isImmersive ? 'p-6' : 'p-5'}`}>
-            <div className="flex items-center justify-between gap-2 pb-3 mb-3.5 border-b border-slate-800/80">
+        <div className={`obs-telemetry-surface relative overflow-hidden flex flex-col ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div className="flex items-center justify-between gap-2 pb-3 mb-3.5 border-b border-white/[0.06]">
                 <div className="flex items-center gap-2.5">
                     <div className="h-8 w-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 shrink-0">
                         <Monitor size={16} />
@@ -25,7 +25,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                         <h3 className="text-sm font-bold text-slate-100 tracking-tight leading-none">
                             Compute Accelerators
                         </h3>
-                        <p className="text-[13px] text-slate-300 mt-1">
+                        <p className="text-xs text-slate-400 mt-1">
                             {gpus.length} hardware engine{gpus.length !== 1 ? 's' : ''} detected
                         </p>
                     </div>
@@ -36,7 +36,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                 </span>
             </div>
 
-            <div className={`grid gap-3 ${isImmersive && gpus.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <div className="divide-y divide-white/[0.06]">
                 {gpus.map((gpuItem, gpuItemIndex) => {
                     const usagePercentage = Number(gpuItem.usage_pct || 0);
                     const hasDedicatedVram = Number(gpuItem.memory_total || 0) > 0;
@@ -52,12 +52,12 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                         : 'VAAPI / QuickSync';
 
                     return (
-                        <div key={gpuItemIndex} className="bg-slate-950/60 border border-slate-800/60 rounded-xl p-3.5 space-y-3">
+                        <div key={gpuItemIndex} className="py-3.5 first:pt-0 last:pb-0 space-y-3">
                             <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
                                     <p className="text-xs font-bold text-slate-100 truncate">{gpuItem.name}</p>
                                     <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                                        <span className="text-xs font-mono text-slate-300 bg-slate-900 border border-slate-700/60 px-2 py-0.5 rounded">
+                                        <span className="text-xs font-mono text-slate-400">
                                             GPU #{gpuItem.index}
                                         </span>
                                         <span className="text-xs font-semibold text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded">
@@ -89,7 +89,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                         <span className="text-slate-300">Render Engine Load</span>
                                         <span className="text-blue-400 font-mono tabular-nums">{usagePercentage.toFixed(1)}%</span>
                                     </div>
-                                    <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                    <div className="h-1.5 w-full bg-white/[0.06] rounded-full overflow-hidden">
                                         <div
                                             className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300 rounded-full"
                                             style={{ width: `${usagePercentage > 0 ? Math.max(3, Math.min(100, usagePercentage)) : 0}%` }}
@@ -107,10 +107,10 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                         </span>
                                     </div>
                                     {hasDedicatedVram && (
-                                        <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                        <div className="h-1.5 w-full bg-white/[0.06] rounded-full overflow-hidden">
                                             <div
                                                 className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300 rounded-full"
-                                                style={{ width: `${Math.max(2, vramPercentage)}%` }}
+                                                style={{ width: `${vramPercentage > 0 ? Math.max(2, vramPercentage) : 0}%` }}
                                             />
                                         </div>
                                     )}

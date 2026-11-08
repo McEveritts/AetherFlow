@@ -107,6 +107,8 @@ describe('DataUsageHistoryWidget', () => {
         render(<DataUsageHistoryWidget density="compact" />);
 
         expect(screen.getByText('Daily Bandwidth Transfer')).toBeInTheDocument();
+        expect(screen.getByRole('group', { name: 'History Range Selection' })).toHaveClass('bg-white/[0.03]');
+        expect(screen.getByText('Daily Bandwidth Transfer').closest('.obs-telemetry-surface')).toBeInTheDocument();
         expect(screen.getByText('Truthful daily network ingress and egress volume')).toBeInTheDocument();
 
         await waitFor(() => {

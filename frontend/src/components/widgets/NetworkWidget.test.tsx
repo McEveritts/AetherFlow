@@ -70,6 +70,11 @@ describe('NetworkWidget', () => {
         expect(screen.getByText('50.0 MB')).toBeInTheDocument();
 
         const sparklineElement = screen.getByTestId('sparkline');
+        expect(sparklineElement.closest('.obs-telemetry-surface')).toBeInTheDocument();
+        expect(sparklineElement.parentElement).toHaveClass('obs-vital-plot');
+        expect(screen.getByText('Network Traffic').closest('.obs-vital-header')).toBeInTheDocument();
+        expect(screen.getByText('Total RX').closest('.obs-vital-footer')).toBeInTheDocument();
+        expect(sparklineElement.parentElement).not.toHaveClass('bg-slate-950/60', 'border');
         expect(sparklineElement).toHaveAttribute('data-current', '4.0 MB/s');
         expect(sparklineElement).toHaveAttribute('data-current2', '24.5 MB/s');
         expect(sparklineElement).toHaveAttribute('data-has-shared-summary', 'true');

@@ -158,16 +158,16 @@ export default function PredictionsCard() {
     };
 
     return (
-        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 relative overflow-hidden flex flex-col justify-between h-full">
+        <div className="obs-telemetry-surface p-5 relative overflow-hidden min-w-0 flex flex-col justify-between h-full">
             <div>
-                <div className="flex items-center justify-between pb-3.5 mb-4 border-b border-white/[0.06] relative z-10">
-                    <div className="flex items-center gap-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 mb-4 border-b border-white/[0.06] relative z-10">
+                    <div className="flex items-center gap-2.5 min-w-0">
                         <div className="h-8 w-8 bg-purple-500/10 rounded-lg flex items-center justify-center border border-purple-500/20 text-purple-400 shrink-0">
                             <BrainCircuit size={16} />
                         </div>
                         <div>
                             <h3 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Resource Insights</h3>
-                            <p className="text-[11px] text-slate-500 mt-1">30-day predictive capacity &amp; saturation model</p>
+                            <p className="text-xs text-slate-400 mt-1">30-day predictive capacity &amp; saturation model</p>
                         </div>
                     </div>
                     <button
@@ -189,17 +189,17 @@ export default function PredictionsCard() {
                 {report && (
                     <div className="space-y-3.5 relative z-10">
                         {/* Trend Badges */}
-                        <div className="grid grid-cols-2 gap-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
                             {[
                                 { label: 'CPU', trend: report.cpu_trend, type: 'cpu' as const },
                                 { label: 'Memory', trend: report.memory_trend, type: 'memory' as const },
                                 { label: 'Disk I/O', trend: report.disk_io_trend, type: 'disk' as const },
                                 { label: 'Network', trend: report.network_trend, type: 'network' as const },
                             ].map(({ label, trend, type }) => (
-                                <div key={label} className="bg-black/30 rounded-xl p-3 border border-white/[0.04] flex flex-col gap-2.5">
-                                    <div className="flex items-center justify-between">
+                                <div key={label} className="min-w-0 py-3 border-b border-white/[0.06] flex flex-col gap-2.5">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
                                         <span className="text-xs font-semibold text-slate-300">{label}</span>
-                                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border flex items-center gap-1 ${trendColor(trend)}`}>
+                                        <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded-md text-xs font-semibold uppercase border inline-flex items-center gap-1 ${trendColor(trend)}`}>
                                             {trendIcon(trend)}
                                             {trend}
                                         </span>
@@ -208,6 +208,7 @@ export default function PredictionsCard() {
                                         <Sparkline
                                             data={getSparklineData(type)}
                                             height={32}
+                                            variant="mini"
                                             color={getTrendTheme(trend).color}
                                             gradientFrom={getTrendTheme(trend).gradientFrom}
                                             gradientTo={getTrendTheme(trend).gradientTo}
@@ -219,15 +220,15 @@ export default function PredictionsCard() {
                         </div>
 
                         {/* Bottleneck & Confidence Row */}
-                        <div className="grid grid-cols-2 gap-2.5">
-                            <div className="flex items-center justify-between bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04]">
-                                <span className="text-[11px] font-medium text-slate-400">Bottleneck</span>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
+                            <div className="min-w-0 flex flex-wrap items-center justify-between gap-2 py-2.5 sm:pr-4">
+                                <span className="text-xs font-medium text-slate-400">Bottleneck</span>
                                 <span className={`text-xs font-mono font-bold uppercase ${bottleneckColor(report.predicted_bottleneck)}`}>
                                     {report.predicted_bottleneck}
                                 </span>
                             </div>
-                            <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex flex-col justify-center">
-                                <div className="flex items-center justify-between text-[11px] mb-1">
+                            <div className="min-w-0 py-2.5 sm:pl-4 flex flex-col justify-center">
+                                <div className="flex items-center justify-between text-xs mb-1">
                                     <span className="text-slate-400">Confidence</span>
                                     <span className="text-purple-400 font-mono font-bold">{(report.confidence_score * 100).toFixed(0)}%</span>
                                 </div>
@@ -252,20 +253,21 @@ export default function PredictionsCard() {
                         {/* Expand/Collapse */}
                         <button
                             onClick={() => setExpanded(!expanded)}
-                            className="w-full text-xs font-semibold text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1 py-1.5 rounded-xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04] transition-colors"
+                            aria-expanded={expanded}
+                            className="w-full min-h-[40px] obs-touch-target-standard text-xs font-semibold text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1 py-2 rounded-xl hover:bg-white/[0.04] border-t border-white/[0.06] transition-colors"
                         >
                             {expanded ? <><ChevronUp size={14} /> Hide Forecast Details</> : <><ChevronDown size={14} /> Show Forecast Details</>}
                         </button>
 
                         {expanded && (
                             <div className="space-y-3 animate-fade-in">
-                                <p className="text-xs text-slate-300 leading-relaxed bg-black/30 rounded-xl p-3 border border-white/[0.04]">
+                                <p className="text-xs text-slate-300 leading-relaxed py-3 border-t border-white/[0.06]">
                                     {report.trend_summary}
                                 </p>
 
                                 {report.recommendations?.length > 0 && (
                                     <div className="space-y-1.5">
-                                        <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Recommendations</p>
+                                        <p className="text-xs uppercase tracking-wider text-slate-400 font-semibold">Recommendations</p>
                                         {report.recommendations.map((r, i) => (
                                             <div key={i} className="flex items-start gap-2 text-xs text-slate-300">
                                                 <BrainCircuit size={12} className="text-purple-400 mt-0.5 shrink-0" />
@@ -280,10 +282,10 @@ export default function PredictionsCard() {
                 )}
 
                 {!report && !error && !isAnalyzing && (
-                    <div className="bg-black/30 border border-white/[0.04] rounded-xl p-6 text-center my-2">
+                    <div className="py-6 text-center my-2">
                         <BrainCircuit size={24} className="mx-auto text-purple-400/50 mb-2" />
                         <p className="text-xs font-semibold text-slate-300">Predictive Telemetry Standby</p>
-                        <p className="text-[11px] text-slate-500 mt-1">
+                        <p className="text-xs text-slate-400 mt-1">
                             Run analysis to evaluate 30-day CPU, RAM, Disk I/O, and Network saturation trajectories.
                         </p>
                     </div>

@@ -760,10 +760,10 @@ export default function StreamingTab() {
     }, [data?.activeSessions, data?.servers]);
 
     const sessionGridClass = activeSessions.length === 1
-        ? 'grid grid-cols-1 gap-4 items-start'
+        ? 'grid grid-cols-1 divide-y divide-white/[0.07] items-start'
         : activeSessions.length === 2
-        ? 'grid grid-cols-1 lg:grid-cols-2 gap-4 items-start'
-        : 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 items-start';
+        ? 'grid grid-cols-1 lg:grid-cols-2 divide-y divide-white/[0.07] lg:divide-y-0 lg:[&>*]:border-t lg:[&>*]:border-white/[0.07] lg:[&>*:nth-child(-n+2)]:border-t-0 lg:[&>*:nth-child(even)]:border-l items-start'
+        : 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 divide-y divide-white/[0.07] lg:divide-y-0 lg:[&>*]:border-t lg:[&>*]:border-white/[0.07] lg:[&>*:nth-child(-n+2)]:border-t-0 lg:max-xl:[&>*:nth-child(even)]:border-l xl:[&>*:nth-child(-n+3)]:border-t-0 xl:[&>*:not(:nth-child(3n+1))]:border-l items-start';
     const analytics = data?.analytics || {
         windowDays: 30,
         totalPlays: 0,
@@ -955,9 +955,9 @@ export default function StreamingTab() {
     }, [data, jellyfinServer.lastConnectedAt]);
 
     if (!isAdmin) return (
-        <section className="min-w-0 max-w-full space-y-4" aria-label="Your streaming history">
+        <section className="min-w-0 max-w-full" aria-label="Your streaming history">
             <h2 className="text-lg font-bold text-slate-100">Your Streaming Archive</h2>
-            <p role="note" className="text-sm text-slate-400">Server-wide live telemetry is withheld for privacy, not zero or unconfigured. Your explicitly linked playback records are available below; ask an administrator to link your provider identity if none appear.</p>
+            <p role="note" className="text-sm text-slate-400 mt-2 pb-4 border-b border-white/[0.07]">Server-wide live telemetry is withheld for privacy, not zero or unconfigured. Your explicitly linked playback records are available below; ask an administrator to link your provider identity if none appear.</p>
             <StreamingHistoryExplorer />
         </section>
     );
@@ -965,8 +965,8 @@ export default function StreamingTab() {
     const isConfigureServerPrimary = jellyfinServer.status !== 'connected';
 
     return (
-        <div className="space-y-3 sm:space-y-6 animate-fade-in relative z-10 w-full min-w-0">
-            <div className="flex flex-col gap-2.5 sm:gap-4 pb-2.5 sm:pb-4 border-b border-white/[0.08] relative z-30">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 max-w-full">
+            <div className="flex flex-col gap-2.5 sm:gap-4 pb-4 border-b border-white/[0.07] relative z-30">
                 <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-3.5 w-full min-w-0">
                     <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
                         <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0 mt-0.5 sm:mt-0">
@@ -990,14 +990,14 @@ export default function StreamingTab() {
                                 setIsMobileActionsOpen(event.currentTarget.open);
                             }
                         }}
-                        className={`group shrink-0 sm:order-last sm:self-center open:w-full open:mt-2 open:rounded-xl open:border open:border-white/[0.08] open:bg-slate-950/90 open:p-2.5 sm:open:w-auto sm:open:mt-0 sm:open:border-0 sm:open:bg-transparent sm:open:p-0 transition-all ${
+                        className={`group shrink-0 sm:order-last sm:self-center open:w-full open:mt-2 open:border-t open:border-white/[0.07] open:pt-2.5 sm:open:w-auto sm:open:mt-0 sm:open:border-0 sm:open:pt-0 transition-all ${
                             isMobileActionsOpen
-                                ? 'w-full mt-2 rounded-xl border border-white/[0.08] bg-slate-950/90 p-2.5 sm:w-auto sm:mt-0 sm:border-0 sm:bg-transparent sm:p-0'
+                                ? 'w-full mt-2 border-t border-white/[0.07] pt-2.5 sm:w-auto sm:mt-0 sm:border-0 sm:pt-0'
                                 : 'w-auto sm:w-auto sm:border-0 sm:bg-transparent sm:p-0'
                         }`}
                     >
                         <summary
-                            className="sm:hidden cursor-pointer font-medium text-xs text-slate-300 hover:text-white flex items-center justify-between gap-1.5 select-none min-h-[44px] px-2.5 py-1.5 rounded-xl border border-white/[0.08] bg-slate-950/80 shrink-0 obs-touch-target-standard"
+                            className="sm:hidden cursor-pointer font-medium text-xs text-slate-300 hover:text-white flex items-center justify-between gap-1.5 select-none min-h-[44px] px-2.5 py-1.5 rounded-xl border border-white/[0.08] bg-white/[0.03] shrink-0 obs-touch-target-standard"
                             aria-label="Server & Provider Actions"
                         >
                             <span className="flex items-center gap-1.5">
@@ -1055,7 +1055,7 @@ export default function StreamingTab() {
                         <button
                             type="button"
                             onClick={isAdmin ? openServerConfig : undefined}
-                            className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full border transition-all ${
+                            className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full border transition-all ${
                                 !data
                                     ? 'bg-slate-500/15 text-slate-300 border-slate-500/30 hover:bg-slate-500/25'
                                     : jellyfinServer.status === 'connected'
@@ -1120,7 +1120,7 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    <div className="hidden sm:flex sm:items-center gap-1 sm:gap-1.5 p-1 bg-slate-950/80 border border-white/[0.08] rounded-xl">
+                    <div className="hidden sm:flex sm:items-center gap-1 sm:gap-1.5">
                         {([
                             { id: 'dashboard', label: 'Dashboard', icon: Tv },
                             { id: 'streams', label: `Live (${data ? liveSummary.activeStreams : '—'})`, icon: Radio },
@@ -1153,10 +1153,12 @@ export default function StreamingTab() {
                 </nav>
             </div>
 
+            {activeView === 'history' && <StreamingHistoryExplorer />}
+
             {error && (
                 <div
                     role="alert"
-                    className="rounded-xl border border-rose-500/35 bg-rose-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                    className="border-b border-rose-500/35 bg-gradient-to-r from-rose-500/[0.08] to-transparent px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
                 >
                     <div className="flex items-start gap-3">
                         <AlertCircle size={18} className="text-rose-400 shrink-0 mt-0.5" />
@@ -1173,7 +1175,7 @@ export default function StreamingTab() {
                         type="button"
                         onClick={() => void mutate()}
                         disabled={isValidating}
-                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 shrink-0 transition-all disabled:opacity-50"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 shrink-0 transition-all disabled:opacity-50"
                     >
                         <RefreshCw size={13} className={isValidating ? 'animate-spin' : ''} />
                         <span>Retry Refresh</span>
@@ -1183,10 +1185,10 @@ export default function StreamingTab() {
 
             {data && jellyfinServer.status !== 'connected' && (
                 <div
-                    className={`rounded-xl border p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
+                    className={`border-b px-4 py-4 sm:py-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
                         jellyfinServer.status === 'unreachable'
-                            ? 'border-rose-500/30 bg-rose-950/25'
-                            : 'border-indigo-500/25 bg-slate-900/60'
+                            ? 'border-rose-500/30 bg-gradient-to-r from-rose-500/[0.08] to-transparent'
+                            : 'border-indigo-500/25 bg-gradient-to-r from-indigo-500/[0.08] to-transparent'
                     }`}
                 >
                     <div className="flex items-start gap-3.5">
@@ -1266,10 +1268,10 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {data ? <section aria-label="Live Stream Overview" className="space-y-2 sm:space-y-2.5">
+            {(activeView === 'dashboard' || activeView === 'streams') && (data ? <section aria-label="Live Stream Overview" className="min-w-0">
                 {activeSessions.length === 0 ? (
-                    <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-3.5 space-y-2">
-                        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                    <div className="min-w-0 border-b border-white/[0.07] py-4 space-y-3">
+                        <div className="flex min-w-0 flex-col gap-3">
                             <div className="flex items-center gap-2">
                                 <span className="relative flex h-2.5 w-2.5">
                                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-600" />
@@ -1278,13 +1280,12 @@ export default function StreamingTab() {
                                     Live Stream Telemetry
                                 </h3>
                             </div>
-                            <div className="flex items-center gap-2.5 sm:gap-4 text-xs font-medium">
-                                <div className="flex items-baseline gap-1">
+                            <div data-testid="idle-live-summary-band" className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07] border-y border-white/[0.07] text-xs font-medium">
+                                <div className="flex min-w-0 flex-wrap items-baseline gap-1 px-4 py-3">
                                     <span className="text-slate-400">Active streams:</span>
                                     <span className="text-sm sm:text-base font-bold text-white tabular-nums">{liveSummary.activeStreams}</span>
                                 </div>
-                                <span className="text-slate-600">&middot;</span>
-                                <div className="flex items-baseline gap-1">
+                                <div className="flex min-w-0 flex-wrap items-baseline gap-1 px-4 py-3">
                                     <span className="text-slate-400">Bandwidth:</span>
                                     <span className="text-sm sm:text-base font-bold text-cyan-300 tabular-nums">
                                         {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)}
@@ -1297,7 +1298,7 @@ export default function StreamingTab() {
                         {(activeView === 'dashboard' || activeView === 'streams') && (
                             <div
                                 data-testid="compact-no-streams-state"
-                                className="pt-2 border-t border-white/[0.06] flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-slate-300"
+                                className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-slate-300"
                             >
                                 {isLoading && !data ? (
                                     <div className="flex items-center gap-2 text-slate-400">
@@ -1366,10 +1367,10 @@ export default function StreamingTab() {
                     </div>
                 ) : (
                     <>
-                        <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                                <span className="relative flex h-2.5 w-2.5">
-                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        <div className="flex flex-wrap items-center justify-between gap-2 min-w-0 pt-4 pb-3">
+                            <div className="flex items-center gap-2 min-w-0">
+                                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                                    <span className="animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                                 </span>
                                 <h3 className="text-sm font-semibold text-slate-100 tracking-tight">
@@ -1383,8 +1384,8 @@ export default function StreamingTab() {
                             )}
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3 sm:gap-3.5">
-                            <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-4 flex flex-col">
+                        <div data-testid="live-summary-surface" className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
+                            <div role="group" aria-label="Active streams summary" className="min-w-0 p-3 sm:p-4 flex flex-col">
                                 <div className="flex items-center justify-between">
                                     <span className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-snug">Active Streams</span>
                                     <div className="hidden sm:flex h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 items-center justify-center text-indigo-400 shrink-0">
@@ -1417,7 +1418,7 @@ export default function StreamingTab() {
                                 </div>
                             </div>
 
-                            <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-4 flex flex-col">
+                            <div role="group" aria-label="Live bandwidth summary" className="min-w-0 p-3 sm:p-4 flex flex-col">
                                 <div className="flex items-center justify-between">
                                     <span className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-snug">Live Bandwidth</span>
                                     <div className="hidden sm:flex h-8 w-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 items-center justify-center text-cyan-400 shrink-0">
@@ -1436,9 +1437,15 @@ export default function StreamingTab() {
                                             <p>
                                                 Estimated active transfer: <span className="text-slate-100 font-mono font-semibold">{formatBytes(liveSummary.activeSessionBytes, 1)}</span>
                                             </p>
-                                            <p className="text-[13px] text-slate-300 leading-normal">
-                                                Accumulated from observed playing intervals (bitrate &times; poll duration &divide; 8) across active playback sessions
-                                            </p>
+                                            <details className="group text-xs text-slate-400">
+                                                <summary className="min-h-[40px] cursor-pointer flex items-center gap-1 underline decoration-white/20 underline-offset-4">
+                                                    Estimate, not metered traffic · Methodology
+                                                    <ChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180 motion-reduce:transition-none" />
+                                                </summary>
+                                                <p className="pt-2 border-t border-white/[0.06] text-[13px] text-slate-300 leading-relaxed">
+                                                    Accumulated from observed playing intervals (bitrate &times; poll duration &divide; 8) across active playback sessions
+                                                </p>
+                                            </details>
                                         </div>
                                     ) : (
                                         <p>Idle &middot; No active throughput</p>
@@ -1449,17 +1456,17 @@ export default function StreamingTab() {
                     </>
                 )}
             </section> : (
-                <div role="status" className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 text-sm text-slate-300">
+                <div role="status" className="min-w-0 border-b border-white/[0.07] py-4 text-sm text-slate-300">
                     {error ? 'Live stream telemetry is unavailable.' : 'Loading live stream telemetry…'}
                 </div>
-            )}
+            ))}
 
             {(activeView === 'dashboard' || activeView === 'streams') && activeSessions.length > 0 && (
-                <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 sm:p-5">
-                    <div className="flex flex-wrap items-center justify-between gap-2.5 mb-3 pb-2.5 border-b border-white/[0.06]">
+                <div className="min-w-0 border-b border-white/[0.07]">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5 py-4 border-b border-white/[0.07]">
                         <div className="flex items-center gap-2.5">
                             <div className="relative flex h-2.5 w-2.5">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                <span className="animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                             </div>
                             <h3 className="text-sm font-semibold text-slate-100 tracking-tight">
@@ -1486,7 +1493,7 @@ export default function StreamingTab() {
                                 return (
                                     <article
                                         key={`${session.provider}:${session.sessionId}`}
-                                        className="rounded-xl border border-white/[0.08] bg-slate-950/60 hover:border-indigo-500/30 transition-all overflow-hidden flex flex-col justify-start"
+                                        className="min-w-0 self-stretch bg-transparent hover:bg-indigo-500/[0.025] transition-colors flex flex-col justify-start"
                                     >
                                         <div className="p-3 sm:p-4 space-y-3">
                                             <div className="flex items-start gap-3 sm:gap-3.5">
@@ -1589,7 +1596,7 @@ export default function StreamingTab() {
                                                 </div>
                                             )}
 
-                                            <details className="group rounded-xl bg-slate-950/60 border border-white/[0.06] overflow-hidden text-[13px]">
+                                            <details className="group border-t border-white/[0.06] text-[13px]">
                                                 <summary className="px-3 py-2.5 cursor-pointer select-none font-medium text-slate-300 flex items-center justify-between hover:bg-white/[0.02] transition-colors focus:outline-none min-h-[44px] obs-touch-target-standard text-[13px]">
                                                     <span className="flex items-center gap-1.5">
                                                         <Layers size={13} className="text-slate-400 shrink-0" />
@@ -1704,14 +1711,14 @@ export default function StreamingTab() {
                                                     return (
                                                         <div className="pt-1.5">
                                                             <div
-                                                                className="flex items-center justify-between gap-2 text-[13px] text-slate-200 py-1.5 px-3 rounded-lg bg-slate-900/80 border border-white/[0.08]"
+                                                                className="flex items-center justify-between gap-2 text-[13px] text-slate-200 py-1.5 px-3 border-t border-white/[0.06]"
                                                                 title={capabilities.pause.reason}
                                                             >
                                                                 <span className="inline-flex items-center gap-1.5 text-[13px] text-slate-200 font-medium">
                                                                     <ShieldCheck size={14} className="text-slate-400 shrink-0" />
                                                                     <span>Read-only stream telemetry &middot; Remote control unsupported for {formatProviderDisplayName(session.provider)}</span>
                                                                 </span>
-                                                                <span className="text-[11px] font-mono uppercase tracking-wider px-2 py-0.5 rounded border border-white/10 bg-white/[0.06] text-slate-300 font-semibold shrink-0">
+                                                                <span className="text-xs font-mono uppercase tracking-wider px-2 py-0.5 rounded border border-white/10 bg-white/[0.06] text-slate-300 font-semibold shrink-0">
                                                                     Read-Only
                                                                 </span>
                                                             </div>
@@ -1816,8 +1823,8 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
-                <div className="space-y-3">
+            {(activeView === 'dashboard' || activeView === 'analytics') && (
+                <div className="min-w-0">
                     <details
                         open={isDesktopViewport || isMobileFiltersOpen}
                         onToggle={(event) => {
@@ -1825,7 +1832,7 @@ export default function StreamingTab() {
                                 setIsMobileFiltersOpen(event.currentTarget.open);
                             }
                         }}
-                        className="group rounded-xl border border-white/[0.08] bg-slate-900/60 p-2.5 sm:p-3.5 space-y-3"
+                        className="group min-w-0 border-b border-white/[0.07] py-3 space-y-3"
                     >
                         <summary
                             className="sm:hidden cursor-pointer select-none min-h-[44px] flex items-center justify-between gap-2.5 text-xs py-1"
@@ -1834,7 +1841,7 @@ export default function StreamingTab() {
                             <div className="flex flex-col gap-0.5 min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5">
                                     <span className="font-semibold text-slate-200 text-xs">Historical Filters</span>
-                                    <span className="text-[11px] text-slate-400 font-normal">&middot; Confirmed &amp; estimated</span>
+                                    <span className="text-xs text-slate-400 font-normal">&middot; Confirmed &amp; estimated</span>
                                 </div>
                                 <span className="text-xs text-slate-300 break-words leading-relaxed">
                                     Window: {windowDays === 0 ? 'All Time' : `${windowDays} Days`} &middot; {selectedDeliverySummary} &middot; {selectedMediaTypeSummary}
@@ -1855,12 +1862,12 @@ export default function StreamingTab() {
                                     All recorded providers
                                 </span>
                             </div>
-                            <details className="group text-xs text-slate-400 shrink-0">
+                            <details className="group/methodology min-w-0 text-xs text-slate-400 shrink-0 open:w-full open:basis-full">
                                 <summary className="cursor-pointer font-medium text-slate-300 hover:text-white flex items-center gap-1.5 select-none min-h-[44px] px-2 py-1 rounded-lg hover:bg-white/[0.04] transition-colors obs-touch-target-standard">
                                     <span>How these metrics are measured</span>
-                                    <ChevronDown size={14} className="text-slate-400 group-open:rotate-180 transition-transform shrink-0" />
+                                    <ChevronDown size={14} className="text-slate-400 group-open/methodology:rotate-180 transition-transform shrink-0" />
                                 </summary>
-                                <div className="mt-2 p-3 rounded-xl border border-white/[0.06] bg-slate-900/60 space-y-1.5 text-slate-300 text-xs leading-relaxed max-w-xl">
+                                <div className="mt-2 min-w-0 border-t border-white/[0.07] pt-3 space-y-1.5 text-slate-300 text-xs leading-relaxed">
                                     <h4 className="font-semibold text-slate-200">Measurement methodology, overlap &amp; nonadditivity details</h4>
                                     <p role="note">Confirmed statistics use included observed sessions and imported events across all recorded providers. Preserved imported and legacy watch-time estimates appear separately below; use All Time to see older records. Bandwidth peaks remain a legacy provider aggregate.</p>
                                     <p>Imported item summaries and preserved legacy watch-time estimates are unverified and not measured session durations.</p>
@@ -1876,7 +1883,7 @@ export default function StreamingTab() {
                                 <div
                                     role="group"
                                     aria-label="Time Window Filter"
-                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-white/[0.03] p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
                                 >
                                     {[
                                         { days: 7, label: '7 Days' },
@@ -1909,7 +1916,7 @@ export default function StreamingTab() {
                                 <div
                                     role="group"
                                     aria-label="Play Method Filter"
-                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-white/[0.03] p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
                                 >
                                     {HISTORICAL_PLAY_METHOD_OPTIONS.map((methodOption) => (
                                         <button
@@ -1937,7 +1944,7 @@ export default function StreamingTab() {
                                 <div
                                     role="group"
                                     aria-label="Media Type Filter"
-                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-white/[0.03] p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
                                 >
                                     {HISTORICAL_MEDIA_TYPE_OPTIONS.map((mediaTypeOption) => (
                                         <button
@@ -1963,14 +1970,14 @@ export default function StreamingTab() {
                     </details>
 
                     {isAnalyticsPayloadUnavailable ? (
-                        <div role="status" className="rounded-xl border border-indigo-500/25 bg-indigo-500/[0.06] px-4 py-6 text-center text-sm text-slate-300">
+                        <div role="status" className="border-b border-indigo-500/25 bg-gradient-to-r from-indigo-500/[0.06] to-transparent px-4 py-6 text-center text-sm text-slate-300">
                             {error
                                 ? 'Analytics for the selected filters are unavailable. Retry to load this cohort.'
                                 : `Loading analytics for ${windowDays === 0 ? 'All Time' : `${windowDays} Days`}, ${selectedDeliverySummary}, ${selectedMediaTypeSummary}…`}
                         </div>
                     ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between">
+                    <div data-testid="historical-summary-surface" className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/[0.07]">
+                        <div role="group" aria-label="Historical data usage" className="min-w-0 p-4 flex flex-col justify-between">
                             <div className="flex items-center justify-between">
                                 <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">
                                     Data Usage ({windowDays === 0 ? 'All' : `${windowDays}d`})
@@ -2019,7 +2026,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between">
+                        <div role="group" aria-label="Confirmed play statistics" className="min-w-0 p-4 flex flex-col justify-between">
                             <div className="flex items-center justify-between">
                                 <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">
                                     Confirmed Play Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
@@ -2049,7 +2056,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between sm:col-span-2 lg:col-span-1">
+                        <div role="group" aria-label="Jellyfin library" className="min-w-0 p-4 flex flex-col justify-between">
                             <div className="flex items-center justify-between">
                                 <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">Jellyfin Library</span>
                                 <div className="h-8 w-8 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center text-fuchsia-400 shrink-0">
@@ -2082,8 +2089,8 @@ export default function StreamingTab() {
 
             {(activeView === 'dashboard' || activeView === 'analytics') && data && (
                 <>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5 flex flex-col">
+                    <div data-testid="historical-trends-surface" className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07]">
+                        <div role="group" aria-label="Transfer trends" className="min-w-0 p-5 flex flex-col">
                             <div className="flex items-center justify-between mb-4">
                                 <div>
                                     <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
@@ -2240,7 +2247,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5 flex flex-col">
+                        <div role="group" aria-label="Playback activity trends" className="min-w-0 p-5 flex flex-col">
                             <div className="flex items-center justify-between mb-4">
                                 <div>
                                     <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
@@ -2398,8 +2405,8 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-3">
+                    <div data-testid="telemetry-breakdowns-surface" className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 xl:grid-cols-3 divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07]">
+                        <div role="group" aria-label="Play method breakdown" className="min-w-0 p-4 space-y-3">
                             <div className="flex items-center justify-between">
                                 <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                                     <Zap size={14} className="text-emerald-400" />
@@ -2434,22 +2441,22 @@ export default function StreamingTab() {
                                     />
                                 )}
                             </div>
-                            <div className={`grid ${unknownPlaysCount > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2.5 sm:gap-3 pt-2 text-xs`}>
-                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
+                            <div role="list" aria-label="Play method metrics" className="divide-y divide-white/[0.06] pt-1 text-xs">
+                                <div role="listitem" className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
                                     <span className="text-xs text-emerald-400 font-semibold block">Direct Play</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.directPlayCount}{' '}
                                         <span className="text-xs text-slate-400 font-normal">({analytics.streamTypes.directPlayPct}%)</span>
                                     </span>
                                 </div>
-                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
+                                <div role="listitem" className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
                                     <span className="text-xs text-sky-400 font-semibold block">Direct Stream</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.directStreamCount}{' '}
                                         <span className="text-xs text-slate-400 font-normal">({analytics.streamTypes.directStreamPct}%)</span>
                                     </span>
                                 </div>
-                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
+                                <div role="listitem" className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
                                     <span className="text-xs text-amber-400 font-semibold block">Transcode</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.transcodeCount}{' '}
@@ -2457,7 +2464,7 @@ export default function StreamingTab() {
                                     </span>
                                 </div>
                                 {unknownPlaysCount > 0 && (
-                                    <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]" title="Imported from Jellyfin played-items sync where live play method was not recorded">
+                                    <div role="listitem" className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5" title="Imported from Jellyfin played-items sync where live play method was not recorded">
                                         <span className="text-xs text-slate-300 font-semibold block">Unknown</span>
                                         <span className="text-sm font-bold text-white tabular-nums">
                                             {unknownPlaysCount}{' '}
@@ -2468,7 +2475,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-2.5">
+                        <div role="group" aria-label="Resolution mix" className="min-w-0 p-4 space-y-2.5">
                             <div className="flex flex-col gap-0.5">
                                 <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                                     <Monitor size={14} className="text-indigo-400" />
@@ -2511,7 +2518,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-2.5">
+                        <div role="group" aria-label="Source codec telemetry" className="min-w-0 p-4 space-y-2.5">
                             <div className="flex flex-col gap-0.5">
                                 <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                                     <Layers size={14} className="text-fuchsia-400" />
@@ -2555,8 +2562,8 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 overflow-hidden">
+                    <div data-testid="streaming-leaderboards-surface" className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07]">
+                        <div role="group" aria-label="Top watchers" className="@container min-w-0 overflow-hidden">
                             <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
                                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Trophy size={16} className="text-amber-400" />
@@ -2573,10 +2580,10 @@ export default function StreamingTab() {
                                     analytics.topUsers.map((userStat, index) => (
                                         <div
                                             key={userStat.userName}
-                                            className="px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
+                                            className="px-4 sm:px-5 py-3.5 grid grid-cols-1 @[440px]:grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 hover:bg-white/[0.02] transition-colors"
                                         >
                                             <div className="flex items-center gap-3 min-w-0">
-                                                <span className="w-6 h-6 rounded-lg bg-white/[0.05] border border-white/10 flex items-center justify-center text-xs font-bold text-slate-300 shrink-0">
+                                                <span className="w-5 text-center text-xs font-medium text-slate-400 tabular-nums shrink-0">
                                                     {index + 1}
                                                 </span>
                                                 <div className="w-9 h-9 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-xs font-bold text-indigo-300 shrink-0 uppercase">
@@ -2589,9 +2596,9 @@ export default function StreamingTab() {
                                                     </p>
                                                 </div>
                                             </div>
-                                            <div className="text-right shrink-0">
-                                                <div className="flex items-center justify-end gap-2">
-                                                    <span className="text-xs font-mono font-bold text-teal-300 bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/20">
+                                            <div className="min-w-0 @[440px]:text-right">
+                                                <div className="flex flex-wrap items-center @[440px]:justify-end gap-x-2 gap-y-1">
+                                                    <span className="text-xs font-mono font-semibold text-teal-300">
                                                         {formatBytes(userStat.totalDataBytes, 1)}
                                                     </span>
                                                     <span className="text-sm font-bold text-white tabular-nums">
@@ -2608,7 +2615,7 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 overflow-hidden">
+                        <div role="group" aria-label="Most watched titles" className="@container min-w-0 overflow-hidden">
                             <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
                                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Flame size={16} className="text-orange-400" />
@@ -2625,38 +2632,33 @@ export default function StreamingTab() {
                                     analytics.topTitles.map((titleStat, index) => (
                                         <div
                                             key={`${titleStat.itemName}-${index}`}
-                                            className="px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
+                                            className="px-4 sm:px-5 py-3.5 grid grid-cols-1 @[440px]:grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 hover:bg-white/[0.02] transition-colors"
                                         >
                                             <div className="flex items-center gap-3 min-w-0">
-                                                <span className="w-6 h-6 rounded-lg bg-white/[0.05] border border-white/10 flex items-center justify-center text-xs font-bold text-slate-300 shrink-0">
+                                                <span className="w-5 text-center text-xs font-medium text-slate-400 tabular-nums shrink-0">
                                                     {index + 1}
                                                 </span>
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-2">
-                                                        <p className="text-sm font-bold text-slate-100 truncate">{titleStat.itemName}</p>
+                                                        <p className="min-w-0 text-sm font-bold text-slate-100 truncate" title={titleStat.itemName}>{titleStat.itemName}</p>
                                                         {titleStat.productionYear ? (
                                                             <span className="text-[13px] font-mono text-slate-300">({titleStat.productionYear})</span>
                                                         ) : null}
                                                     </div>
                                                     <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-[13px]">
-                                                        <span className="px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/20">
+                                                        <span className="px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-300 text-xs">
                                                             {titleStat.itemType}
                                                         </span>
-                                                        {titleStat.videoResolution && (
-                                                            <span className="px-1.5 py-0.2 rounded bg-white/10 text-slate-300 font-mono">
-                                                                {titleStat.videoResolution}
-                                                            </span>
-                                                        )}
-                                                        {titleStat.videoCodec && (
-                                                            <span className="px-1.5 py-0.2 rounded bg-indigo-500/15 text-indigo-300 font-mono">
-                                                                {titleStat.videoCodec}
+                                                        {(titleStat.videoResolution || titleStat.videoCodec) && (
+                                                            <span className="text-slate-300">
+                                                                {[titleStat.videoResolution, titleStat.videoCodec].filter(Boolean).join(' · ')}
                                                             </span>
                                                         )}
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="text-right shrink-0">
-                                                <div className="flex items-center justify-end gap-2">
+                                            <div className="min-w-0 @[440px]:text-right">
+                                                <div className="flex flex-wrap items-center @[440px]:justify-end gap-x-2 gap-y-1">
                                                     <span className="text-xs font-mono text-teal-300">
                                                         {formatBytes(titleStat.totalDataBytes, 1)}
                                                     </span>
@@ -2679,19 +2681,20 @@ export default function StreamingTab() {
                 </>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'history') && data && (
-                <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5">
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
-                        <div>
+            {(activeView === 'dashboard' || activeView === 'analytics') && data && (
+                <div data-testid="recent-playback-section" className="min-w-0 border-b border-white/[0.07] py-5">
+                    <div className="flex min-w-0 flex-col gap-4 mb-4 pb-4 border-b border-white/[0.06]">
+                        <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Clock size={16} className="text-indigo-400" />
-                                    Playback & Stream Data Usage Log — Recent Loaded Preview
+                                    Recent Playback &amp; Data Usage
                                 </h3>
                                 <span
                                     data-testid="history-result-count"
-                                    className="text-xs font-mono px-2.5 py-1 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold"
+                                    className="text-xs text-slate-400"
                                 >
+                                    Loaded Preview ·{' '}
                                     {filteredHistory.length === 0
                                         ? `0 matching of ${loadedHistory.length} loaded`
                                         : `Showing ${(safeHistoryPage - 1) * historyPageSize + 1}–${Math.min(
@@ -2706,9 +2709,32 @@ export default function StreamingTab() {
                             <p className="text-xs text-slate-300 mt-0.5">
                                 Detailed per-session audit of play method, codecs, bitrate, data consumed, and completion
                             </p>
+                            <button
+                                type="button"
+                                onClick={() => setActiveView('history')}
+                                className="mt-3 obs-touch-target-standard min-h-[44px] inline-flex max-w-full items-center justify-center gap-2 rounded-xl border border-indigo-400/30 bg-indigo-500/15 px-4 py-2.5 text-sm font-semibold text-indigo-200 hover:bg-indigo-500/25 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                            >
+                                <Search size={16} className="shrink-0" />
+                                <span>Explore Full Watch History Archive</span>
+                                <ChevronRight size={16} className="shrink-0" />
+                            </button>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div role="group" aria-label="Recent playback controls" className="flex min-w-0 flex-wrap items-center gap-2">
+                            <div className="relative min-w-0 basis-full sm:basis-48 sm:flex-1">
+                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                                <input
+                                    type="text"
+                                    aria-label="Search playback history"
+                                    value={historySearch}
+                                    onChange={(event) => {
+                                        setHistorySearch(event.target.value);
+                                        setHistoryPage(1);
+                                    }}
+                                    placeholder="Search title, user, client, device..."
+                                    className="min-h-[40px] w-full min-w-0 pl-9 pr-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500/50"
+                                />
+                            </div>
                             <label htmlFor="history-play-method-select" className="sr-only">
                                 Filter history by play method
                             </label>
@@ -2720,7 +2746,7 @@ export default function StreamingTab() {
                                     setPlayMethodFilter(event.target.value);
                                     setHistoryPage(1);
                                 }}
-                                className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                                className="min-h-[40px] px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
                             >
                                 <option value="all">All Play Methods</option>
                                 <option value="DirectPlay">Direct Play</option>
@@ -2740,28 +2766,13 @@ export default function StreamingTab() {
                                     setHistoryPageSize(Number(event.target.value) || 10);
                                     setHistoryPage(1);
                                 }}
-                                className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                                className="min-h-[40px] px-3 py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
                             >
                                 <option value={10}>10 / page</option>
                                 <option value={20}>20 / page</option>
                                 <option value={25}>25 / page</option>
                                 <option value={50}>50 / page</option>
                             </select>
-
-                            <div className="relative w-full sm:w-64">
-                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                <input
-                                    type="text"
-                                    aria-label="Search playback history"
-                                    value={historySearch}
-                                    onChange={(event) => {
-                                        setHistorySearch(event.target.value);
-                                        setHistoryPage(1);
-                                    }}
-                                    placeholder="Search title, user, client, device..."
-                                    className="min-h-[40px] w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500/50"
-                                />
-                            </div>
 
                             <button
                                 type="button"
@@ -2777,7 +2788,7 @@ export default function StreamingTab() {
                                         ? `Exports the ${filteredHistory.length} loaded matching rows (${analytics.totalPlays} total records exist in backend window)`
                                         : `Export ${filteredHistory.length} matching rows to CSV`
                                 }
-                                className="min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-medium bg-slate-850 hover:bg-slate-750 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                                className="obs-touch-target-standard min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-medium bg-white/[0.03] hover:bg-white/[0.07] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
                             >
                                 <Download size={13} />
                                 <span>
@@ -2882,12 +2893,12 @@ export default function StreamingTab() {
                                                     </p>
                                                 </td>
                                                 <td className="py-3 px-3">
-                                                    <div className="flex flex-wrap items-center gap-1">
+                                                    <div className="flex min-w-0 flex-col items-start gap-1.5">
                                                         <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${methodStyle.badge}`}>
                                                             {methodStyle.label}
                                                             {historyItem.hwAccel ? ` (${historyItem.hwAccel})` : ''}
                                                         </span>
-                                                        <span className="text-xs font-mono bg-white/[0.06] text-slate-300 px-1.5 py-0.5 rounded">
+                                                        <span className="text-xs text-slate-300 leading-relaxed">
                                                             {[historyItem.videoResolution, [historyItem.videoCodec, historyItem.audioCodec].filter(Boolean).join(' / ')].filter(Boolean).join(' · ') || 'Unrecorded pipeline'}
                                                         </span>
                                                     </div>
@@ -2947,7 +2958,7 @@ export default function StreamingTab() {
                                     aria-label="Previous loaded history page"
                                     disabled={safeHistoryPage <= 1}
                                     onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}
-                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
+                                    className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
                                 >
                                     <ChevronLeft size={13} />
                                     <span>Previous</span>
@@ -2957,7 +2968,7 @@ export default function StreamingTab() {
                                     aria-label="Next loaded history page"
                                     disabled={safeHistoryPage >= totalHistoryPages}
                                     onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}
-                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
+                                    className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
                                 >
                                     <span>Next</span>
                                     <ChevronRight size={13} />
@@ -2968,12 +2979,14 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'history' || activeView === 'analytics') && <StreamingHistoryExplorer />}
+            {activeView === 'history' && data && (
+                <StreamingImportedHistory estimates={analytics.historicalEstimates ?? []} windowDays={windowDays} />
+            )}
 
             {showConfigModal && (
                 <StreamingDialog name="Media Server Providers" onClose={closeConfig}>
                     <div
-                        className="w-full max-w-xl rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-4 sm:p-6 shadow-2xl space-y-4 sm:space-y-5"
+                        className="w-full max-w-xl glass-panel obs-telemetry-surface rounded-2xl p-4 sm:p-6 shadow-2xl space-y-4 sm:space-y-5"
                         onClick={(event) => event.stopPropagation()}
                     >
                         <div className="flex items-center justify-between pb-3 border-b border-white/10 gap-2">
@@ -3160,7 +3173,7 @@ export default function StreamingTab() {
                 <StreamingDialog name={`Message ${messageSession.userName}`} onClose={closeMessage}>
                     <form
                         onSubmit={handleSendSessionMessage}
-                        className="w-full max-w-md rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-6 shadow-2xl space-y-4"
+                        className="w-full max-w-md glass-panel obs-telemetry-surface rounded-2xl p-6 shadow-2xl space-y-4"
                         onClick={(event) => event.stopPropagation()}
                     >
                         <div className="flex items-center justify-between pb-2 border-b border-white/10">
@@ -3172,7 +3185,7 @@ export default function StreamingTab() {
                                 type="button"
                                 aria-label="Close message modal"
                                 onClick={closeMessage}
-                                className="p-1 text-slate-400 hover:text-white"
+                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard p-1 text-slate-400 hover:text-white"
                             >
                                 <X size={16} />
                             </button>
@@ -3210,14 +3223,14 @@ export default function StreamingTab() {
                             <button
                                 type="button"
                                 onClick={closeMessage}
-                                className="px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-white"
+                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-white"
                             >
                                 Cancel
                             </button>
                             <button
                                 type="submit"
                                 disabled={isSendingMessage}
-                                className="px-4 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5"
+                                className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-4 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5"
                             >
                                 {isSendingMessage ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
                                 <span>Send Message</span>

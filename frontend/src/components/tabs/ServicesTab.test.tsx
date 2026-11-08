@@ -111,6 +111,26 @@ describe('ServicesTab Loopback, Protocol, Update, Component & Control Contracts'
         openSpy.mockRestore();
     });
 
+    it('embeds service grid cells directly in architectural page sections', () => {
+        mockServicesPayload = {
+            'AetherFlow API': { id: 'aetherflow-api', process: 'aetherflow-api', status: 'running', version: '4.0.0', managed_by: 'systemd' },
+            Sonarr: { id: 'sonarr', process: 'sonarr', status: 'running', version: '4.1.0', managed_by: 'systemd' },
+            Radarr: { id: 'radarr', process: 'radarr', status: 'running', version: '5.0.0', managed_by: 'systemd' },
+        };
+        render(<ServicesTab />);
+        fireEvent.click(screen.getByTitle('Card grid view'));
+        for (const label of ['Core platform service grid', 'Installed application service grid']) {
+            const grid = screen.getByLabelText(label);
+            expect(grid).toHaveClass('border-y', 'border-white/[0.07]', 'bg-transparent', 'grid-cols-1', 'md:grid-cols-2', 'xl:grid-cols-3');
+            expect(grid).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'shadow-xl');
+            for (const card of within(grid).getAllByRole('article')) {
+                expect(card).not.toHaveClass('obs-telemetry-surface');
+                expect(card).not.toHaveClass('rounded-2xl');
+            }
+        }
+        expect(within(screen.getByLabelText('Installed application service grid')).getAllByRole('article')).toHaveLength(2);
+    });
+
     it('keeps an unobserved installed version unknown until a measured version arrives', () => {
         mockServicesPayload = {
             Sonarr: { id: 'sonarr', process: 'sonarr', status: 'running', version: '',
@@ -390,7 +410,7 @@ describe('ServicesTab Loopback, Protocol, Update, Component & Control Contracts'
 
         render(<ServicesTab />);
 
-        expect(screen.getByText(/Check failed/i)).toBeInTheDocument();
+        expect(screen.getByText('Check failed')).toBeInTheDocument();
 
         const manageButton = screen.getByRole('button', { name: /Manage Sonarr service actions/i });
         fireEvent.click(manageButton);
@@ -1060,7 +1080,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         });
     });
 
-    it('uses adaptive w-auto for actions wrapper in list view to prevent forced full-width row splitting', () => {
+    it('lets the actions wrap within a flexible track without forced row splitting', () => {
         mockServicesPayload = {
             'aetherflow-frontend': {
                 id: 'aetherflow-frontend',
@@ -1078,9 +1098,8 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const logsButton = within(frontendArticle).getByRole('button', { name: /Logs/i });
         const actionsContainer = logsButton.parentElement;
         expect(actionsContainer).toBeInTheDocument();
-        expect(actionsContainer).toHaveClass('sm:w-auto');
-        expect(actionsContainer).toHaveClass('grid', 'grid-cols-3');
-        expect(actionsContainer?.className).toContain('@[1250px]:w-[280px]');
+        expect(actionsContainer).toHaveClass('flex', 'flex-wrap', 'min-w-0');
+        expect(actionsContainer?.className).not.toMatch(/(?:min-)?w-\[\d+px\]/);
     });
 
     it('differentiates routine inspection from lifecycle mutations with restrained cues and destructive rose outline', () => {
@@ -1118,6 +1137,36 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(stopButton).toHaveClass('text-rose-300');
     });
 
+    it('keeps update errors, endpoints and companion logs in independent layout tracks', () => {
+        mockServicesPayload = {
+            Invidious: {
+                id: 'invidious',
+                process: 'af-invidious',
+                status: 'running',
+                installed_version: '2026.11.08-long-build-identifier',
+                update_error: 'Release lookup failed',
+                default_port: 30000,
+                active_port: 30000,
+                uptime: '2d',
+                components: [
+                    { unit: 'af-invidious', status: 'running', role: 'required' },
+                    { unit: 'af-invidious-worker', status: 'stopped', role: 'required' },
+                ],
+            },
+        };
+        render(<ServicesTab />);
+        const service = screen.getByRole('article', { name: 'Invidious service' });
+        const versionTrack = within(service).getByText('Version').parentElement;
+        const endpointTrack = within(service).getByText('Port').parentElement;
+        expect(versionTrack).toContainElement(within(service).getByText('Check failed'));
+        expect(endpointTrack).toContainElement(within(service).getByText(':30000'));
+        expect(versionTrack).not.toContainElement(within(service).getByRole('button', { name: 'Connection details for Invidious' }));
+        const components = within(service).getByRole('list', { name: 'Service components' });
+        expect(components.parentElement).toBe(service);
+        expect(within(components).getAllByRole('listitem')).toHaveLength(2);
+        expect(within(components).getByRole('button', { name: 'View logs for af-invidious-worker' })).toBeEnabled();
+    });
+
     it('aligns metadata columns so labels and values share respective baselines with inline centered port controls', () => {
         mockServicesPayload = {
             Sonarr: {
@@ -1139,12 +1188,12 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const portLabel = within(sonarrArticle).getByText('Port');
         const uptimeLabel = within(sonarrArticle).getByText('Uptime');
 
-        expect(versionLabel).toHaveClass('@[1250px]:hidden');
-        expect(portLabel).toHaveClass('@[1250px]:hidden');
-        expect(uptimeLabel).toHaveClass('@[1250px]:hidden');
+        expect(versionLabel).toHaveClass('@[720px]:hidden');
+        expect(portLabel).toHaveClass('@[720px]:hidden');
+        expect(uptimeLabel).toHaveClass('@[720px]:hidden');
 
         const portValueContainer = within(sonarrArticle).getByText(':8989').parentElement;
-        expect(portValueContainer).toHaveClass('min-h-[40px]');
+        expect(portValueContainer).toHaveClass('min-w-0', 'flex-wrap');
         expect(portValueContainer).toHaveClass('flex');
         expect(portValueContainer).toHaveClass('items-center');
 
@@ -1174,6 +1223,8 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
         const syncButton = screen.getByRole('button', { name: 'Check Updates & Sync' });
         expect(syncButton).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: /^Services/ })).not.toBeInTheDocument();
+        expect(screen.getByText('1 Total')).toBeInTheDocument();
         expect(within(syncButton).getByText('Sync')).toHaveClass('sm:hidden');
         expect(within(syncButton).getByText('Check Updates & Sync')).toHaveClass('hidden', 'sm:inline');
     });
@@ -1297,11 +1348,11 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const portContainer = within(audiobookshelfArticle).getByText(':13378').parentElement;
 
         expect(portContainer).toHaveClass('flex-wrap');
-        expect(portContainer).toHaveClass('@[1250px]:flex-nowrap');
-        expect(portContainer).toHaveClass('min-h-[40px]');
+        expect(portContainer).toHaveClass('min-w-0', 'gap-x-2');
+        expect(portContainer).toHaveClass('min-w-0');
 
         const portColumn = portContainer?.parentElement;
-        expect(portColumn).toHaveClass('@[1250px]:w-[180px]');
+        expect(portColumn).toHaveClass('min-w-0');
         expect(portColumn).toHaveClass('relative');
         expect(portColumn).toHaveAttribute('data-access-menu', 'Audiobookshelf');
 
@@ -1394,7 +1445,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(mockedApiFetch).not.toHaveBeenCalled();
     });
 
-    it('enforces bounded mobile actions grid with at most WebUI, Logs, Manage and spans Logs for headless apps', () => {
+    it('keeps mobile actions bounded with WebUI, Logs and Manage without a reserved headless slot', () => {
         mockServicesPayload = {
             Radarr: {
                 id: 'radarr',
@@ -1428,7 +1479,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(radarrManage).toBeInTheDocument();
 
         const radarrFooter = radarrLogs.parentElement;
-        expect(radarrFooter).toHaveClass('grid', 'grid-cols-3');
+        expect(radarrFooter).toHaveClass('flex', 'flex-wrap', 'min-w-0');
 
         const headlessArticle = screen.getByRole('article', { name: 'HeadlessApp service' });
         const headlessLogs = within(headlessArticle).getByRole('button', { name: /^Logs$/i });
@@ -1520,7 +1571,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(screen.queryByRole('article', { name: 'Sonarr service' })).not.toBeInTheDocument();
     });
 
-    it('enforces fixed laptop metadata tracks and single-baseline alignment', () => {
+    it('uses flexible laptop metadata tracks with independently wrapping values', () => {
         mockServicesPayload = {
             Audiobookshelf: {
                 id: 'audiobookshelf',
@@ -1537,32 +1588,33 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         render(<ServicesTab />);
 
         const serviceArticle = screen.getByRole('article', { name: 'Audiobookshelf service' });
-        const versionContainer = within(serviceArticle).getByText(/2\.8\.0-long-build-identifier/).closest('div[class*="sm:w-[130px]"]');
+        const versionContainer = within(serviceArticle).getByText('Version').parentElement;
         expect(versionContainer).toBeInTheDocument();
-        expect(versionContainer).toHaveClass('sm:w-[130px]', 'shrink-0');
+        expect(versionContainer).toHaveClass('min-w-0', 'flex-col');
 
-        const portContainer = within(serviceArticle).getByText(':13378').closest('div[class*="sm:w-[180px]"]');
+        const portContainer = within(serviceArticle).getByText('Port').parentElement;
         expect(portContainer).toBeInTheDocument();
-        expect(portContainer).toHaveClass('sm:w-[180px]', 'shrink-0');
+        expect(portContainer).toHaveClass('min-w-0', 'flex-col');
 
-        const uptimeContainer = within(serviceArticle).getByText('10d').closest('div[class*="sm:w-[90px]"]');
+        const uptimeContainer = within(serviceArticle).getByText('Uptime').parentElement;
         expect(uptimeContainer).toBeInTheDocument();
-        expect(uptimeContainer).toHaveClass('sm:w-[90px]', 'shrink-0');
+        expect(uptimeContainer).toHaveClass('min-w-0', 'flex-col');
 
         const metadataRow = versionContainer?.parentElement;
-        expect(metadataRow).toHaveClass('sm:flex-nowrap', 'shrink-0');
+        expect(metadataRow).toHaveClass('min-w-0', '@[720px]:flex', '@[720px]:flex-wrap');
+        expect(metadataRow).toContainElement(uptimeContainer);
 
-        expect(versionContainer).toHaveClass('@[960px]:w-[100px]');
-        expect(portContainer).toHaveClass('@[960px]:w-[140px]');
-        expect(uptimeContainer).toHaveClass('@[960px]:w-[65px]');
+        expect(versionContainer?.className).not.toMatch(/w-\[\d+px\]/);
+        expect(portContainer?.className).not.toMatch(/w-\[\d+px\]/);
+        expect(uptimeContainer?.className).not.toMatch(/w-\[\d+px\]/);
 
-        const actionsContainer = within(serviceArticle).getByRole('button', { name: /Logs/i }).closest('div[class*="@[960px]:w-[280px]"]');
+        const actionsContainer = within(serviceArticle).getByRole('button', { name: /Logs/i }).closest('[role="group"]');
         expect(actionsContainer).toBeInTheDocument();
-        expect(actionsContainer).toHaveClass('@[960px]:w-[280px]', '@[1250px]:w-[280px]');
+        expect(actionsContainer).toHaveClass('flex', 'flex-wrap', 'min-w-0');
 
-        expect(serviceArticle.className).toContain('@[960px]:grid');
-        expect(serviceArticle.className).toContain('@[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px]');
-        expect(serviceArticle.className).toContain('@[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)]');
+        expect(serviceArticle.className).toContain('@[720px]:grid');
+        expect(serviceArticle.className).toContain('@[720px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,2fr)]');
+        expect(serviceArticle.className).not.toMatch(/minmax\(\d+px/);
     });
 
     it('renders compact attention banner with truthful recovery context and primary action hierarchy', () => {
@@ -1672,7 +1724,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const diagnosticBlock = within(calibreArticle).getByRole('status');
 
         expect(diagnosticBlock).toHaveClass('w-full');
-        expect(diagnosticBlock).toHaveClass('@[1250px]:col-span-full');
+        expect(diagnosticBlock).toHaveClass('col-span-full');
         expect(diagnosticBlock).toHaveTextContent('Install failed — rollback/recovery unconfirmed');
         expect(diagnosticBlock).toHaveTextContent('pip dependencies could not resolve packages');
 
@@ -1712,6 +1764,12 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(listModeButton).toHaveClass('min-h-[44px]');
         expect(cardModeButton).toHaveClass('min-w-[44px]');
         expect(cardModeButton).toHaveClass('min-h-[44px]');
+        expect(listModeButton).toHaveAttribute('aria-pressed', 'true');
+        expect(cardModeButton).toHaveAttribute('aria-pressed', 'false');
+        fireEvent.click(cardModeButton);
+        expect(listModeButton).toHaveAttribute('aria-pressed', 'false');
+        expect(cardModeButton).toHaveAttribute('aria-pressed', 'true');
+        fireEvent.click(listModeButton);
 
         const searchInput = screen.getByRole('textbox', { name: 'Search services by name, domain, port' });
         fireEvent.change(searchInput, { target: { value: 'nonexistent-service' } });
@@ -1747,7 +1805,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(titleElement).toHaveClass('break-words');
         expect(titleElement).not.toHaveClass('sm:truncate');
 
-        const identityHeader = titleElement.closest('div[class*="grid-cols-[1fr_auto]"]');
+        const identityHeader = titleElement.closest('div[class*="grid-cols-[minmax(0,1fr)_auto]"]');
         expect(identityHeader).toBeInTheDocument();
 
         const inspectButton = within(calibreArticle).getByRole('button', { name: /Review installation failure/i });
@@ -1839,9 +1897,9 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
         render(<ServicesTab />);
 
-        const tableHeadings = screen.getAllByText('Port & Access');
+        const tableHeadings = screen.getAllByText('Endpoint');
         for (const headingElement of tableHeadings) {
-            expect(headingElement.parentElement).toHaveClass('text-slate-300');
+            expect(headingElement.parentElement).toHaveClass('text-slate-400');
             expect(headingElement.parentElement).toHaveClass('text-xs');
         }
 
@@ -2138,7 +2196,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(mockedApiFetch).not.toHaveBeenCalled();
     });
 
-    it('supports 4-action variant with honest flex-wrap inside 280px track without overlapping metadata', () => {
+    it('supports four wrapping actions in an independently bounded flexible track', () => {
         mockServicesPayload = {
             Sonarr: {
                 id: 'sonarr',
@@ -2171,19 +2229,18 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(logsButton).toBeInTheDocument();
         expect(manageButton).toBeInTheDocument();
 
-        const actionsContainer = updateButton.closest('div[class*="@[960px]:w-[280px]"]');
+        const actionsContainer = updateButton.closest('[role="group"]');
         expect(actionsContainer).toBeInTheDocument();
         expect(actionsContainer).toHaveClass(
-            'sm:flex',
-            'sm:flex-wrap',
-            'sm:justify-end',
-            '@[960px]:w-[280px]',
-            '@[1250px]:w-[280px]'
+            'flex',
+            'flex-wrap',
+            'min-w-0',
+            '@[720px]:justify-end'
         );
 
-        const uptimeContainer = within(sonarrArticle).getByText('5d').closest('div[class*="@[960px]:w-[65px]"]');
+        const uptimeContainer = within(sonarrArticle).getByText('Uptime').parentElement;
         expect(uptimeContainer).toBeInTheDocument();
-        expect(uptimeContainer).toHaveClass('@[960px]:w-[65px]', 'shrink-0');
+        expect(uptimeContainer).toHaveClass('min-w-0');
     });
 
     it('organizes compact two-line identity, subordinate status manager badge, and consolidated port endpoint', () => {
@@ -2217,13 +2274,13 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(identityBlock).not.toHaveTextContent('systemd');
         expect(identityBlock).not.toHaveTextContent('api.seedbox.internal');
 
-        const statusColumn = within(apiArticle).getByText('running').closest('div[class*="@[960px]:w-[95px]"]');
+        const statusColumn = within(apiArticle).getByText('running').parentElement?.parentElement;
         expect(statusColumn).toBeInTheDocument();
         const managerBadge = within(statusColumn as HTMLElement).getByText('systemd');
         expect(managerBadge).toBeInTheDocument();
         expect(managerBadge).toHaveClass('hidden', 'sm:inline-flex', 'text-xs', 'text-slate-300');
 
-        const portColumn = within(apiArticle).getByText(':13378').closest('div[class*="@[960px]:w-[140px]"]');
+        const portColumn = within(apiArticle).getByText('Port').parentElement;
         expect(portColumn).toBeInTheDocument();
         expect(within(portColumn as HTMLElement).queryByText('api.seedbox.internal')).not.toBeInTheDocument();
 
@@ -2311,7 +2368,83 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(within(frontendArticle).queryByRole('menuitem', { name: /Public Endpoint/i })).not.toBeInTheDocument();
     });
 
-    it('proves bounded wide tracks and matching header/row grid-cols with wrapped action area', () => {
+    it('keeps update-check failure reasons outside collapsed mobile metadata in both views', () => {
+        mockServicesPayload = {
+            Sonarr: { id: 'sonarr', process: 'sonarr', status: 'running', version: '4.0.0', update_error: 'Release lookup failed: rate limit exceeded' },
+        };
+        render(<ServicesTab />);
+        const listRow = screen.getByRole('article', { name: 'Sonarr service' });
+        const reason = within(listRow).getByRole('note');
+        expect(reason).toHaveTextContent('Update check failed: Release lookup failed: rate limit exceeded');
+        expect(reason.parentElement).toBe(listRow);
+        expect(reason).not.toHaveClass('hidden');
+        fireEvent.click(screen.getByRole('button', { name: 'Card grid view' }));
+        expect(within(screen.getByRole('article', { name: 'Sonarr service' })).getByRole('note')).toHaveTextContent('Release lookup failed: rate limit exceeded');
+    });
+
+    it('gives full service names a wrapping two-line card identity separate from quick actions', () => {
+        mockServicesPayload = {
+            'Plex Media Server': { id: 'plex', process: 'plexmediaserver', status: 'running', managed_by: 'systemd' },
+            Audiobookshelf: { id: 'audiobookshelf', process: 'audiobookshelf', status: 'running', managed_by: 'systemd' },
+        };
+        render(<ServicesTab />);
+        fireEvent.click(screen.getByRole('button', { name: 'Card grid view' }));
+
+        for (const name of ['Plex Media Server', 'Audiobookshelf']) {
+            const card = screen.getByRole('article', { name: `${name} service` });
+            const title = within(card).getByRole('heading', { name });
+            expect(title).toHaveClass('w-full', 'line-clamp-2', 'break-words', 'leading-snug');
+            expect(title).not.toHaveClass('truncate', 'max-w-[220px]');
+            expect(title.parentElement?.parentElement?.parentElement).toHaveClass('flex-1', 'basis-[220px]', 'min-w-0');
+            expect(title.parentElement?.parentElement?.parentElement?.parentElement).toHaveClass('flex-wrap');
+            expect(within(card).getByText('systemd')).toBeInTheDocument();
+        }
+    });
+
+    it.each(['Compact list view', 'Card grid view'])('gives API key and component controls standard touch targets in %s', (view) => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr', process: 'sonarr', status: 'running', api_key: 'fixture-api-key',
+                components: [{ unit: 'sonarr', status: 'running', role: 'required' }, { unit: 'sonarr-helper', status: 'running', role: 'required' }],
+            },
+        };
+        render(<ServicesTab />);
+        fireEvent.click(screen.getByRole('button', { name: view }));
+        const service = screen.getByRole('article', { name: 'Sonarr service' });
+        expect(within(service).getByRole('button', { name: 'Reveal Sonarr API key' })).toHaveClass('obs-touch-target-standard');
+        expect(within(service).getByRole('button', { name: 'Copy Sonarr API key' })).toHaveClass('obs-touch-target-standard');
+        if (view === 'Card grid view') {
+            expect(within(service).getByTitle('View logs for sonarr-helper')).toHaveClass('obs-touch-target-standard');
+        }
+    });
+
+    it('leads cards with identity before metadata, companions and failed-install diagnostics', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr', process: 'sonarr', status: 'failed', version: '4.0.0',
+                last_job: { action: 'install', status: 'failed', message: 'Installer failed' },
+                components: [
+                    { unit: 'sonarr', status: 'failed', role: 'required' },
+                    { unit: 'sonarr-helper', status: 'stopped', role: 'required' },
+                ],
+            },
+        };
+        render(<ServicesTab />);
+        fireEvent.click(screen.getByRole('button', { name: 'Card grid view' }));
+        const card = screen.getByRole('article', { name: 'Sonarr service' });
+        const identity = within(card).getByRole('heading', { name: 'Sonarr' });
+        const version = within(card).getByText('Version');
+        const companions = within(card).getByRole('list', { name: 'Service components' });
+        const failure = within(card).getByText('Install failed — rollback/recovery unconfirmed');
+        expect(card).not.toHaveClass('obs-telemetry-surface');
+        expect(card.parentElement).toHaveClass('border-y', 'border-white/[0.07]', 'bg-transparent');
+        expect(card.parentElement).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl');
+        expect(identity.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(version.compareDocumentPosition(companions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(companions.compareDocumentPosition(failure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('uses four bounded tracks from 720px with matching compact header and wrapped actions', () => {
         mockServicesPayload = {
             Radarr: {
                 id: 'radarr',
@@ -2328,20 +2461,20 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         render(<ServicesTab />);
 
         const radarrArticle = screen.getByRole('article', { name: 'Radarr service' });
-        expect(radarrArticle).toHaveClass('@[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)]');
-        expect(radarrArticle).toHaveClass('@[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px]');
+        expect(radarrArticle).toHaveClass('min-w-0', 'max-w-full');
+        expect(radarrArticle).toHaveClass('@[720px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,2fr)]');
 
-        const headers = screen.getAllByText('Port & Access');
+        const headers = screen.getAllByText('Endpoint');
         expect(headers.length).toBeGreaterThanOrEqual(1);
         const headerRow = headers[0].parentElement;
-        expect(headerRow).toHaveClass('@[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)]');
-        expect(headerRow).toHaveClass('@[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px]');
+        expect(headerRow).toHaveClass('gap-x-2');
+        expect(headerRow).toHaveClass('@[720px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,2fr)]');
 
         const actionsHeader = within(headerRow as HTMLElement).getByText('Actions');
-        expect(actionsHeader).toHaveClass('@[1250px]:text-left');
+        expect(actionsHeader).toHaveClass('text-right');
 
         const actionTrack = within(radarrArticle).getByRole('button', { name: /Web UI/i }).parentElement;
-        expect(actionTrack).toHaveClass('@[960px]:w-[280px]', '@[1250px]:w-[280px]', '@[1250px]:min-w-[280px]', '@[1250px]:justify-start');
+        expect(actionTrack).toHaveClass('min-w-0', 'flex-wrap', '@[720px]:justify-end');
     });
 
     it('proves unique failed inspect action in Actions track and guarded start downstream in status banner without button duplication', () => {
@@ -2370,7 +2503,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         const statusBlock = within(brokenArticle).getByRole('status');
         expect(statusBlock).not.toContainElement(inspectButtons[0]);
         expect(statusBlock).toContainElement(guardedButtons[0]);
-        expect(statusBlock).toHaveClass('order-last', '@[960px]:order-last', '@[1250px]:order-last');
+        expect(statusBlock).toHaveClass('order-last', 'col-span-full', 'bg-rose-500/[0.07]', 'border-t');
 
         expect(Boolean(inspectButtons[0].compareDocumentPosition(statusBlock) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
         expect(Boolean(inspectButtons[0].compareDocumentPosition(guardedButtons[0]) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
@@ -2379,7 +2512,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(statusBlock).toHaveTextContent('Confirmation required; starting does not repair the failed installation.');
     });
 
-    it('verifies stable WebUI / Logs / Manage slots in 280px action area and unoccupied slot when WebUI absent', () => {
+    it('keeps WebUI, Logs and Manage in flexible action groups without empty headless placeholders', () => {
         mockServicesPayload = {
             Radarr: {
                 id: 'radarr',
@@ -2406,39 +2539,39 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         render(<ServicesTab />);
 
         const radarrArticle = screen.getByRole('article', { name: 'Radarr service' });
-        const radarrActions = within(radarrArticle).getByRole('button', { name: 'Logs' }).closest('div[class*="@[960px]:w-[280px]"]');
+        const radarrActions = within(radarrArticle).getByRole('button', { name: 'Logs' }).closest('[role="group"]');
         expect(radarrActions).toBeInTheDocument();
-        expect(radarrActions).toHaveClass('sm:justify-end', '@[960px]:justify-end', '@[960px]:w-[280px]');
+        expect(radarrActions).toHaveClass('flex', 'flex-wrap', 'min-w-0', '@[720px]:justify-end');
 
         const updateButton = within(radarrArticle).getByRole('button', { name: 'Update' });
-        expect(updateButton).toHaveClass('col-span-3', 'sm:w-full');
+        expect(updateButton).toHaveClass('min-h-[44px]');
+        expect(updateButton).not.toHaveClass('sm:w-full');
 
         const radarrWebUi = within(radarrArticle).getByRole('button', { name: 'Web UI' });
-        expect(radarrWebUi).toHaveClass('sm:w-[88px]');
+        expect(radarrWebUi).toHaveClass('max-w-full');
         const radarrLogs = within(radarrArticle).getByRole('button', { name: 'Logs' });
-        expect(radarrLogs).toHaveClass('sm:w-[74px]', 'bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
+        expect(radarrLogs).toHaveClass('max-w-full', 'bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
         const radarrManage = within(radarrArticle).getByRole('button', { name: 'Manage Radarr service actions' });
         expect(radarrManage).toHaveClass('bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
-        expect(radarrManage.parentElement).toHaveClass('sm:w-[94px]');
+        expect(radarrManage.parentElement).toHaveClass('min-w-0', 'max-w-full');
 
         const headlessArticle = screen.getByRole('article', { name: 'HeadlessApp service' });
         expect(within(headlessArticle).queryByRole('button', { name: 'Web UI' })).not.toBeInTheDocument();
 
-        const headlessActions = within(headlessArticle).getByRole('button', { name: 'Logs' }).closest('div[class*="@[960px]:w-[280px]"]');
+        const headlessActions = within(headlessArticle).getByRole('button', { name: 'Logs' }).closest('[role="group"]');
         expect(headlessActions).toBeInTheDocument();
 
         const unoccupiedPlaceholder = headlessActions?.querySelector('div[aria-hidden="true"]');
-        expect(unoccupiedPlaceholder).toBeInTheDocument();
-        expect(unoccupiedPlaceholder).toHaveClass('hidden', 'sm:block', 'sm:w-[88px]', 'shrink-0');
+        expect(unoccupiedPlaceholder).not.toBeInTheDocument();
 
         const headlessLogs = within(headlessArticle).getByRole('button', { name: 'Logs' });
-        expect(headlessLogs).toHaveClass('sm:w-[74px]', 'bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
+        expect(headlessLogs).toHaveClass('max-w-full', 'bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
         const headlessManage = within(headlessArticle).getByRole('button', { name: 'Manage HeadlessApp service actions' });
         expect(headlessManage).toHaveClass('bg-slate-800/90', 'text-slate-200', 'border-slate-700/80');
-        expect(headlessManage.parentElement).toHaveClass('sm:w-[94px]');
+        expect(headlessManage.parentElement).toHaveClass('min-w-0', 'max-w-full');
     });
 
-    it('verifies port and connection sublayout with min-w-[6ch], 12px gap-3, and compact 140px fit', () => {
+    it('keeps five-digit ports, reassignment and Connection in their own wrapping track', () => {
         mockServicesPayload = {
             Sonarr: {
                 id: 'sonarr',
@@ -2459,13 +2592,13 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(portNumeral).toHaveClass('min-w-[6ch]', 'inline-block');
 
         const defaultPortPill = within(sonarrArticle).getByText('def :8989');
-        expect(defaultPortPill).toHaveClass('hidden', '@[1250px]:inline-block');
+        expect(defaultPortPill).toHaveClass('text-indigo-300', 'font-mono');
 
         const portContainer = portNumeral.parentElement;
-        expect(portContainer).toHaveClass('gap-3', 'flex', 'items-center', 'min-h-[40px]', 'flex-wrap', '@[1250px]:flex-nowrap');
+        expect(portContainer).toHaveClass('gap-x-2', 'gap-y-1', 'flex', 'items-center', 'min-w-0', 'flex-wrap');
 
         const portColumn = portContainer?.parentElement;
-        expect(portColumn).toHaveClass('@[960px]:w-[140px]', '@[1250px]:w-[180px]');
+        expect(portColumn).toHaveClass('relative', 'min-w-0', 'flex-col');
 
         const accessButton = within(sonarrArticle).getByRole('button', { name: 'Connection details for Sonarr' });
         expect(accessButton).toBeVisible();
@@ -2637,5 +2770,32 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
         const uptimeText = within(serviceArticle).getByText('5d 12h');
         expect(uptimeText).toHaveClass('text-slate-300', 'text-xs', 'sm:text-[13px]');
+    });
+
+    it.each(['Compact list view', 'Card grid view'])('embeds fleet sections and attention into the page in %s', (view) => {
+        mockServicesPayload = {
+            'AetherFlow API': { id: 'aetherflow-api', process: 'aetherflow-api', status: 'running' },
+            Sonarr: { id: 'sonarr', process: 'sonarr', status: 'running' },
+            Radarr: { id: 'radarr', process: 'radarr', status: 'failed' },
+        };
+        const { container } = render(<ServicesTab />);
+        fireEvent.click(screen.getByRole('button', { name: view }));
+        const suffix = view === 'Card grid view' ? 'grid' : 'list';
+        const fleet = container.firstElementChild;
+        expect(fleet).not.toHaveClass('space-y-4', 'sm:space-y-5');
+        expect(fleet?.firstElementChild).toHaveClass('border-b', 'border-white/[0.07]', 'pb-4');
+        expect(screen.getByRole('group', { name: 'Service search and filters' })).toHaveClass('border-b', 'border-white/[0.07]');
+        for (const label of [`Core platform service ${suffix}`, `Installed application service ${suffix}`]) {
+            const section = screen.getByLabelText(label);
+            expect(section).toHaveClass('border-y', 'border-white/[0.07]', 'divide-white/[0.07]', 'rounded-none', 'shadow-none', 'bg-transparent');
+            expect(section).not.toHaveClass('obs-telemetry-surface', 'rounded-2xl', 'border', 'shadow-xl');
+            if (suffix === 'grid') {
+                expect(section).toHaveClass('md:grid-cols-2', 'xl:grid-cols-3', 'md:max-xl:[&>*:nth-child(even)]:border-l', 'xl:[&>*:not(:nth-child(3n+1))]:border-l');
+            }
+        }
+        const attention = screen.getByRole('region', { name: 'Fleet attention required' });
+        expect(attention).toHaveClass('border-y', 'border-amber-500/25', 'from-amber-500/[0.08]', 'via-rose-500/[0.05]', 'to-transparent');
+        expect(attention).not.toHaveClass('rounded-xl', 'border', 'obs-telemetry-surface');
+        expect(container.querySelector('.obs-telemetry-surface')).not.toBeInTheDocument();
     });
 });

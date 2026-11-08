@@ -1,11 +1,20 @@
 import React, { Profiler } from "react";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import { useSystemStore } from "@/store/useSystemStore";
 import { useConnectionStore, ConnectionState } from "@/store/useConnectionStore";
 import { useTaskStore } from "@/store/useTaskStore";
+
+let mockPendingCount = 0;
+
+jest.mock("swr", () => ({
+  __esModule: true,
+  default: () => ({ data: { count: mockPendingCount } }),
+}));
 
 jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
@@ -24,6 +33,8 @@ jest.mock("@/contexts/ToastContext", () => ({
 
 describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibility", () => {
   beforeEach(() => {
+    localStorage.removeItem("aetherflow-sidebar-pinned");
+    mockPendingCount = 0;
     useSystemStore.setState({
       activeTab: "overview",
       isSidebarHovered: false,
@@ -119,86 +130,239 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     expect(useSystemStore.getState().isMobileMenuOpen).toBe(false);
   });
 
-  it("renders a persistent labeled sidebar on desktop around 208px width with product mark and name", () => {
+  it("starts as a compact desktop rail with an accessible logo and icon labels", () => {
     const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
 
-    const desktopAside = container.querySelector("aside")!;
-    const desktopSpacer = desktopAside.parentElement!;
-
-    expect(desktopSpacer).toHaveClass("md:w-52");
-    expect(desktopAside).toHaveClass("md:w-52");
-
-    expect(screen.getByText("AetherFlow")).toBeInTheDocument();
-    expect(screen.getByText("Nexus OS")).toBeInTheDocument();
-    expect(screen.getByAltText("AetherFlow Logo")).toBeInTheDocument();
+    expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]", "obs-gpu-120hz-rail");
+    expect(within(desktopAside).getByRole("button", { name: "Expand Sidebar" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(desktopAside).getByAltText("AetherFlow Logo")).toHaveAttribute("src", "/img/aetherflow-mark.svg");
+    expect(within(desktopAside).queryByText("Workspace")).not.toBeInTheDocument();
+    for (const label of ["Overview", "Services", "Settings"]) {
+      expect(within(desktopAside).getByRole("button", { name: label })).toBeInTheDocument();
+    }
   });
 
-  it("does not depend on hover for essential labels", () => {
+  it("keeps both sidebar logos unboxed with the same luminous mark", () => {
     const { container } = render(<Sidebar />);
-    const desktopAside = container.querySelector("aside")!;
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const desktopMark = within(desktopAside).getByAltText("AetherFlow Logo");
+    const logoButton = desktopMark.closest("button")!;
 
+    expect(logoButton).toHaveClass("obs-brand-logo");
+    expect(logoButton).not.toHaveClass("border", "bg-indigo-500/10", "rounded-xl", "overflow-hidden");
+    expect(desktopMark).toHaveClass("obs-brand-mark", "w-8", "h-8");
+    expect(desktopAside.querySelector(".obs-sidebar-surface")).toBeInTheDocument();
+    expect(desktopAside.querySelector(".inset-x-0.top-0.h-px")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /toggle navigation drawer/i }));
+    const mobileDrawer = screen.getByRole("dialog", { name: "Navigation Menu" });
+    const mobileMark = within(mobileDrawer).getByAltText("AetherFlow Logo");
+
+    expect(mobileDrawer).toHaveClass("obs-sidebar-surface");
+    expect(mobileDrawer).not.toHaveClass("glass-panel", "shadow-2xl");
+    expect(mobileMark).toHaveClass("obs-brand-mark", "w-8", "h-8");
+    expect(mobileMark.parentElement).toHaveClass("obs-brand-logo");
+    expect(mobileMark.parentElement).not.toHaveClass("border", "bg-indigo-500/10", "rounded-xl");
+  });
+
+  it("uses only a right sidebar hairline and layers the aura directly behind the SVG", () => {
+    const stylesheet = readFileSync(join(__dirname, "../../app/globals.css"), "utf8");
+    const sidebarSurface = stylesheet.match(/\.obs-sidebar-surface\s*\{([^}]+)\}/)?.[1];
+    const logoSurface = stylesheet.match(/\.obs-brand-logo\s*\{([^}]+)\}/)?.[1];
+    const logoAura = stylesheet.match(/\.obs-brand-logo::before\s*\{([^}]+)\}/)?.[1];
+    const logoMark = stylesheet.match(/\.obs-brand-mark\s*\{([^}]+)\}/)?.[1];
+
+    expect(sidebarSurface).toContain("border: 0;");
+    expect(sidebarSurface).toContain("border-right: 1px solid rgba(255, 255, 255, 0.07);");
+    expect(sidebarSurface).toContain("box-shadow: none;");
+    expect(sidebarSurface).not.toMatch(/border-(top|left|bottom):|obs-chromatic-inset/);
+    expect(logoSurface).toContain("overflow: visible;");
+    expect(logoSurface).toContain("background: transparent;");
+    expect(logoSurface).toContain("border: 0;");
+    expect(logoAura?.match(/radial-gradient/g)).toHaveLength(3);
+    expect(logoAura).toContain("filter: blur(10px);");
+    expect(logoAura).toContain("pointer-events: none;");
+    expect(logoMark).toContain("drop-shadow(0 0 12px rgba(99, 102, 241, 0.85))");
+    expect(logoMark).toContain("drop-shadow(0 0 24px rgba(56, 189, 248, 0.55))");
+  });
+
+  it("expands the docked spacer with the sidebar on hover and collapses both on leave", () => {
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+
+    fireEvent.mouseEnter(desktopAside);
+    expect(useSystemStore.getState().isSidebarHovered).toBe(true);
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    expect(within(desktopAside).getByText("AetherFlow")).toBeInTheDocument();
     expect(within(desktopAside).getByText("Workspace")).toBeInTheDocument();
     expect(within(desktopAside).getByText("System")).toBeInTheDocument();
 
-    expect(within(desktopAside).getByRole("button", { name: "Overview" })).toBeInTheDocument();
-    expect(within(desktopAside).getByRole("button", { name: "Services" })).toBeInTheDocument();
-    expect(within(desktopAside).getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    fireEvent.mouseLeave(desktopAside);
+    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+    expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
   });
 
-  it("keeps the colorful brand mark visible and operable as the desktop rail toggle", async () => {
-    const user = userEvent.setup();
+  it("shows the glowing emerald Nexus OS status dot only in the expanded desktop header", () => {
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+
+    expect(within(desktopAside).queryByText("Nexus OS")).not.toBeInTheDocument();
+    fireEvent.mouseEnter(desktopAside);
+    expect(within(desktopAside).getByText("AetherFlow")).toHaveClass("text-base");
+    const statusLabel = within(desktopAside).getByText("Nexus OS");
+    expect(statusLabel.parentElement).toHaveClass("flex", "items-center", "gap-1.5", "mt-0.5");
+    expect(statusLabel.previousElementSibling).toHaveClass("w-1.5", "h-1.5", "rounded-full", "bg-emerald-400", "shadow-[0_0_6px_#34d399]", "shrink-0");
+    fireEvent.mouseLeave(desktopAside);
+    expect(within(desktopAside).queryByText("Nexus OS")).not.toBeInTheDocument();
+  });
+
+  it("pins with the logo when collapsed and immediately collapses when expanded without navigating", async () => {
+    const user = userEvent.setup({ skipHover: true });
     useSystemStore.setState({ activeTab: "services" });
     const { container } = render(<Sidebar />);
-
     const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
-    const desktopSpacer = desktopAside.parentElement!;
-    const expandedLogoButton = within(desktopAside).getByRole("button", { name: "Collapse Sidebar" });
+    const logoButton = within(desktopAside).getByRole("button", { name: "Expand Sidebar" });
 
-    expect(expandedLogoButton).toHaveAttribute("aria-expanded", "true");
-    expect(expandedLogoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
-    expect(expandedLogoButton.querySelector("img")).toHaveAttribute("src", "/img/aetherflow-mark.svg");
-    expect(expandedLogoButton).toHaveClass("focus-visible:ring-2");
+    expect(logoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
+    expect(logoButton).toHaveClass("focus-visible:ring-2");
+    await user.click(logoButton);
+    expect(logoButton).toHaveAttribute("aria-expanded", "true");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    fireEvent.mouseLeave(desktopAside);
+    expect(desktopAside).toHaveClass("md:w-64");
 
-    await user.click(expandedLogoButton);
-
-    const collapsedLogoButton = within(desktopAside).getByRole("button", { name: "Expand Sidebar" });
-    expect(collapsedLogoButton).toHaveAttribute("aria-expanded", "false");
-    expect(collapsedLogoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
-    expect(collapsedLogoButton.querySelector("img")).toHaveAttribute("src", "/img/aetherflow-mark.svg");
-    expect(desktopSpacer).toHaveClass("md:w-16");
+    await user.click(logoButton);
+    expect(logoButton).toHaveAttribute("aria-expanded", "false");
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+    expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
+    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
     expect(within(desktopAside).getByRole("button", { name: "Services" })).toHaveAttribute("aria-current", "page");
-    expect(useSystemStore.getState().activeTab).toBe("services");
-
-    collapsedLogoButton.focus();
-    await user.keyboard("{Enter}");
-    expect(within(desktopAside).getByRole("button", { name: "Collapse Sidebar" })).toHaveAttribute("aria-expanded", "true");
-
-    await user.keyboard(" ");
-    expect(within(desktopAside).getByRole("button", { name: "Expand Sidebar" })).toHaveAttribute("aria-expanded", "false");
     expect(useSystemStore.getState().activeTab).toBe("services");
   });
 
-  it("allows collapsing to compact rail and expanding back via accessible toggle button", () => {
+  it("keeps the logo keyboard-focusable and supports Enter and Space to pin and collapse", async () => {
+    const user = userEvent.setup();
     const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const logoButton = within(desktopAside).getByRole("button", { name: "Expand Sidebar" });
 
-    const desktopAside = container.querySelector("aside")!;
-    const desktopSpacer = desktopAside.parentElement!;
+    act(() => logoButton.focus());
+    expect(logoButton).toHaveFocus();
+    expect(logoButton).toHaveAttribute("aria-expanded", "true");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    await user.keyboard("{Enter}");
+    expect(logoButton).toHaveAttribute("aria-expanded", "true");
+    fireEvent.mouseLeave(desktopAside);
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    await user.keyboard(" ");
+    expect(logoButton).toHaveAttribute("aria-expanded", "false");
+    expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
+    expect(logoButton).toHaveFocus();
+    expect(useSystemStore.getState().activeTab).toBe("overview");
+  });
 
-    expect(desktopSpacer).toHaveClass("md:w-52");
+  it("pins a hovered sidebar with a normal logo click and persists the pin preference", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    await user.hover(desktopAside);
+    await user.click(within(desktopAside).getByRole("button", { name: "Pin Sidebar" }));
+    await user.unhover(desktopAside);
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    expect(localStorage.getItem("aetherflow-sidebar-pinned")).toBe("true");
+    await user.click(within(desktopAside).getByRole("button", { name: "Unpin and collapse sidebar" }));
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+    expect(localStorage.getItem("aetherflow-sidebar-pinned")).toBe("false");
+  });
 
-    const collapseButton = screen.getByRole("button", { name: /collapse sidebar/i });
-    expect(collapseButton).toBeInTheDocument();
-    fireEvent.click(collapseButton);
+  it("restores a saved pin without expanding fresh visits by default", () => {
+    localStorage.setItem("aetherflow-sidebar-pinned", "true");
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    expect(within(desktopAside).getByRole("button", { name: "Collapse Sidebar" })).toHaveAttribute("aria-expanded", "true");
+  });
 
-    expect(desktopSpacer).toHaveClass("md:w-16");
-    expect(desktopAside).toHaveClass("md:w-16");
+  it("still pins locally when saving the pin preference is unavailable", () => {
+    const originalSetItem = Storage.prototype.setItem;
+    const writePreference = jest.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key: string, value: string) {
+      if (key === "aetherflow-sidebar-pinned") throw new DOMException("Pin preference is unavailable", "SecurityError");
+      originalSetItem.call(this, key, value);
+    });
+    try {
+      const { container } = render(<Sidebar />);
+      const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+      fireEvent.click(within(desktopAside).getByRole("button", { name: "Expand Sidebar" }));
+      fireEvent.mouseLeave(desktopAside);
+      expect(desktopAside.parentElement).toHaveClass("md:w-64");
+      fireEvent.click(within(desktopAside).getByRole("button", { name: "Collapse Sidebar" }));
+      expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
+    } finally {
+      writePreference.mockRestore();
+    }
+  });
 
-    const expandButton = screen.getByRole("button", { name: /expand sidebar/i });
-    expect(expandButton).toBeInTheDocument();
-    fireEvent.click(expandButton);
+  it("reveals labels throughout keyboard navigation and collapses when focus leaves the unpinned rail", () => {
+    const { container } = render(<><Sidebar /><button type="button">Outside sidebar</button></>);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    act(() => within(desktopAside).getByRole("button", { name: "Services" }).focus());
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    expect(within(desktopAside).getByText("Services")).toBeInTheDocument();
+    act(() => within(desktopAside).getByRole("button", { name: "Settings" }).focus());
+    expect(desktopAside).toHaveClass("md:w-64");
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    act(() => screen.getByRole("button", { name: "Outside sidebar" }).focus());
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+    expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
+  });
 
-    expect(desktopSpacer).toHaveClass("md:w-52");
-    expect(desktopAside).toHaveClass("md:w-52");
+  it("offers a discoverable keyboard-accessible pin control while hover-expanded", () => {
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    fireEvent.mouseEnter(desktopAside);
+    const pinButton = within(desktopAside).getByRole("button", { name: "Pin sidebar open" });
+    expect(pinButton).toHaveClass("obs-touch-target-standard");
+    fireEvent.click(pinButton);
+    fireEvent.mouseLeave(desktopAside);
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+  });
+
+  it("shows pending inbox counts in the collapsed rail, expanded navigation, and mobile drawer", () => {
+    mockPendingCount = 3;
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const inboxButton = within(desktopAside).getByRole("button", { name: "Approval Inbox" });
+    expect(within(inboxButton).getByText("3")).toBeInTheDocument();
+    fireEvent.mouseEnter(desktopAside);
+    expect(within(inboxButton).getByText("3")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Navigation Drawer" }));
+    const drawer = screen.getByRole("dialog", { name: "Navigation Menu" });
+    expect(within(drawer).getByText("3")).toBeInTheDocument();
+  });
+
+  it("traps mobile drawer focus and restores the trigger on Escape", async () => {
+    const user = userEvent.setup();
+    render(<Sidebar />);
+    const menuButton = screen.getByRole("button", { name: "Toggle Navigation Drawer" });
+    await user.click(menuButton);
+    const drawer = screen.getByRole("dialog", { name: "Navigation Menu" });
+    const closeButton = within(drawer).getByRole("button", { name: "Close Navigation Drawer" });
+    await waitFor(() => expect(closeButton).toHaveFocus());
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(within(drawer).getByRole("button", { name: "Log Out" })).toHaveFocus();
+    await user.keyboard("{Tab}");
+    expect(closeButton).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(menuButton).toHaveFocus();
   });
 
   it("marks the active item with aria-current page and single indigo indicator", () => {
@@ -209,6 +373,7 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     const activeServicesBtn = within(desktopAside).getByRole("button", { name: "Services" });
     expect(activeServicesBtn).toHaveAttribute("aria-current", "page");
     expect(activeServicesBtn).toHaveClass("border-indigo-500/40", "from-indigo-500/25", "to-fuchsia-500/20");
+    expect(activeServicesBtn.querySelector("span.absolute")).toHaveClass("shadow-[0_0_8px_#6366f1]");
   });
 
   it("ensures all interactive navigation controls meet >= 40px touch and click target requirement", () => {

@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
-import AppTopologyMap from '@/components/widgets/AppTopologyMap';
+import { render, screen, fireEvent, within, act } from '@testing-library/react';
+import AppTopologyMap, { computeTopologyLayout, formatTopologyLabel } from '@/components/widgets/AppTopologyMap';
 import { SystemMetrics } from '@/types/dashboard';
 import { useSystemStore } from '@/store/useSystemStore';
 import * as d3 from 'd3';
@@ -25,6 +25,7 @@ jest.mock('d3', () => {
     const mockForceLink = {
         id: jest.fn().mockReturnThis(),
         distance: jest.fn().mockReturnThis(),
+        strength: jest.fn().mockReturnThis(),
         links: jest.fn().mockReturnThis(),
     };
     const forcesMap: Record<string, unknown> = {
@@ -71,6 +72,8 @@ jest.mock('d3', () => {
             strength: jest.fn().mockReturnThis(),
         })),
         forceCenter: jest.fn(() => ({})),
+        forceX: jest.fn(() => ({ strength: jest.fn().mockReturnThis() })),
+        forceY: jest.fn(() => ({ strength: jest.fn().mockReturnThis() })),
         forceCollide: jest.fn(() => ({
             radius: jest.fn().mockReturnThis(),
         })),
@@ -99,6 +102,65 @@ jest.mock('swr', () => ({
 }));
 
 describe('AppTopologyMap', () => {
+    it('packs 28 node and centered-label footprints inside mobile bounds with no overlapping cells', () => {
+        const layout = computeTopologyLayout(28, 316, 300);
+        expect(layout.positions).toHaveLength(28);
+        for (const position of layout.positions) {
+            expect(position.x - 48).toBeGreaterThanOrEqual(0);
+            expect(position.x + 48).toBeLessThanOrEqual(316);
+            expect(position.y - 17).toBeGreaterThanOrEqual(0);
+            expect(position.y + 32).toBeLessThanOrEqual(layout.height);
+        }
+        layout.positions.forEach((position, nodeIndex) => {
+            layout.positions.slice(nodeIndex + 1).forEach(otherPosition => {
+                expect(Math.hypot(position.x - otherPosition.x, position.y - otherPosition.y)).toBeGreaterThanOrEqual(104);
+            });
+        });
+        expect(formatTopologyLabel('a-very-long-service-label')).toBe('a-very-long-ser…');
+        expect(formatTopologyLabel('Jellyfin')).toBe('Jellyfin');
+    });
+
+    it('observes graph resizing, recenters the layout, and disconnects on view changes', () => {
+        const originalResizeObserver = globalThis.ResizeObserver;
+        let resizeCallback: ResizeObserverCallback = () => undefined;
+        const observe = jest.fn();
+        const disconnect = jest.fn();
+        const MockResizeObserver = jest.fn((callback: ResizeObserverCallback) => {
+            resizeCallback = callback;
+            return { observe, disconnect, unobserve: jest.fn() };
+        });
+        globalThis.ResizeObserver = MockResizeObserver;
+        try {
+            render(<AppTopologyMap topologyData={{ jellyfin: { status: 'running' } }} />);
+            fireEvent.click(screen.getByRole('button', { name: /Show interactive topology graph/i }));
+            const observedContainer = observe.mock.calls[0][0] as HTMLElement;
+            const selection = jest.mocked(d3.select).mock.results.at(-1)!.value;
+            const simulation = jest.mocked(d3.forceSimulation).mock.results.at(-1)!.value;
+            const restart = simulation.restart as jest.Mock;
+            restart.mockClear();
+            const entry: ResizeObserverEntry = {
+                target: observedContainer,
+                contentRect: new DOMRectReadOnly(0, 0, 316, 420),
+                borderBoxSize: [],
+                contentBoxSize: [],
+                devicePixelContentBoxSize: [],
+            };
+            act(() => resizeCallback([entry], {} as ResizeObserver));
+            expect(selection.attr).toHaveBeenCalledWith('viewBox', [0, 0, 316, 300]);
+            expect(selection.attr).toHaveBeenCalledWith('text-anchor', 'middle');
+            expect(selection.attr).toHaveBeenCalledWith('dx', 0);
+            expect(jest.mocked(d3.forceCollide).mock.results.at(-1)!.value.radius).toHaveBeenCalledWith(52);
+            expect(restart).toHaveBeenCalled();
+            for (const name of ['Zoom in', 'Zoom out', 'Reset zoom']) {
+                expect(screen.getByRole('button', { name })).toHaveClass('min-h-[40px]', 'obs-touch-target-standard');
+            }
+            fireEvent.click(screen.getByRole('button', { name: /Show scannable service health list/i }));
+            expect(disconnect).toHaveBeenCalledTimes(1);
+        } finally {
+            globalThis.ResizeObserver = originalResizeObserver;
+        }
+    });
+
     const sampleTopologyData: SystemMetrics['services'] = {
         qbittorrent: { status: 'error', uptime: '0m', version: '4.6.0' },
         jellyfin: { status: 'running', uptime: '3d 4h', version: '10.8.13' },
@@ -109,6 +171,10 @@ describe('AppTopologyMap', () => {
         render(<AppTopologyMap topologyData={sampleTopologyData} density="compact" />);
 
         expect(screen.getByText('Service Health')).toBeInTheDocument();
+        const healthList = screen.getByRole('list', { name: 'Managed service health' });
+        expect(healthList).toHaveClass('divide-y');
+        expect(within(healthList).getAllByRole('listitem')).toHaveLength(3);
+        expect(healthList.closest('.obs-telemetry-surface')).toBeInTheDocument();
         expect(screen.getByText('Showing 3 of 3 services')).toBeInTheDocument();
 
         expect(screen.getByText('qBittorrent')).toBeInTheDocument();
@@ -315,7 +381,7 @@ describe('AppTopologyMap', () => {
 
         const versionElement = screen.getByText('v4.0.0-rc1');
         const versionContainer = versionElement.closest('div');
-        expect(versionContainer).toHaveClass('text-[13px]');
-        expect(versionContainer).toHaveClass('text-slate-300');
+        expect(versionContainer).toHaveClass('text-xs');
+        expect(versionContainer).toHaveClass('text-slate-400');
     });
 });

@@ -8,6 +8,7 @@ import {
     RefreshCw,
     ChevronLeft,
     ChevronRight,
+    ChevronDown,
     AlertCircle,
     AlertTriangle,
     ShieldCheck,
@@ -15,7 +16,6 @@ import {
     RotateCcw,
     Loader2,
     FileSpreadsheet,
-    CheckCircle2,
     Info,
     ArrowUpDown,
     Globe,
@@ -39,6 +39,14 @@ export interface StreamingHistoryExplorerProps {
     initialQuery?: Partial<StreamingHistoryQuery>;
     searchDebounceMs?: number;
 }
+
+const SPECIALIST_PANELS = [
+    { id: 'insights', label: 'Cohort & Trend Insights', adminOnly: false },
+    { id: 'portability', label: 'Archive Portability & Backup', adminOnly: true },
+    { id: 'administration', label: 'Retention & Administration', adminOnly: true },
+] as const;
+
+type SpecialistPanelId = typeof SPECIALIST_PANELS[number]['id'];
 
 const VALID_WINDOWS: ReadonlyArray<NonNullable<StreamingHistoryQuery['window']>> = [
     'all',
@@ -482,17 +490,11 @@ export function StreamingHistoryExplorer({
 
     const [searchInput, setSearchInput] = useState<string>(() => queryState.search || '');
     const [cursorStack, setCursorStack] = useState<Array<string | undefined>>([]);
-    const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(() =>
-        Boolean(
-            queryState.serverId ||
-                queryState.userId ||
-                queryState.client ||
-                queryState.device ||
-                queryState.itemId ||
-                queryState.libraryId ||
-                queryState.genre
-        )
-    );
+    const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+    const [specialistPanels, setSpecialistPanels] = useState<{
+        active: SpecialistPanelId | null;
+        visited: SpecialistPanelId[];
+    }>({ active: null, visited: [] });
 
     const [pageData, setPageData] = useState<StreamingHistoryPage | null>(null);
     const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -847,17 +849,34 @@ export function StreamingHistoryExplorer({
     const hasNextPage = Boolean(pageData?.nextCursor);
 
     const isDatedWindow = Boolean(queryState.window && queryState.window !== 'all');
+    const advancedFilterCount = [
+        queryState.timezone && queryState.timezone !== 'UTC',
+        queryState.provenance && queryState.provenance !== 'all',
+        queryState.playMethod,
+        queryState.mediaType,
+        queryState.provider,
+        queryState.serverId,
+        queryState.userId,
+        queryState.client,
+        queryState.device,
+        queryState.itemId,
+        queryState.libraryId,
+        queryState.genre,
+        queryState.sort && queryState.sort !== 'startedDesc',
+        queryState.pageSize && queryState.pageSize !== 50,
+        isAdmin && queryState.includeExcluded,
+    ].filter(Boolean).length;
 
     return (
         <section
             aria-label="Streaming History Explorer"
             data-testid="streaming-history-explorer"
-            className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 space-y-5 w-full min-w-0"
+            className="border-b border-white/[0.07] py-6 space-y-3 w-full min-w-0 max-w-full"
         >
             {/* ===================================================================== */}
             {/* 1. HEADER, SCOPE DISCLOSURE & FULL-QUERY EXPORT                       */}
             {/* ===================================================================== */}
-            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
+            <div className="min-w-0 pb-3 border-b border-white/[0.07]">
                 <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2.5">
                         <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
@@ -894,239 +913,39 @@ export function StreamingHistoryExplorer({
                     </div>
 
                     <p className="text-xs text-slate-400">
-                        Cursor-paginated archive explorer independent of the 5-second live stream poll. Only confirmed observed sessions and imported events count as confirmed plays, watch time, and estimated transfer.
+                        Confirmed plays only · Transfer is estimated, not metered traffic.
                     </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <button
-                        type="button"
-                        onClick={() => setShowAdvancedFilters((prev) => !prev)}
-                        aria-expanded={showAdvancedFilters}
-                        data-testid="toggle-advanced-filters-btn"
-                        className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
-                    >
-                        <SlidersHorizontal size={13} className="text-indigo-400" />
-                        <span>{showAdvancedFilters ? 'Hide Facet Filters' : 'More Facet Filters'}</span>
-                    </button>
 
-                    <button
-                        type="button"
-                        onClick={handleResetFilters}
-                        data-testid="reset-history-filters-btn"
-                        className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 flex items-center gap-1.5 transition-all"
-                    >
-                        <RotateCcw size={13} />
-                        <span>Reset Filters</span>
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={handleRestartQuery}
-                        disabled={isLoading}
-                        aria-label="Refresh history snapshot"
-                        data-testid="refresh-history-snapshot-btn"
-                        className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:opacity-50 border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
-                    >
-                        <RefreshCw size={13} className={isLoading ? 'animate-spin text-indigo-400' : ''} />
-                        <span>Refresh Snapshot</span>
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => void handleExportFullQuery()}
-                        disabled={
-                            isExporting ||
-                            isConflict409 ||
-                            isLoading ||
-                            pageData === null ||
-                            customRangeIncomplete ||
-                            (counts !== null && counts.matchingRecords === 0)
-                        }
-                        data-testid="export-full-history-btn"
-                        aria-label="Export full matching query to CSV"
-                        title="Streams the complete filtered cohort from GET /api/v1/auth/streaming/history/export at the active snapshot token (not just the current page)"
-                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-indigo-500/20 flex items-center gap-1.5 transition-all"
-                    >
-                        {isExporting ? (
-                            <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                            <Download size={13} />
-                        )}
-                        <span>
-                            {isExporting
-                                ? 'Exporting CSV...'
-                                : counts
-                                  ? `Export Full Query CSV (${counts.matchingRecords.toLocaleString()})`
-                                  : 'Export Full Query CSV'}
-                        </span>
-                    </button>
-                </div>
             </div>
 
-            {/* ===================================================================== */}
-            {/* 2. NON-ADMIN LINKED USER & PROVENANCE / UNDATED HONEST DISCLOSURES    */}
-            {/* ===================================================================== */}
-            {(!isAdmin || scope?.permissionScope === 'linked_user') && (
-                <div
-                    data-testid="linked-user-scope-notice"
-                    className="px-3.5 py-2.5 rounded-xl border border-sky-500/25 bg-sky-950/25 text-xs text-sky-200 flex items-start gap-2.5"
-                >
-                    <Info size={15} className="text-sky-400 shrink-0 mt-0.5" />
-                    <div>
-                        <strong className="font-bold">Linked Provider Account Scope:</strong> Non-admin history contains only media provider accounts explicitly linked to your AetherFlow user in{' '}
-                        <code className="font-mono text-sky-100">streaming_user_links</code> (never guessed from display names). If no provider user is linked, 0 available records are returned. IP addresses, device IDs, and policy-excluded raw records are omitted.
-                    </div>
-                </div>
-            )}
-
-            {/* ===================================================================== */}
-            {/* 3. COHORT METRICS STRIP (CONFIRMED VS SUMMARIES VS LEGACY VS UNDATED) */}
-            {/* ===================================================================== */}
-            {counts && (
-                <div
-                    data-testid="history-cohort-summary-grid"
-                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3"
-                >
-                    {/* Matching vs Available */}
-                    <div className="rounded-xl border border-white/[0.06] bg-black/30 p-3">
-                        <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
-                            Filtered Cohort
-                        </span>
-                        <div className="mt-1 flex items-baseline gap-1.5">
-                            <span
-                                data-testid="summary-matching-records"
-                                className="text-lg font-extrabold text-white tabular-nums"
-                            >
-                                {counts.matchingRecords.toLocaleString()}
-                            </span>
-                            <span className="text-xs text-slate-400">
-                                of{' '}
-                                <strong
-                                    data-testid="summary-available-records"
-                                    className="text-slate-200 tabular-nums"
-                                >
-                                    {counts.availableRecords.toLocaleString()}
-                                </strong>{' '}
-                                available
-                            </span>
+            <div className="min-w-0 space-y-3 border-b border-white/[0.07] pb-3">
+                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(180px,240px)] gap-3">
+                    {/* Literal Debounced Search */}
+                    <div className="flex-1 min-w-0">
+                        <label
+                            htmlFor="sh-search-input"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                        >
+                            Literal Archive Search
+                        </label>
+                        <div className="relative">
+                            <Search
+                                size={14}
+                                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
+                            />
+                            <input
+                                id="sh-search-input"
+                                type="text"
+                                value={searchInput}
+                                onChange={(e) => setSearchInput(e.target.value)}
+                                placeholder="Search title, series, user, client or device"
+                                className="w-full pl-9 pr-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                            />
                         </div>
-                        <p className="text-xs text-slate-500 mt-1">
-                            Complete matching query across archive (loaded {items.length} on this page)
-                        </p>
                     </div>
 
-                    {/* Confirmed Plays & Watch Time */}
-                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-950/15 p-3">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold uppercase tracking-wider text-emerald-300">
-                                Confirmed Plays
-                            </span>
-                            <CheckCircle2 size={13} className="text-emerald-400" />
-                        </div>
-                        <div className="mt-1 flex items-baseline gap-2">
-                            <span
-                                data-testid="summary-confirmed-plays"
-                                className="text-lg font-extrabold text-emerald-200 tabular-nums"
-                            >
-                                {counts.confirmedPlays.toLocaleString()}
-                            </span>
-                            <span
-                                data-testid="summary-watch-time"
-                                className="text-xs font-mono text-emerald-300/90"
-                            >
-                                {formatHistoryDuration(counts.watchTimeSecs)}
-                            </span>
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1">
-                            Included <code className="font-mono">observed_session</code> +{' '}
-                            <code className="font-mono">imported_event</code> only. Watch time sums recorded durations; missing durations are not measured zeroes.
-                        </p>
-                    </div>
-
-                    {/* Estimated Transfer */}
-                    <div className="rounded-xl border border-teal-500/20 bg-teal-950/15 p-3">
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold uppercase tracking-wider text-teal-300">
-                                Estimated Transfer
-                            </span>
-                            <span className="text-xs font-semibold px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                Estimated
-                            </span>
-                        </div>
-                        <div className="mt-1 flex items-baseline gap-2">
-                            <span
-                                data-testid="summary-estimated-bytes"
-                                className="text-lg font-extrabold text-teal-200 tabular-nums"
-                            >
-                                {formatHistoryBytes(counts.estimatedBytes, 2)}
-                            </span>
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1">
-                            Bitrate &times; duration estimate, not measured network interface traffic
-                        </p>
-                    </div>
-
-                    {/* Item Summaries & Legacy Unverified */}
-                    <div className="rounded-xl border border-amber-500/20 bg-amber-950/15 p-3">
-                        <span className="text-xs font-bold uppercase tracking-wider text-amber-300 block">
-                            Summaries &amp; Legacy
-                        </span>
-                        <div className="mt-1 flex items-baseline gap-3 text-xs">
-                            <div>
-                                <span
-                                    data-testid="summary-item-summaries"
-                                    className="text-base font-extrabold text-amber-200 tabular-nums"
-                                >
-                                    {counts.itemSummaries.toLocaleString()}
-                                </span>{' '}
-                                <span className="text-slate-300">summaries</span>
-                            </div>
-                            <div>
-                                <span
-                                    data-testid="summary-legacy-records"
-                                    className="text-base font-extrabold text-slate-200 tabular-nums"
-                                >
-                                    {counts.legacyRecords.toLocaleString()}
-                                </span>{' '}
-                                <span className="text-slate-400">legacy</span>
-                            </div>
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1">
-                            Separately inspectable; excluded from confirmed play totals
-                        </p>
-                    </div>
-
-                    {/* Undated Records */}
-                    <div className="rounded-xl border border-white/[0.06] bg-black/30 p-3">
-                        <span className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-                            Undated Records
-                        </span>
-                        <div className="mt-1 flex items-baseline gap-2">
-                            <span
-                                data-testid="summary-undated-records"
-                                className="text-lg font-extrabold text-slate-200 tabular-nums"
-                            >
-                                {counts.undatedRecords.toLocaleString()}
-                            </span>
-                            <span className="text-xs text-slate-400">
-                                {isDatedWindow ? 'excluded in dated window' : 'retained in All Time'}
-                            </span>
-                        </div>
-                        <p className="text-xs text-slate-500 mt-1">
-                            {isDatedWindow
-                                ? 'Switch window to "All Time" to inspect undated rows (ordered last).'
-                                : 'Undated rows sort after dated rows in both ascending and descending order.'}
-                        </p>
-                    </div>
-                </div>
-            )}
-
-            {/* ===================================================================== */}
-            {/* 4. PRIMARY FILTER BAR (WINDOW, TIMEZONE, PROVENANCE, SEARCH, SORT)    */}
-            {/* ===================================================================== */}
-            <div className="rounded-xl border border-white/[0.06] bg-black/30 p-3.5 space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
                     {/* Window */}
                     <div>
                         <label
@@ -1144,7 +963,7 @@ export function StreamingHistoryExplorer({
                                     e.target.value as NonNullable<StreamingHistoryQuery['window']>
                                 )
                             }
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="all">All Time (includes undated)</option>
                             <option value="7d">Last 7 Days (rolling)</option>
@@ -1158,123 +977,7 @@ export function StreamingHistoryExplorer({
                         </select>
                     </div>
 
-                    {/* IANA Timezone */}
-                    <div>
-                        <label
-                            htmlFor="sh-timezone-input"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1"
-                        >
-                            <Globe size={11} className="text-indigo-400" />
-                            <span>IANA Timezone</span>
-                        </label>
-                        <input
-                            id="sh-timezone-input"
-                            type="text"
-                            list="sh-timezone-datalist"
-                            value={queryState.timezone ?? 'UTC'}
-                            onChange={(e) => updateFilter('timezone', e.target.value)}
-                            placeholder="UTC or America/New_York"
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
-                        />
-                        <datalist id="sh-timezone-datalist">
-                            {COMMON_TIMEZONES.map((tz) => (
-                                <option key={tz} value={tz} />
-                            ))}
-                        </datalist>
-                    </div>
-
-                    {/* Provenance */}
-                    <div>
-                        <label
-                            htmlFor="sh-provenance-select"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                        >
-                            Record Provenance
-                        </label>
-                        <select
-                            id="sh-provenance-select"
-                            value={queryState.provenance || 'all'}
-                            onChange={(e) =>
-                                updateFilter(
-                                    'provenance',
-                                    e.target.value as NonNullable<StreamingHistoryQuery['provenance']>
-                                )
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                        >
-                            <option value="all">All Provenances</option>
-                            <option value="observed_session">Observed Session (Confirmed)</option>
-                            <option value="imported_event">Imported Event (Confirmed)</option>
-                            <option value="item_summary">Item Summary (Last-Played)</option>
-                            <option value="legacy_unverified">Legacy Unverified</option>
-                        </select>
-                    </div>
-
-                    {/* Play Method */}
-                    <div>
-                        <label
-                            htmlFor="sh-play-method-select"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                        >
-                            Play Method
-                        </label>
-                        <select
-                            id="sh-play-method-select"
-                            value={queryState.playMethod || ''}
-                            onChange={(e) => updateFilter('playMethod', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                        >
-                            <option value="">All Play Methods</option>
-                            <option value="DirectPlay">Direct Play</option>
-                            <option value="DirectStream">Direct Stream</option>
-                            <option value="Transcode">Transcode</option>
-                            <option value="Unknown">Unknown / Unrecorded</option>
-                        </select>
-                    </div>
-
-                    {/* Media Type */}
-                    <div>
-                        <label
-                            htmlFor="sh-media-type-select"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                        >
-                            Media Type
-                        </label>
-                        <select
-                            id="sh-media-type-select"
-                            value={queryState.mediaType || ''}
-                            onChange={(e) => updateFilter('mediaType', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                        >
-                            <option value="">All Media Types</option>
-                            <option value="Movie">Movie</option>
-                            <option value="Episode">Episode</option>
-                            <option value="Audio">Audio</option>
-                        </select>
-                    </div>
-
-                    {/* Provider */}
-                    <div>
-                        <label
-                            htmlFor="sh-provider-select"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                        >
-                            Provider
-                        </label>
-                        <select
-                            id="sh-provider-select"
-                            value={queryState.provider || ''}
-                            onChange={(e) => updateFilter('provider', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                        >
-                            <option value="">All Providers</option>
-                            <option value="jellyfin">Jellyfin</option>
-                            <option value="plex">Plex</option>
-                            <option value="emby">Emby</option>
-                        </select>
-                    </div>
                 </div>
-
                 {/* Custom Date Bounds [from, until) */}
                 {queryState.window === 'custom' && (
                     <div
@@ -1294,7 +997,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.from || ''}
                                 onChange={(e) => updateFilter('from', e.target.value)}
                                 placeholder="2026-10-01T00:00:00Z"
-                                className="w-full px-3 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                             />
                         </div>
                         <div>
@@ -1310,238 +1013,57 @@ export function StreamingHistoryExplorer({
                                 value={queryState.until || ''}
                                 onChange={(e) => updateFilter('until', e.target.value)}
                                 placeholder="2026-11-01T00:00:00Z"
-                                className="w-full px-3 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                             />
                         </div>
                     </div>
                 )}
 
-                {/* Search, Sort, Page Size & Admin Include Excluded */}
-                <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3 pt-2 border-t border-white/[0.06]">
-                    {/* Literal Debounced Search */}
-                    <div className="flex-1 min-w-0">
-                        <label
-                            htmlFor="sh-search-input"
-                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                        >
-                            Literal Archive Search (Title, Series, User, Client, Device)
-                        </label>
-                        <div className="relative">
-                            <Search
-                                size={14}
-                                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
-                            />
-                            <input
-                                id="sh-search-input"
-                                type="text"
-                                value={searchInput}
-                                onChange={(e) => setSearchInput(e.target.value)}
-                                placeholder="Literal search (wildcards % and _ matched literally; IPs/device IDs/session keys not searchable)..."
-                                className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-                            />
-                        </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-end gap-3 shrink-0">
-                        {/* Sort Order */}
-                        <div>
-                            <label
-                                htmlFor="sh-sort-select"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1"
-                            >
-                                <ArrowUpDown size={11} className="text-indigo-400" />
-                                <span>Sort Order</span>
-                            </label>
-                            <select
-                                id="sh-sort-select"
-                                value={queryState.sort || 'startedDesc'}
-                                onChange={(e) =>
-                                    updateFilter(
-                                        'sort',
-                                        e.target.value as NonNullable<StreamingHistoryQuery['sort']>
-                                    )
-                                }
-                                className="px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                            >
-                                <option value="startedDesc">Newest Started First (undated last)</option>
-                                <option value="startedAsc">Oldest Started First (undated last)</option>
-                            </select>
-                        </div>
-
-                        {/* Page Size */}
-                        <div>
-                            <label
-                                htmlFor="sh-page-size-select"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Page Size
-                            </label>
-                            <select
-                                id="sh-page-size-select"
-                                value={queryState.pageSize || 50}
-                                onChange={(e) =>
-                                    updateFilter('pageSize', Number(e.target.value) || 50)
-                                }
-                                className="px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                            >
-                                <option value={25}>25 / page</option>
-                                <option value={50}>50 / page (default)</option>
-                                <option value={100}>100 / page</option>
-                                <option value={200}>200 / page (max)</option>
-                            </select>
-                        </div>
-
-                        {/* Admin-Only Include Policy-Excluded Records */}
-                        {isAdmin && (
-                            <label
-                                htmlFor="sh-include-excluded-checkbox"
-                                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-purple-500/10 border border-purple-500/30 text-xs font-semibold text-purple-200 cursor-pointer select-none"
-                            >
-                                <input
-                                    id="sh-include-excluded-checkbox"
-                                    type="checkbox"
-                                    checked={Boolean(queryState.includeExcluded)}
-                                    onChange={(e) =>
-                                        updateFilter('includeExcluded', e.target.checked)
-                                    }
-                                    className="rounded border-purple-400/50 bg-slate-950 text-indigo-500 focus:ring-indigo-500"
-                                />
-                                <span>Include Policy-Excluded Raw Records</span>
-                            </label>
-                        )}
-                    </div>
-                </div>
-
-                {/* Expandable Facet Filters (Server, User, Client, Device, Item, Library, Genre) */}
-                {showAdvancedFilters && (
-                    <div
-                        data-testid="advanced-facet-filters-panel"
-                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5 pt-3 border-t border-white/[0.06]"
-                    >
-                        <div>
-                            <label
-                                htmlFor="sh-server-id-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Server ID
-                            </label>
-                            <input
-                                id="sh-server-id-input"
-                                type="text"
-                                value={queryState.serverId || ''}
-                                onChange={(e) => updateFilter('serverId', e.target.value)}
-                                placeholder="e.g. jf-srv-01"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-user-id-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Provider User ID
-                            </label>
-                            <input
-                                id="sh-user-id-input"
-                                type="text"
-                                value={queryState.userId || ''}
-                                onChange={(e) => updateFilter('userId', e.target.value)}
-                                placeholder="e.g. u-1"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-client-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Client Name
-                            </label>
-                            <input
-                                id="sh-client-input"
-                                type="text"
-                                value={queryState.client || ''}
-                                onChange={(e) => updateFilter('client', e.target.value)}
-                                placeholder="e.g. Swiftfin iOS"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-device-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Device Name
-                            </label>
-                            <input
-                                id="sh-device-input"
-                                type="text"
-                                value={queryState.device || ''}
-                                onChange={(e) => updateFilter('device', e.target.value)}
-                                placeholder="e.g. Apple TV"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-item-id-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Item ID
-                            </label>
-                            <input
-                                id="sh-item-id-input"
-                                type="text"
-                                value={queryState.itemId || ''}
-                                onChange={(e) => updateFilter('itemId', e.target.value)}
-                                placeholder="e.g. item-42"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-library-id-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Library ID
-                            </label>
-                            <input
-                                id="sh-library-id-input"
-                                type="text"
-                                value={queryState.libraryId || ''}
-                                onChange={(e) => updateFilter('libraryId', e.target.value)}
-                                placeholder="e.g. lib-movies"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100 font-mono"
-                            />
-                        </div>
-                        <div>
-                            <label
-                                htmlFor="sh-genre-input"
-                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
-                            >
-                                Genre
-                            </label>
-                            <input
-                                id="sh-genre-input"
-                                type="text"
-                                value={queryState.genre || ''}
-                                onChange={(e) => updateFilter('genre', e.target.value)}
-                                placeholder="e.g. Sci-Fi"
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-slate-950/80 border border-white/10 text-xs text-slate-100"
-                            />
-                        </div>
-                    </div>
-                )}
             </div>
 
-            {/* ===================================================================== */}
-            {/* 5. SNAPSHOT INVALIDATION (409), FETCH ERROR & EXPORT ERROR BANNERS    */}
-            {/* ===================================================================== */}
+            {counts && (
+                <div
+                    data-testid="history-cohort-summary-grid"
+                    className="grid grid-cols-2 sm:grid-cols-4 border-b border-white/[0.07] [&>*]:min-w-0 [&>*]:p-3 [&>*]:border-white/[0.07] [&>*:nth-child(even)]:border-l [&>*:nth-child(n+3)]:border-t sm:[&>*:nth-child(n+3)]:border-t-0 sm:[&>*+*]:border-l"
+                >
+                    <div className="min-w-0">
+                        <span className="block text-xs text-slate-400">Matching records</span>
+                        <span data-testid="summary-matching-records" className="text-lg font-bold text-white tabular-nums">
+                            {counts.matchingRecords.toLocaleString()}
+                        </span>
+                        <span className="ml-1 text-xs text-slate-400">of <span data-testid="summary-available-records">{counts.availableRecords.toLocaleString()}</span></span>
+                    </div>
+                    <div className="min-w-0">
+                        <span className="block text-xs text-emerald-300">Confirmed Plays</span>
+                        <span data-testid="summary-confirmed-plays" className="text-lg font-bold text-emerald-200 tabular-nums">
+                            {counts.confirmedPlays.toLocaleString()}
+                        </span>
+                        <span data-testid="summary-watch-time" className="ml-1 text-xs text-slate-300">
+                            {formatHistoryDuration(counts.watchTimeSecs)}
+                        </span>
+                    </div>
+                    <div className="min-w-0">
+                        <span className="block text-xs text-teal-300">Estimated Transfer</span>
+                        <span data-testid="summary-estimated-bytes" className="text-lg font-bold text-teal-200 tabular-nums">
+                            {formatHistoryBytes(counts.estimatedBytes, 2)}
+                        </span>
+                    </div>
+                    <div className="min-w-0 text-xs text-slate-300">
+                        <span className="block text-slate-400">Other evidence</span>
+                        <span data-testid="summary-item-summaries" className="font-semibold text-amber-200 tabular-nums">{counts.itemSummaries.toLocaleString()}</span> summaries ·{' '}
+                        <span data-testid="summary-legacy-records" className="font-semibold tabular-nums">{counts.legacyRecords.toLocaleString()}</span> legacy
+                        <span className="block">
+                            <span data-testid="summary-undated-records" className="font-semibold tabular-nums">{counts.undatedRecords.toLocaleString()}</span> undated
+                        </span>
+                    </div>
+                </div>
+            )}
+
             {isConflict409 && (
                 <div
                     role="alert"
                     data-testid="history-snapshot-conflict-banner"
-                    className="rounded-xl border border-amber-500/40 bg-amber-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                    className="border-y border-amber-500/40 bg-amber-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
                 >
                     <div className="flex items-start gap-3">
                         <AlertTriangle size={18} className="text-amber-400 shrink-0 mt-0.5" />
@@ -1560,7 +1082,7 @@ export function StreamingHistoryExplorer({
                         type="button"
                         onClick={handleRestartQuery}
                         data-testid="restart-query-409-btn"
-                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 flex items-center gap-1.5 shrink-0 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 flex items-center gap-1.5 shrink-0 transition-all"
                     >
                         <RefreshCw size={13} />
                         <span>Restart Query from Page 1</span>
@@ -1572,7 +1094,7 @@ export function StreamingHistoryExplorer({
                 <div
                     role="alert"
                     data-testid="history-error-banner"
-                    className="rounded-xl border border-rose-500/35 bg-rose-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                    className="border-y border-rose-500/35 bg-rose-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
                 >
                     <div className="flex items-start gap-3">
                         <AlertCircle size={18} className="text-rose-400 shrink-0 mt-0.5" />
@@ -1591,7 +1113,7 @@ export function StreamingHistoryExplorer({
                         type="button"
                         onClick={handleRestartQuery}
                         data-testid="retry-history-query-btn"
-                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 shrink-0 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 shrink-0 transition-all"
                     >
                         <RefreshCw size={13} />
                         <span>Retry Query</span>
@@ -1603,7 +1125,7 @@ export function StreamingHistoryExplorer({
                 <div
                     role="alert"
                     data-testid="history-export-error-banner"
-                    className="rounded-xl border border-rose-500/35 bg-rose-950/30 p-3.5 flex items-center justify-between gap-3 text-xs text-rose-200"
+                    className="border-y border-rose-500/35 bg-rose-950/30 p-3.5 flex items-center justify-between gap-3 text-xs text-rose-200"
                 >
                     <div className="flex items-center gap-2">
                         <FileSpreadsheet size={15} className="text-rose-400 shrink-0" />
@@ -1612,21 +1134,18 @@ export function StreamingHistoryExplorer({
                     <button
                         type="button"
                         onClick={() => setExportErrorMessage(null)}
-                        className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-rose-100 font-semibold"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-rose-100 font-semibold"
                     >
                         Dismiss
                     </button>
                 </div>
             )}
 
-            {/* ===================================================================== */}
-            {/* 6. SCOPED OVERFLOW TABLE (KEYBOARD ACCESSIBLE)                        */}
-            {/* ===================================================================== */}
             <div
                 tabIndex={0}
                 role="region"
                 aria-label="Streaming history records table"
-                className="overflow-x-auto rounded-xl border border-white/[0.06] bg-slate-950/40 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                className="min-w-0 max-w-full overflow-x-auto border-y border-white/[0.07] focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
             >
                 <table className="w-full text-left border-collapse text-xs">
                     <thead>
@@ -1871,9 +1390,6 @@ export function StreamingHistoryExplorer({
                 </table>
             </div>
 
-            {/* ===================================================================== */}
-            {/* 7. CURSOR PAGINATION FOOTER & SNAPSHOT METADATA                       */}
-            {/* ===================================================================== */}
             <div className="pt-3 border-t border-white/[0.06] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-slate-400">
                 <div className="space-y-0.5">
                     <div data-testid="pagination-status-text">
@@ -1898,7 +1414,7 @@ export function StreamingHistoryExplorer({
                         disabled={!hasPreviousPage || isLoading}
                         data-testid="history-prev-page-btn"
                         aria-label="Previous history page"
-                        className="px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 font-semibold flex items-center gap-1 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 font-semibold flex items-center gap-1 transition-all"
                     >
                         <ChevronLeft size={14} />
                         <span>Previous</span>
@@ -1909,15 +1425,448 @@ export function StreamingHistoryExplorer({
                         disabled={!hasNextPage || isLoading}
                         data-testid="history-next-page-btn"
                         aria-label="Next history page"
-                        className="px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 font-semibold flex items-center gap-1 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 font-semibold flex items-center gap-1 transition-all"
                     >
                         <span>Next</span>
                         <ChevronRight size={14} />
                     </button>
                 </div>
             </div>
-            {scope && !isLoading && !isConflict409 && (
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                        type="button"
+                        onClick={handleResetFilters}
+                        data-testid="reset-history-filters-btn"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 flex items-center gap-1.5 transition-all"
+                    >
+                        <RotateCcw size={13} />
+                        <span>Reset Filters</span>
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={handleRestartQuery}
+                        disabled={isLoading}
+                        aria-label="Refresh history snapshot"
+                        data-testid="refresh-history-snapshot-btn"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] disabled:opacity-50 border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                    >
+                        <RefreshCw size={13} className={isLoading ? 'animate-spin text-indigo-400' : ''} />
+                        <span>Refresh Snapshot</span>
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={() => void handleExportFullQuery()}
+                        disabled={
+                            isExporting ||
+                            isConflict409 ||
+                            isLoading ||
+                            pageData === null ||
+                            customRangeIncomplete ||
+                            (counts !== null && counts.matchingRecords === 0)
+                        }
+                        data-testid="export-full-history-btn"
+                        aria-label="Export full matching query to CSV"
+                        title="Streams the complete filtered cohort from GET /api/v1/auth/streaming/history/export at the active snapshot token (not just the current page)"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-indigo-500/20 flex items-center gap-1.5 transition-all"
+                    >
+                        {isExporting ? (
+                            <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                            <Download size={13} />
+                        )}
+                        <span>
+                            {isExporting
+                                ? 'Exporting CSV...'
+                                : counts
+                                  ? `Export Full Query CSV (${counts.matchingRecords.toLocaleString()})`
+                                  : 'Export Full Query CSV'}
+                        </span>
+                    </button>
+                </div>
+
+            <details className="group min-w-0 border-t border-white/[0.06] pt-2">
+                <summary className="obs-touch-target-standard min-h-[44px] cursor-pointer text-xs font-semibold text-slate-300 flex items-center gap-2">
+                    <Info size={14} className="text-indigo-400 shrink-0" />
+                    Provenance &amp; scope details
+                    <ChevronDown size={14} className="ml-auto shrink-0 transition-transform group-open:rotate-180 motion-reduce:transition-none" />
+                </summary>
+                <div className="space-y-3 pt-2 text-xs text-slate-400">
+                    <p>Only confirmed observed sessions and imported events count as confirmed plays and watch time. Transfer uses bitrate × duration estimates, not measured network traffic. Item summaries and legacy records remain inspectable but do not contribute to confirmed totals.</p>
+                    <p>{isDatedWindow ? 'Undated records are excluded by this dated window. Switch to All Time to inspect them.' : 'All Time includes undated records, ordered after dated records in either sort direction.'} Literal search matches % and _ exactly; IP addresses, device IDs, and session keys are not searchable. This cursor-paginated archive is independent of the 5-second live stream poll.</p>
+            {(!isAdmin || scope?.permissionScope === 'linked_user') && (
+                <div
+                    data-testid="linked-user-scope-notice"
+                    className="px-3.5 py-2.5 border-y border-sky-500/25 bg-sky-950/25 text-xs text-sky-200 flex items-start gap-2.5"
+                >
+                    <Info size={15} className="text-sky-400 shrink-0 mt-0.5" />
+                    <div>
+                        <strong className="font-bold">Linked Provider Account Scope:</strong> Non-admin history contains only media provider accounts explicitly linked to your AetherFlow user in{' '}
+                        <code className="font-mono text-sky-100">streaming_user_links</code> (never guessed from display names). If no provider user is linked, 0 available records are returned. IP addresses, device IDs, and policy-excluded raw records are omitted.
+                    </div>
+                </div>
+            )}
+
+                </div>
+            </details>
+
+            <div className="min-w-0 border-t border-white/[0.06] pt-4 space-y-3" aria-label="Advanced history filters">
+                <button
+                    type="button"
+                    onClick={() => setShowAdvancedFilters((previous) => !previous)}
+                    aria-expanded={showAdvancedFilters}
+                    aria-controls="history-advanced-filters"
+                    data-testid="toggle-advanced-filters-btn"
+                    className="obs-touch-target-standard min-h-[44px] flex max-w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 transition-colors"
+                >
+                    <SlidersHorizontal size={15} className="shrink-0 text-indigo-400" />
+                    <span>Advanced Filters</span>
+                    {advancedFilterCount > 0 && (
+                        <span aria-label={`${advancedFilterCount} active advanced filters`} className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs tabular-nums text-indigo-200">
+                            {advancedFilterCount}
+                        </span>
+                    )}
+                    <ChevronDown size={15} className={`shrink-0 text-slate-400 transition-transform ${showAdvancedFilters ? 'rotate-180' : ''}`} />
+                </button>
+                <div id="history-advanced-filters" hidden={!showAdvancedFilters} className="space-y-3">
+                {showAdvancedFilters && <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                    {/* IANA Timezone */}
+                    <div>
+                        <label
+                            htmlFor="sh-timezone-input"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1"
+                        >
+                            <Globe size={11} className="text-indigo-400" />
+                            <span>IANA Timezone</span>
+                        </label>
+                        <input
+                            id="sh-timezone-input"
+                            type="text"
+                            list="sh-timezone-datalist"
+                            value={queryState.timezone ?? 'UTC'}
+                            onChange={(e) => updateFilter('timezone', e.target.value)}
+                            placeholder="UTC or America/New_York"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                        />
+                        <datalist id="sh-timezone-datalist">
+                            {COMMON_TIMEZONES.map((tz) => (
+                                <option key={tz} value={tz} />
+                            ))}
+                        </datalist>
+                    </div>
+
+                    {/* Provenance */}
+                    <div>
+                        <label
+                            htmlFor="sh-provenance-select"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                        >
+                            Record Provenance
+                        </label>
+                        <select
+                            id="sh-provenance-select"
+                            value={queryState.provenance || 'all'}
+                            onChange={(e) =>
+                                updateFilter(
+                                    'provenance',
+                                    e.target.value as NonNullable<StreamingHistoryQuery['provenance']>
+                                )
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                        >
+                            <option value="all">All Provenances</option>
+                            <option value="observed_session">Observed Session (Confirmed)</option>
+                            <option value="imported_event">Imported Event (Confirmed)</option>
+                            <option value="item_summary">Item Summary (Last-Played)</option>
+                            <option value="legacy_unverified">Legacy Unverified</option>
+                        </select>
+                    </div>
+
+                    {/* Play Method */}
+                    <div>
+                        <label
+                            htmlFor="sh-play-method-select"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                        >
+                            Play Method
+                        </label>
+                        <select
+                            id="sh-play-method-select"
+                            value={queryState.playMethod || ''}
+                            onChange={(e) => updateFilter('playMethod', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                        >
+                            <option value="">All Play Methods</option>
+                            <option value="DirectPlay">Direct Play</option>
+                            <option value="DirectStream">Direct Stream</option>
+                            <option value="Transcode">Transcode</option>
+                            <option value="Unknown">Unknown / Unrecorded</option>
+                        </select>
+                    </div>
+
+                    {/* Media Type */}
+                    <div>
+                        <label
+                            htmlFor="sh-media-type-select"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                        >
+                            Media Type
+                        </label>
+                        <select
+                            id="sh-media-type-select"
+                            value={queryState.mediaType || ''}
+                            onChange={(e) => updateFilter('mediaType', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                        >
+                            <option value="">All Media Types</option>
+                            <option value="Movie">Movie</option>
+                            <option value="Episode">Episode</option>
+                            <option value="Audio">Audio</option>
+                        </select>
+                    </div>
+
+                    {/* Provider */}
+                    <div>
+                        <label
+                            htmlFor="sh-provider-select"
+                            className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                        >
+                            Provider
+                        </label>
+                        <select
+                            id="sh-provider-select"
+                            value={queryState.provider || ''}
+                            onChange={(e) => updateFilter('provider', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                        >
+                            <option value="">All Providers</option>
+                            <option value="jellyfin">Jellyfin</option>
+                            <option value="plex">Plex</option>
+                            <option value="emby">Emby</option>
+                        </select>
+                    </div>
+                </div>
+
+                {/* Search, Sort, Page Size & Admin Include Excluded */}
+                <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3 pt-2 border-t border-white/[0.06]">
+                    <div className="flex flex-wrap items-end gap-3 shrink-0">
+                        {/* Sort Order */}
+                        <div>
+                            <label
+                                htmlFor="sh-sort-select"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1"
+                            >
+                                <ArrowUpDown size={11} className="text-indigo-400" />
+                                <span>Sort Order</span>
+                            </label>
+                            <select
+                                id="sh-sort-select"
+                                value={queryState.sort || 'startedDesc'}
+                                onChange={(e) =>
+                                    updateFilter(
+                                        'sort',
+                                        e.target.value as NonNullable<StreamingHistoryQuery['sort']>
+                                    )
+                                }
+                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            >
+                                <option value="startedDesc">Newest Started First (undated last)</option>
+                                <option value="startedAsc">Oldest Started First (undated last)</option>
+                            </select>
+                        </div>
+
+                        {/* Page Size */}
+                        <div>
+                            <label
+                                htmlFor="sh-page-size-select"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Page Size
+                            </label>
+                            <select
+                                id="sh-page-size-select"
+                                value={queryState.pageSize || 50}
+                                onChange={(e) =>
+                                    updateFilter('pageSize', Number(e.target.value) || 50)
+                                }
+                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            >
+                                <option value={25}>25 / page</option>
+                                <option value={50}>50 / page (default)</option>
+                                <option value={100}>100 / page</option>
+                                <option value={200}>200 / page (max)</option>
+                            </select>
+                        </div>
+
+                        {/* Admin-Only Include Policy-Excluded Records */}
+                        {isAdmin && (
+                            <label
+                                htmlFor="sh-include-excluded-checkbox"
+                                className="obs-touch-target-standard min-h-[44px] inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-purple-500/10 border border-purple-500/30 text-xs font-semibold text-purple-200 cursor-pointer select-none"
+                            >
+                                <input
+                                    id="sh-include-excluded-checkbox"
+                                    type="checkbox"
+                                    checked={Boolean(queryState.includeExcluded)}
+                                    onChange={(e) =>
+                                        updateFilter('includeExcluded', e.target.checked)
+                                    }
+                                    className="rounded border-purple-400/50 bg-slate-950 text-indigo-500 focus:ring-indigo-500"
+                                />
+                                <span>Include Policy-Excluded Raw Records</span>
+                            </label>
+                        )}
+                    </div>
+                </div>
+
+                {/* Expandable Facet Filters (Server, User, Client, Device, Item, Library, Genre) */}
+                    <div
+                        data-testid="advanced-facet-filters-panel"
+                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5 pt-3 border-t border-white/[0.06]"
+                    >
+                        <div>
+                            <label
+                                htmlFor="sh-server-id-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Server ID
+                            </label>
+                            <input
+                                id="sh-server-id-input"
+                                type="text"
+                                value={queryState.serverId || ''}
+                                onChange={(e) => updateFilter('serverId', e.target.value)}
+                                placeholder="e.g. jf-srv-01"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-user-id-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Provider User ID
+                            </label>
+                            <input
+                                id="sh-user-id-input"
+                                type="text"
+                                value={queryState.userId || ''}
+                                onChange={(e) => updateFilter('userId', e.target.value)}
+                                placeholder="e.g. u-1"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-client-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Client Name
+                            </label>
+                            <input
+                                id="sh-client-input"
+                                type="text"
+                                value={queryState.client || ''}
+                                onChange={(e) => updateFilter('client', e.target.value)}
+                                placeholder="e.g. Swiftfin iOS"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-device-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Device Name
+                            </label>
+                            <input
+                                id="sh-device-input"
+                                type="text"
+                                value={queryState.device || ''}
+                                onChange={(e) => updateFilter('device', e.target.value)}
+                                placeholder="e.g. Apple TV"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-item-id-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Item ID
+                            </label>
+                            <input
+                                id="sh-item-id-input"
+                                type="text"
+                                value={queryState.itemId || ''}
+                                onChange={(e) => updateFilter('itemId', e.target.value)}
+                                placeholder="e.g. item-42"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-library-id-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Library ID
+                            </label>
+                            <input
+                                id="sh-library-id-input"
+                                type="text"
+                                value={queryState.libraryId || ''}
+                                onChange={(e) => updateFilter('libraryId', e.target.value)}
+                                placeholder="e.g. lib-movies"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                htmlFor="sh-genre-input"
+                                className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1"
+                            >
+                                Genre
+                            </label>
+                            <input
+                                id="sh-genre-input"
+                                type="text"
+                                value={queryState.genre || ''}
+                                onChange={(e) => updateFilter('genre', e.target.value)}
+                                placeholder="e.g. Sci-Fi"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                            />
+                        </div>
+                    </div>
+                </>}
+                </div>
+            </div>
+
+            <div role="group" aria-label="Archive specialist tools" className={`grid min-w-0 grid-cols-1 border-y border-white/[0.07] divide-y divide-white/[0.07] ${isAdmin ? 'xl:grid-cols-3 xl:divide-y-0 xl:divide-x' : ''}`}>
+                {SPECIALIST_PANELS.filter((panel) => !panel.adminOnly || isAdmin).map((panel) => (
+                    <button
+                        key={panel.id}
+                        id={`history-${panel.id}-toggle`}
+                        type="button"
+                        aria-expanded={specialistPanels.active === panel.id}
+                        aria-controls={`history-${panel.id}-panel`}
+                        onClick={() => setSpecialistPanels((previous) => ({
+                            active: previous.active === panel.id ? null : panel.id,
+                            visited: previous.visited.includes(panel.id) ? previous.visited : [...previous.visited, panel.id],
+                        }))}
+                        className={`obs-touch-target-standard min-h-[44px] min-w-0 flex items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${specialistPanels.active === panel.id ? 'bg-indigo-500/15 text-indigo-200' : 'text-slate-300 hover:bg-white/[0.05] hover:text-white'}`}
+                    >
+                        <span>{panel.label}</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${specialistPanels.active === panel.id ? 'rotate-180' : ''}`} />
+                    </button>
+                ))}
+            </div>
+
+            <div id="history-insights-panel" role="region" aria-labelledby="history-insights-toggle" hidden={specialistPanels.active !== 'insights'}>
+            {specialistPanels.visited.includes('insights') && scope && !isLoading && !isConflict409 && (
                 <StreamingInsights
+                    embedded
                     query={pageData?.query ?? canonicalRequestQuery}
                     snapshot={scope.snapshotToken}
                     onDrilldown={(filters) => {
@@ -1934,8 +1883,15 @@ export function StreamingHistoryExplorer({
                     }}
                 />
             )}
-            {isAdmin && <StreamingPortability onRestoreApplied={handleRestartQuery} />}
-            {isAdmin && <StreamingHistoryAdmin onChanged={handleRestartQuery} />}
+            </div>
+            {isAdmin && <>
+                <div id="history-portability-panel" role="region" aria-labelledby="history-portability-toggle" hidden={specialistPanels.active !== 'portability'}>
+                    {specialistPanels.visited.includes('portability') && <StreamingPortability embedded onRestoreApplied={handleRestartQuery} />}
+                </div>
+                <div id="history-administration-panel" role="region" aria-labelledby="history-administration-toggle" hidden={specialistPanels.active !== 'administration'}>
+                    {specialistPanels.visited.includes('administration') && <StreamingHistoryAdmin embedded onChanged={handleRestartQuery} />}
+                </div>
+            </>}
         </section>
     );
 }

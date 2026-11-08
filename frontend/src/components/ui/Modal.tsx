@@ -3,8 +3,10 @@
 import { cn } from "@/lib/utils";
 import React, { useEffect, useId, useRef, type RefObject } from "react";
 import { X } from "lucide-react";
+import { createPortal } from "react-dom";
 
 const modalStack: HTMLDivElement[] = [];
+let originalBodyOverflow = '';
 
 export interface ModalProps extends React.HTMLAttributes<HTMLDivElement> {
   isOpen: boolean;
@@ -25,6 +27,10 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
     const panel = panelRef.current;
     if (!panel) return;
     const invoker = returnFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    if (modalStack.length === 0) {
+      originalBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    }
     modalStack.push(panel);
     const isTopModal = () => modalStack[modalStack.length - 1] === panel;
     const getFocusable = () => Array.from(panel.querySelectorAll<HTMLElement>(
@@ -63,20 +69,22 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('focusin', containFocus);
+      const wasTopModal = isTopModal();
       const stackIndex = modalStack.lastIndexOf(panel);
       if (stackIndex >= 0) modalStack.splice(stackIndex, 1);
+      if (modalStack.length === 0) document.body.style.overflow = originalBodyOverflow;
       const restoreTarget = invoker?.isConnected ? invoker : modalStack[modalStack.length - 1];
-      restoreTarget?.focus();
+      if (wasTopModal) restoreTarget?.focus();
     };
   }, [isOpen, initialFocusRef, returnFocusRef]);
 
-  if (!isOpen) return null;
+  if (!isOpen || typeof document === 'undefined') return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
       {/* Obsidian Backdrop */}
       <div 
-        className="fixed inset-0 bg-black/80 backdrop-blur-md transition-opacity" 
+        className="fixed inset-0 bg-slate-950/60 backdrop-blur-md transition-opacity"
         onClick={onClose}
       />
       
@@ -85,7 +93,7 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
         {...props}
         ref={panelRef}
         className={cn(
-          "relative w-full max-w-lg glass-panel rounded-2xl p-6 shadow-[0_24px_60px_rgba(0,0,0,0.9)] border border-indigo-500/30",
+          "relative w-full max-w-lg obs-telemetry-surface glass-panel rounded-2xl p-6 shadow-[0_24px_60px_rgba(0,0,0,0.6)] border border-indigo-500/30",
           "max-h-[calc(100dvh-2rem)] overflow-y-auto no-scrollbar",
           className
         )}
@@ -115,6 +123,7 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

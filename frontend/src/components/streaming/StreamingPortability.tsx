@@ -117,6 +117,7 @@ export interface StreamingPortabilityRestoreResponse {
 }
 
 export interface StreamingPortabilityProps {
+    embedded?: boolean;
     initialMode?: StreamingRestoreMode;
     onRestoreApplied?: (response: StreamingPortabilityRestoreResponse) => void;
 }
@@ -513,7 +514,7 @@ function CountsBreakdownCard({
     return (
         <div
             data-testid={`${testIdPrefix}-card`}
-            className={`rounded-xl border p-3.5 space-y-2 ${accentClass}`}
+            className={`border-y py-3.5 space-y-2 ${accentClass}`}
         >
             <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
@@ -526,8 +527,8 @@ function CountsBreakdownCard({
                     {total.toLocaleString()} total
                 </span>
             </div>
-            <dl className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-                <div className="rounded-lg bg-black/25 px-2.5 py-1.5 border border-white/[0.05]">
+            <dl className="grid grid-cols-2 sm:grid-cols-5 text-xs [&>*]:border-white/[0.07] [&>*:nth-child(even)]:border-l [&>*:nth-child(n+3)]:border-t sm:[&>*:nth-child(n+3)]:border-t-0 sm:[&>*+*]:border-l">
+                <div className="min-w-0 px-2.5 py-1.5">
                     <dt className="text-slate-400">History</dt>
                     <dd
                         data-testid={`${testIdPrefix}-history`}
@@ -536,7 +537,7 @@ function CountsBreakdownCard({
                         {counts.history.toLocaleString()}
                     </dd>
                 </div>
-                <div className="rounded-lg bg-black/25 px-2.5 py-1.5 border border-white/[0.05]">
+                <div className="min-w-0 px-2.5 py-1.5">
                     <dt className="text-slate-400">Labels</dt>
                     <dd
                         data-testid={`${testIdPrefix}-labels`}
@@ -545,7 +546,7 @@ function CountsBreakdownCard({
                         {counts.labels.toLocaleString()}
                     </dd>
                 </div>
-                <div className="rounded-lg bg-black/25 px-2.5 py-1.5 border border-white/[0.05]">
+                <div className="min-w-0 px-2.5 py-1.5">
                     <dt className="text-slate-400">Session Samples</dt>
                     <dd
                         data-testid={`${testIdPrefix}-session-samples`}
@@ -554,7 +555,7 @@ function CountsBreakdownCard({
                         {counts.sessionSamples.toLocaleString()}
                     </dd>
                 </div>
-                <div className="rounded-lg bg-black/25 px-2.5 py-1.5 border border-white/[0.05]">
+                <div className="min-w-0 px-2.5 py-1.5">
                     <dt className="text-slate-400">Bandwidth</dt>
                     <dd
                         data-testid={`${testIdPrefix}-bandwidth-samples`}
@@ -563,7 +564,7 @@ function CountsBreakdownCard({
                         {counts.bandwidthSamples.toLocaleString()}
                     </dd>
                 </div>
-                <div className="rounded-lg bg-black/25 px-2.5 py-1.5 border border-white/[0.05]">
+                <div className="min-w-0 px-2.5 py-1.5">
                     <dt className="text-slate-400">Policies</dt>
                     <dd
                         data-testid={`${testIdPrefix}-tracking-policies`}
@@ -578,6 +579,7 @@ function CountsBreakdownCard({
 }
 
 export default function StreamingPortability({
+    embedded = false,
     initialMode = 'merge',
     onRestoreApplied,
 }: StreamingPortabilityProps = {}) {
@@ -1192,7 +1194,7 @@ export default function StreamingPortability({
             <section
                 aria-label="Streaming History Portability"
                 data-testid="streaming-portability-loading"
-                className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 w-full min-w-0 max-w-full"
+                className={`w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}
             >
                 <div className="flex items-center gap-2.5 text-xs text-slate-300">
                     <Loader2 size={15} className="animate-spin text-indigo-400" />
@@ -1207,7 +1209,7 @@ export default function StreamingPortability({
             <section
                 aria-label="Streaming History Portability"
                 data-testid="streaming-portability-admin-boundary"
-                className="rounded-2xl border border-amber-500/25 bg-amber-950/20 backdrop-blur-xl p-5 w-full min-w-0 max-w-full"
+                className={`w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}
             >
                 <div className="flex items-start gap-3">
                     <Lock size={18} className="text-amber-400 shrink-0 mt-0.5" />
@@ -1239,7 +1241,7 @@ export default function StreamingPortability({
         <section
             aria-label="Streaming History Portability"
             data-testid="streaming-portability"
-            className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 space-y-5 w-full min-w-0 max-w-full"
+            className={`space-y-5 w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}
         >
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
                 <div className="space-y-1 min-w-0">
@@ -1273,7 +1275,7 @@ export default function StreamingPortability({
                         onClick={() => void handleExportArchive()}
                         disabled={isExporting || isPreviewing || isRestoring}
                         data-testid="portability-export-btn"
-                        className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-indigo-500/20 flex items-center gap-1.5 transition-all"
+                        className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-indigo-500/20 flex items-center gap-1.5 transition-all"
                     >
                         {isExporting ? (
                             <Loader2 size={14} className="animate-spin" />
@@ -1291,7 +1293,7 @@ export default function StreamingPortability({
                 <div
                     role="alert"
                     data-testid="portability-export-error"
-                    className="px-3.5 py-2.5 rounded-xl border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
+                    className="px-3.5 py-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
                 >
                     <AlertCircle size={15} className="text-rose-400 shrink-0 mt-0.5" />
                     <div className="min-w-0">
@@ -1303,7 +1305,7 @@ export default function StreamingPortability({
             {lastExportedArchiveSha256 && (
                 <div
                     data-testid="portability-export-success"
-                    className="px-3.5 py-2.5 rounded-xl border border-emerald-500/25 bg-emerald-950/20 text-xs text-emerald-200 flex items-start gap-2.5"
+                    className="px-3.5 py-2.5 border-y border-emerald-500/25 bg-emerald-950/20 text-xs text-emerald-200 flex items-start gap-2.5"
                 >
                     <CheckCircle2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
                     <div className="min-w-0 break-all">
@@ -1319,7 +1321,7 @@ export default function StreamingPortability({
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-3 min-w-0">
+                <div className="border-t border-white/[0.06] pt-4 space-y-3 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                         <label
                             htmlFor="streaming-portability-file-input"
@@ -1412,7 +1414,7 @@ export default function StreamingPortability({
                     )}
                 </div>
 
-                <div className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-3 min-w-0">
+                <div className="border-t border-white/[0.06] pt-4 space-y-3 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
                             2. Select Restore Mode &amp; Generate Dry-Run Preview
@@ -1431,7 +1433,7 @@ export default function StreamingPortability({
                             data-testid="portability-mode-merge-btn"
                             onClick={() => handleModeChange('merge')}
                             disabled={isPreviewing || isRestoring}
-                            className={`p-3 rounded-xl border text-left transition-all space-y-1 ${
+                            className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard p-3 rounded-xl border text-left transition-all space-y-1 ${
                                 mode === 'merge'
                                     ? 'border-indigo-500/60 bg-indigo-500/15 text-slate-100'
                                     : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]'
@@ -1454,7 +1456,7 @@ export default function StreamingPortability({
                             data-testid="portability-mode-replace-btn"
                             onClick={() => handleModeChange('replace')}
                             disabled={isPreviewing || isRestoring}
-                            className={`p-3 rounded-xl border text-left transition-all space-y-1 ${
+                            className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard p-3 rounded-xl border text-left transition-all space-y-1 ${
                                 mode === 'replace'
                                     ? 'border-amber-500/60 bg-amber-500/15 text-slate-100'
                                     : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]'
@@ -1475,7 +1477,7 @@ export default function StreamingPortability({
                         <div
                             role="note"
                             data-testid="portability-replace-warning"
-                            className="px-3.5 py-2.5 rounded-xl border border-amber-500/40 bg-amber-950/30 text-xs text-amber-100 flex items-start gap-2.5"
+                            className="px-3.5 py-2.5 border-y border-amber-500/40 bg-amber-950/30 text-xs text-amber-100 flex items-start gap-2.5"
                         >
                             <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                             <div className="space-y-1 min-w-0">
@@ -1503,7 +1505,7 @@ export default function StreamingPortability({
                             onClick={() => void handlePreviewRestore()}
                             disabled={!canPreview}
                             data-testid="portability-preview-btn"
-                            className="px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-sky-500/20 flex items-center gap-1.5 transition-all"
+                            className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-md shadow-sky-500/20 flex items-center gap-1.5 transition-all"
                         >
                             {isPreviewing ? (
                                 <Loader2 size={14} className="animate-spin" />
@@ -1524,7 +1526,7 @@ export default function StreamingPortability({
                 <div
                     role="alert"
                     data-testid="portability-stale-conflict-banner"
-                    className="px-4 py-3 rounded-xl border border-amber-500/40 bg-amber-950/35 text-xs text-amber-100 flex items-start gap-3"
+                    className="px-4 py-3 border-y border-amber-500/40 bg-amber-950/35 text-xs text-amber-100 flex items-start gap-3"
                 >
                     <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                     <div className="space-y-1 min-w-0">
@@ -1544,7 +1546,7 @@ export default function StreamingPortability({
                 <div
                     role="alert"
                     data-testid="portability-preview-error"
-                    className="px-3.5 py-2.5 rounded-xl border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
+                    className="px-3.5 py-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
                 >
                     <AlertCircle size={15} className="text-rose-400 shrink-0 mt-0.5" />
                     <div className="min-w-0">
@@ -1557,7 +1559,7 @@ export default function StreamingPortability({
                 <div
                     role="alert"
                     data-testid="portability-restore-error"
-                    className="px-3.5 py-2.5 rounded-xl border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
+                    className="px-3.5 py-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-start gap-2.5"
                 >
                     <AlertCircle size={15} className="text-rose-400 shrink-0 mt-0.5" />
                     <div className="min-w-0">
@@ -1569,7 +1571,7 @@ export default function StreamingPortability({
             {previewData && isPreviewBoundToCurrentSelection && (
                 <div
                     data-testid="portability-preview-panel"
-                    className="rounded-xl border border-sky-500/30 bg-slate-950/60 p-4 space-y-4 min-w-0"
+                    className="border-y border-sky-500/30 bg-transparent p-4 space-y-4 min-w-0"
                 >
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-white/[0.06]">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1598,8 +1600,8 @@ export default function StreamingPortability({
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                        <div className="rounded-lg border border-white/[0.06] bg-black/30 p-3 space-y-1 min-w-0">
+                    <div className="grid grid-cols-1 md:grid-cols-2 border-y border-white/[0.07] divide-y md:divide-y-0 md:divide-x divide-white/[0.07] text-xs">
+                        <div className="p-3 space-y-1 min-w-0">
                             <span className="text-slate-400 font-semibold block">
                                 Archive SHA-256 Digest
                             </span>
@@ -1610,7 +1612,7 @@ export default function StreamingPortability({
                                 {previewData.archiveSha256}
                             </code>
                         </div>
-                        <div className="rounded-lg border border-white/[0.06] bg-black/30 p-3 space-y-1 min-w-0">
+                        <div className="p-3 space-y-1 min-w-0">
                             <span className="text-slate-400 font-semibold block">
                                 Preview Plan Fingerprint SHA-256
                             </span>
@@ -1626,7 +1628,7 @@ export default function StreamingPortability({
                     {previewData.replacementNotice && (
                         <div
                             data-testid="preview-replacement-notice"
-                            className="px-3.5 py-2.5 rounded-xl border border-amber-500/35 bg-amber-950/30 text-xs text-amber-100 flex items-start gap-2.5"
+                            className="px-3.5 py-2.5 border-y border-amber-500/35 bg-amber-950/30 text-xs text-amber-100 flex items-start gap-2.5"
                         >
                             <AlertTriangle size={15} className="text-amber-400 shrink-0 mt-0.5" />
                             <span className="min-w-0">{previewData.replacementNotice}</span>
@@ -1638,13 +1640,13 @@ export default function StreamingPortability({
                             title="Archive Source Counts"
                             counts={previewData.archiveCounts}
                             testIdPrefix="preview-archive-counts"
-                            accentClass="border-white/[0.08] bg-black/20"
+                            accentClass="border-white/[0.08] bg-white/[0.02]"
                         />
                         <CountsBreakdownCard
                             title="Destination Target Counts"
                             counts={previewData.targetCounts}
                             testIdPrefix="preview-target-counts"
-                            accentClass="border-white/[0.08] bg-black/20"
+                            accentClass="border-white/[0.08] bg-white/[0.02]"
                         />
                     </div>
 
@@ -1693,7 +1695,7 @@ export default function StreamingPortability({
                                 No row identity or policy conflicts detected in this preview.
                             </p>
                         ) : (
-                            <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-white/[0.08]">
+                            <div className="w-full min-w-0 max-w-full overflow-x-auto border-y border-white/[0.07]">
                                 <table
                                     data-testid="preview-conflicts-table"
                                     className="w-full text-left border-collapse text-xs"
@@ -1749,7 +1751,7 @@ export default function StreamingPortability({
                                 checked={isApproved}
                                 onChange={(e) => setIsApproved(e.target.checked)}
                                 disabled={isRestoring || isPreviewing}
-                                className="mt-0.5 rounded border-white/20 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                                className="mt-0.5 rounded border-white/20 bg-white/[0.04] text-indigo-600 focus:ring-indigo-500"
                             />
                             <span>
                                 I have reviewed the dry-run preview hashes, counts, and conflicts,
@@ -1764,7 +1766,7 @@ export default function StreamingPortability({
                             onClick={() => void handleApplyRestore()}
                             disabled={!canApplyRestore}
                             data-testid="portability-apply-restore-btn"
-                            className={`px-4 py-2 rounded-xl text-xs font-bold text-white shadow-md flex items-center gap-1.5 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                            className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-4 py-2 rounded-xl text-xs font-bold text-white shadow-md flex items-center gap-1.5 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
                                 previewData.mode === 'replace'
                                     ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-500/20'
                                     : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20'
@@ -1790,7 +1792,7 @@ export default function StreamingPortability({
             {restoreResult && (
                 <div
                     data-testid="portability-restore-result"
-                    className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3"
+                    className="border-y border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3"
                 >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2 text-sm font-bold text-emerald-200">
@@ -1807,8 +1809,8 @@ export default function StreamingPortability({
                         </span>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                        <div className="rounded-lg bg-black/30 p-2.5 border border-white/[0.06] break-all">
+                    <div className="grid grid-cols-1 md:grid-cols-2 border-y border-white/[0.07] divide-y md:divide-y-0 md:divide-x divide-white/[0.07] text-xs">
+                        <div className="min-w-0 p-2.5 break-all">
                             <span className="text-slate-400 block">Restored Archive SHA-256</span>
                             <code
                                 data-testid="restore-result-archive-sha256"
@@ -1817,7 +1819,7 @@ export default function StreamingPortability({
                                 {restoreResult.archiveSha256}
                             </code>
                         </div>
-                        <div className="rounded-lg bg-black/30 p-2.5 border border-white/[0.06] break-all">
+                        <div className="min-w-0 p-2.5 break-all">
                             <span className="text-slate-400 block">Applied Preview SHA-256</span>
                             <code
                                 data-testid="restore-result-preview-sha256"
@@ -1832,7 +1834,7 @@ export default function StreamingPortability({
                         title="Resulting Database Counts"
                         counts={restoreResult.resultingCounts}
                         testIdPrefix="restore-resulting-counts"
-                        accentClass="border-emerald-500/25 bg-black/25"
+                        accentClass="border-emerald-500/25 bg-white/[0.02]"
                     />
                 </div>
             )}

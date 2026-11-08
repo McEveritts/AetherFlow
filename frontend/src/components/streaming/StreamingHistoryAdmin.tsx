@@ -69,7 +69,7 @@ export interface ReconciliationApplyResponse {
     auditId: number; previewHash: string; appliedRows: number; backupPath: string | null;
     historyRevision: number; countsBefore: StreamingHistoryCounts; countsAfter: StreamingHistoryCounts; createdAt: string;
 }
-export interface StreamingHistoryAdminProps { onChanged?: () => void; }
+export interface StreamingHistoryAdminProps { onChanged?: () => void; embedded?: boolean; }
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> { return typeof v === 'object' && v !== null && !Array.isArray(v); }
 function isSafeInt(v: unknown): v is number { return typeof v === 'number' && Number.isSafeInteger(v); }
@@ -224,7 +224,7 @@ export function parseCandidateIdsInput(raw: string): { ok: true; ids: number[] }
     return { ok: true, ids };
 }
 
-export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdminProps = {}) {
+export default function StreamingHistoryAdmin({ onChanged, embedded = false }: StreamingHistoryAdminProps = {}) {
     const { user, isAuthenticated, isLoading: authLoading } = useAuth();
     const { addToast } = useToast();
     const isAdmin = Boolean(isAuthenticated && user?.role === 'admin');
@@ -647,7 +647,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
 
     if (authLoading) {
         return (
-            <section aria-label="Streaming History Administration" data-testid="streaming-history-admin-loading" className="rounded-2xl border border-white/[0.06] bg-slate-900/40 p-5 w-full min-w-0 max-w-full">
+            <section aria-label="Streaming History Administration" data-testid="streaming-history-admin-loading" className={`w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}>
                 <div className="flex items-center gap-2 text-xs text-slate-300"><Loader2 size={14} className="animate-spin text-indigo-400" /><span>Verifying administrative permissions...</span></div>
             </section>
         );
@@ -655,7 +655,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
 
     if (!isAdmin) {
         return (
-            <section aria-label="Streaming History Administration" data-testid="streaming-history-admin-boundary" className="rounded-2xl border border-amber-500/25 bg-amber-950/20 p-5 w-full min-w-0 max-w-full">
+            <section aria-label="Streaming History Administration" data-testid="streaming-history-admin-boundary" className={`w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}>
                 <div className="flex items-start gap-3">
                     <Lock size={18} className="text-amber-400 shrink-0 mt-0.5" />
                     <div className="space-y-1 min-w-0">
@@ -668,7 +668,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
     }
 
     return (
-        <section aria-label="Streaming History Administration" data-testid="streaming-history-admin" className="rounded-2xl border border-white/[0.06] bg-slate-900/40 p-5 space-y-4 w-full min-w-0 max-w-full">
+        <section aria-label="Streaming History Administration" data-testid="streaming-history-admin" className={`space-y-4 w-full min-w-0 max-w-full ${embedded ? 'border-t border-white/[0.07] pt-5' : 'border-b border-white/[0.07] py-5'}`}>
             <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/[0.06]">
                 <div className="space-y-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -684,18 +684,18 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                         { id: 'links', label: 'User Links', icon: Users },
                         { id: 'reconciliation', label: 'Reconciliation', icon: GitCompare },
                     ] as const).map(({ id, label, icon: Icon }) => (
-                        <button key={id} type="button" role="tab" aria-selected={activeSection === id} data-testid={`admin-tab-${id}`} onClick={() => handleSectionChange(id)} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${activeSection === id ? 'bg-indigo-600 text-white' : 'bg-black/30 text-slate-300 hover:bg-white/[0.08]'}`}>
+                        <button key={id} type="button" role="tab" aria-selected={activeSection === id} data-testid={`admin-tab-${id}`} onClick={() => handleSectionChange(id)} className={`min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${activeSection === id ? 'bg-indigo-600 text-white' : 'bg-white/[0.02] text-slate-300 hover:bg-white/[0.08]'}`}>
                             <Icon size={13} /><span>{label}</span>
                         </button>
                     ))}
-                    <button type="button" onClick={() => void loadAdminState()} disabled={isLoadingInitial} data-testid="admin-refresh-btn" className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 flex items-center gap-1">
+                    <button type="button" onClick={() => void loadAdminState()} disabled={isLoadingInitial} data-testid="admin-refresh-btn" className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 flex items-center gap-1">
                         <RefreshCw size={13} className={isLoadingInitial ? 'animate-spin' : ''} /><span>Refresh</span>
                     </button>
                 </div>
             </div>
 
             {loadError && (
-                <div role="alert" data-testid="admin-load-error" className="p-3 rounded-xl border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-center gap-2">
+                <div role="alert" data-testid="admin-load-error" className="p-3 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200 flex items-center gap-2">
                     <AlertCircle size={14} className="text-rose-400 shrink-0" /><span className="min-w-0 break-words">{loadError}</span>
                 </div>
             )}
@@ -703,11 +703,11 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             {activeSection === 'imports' && (
                 <div data-testid="admin-section-imports" className="space-y-4 min-w-0 max-w-full">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                        <div className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-2 min-w-0">
+                        <div className="border-t border-white/[0.06] pt-4 space-y-2 min-w-0">
                             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">Upstream Capabilities &amp; Checkpoints (Max {statusData?.maxBatchEvents ?? MAX_IMPORT_BATCH_EVENTS} events/batch)</h4>
-                            <div className="overflow-x-auto min-w-0 max-w-full space-y-2">
+                            <div className="overflow-x-auto min-w-0 max-w-full divide-y divide-white/[0.07] border-y border-white/[0.07]">
                                 {statusData?.capabilities.map((cap) => (
-                                    <div key={`${cap.provider}:${cap.serverId}`} data-testid="import-capability-row" className="p-2.5 rounded-lg bg-slate-900/60 border border-white/[0.05] text-xs space-y-1">
+                                    <div key={`${cap.provider}:${cap.serverId}`} data-testid="import-capability-row" className="p-2.5 text-xs space-y-1">
                                         <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
                                             <span className="font-bold text-indigo-300">{cap.provider} / {cap.serverId}</span>
                                             <span className="text-amber-300">{cap.upstreamEndpointClassification}</span>
@@ -734,19 +734,19 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                             </div>
                         </div>
 
-                        <div className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-3 min-w-0">
+                        <div className="border-t border-white/[0.06] pt-4 space-y-3 min-w-0">
                             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">Bounded Event JSON Batch Import (&le;1 MiB, &le;500 events)</h4>
                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                                <label className="space-y-1"><span className="text-slate-400">Provider</span><select aria-label="Import Provider" data-testid="import-provider-select" value={importProvider} onChange={(e) => setImportProvider(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100"><option value="jellyfin">jellyfin</option><option value="emby">emby</option></select></label>
-                                <label className="space-y-1"><span className="text-slate-400">Server ID</span><input type="text" aria-label="Import Server ID" data-testid="import-server-id-input" value={importServerId} onChange={(e) => setImportServerId(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
-                                <label className="space-y-1"><span className="text-slate-400">Source</span><input type="text" aria-label="Import Source" data-testid="import-source-input" value={importSource} onChange={(e) => setImportSource(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
-                                <label className="space-y-1"><span className="text-slate-400">Opaque Checkpoint</span><input type="text" aria-label="Import Checkpoint" data-testid="import-checkpoint-input" value={importCheckpoint} onChange={(e) => setImportCheckpoint(e.target.value)} placeholder="Upstream cursor / batch token" className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                                <label className="space-y-1"><span className="text-slate-400">Provider</span><select aria-label="Import Provider" data-testid="import-provider-select" value={importProvider} onChange={(e) => setImportProvider(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100"><option value="jellyfin">jellyfin</option><option value="emby">emby</option></select></label>
+                                <label className="space-y-1"><span className="text-slate-400">Server ID</span><input type="text" aria-label="Import Server ID" data-testid="import-server-id-input" value={importServerId} onChange={(e) => setImportServerId(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                                <label className="space-y-1"><span className="text-slate-400">Source</span><input type="text" aria-label="Import Source" data-testid="import-source-input" value={importSource} onChange={(e) => setImportSource(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                                <label className="space-y-1"><span className="text-slate-400">Opaque Checkpoint</span><input type="text" aria-label="Import Checkpoint" data-testid="import-checkpoint-input" value={importCheckpoint} onChange={(e) => setImportCheckpoint(e.target.value)} placeholder="Upstream cursor / batch token" className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
                             </div>
                             <input type="file" aria-label="Upload Event Batch JSON" data-testid="import-file-input" accept=".json,application/json" onChange={(e) => void handleImportFileChange(e)} className="block w-full text-xs text-slate-300" />
-                            <textarea aria-label="Event Batch JSON Payload" data-testid="import-json-textarea" rows={5} value={importJsonText} onChange={(e) => { setImportJsonText(e.target.value); setImportError(null); }} placeholder='[{"sourceEventId":"evt-1","userId":"u-1","itemId":"i-1","itemName":"Dune","startedAt":"2026-03-01T20:00:00Z"}]' className="w-full rounded-lg bg-slate-950 border border-white/10 p-2.5 text-xs font-mono text-slate-100" />
-                            {importError && <div role="alert" data-testid="import-error" className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{importError}</div>}
+                            <textarea aria-label="Event Batch JSON Payload" data-testid="import-json-textarea" rows={5} value={importJsonText} onChange={(e) => { setImportJsonText(e.target.value); setImportError(null); }} placeholder='[{"sourceEventId":"evt-1","userId":"u-1","itemId":"i-1","itemName":"Dune","startedAt":"2026-03-01T20:00:00Z"}]' className="w-full rounded-lg bg-white/[0.04] border border-white/10 p-2.5 text-xs font-mono text-slate-100" />
+                            {importError && <div role="alert" data-testid="import-error" className="p-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{importError}</div>}
                             <div className="flex justify-end">
-                                <button type="button" data-testid="import-submit-btn" disabled={isImporting} onClick={() => void handleSubmitImportBatch()} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white flex items-center gap-1.5">
+                                <button type="button" data-testid="import-submit-btn" disabled={isImporting} onClick={() => void handleSubmitImportBatch()} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white flex items-center gap-1.5">
                                     {isImporting ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}<span>Submit Event Batch</span>
                                 </button>
                             </div>
@@ -754,7 +754,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                     </div>
 
                     {importResult && (
-                        <div data-testid="import-outcomes-panel" className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-4 space-y-2 text-xs min-w-0 max-w-full">
+                        <div data-testid="import-outcomes-panel" className="border-y border-emerald-500/25 bg-emerald-950/15 p-4 space-y-2 text-xs min-w-0 max-w-full">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                                 <strong className="text-emerald-200 flex items-center gap-1.5"><CheckCircle2 size={14} /><span>Batch Imported: Checkpoint {importResult.checkpoint} (Revision {importResult.revision})</span></strong>
                                 <div className="flex flex-wrap gap-3 font-mono text-slate-200">
@@ -788,34 +788,34 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             )}
 
             {activeSection === 'policies' && (
-                <div data-testid="admin-section-policies" className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-3 text-xs min-w-0 max-w-full">
+                <div data-testid="admin-section-policies" className="border-t border-white/[0.06] pt-4 space-y-3 text-xs min-w-0 max-w-full">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Minimum Watch Seconds (0..86400)</span><input type="number" aria-label="Minimum Watch Seconds" data-testid="policy-min-watch-input" value={minWatchInput} onChange={(e) => setMinWatchInput(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Reconnect Window Seconds (0..300)</span><input type="number" aria-label="Reconnect Window Seconds" data-testid="policy-reconnect-input" value={reconnectInput} onChange={(e) => setReconnectInput(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Minimum Watch Seconds (0..86400)</span><input type="number" aria-label="Minimum Watch Seconds" data-testid="policy-min-watch-input" value={minWatchInput} onChange={(e) => setMinWatchInput(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Reconnect Window Seconds (0..300)</span><input type="number" aria-label="Reconnect Window Seconds" data-testid="policy-reconnect-input" value={reconnectInput} onChange={(e) => setReconnectInput(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
                     </div>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Excluded Users JSON Array (provider, serverId, id, name)</span><textarea aria-label="Excluded Users JSON" data-testid="policy-excluded-users-textarea" rows={4} value={excludedUsersText} onChange={(e) => setExcludedUsersText(e.target.value)} className="w-full rounded-lg bg-slate-950 border border-white/10 p-2.5 text-xs font-mono text-slate-100" /></label>
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Excluded Libraries JSON Array (provider, serverId, id, name)</span><textarea aria-label="Excluded Libraries JSON" data-testid="policy-excluded-libraries-textarea" rows={4} value={excludedLibrariesText} onChange={(e) => setExcludedLibrariesText(e.target.value)} className="w-full rounded-lg bg-slate-950 border border-white/10 p-2.5 text-xs font-mono text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Excluded Users JSON Array (provider, serverId, id, name)</span><textarea aria-label="Excluded Users JSON" data-testid="policy-excluded-users-textarea" rows={4} value={excludedUsersText} onChange={(e) => setExcludedUsersText(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 p-2.5 text-xs font-mono text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Excluded Libraries JSON Array (provider, serverId, id, name)</span><textarea aria-label="Excluded Libraries JSON" data-testid="policy-excluded-libraries-textarea" rows={4} value={excludedLibrariesText} onChange={(e) => setExcludedLibrariesText(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 p-2.5 text-xs font-mono text-slate-100" /></label>
                     </div>
-                    {policyError && <div role="alert" data-testid="policy-error" className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{policyError}</div>}
+                    {policyError && <div role="alert" data-testid="policy-error" className="p-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{policyError}</div>}
                     <div className="flex items-center justify-between gap-2">
                         <span className="text-xs text-slate-400">Policy Revision: <strong className="font-mono text-slate-200">{policyData?.policyRevision ?? 1}</strong></span>
-                        <button type="button" data-testid="policy-save-btn" disabled={isSavingPolicy} onClick={() => void handleSavePolicy()} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white">Save Tracking Policy</button>
+                        <button type="button" data-testid="policy-save-btn" disabled={isSavingPolicy} onClick={() => void handleSavePolicy()} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white">Save Tracking Policy</button>
                     </div>
                 </div>
             )}
 
             {activeSection === 'links' && (
-                <div data-testid="admin-section-links" className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-3 text-xs min-w-0 max-w-full">
+                <div data-testid="admin-section-links" className="border-t border-white/[0.06] pt-4 space-y-3 text-xs min-w-0 max-w-full">
                     <p className="text-xs text-slate-400">{linksData?.identitySemantics ?? 'Explicit (afUserId, provider, serverId, providerUserId) mappings only; display names are never used for implicit matching.'}</p>
                     <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 items-end">
-                        <label className="space-y-1"><span className="text-slate-400">AF User ID</span><input type="number" aria-label="AF User ID" data-testid="link-af-user-id-input" value={linkAfUserId} onChange={(e) => setLinkAfUserId(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
-                        <label className="space-y-1"><span className="text-slate-400">Provider</span><select aria-label="Link Provider" data-testid="link-provider-select" value={linkProvider} onChange={(e) => setLinkProvider(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100"><option value="jellyfin">jellyfin</option><option value="emby">emby</option></select></label>
-                        <label className="space-y-1"><span className="text-slate-400">Server ID</span><input type="text" aria-label="Link Server ID" data-testid="link-server-id-input" value={linkServerId} onChange={(e) => setLinkServerId(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
-                        <label className="space-y-1"><span className="text-slate-400">Provider User ID</span><input type="text" aria-label="Provider User ID" data-testid="link-provider-user-id-input" value={linkProviderUserId} onChange={(e) => setLinkProviderUserId(e.target.value)} className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
-                        <button type="button" data-testid="link-upsert-btn" disabled={isMutatingLink} onClick={() => void handleUpsertUserLink()} className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white flex items-center justify-center gap-1"><Plus size={14} /><span>Save Link</span></button>
+                        <label className="space-y-1"><span className="text-slate-400">AF User ID</span><input type="number" aria-label="AF User ID" data-testid="link-af-user-id-input" value={linkAfUserId} onChange={(e) => setLinkAfUserId(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-400">Provider</span><select aria-label="Link Provider" data-testid="link-provider-select" value={linkProvider} onChange={(e) => setLinkProvider(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100"><option value="jellyfin">jellyfin</option><option value="emby">emby</option></select></label>
+                        <label className="space-y-1"><span className="text-slate-400">Server ID</span><input type="text" aria-label="Link Server ID" data-testid="link-server-id-input" value={linkServerId} onChange={(e) => setLinkServerId(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-400">Provider User ID</span><input type="text" aria-label="Provider User ID" data-testid="link-provider-user-id-input" value={linkProviderUserId} onChange={(e) => setLinkProviderUserId(e.target.value)} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-2.5 py-1.5 text-xs text-slate-100" /></label>
+                        <button type="button" data-testid="link-upsert-btn" disabled={isMutatingLink} onClick={() => void handleUpsertUserLink()} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white flex items-center justify-center gap-1"><Plus size={14} /><span>Save Link</span></button>
                     </div>
-                    {linkError && <div role="alert" data-testid="link-error" className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{linkError}</div>}
+                    {linkError && <div role="alert" data-testid="link-error" className="p-2.5 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{linkError}</div>}
                     <div className="overflow-x-auto min-w-0 max-w-full">
                         <table className="w-full text-left text-xs font-mono border-collapse" data-testid="user-links-table">
                             <thead><tr className="border-b border-white/10 text-slate-400"><th className="py-1.5 pr-2">AF User</th><th className="py-1.5 pr-2">Provider</th><th className="py-1.5 pr-2">Server ID</th><th className="py-1.5 pr-2">Provider User ID</th><th className="py-1.5 text-right">Action</th></tr></thead>
@@ -829,7 +829,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                                             <td className="py-1.5 pr-2 text-slate-300">{lnk.serverId}</td>
                                             <td className="py-1.5 pr-2 text-emerald-300">{lnk.providerUserId}</td>
                                             <td className="py-1.5 text-right">
-                                                <button type="button" data-testid={`delete-link-${key}`} disabled={isMutatingLink} onClick={() => void handleDeleteUserLink(lnk)} className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 inline-flex items-center gap-1"><Trash2 size={12} /><span>Delete</span></button>
+                                                <button type="button" data-testid={`delete-link-${key}`} disabled={isMutatingLink} onClick={() => void handleDeleteUserLink(lnk)} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 inline-flex items-center gap-1"><Trash2 size={12} /><span>Delete</span></button>
                                             </td>
                                         </tr>
                                     );
@@ -841,30 +841,30 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             )}
 
             {activeSection === 'reconciliation' && (
-                <div data-testid="admin-section-reconciliation" className="rounded-xl border border-white/[0.06] bg-black/30 p-4 space-y-4 text-xs min-w-0 max-w-full">
-                    <div role="note" data-testid="reconciliation-backup-warning" className="p-3 rounded-xl border border-amber-500/30 bg-amber-950/25 text-amber-100 flex items-start gap-2.5">
+                <div data-testid="admin-section-reconciliation" className="border-t border-white/[0.06] pt-4 space-y-4 text-xs min-w-0 max-w-full">
+                    <div role="note" data-testid="reconciliation-backup-warning" className="p-3 border-y border-amber-500/30 bg-amber-950/25 text-amber-100 flex items-start gap-2.5">
                         <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
                         <p className="text-xs"><strong>Verified SQLite Backup Requirement:</strong> Applying legacy reconciliation requires a verified SQLite backup (<code className="font-mono">VACUUM INTO</code>) and a valid 15-minute signed approval token bound to the exact preview hash. Preview never auto-applies changes.</p>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Candidate Row IDs (comma-separated, optional)</span><input type="text" aria-label="Candidate Row IDs" data-testid="reconcile-candidate-ids-input" value={candidateIdsInput} onChange={(e) => { setCandidateIdsInput(e.target.value); invalidateReconcileApproval(); }} placeholder="e.g. 10, 12, 19" className="w-full rounded-lg bg-slate-900 border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
-                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Preview Limit (1..1000)</span><input type="number" aria-label="Reconciliation Preview Limit" data-testid="reconcile-limit-input" value={reconcileLimitInput} onChange={(e) => { setReconcileLimitInput(e.target.value); invalidateReconcileApproval(); }} className="w-full rounded-lg bg-slate-900 border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
-                        <button type="button" data-testid="reconcile-preview-btn" disabled={isPreviewingReconcile || isApplyingReconcile} onClick={() => void handlePreviewReconciliation()} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white">{isPreviewingReconcile ? 'Generating Preview...' : 'Generate Reconciliation Preview'}</button>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Candidate Row IDs (comma-separated, optional)</span><input type="text" aria-label="Candidate Row IDs" data-testid="reconcile-candidate-ids-input" value={candidateIdsInput} onChange={(e) => { setCandidateIdsInput(e.target.value); invalidateReconcileApproval(); }} placeholder="e.g. 10, 12, 19" className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
+                        <label className="space-y-1"><span className="text-slate-300 font-semibold">Preview Limit (1..1000)</span><input type="number" aria-label="Reconciliation Preview Limit" data-testid="reconcile-limit-input" value={reconcileLimitInput} onChange={(e) => { setReconcileLimitInput(e.target.value); invalidateReconcileApproval(); }} className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-3 py-1.5 text-xs text-slate-100" /></label>
+                        <button type="button" data-testid="reconcile-preview-btn" disabled={isPreviewingReconcile || isApplyingReconcile} onClick={() => void handlePreviewReconciliation()} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white">{isPreviewingReconcile ? 'Generating Preview...' : 'Generate Reconciliation Preview'}</button>
                     </div>
 
-                    {reconcileStaleConflict && <div role="alert" data-testid="reconcile-stale-conflict" className="p-3 rounded-xl border border-amber-500/40 bg-amber-950/35 text-xs text-amber-200"><strong>Stale Preview Conflict (409):</strong> {reconcileStaleConflict}</div>}
-                    {reconcileError && !reconcileStaleConflict && <div role="alert" data-testid="reconcile-error" className="p-3 rounded-xl border border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{reconcileError}</div>}
+                    {reconcileStaleConflict && <div role="alert" data-testid="reconcile-stale-conflict" className="p-3 border-y border-amber-500/40 bg-amber-950/35 text-xs text-amber-200"><strong>Stale Preview Conflict (409):</strong> {reconcileStaleConflict}</div>}
+                    {reconcileError && !reconcileStaleConflict && <div role="alert" data-testid="reconcile-error" className="p-3 border-y border-rose-500/30 bg-rose-950/30 text-xs text-rose-200">{reconcileError}</div>}
 
                     {reconcilePreview && (
-                        <div data-testid="reconcile-preview-panel" className="space-y-3 rounded-xl border border-indigo-500/25 bg-indigo-950/15 p-4 min-w-0 max-w-full">
+                        <div data-testid="reconcile-preview-panel" className="space-y-3 border-y border-indigo-500/25 bg-indigo-950/15 p-4 min-w-0 max-w-full">
                             <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
                                 <span>Preview Hash: <code data-testid="reconcile-preview-hash" className="text-indigo-200">{reconcilePreview.previewHash}</code></span>
                                 <span>Affected Rows: <strong data-testid="reconcile-affected-count">{reconcilePreview.totalAffectedRows}</strong></span>
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono">
-                                <div data-testid="reconcile-counts-before" className="p-2.5 rounded-lg bg-black/30 border border-white/[0.06]"><div className="font-bold text-slate-300 mb-1">Counts Before</div><div>Legacy: {reconcilePreview.countsBefore.legacyRecords} | Summaries: {reconcilePreview.countsBefore.itemSummaries} | Undated: {reconcilePreview.countsBefore.undatedRecords} | Confirmed: {reconcilePreview.countsBefore.confirmedPlays}</div></div>
-                                <div data-testid="reconcile-counts-after" className="p-2.5 rounded-lg bg-black/30 border border-white/[0.06]"><div className="font-bold text-slate-300 mb-1">Projected Counts After</div><div>Legacy: {reconcilePreview.countsAfter.legacyRecords} | Summaries: {reconcilePreview.countsAfter.itemSummaries} | Undated: {reconcilePreview.countsAfter.undatedRecords} | Confirmed: {reconcilePreview.countsAfter.confirmedPlays}</div></div>
+                                <div data-testid="reconcile-counts-before" className="p-2.5 border-y border-white/[0.07]"><div className="font-bold text-slate-300 mb-1">Counts Before</div><div>Legacy: {reconcilePreview.countsBefore.legacyRecords} | Summaries: {reconcilePreview.countsBefore.itemSummaries} | Undated: {reconcilePreview.countsBefore.undatedRecords} | Confirmed: {reconcilePreview.countsBefore.confirmedPlays}</div></div>
+                                <div data-testid="reconcile-counts-after" className="p-2.5 border-y border-white/[0.07]"><div className="font-bold text-slate-300 mb-1">Projected Counts After</div><div>Legacy: {reconcilePreview.countsAfter.legacyRecords} | Summaries: {reconcilePreview.countsAfter.itemSummaries} | Undated: {reconcilePreview.countsAfter.undatedRecords} | Confirmed: {reconcilePreview.countsAfter.confirmedPlays}</div></div>
                             </div>
                             <div className="overflow-x-auto min-w-0 max-w-full">
                                 <table className="w-full text-left text-xs font-mono border-collapse" data-testid="reconcile-changes-table">
@@ -882,7 +882,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                                     </tbody>
                                 </table>
                             </div>
-                            <div role="note" data-testid="reconcile-unverified-proposal-warning" className="p-2.5 rounded-lg border border-amber-500/35 bg-amber-950/30 text-xs text-amber-100">
+                            <div role="note" data-testid="reconcile-unverified-proposal-warning" className="p-2.5 border-y border-amber-500/35 bg-amber-950/30 text-xs text-amber-100">
                                 <strong>Unverified Proposals Warning:</strong> Suspected classifications and epoch/undated matches are unverified proposals, not proof of fabricated data. The operator must verify upstream source evidence before approving.
                             </div>
                             <div className="pt-2 border-t border-white/10 flex flex-wrap items-center justify-between gap-3">
@@ -890,13 +890,13 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
                                     <input type="checkbox" data-testid="reconcile-approve-checkbox" checked={reconcileApproved} onChange={(e) => setReconcileApproved(e.target.checked)} />
                                     <span>I explicitly approve applying preview hash <code className="font-mono">{reconcilePreview.previewHash}</code> after verifying source evidence and SQLite backup.</span>
                                 </label>
-                                <button type="button" data-testid="reconcile-apply-btn" disabled={!reconcileApproved || isApplyingReconcile || isPreviewingReconcile} onClick={() => void handleApplyReconciliation()} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white">{isApplyingReconcile ? 'Applying...' : 'Apply Approved Reconciliation'}</button>
+                                <button type="button" data-testid="reconcile-apply-btn" disabled={!reconcileApproved || isApplyingReconcile || isPreviewingReconcile} onClick={() => void handleApplyReconciliation()} className="min-h-[36px] sm:min-h-[32px] obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white">{isApplyingReconcile ? 'Applying...' : 'Apply Approved Reconciliation'}</button>
                             </div>
                         </div>
                     )}
 
                     {reconcileResult && (
-                        <div data-testid="reconcile-apply-result" className="p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-950/20 text-xs text-emerald-100 space-y-1">
+                        <div data-testid="reconcile-apply-result" className="p-3.5 border-y border-emerald-500/30 bg-emerald-950/20 text-xs text-emerald-100 space-y-1">
                             <div><strong>Reconciliation Applied:</strong> Audit #{reconcileResult.auditId} | Applied Rows: {reconcileResult.appliedRows} | Revision: {reconcileResult.historyRevision}</div>
                             <div className="font-mono">Hash: {reconcileResult.previewHash} | Backup: {reconcileResult.backupPath ?? 'in-memory'}</div>
                         </div>

@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMarketplace } from '@/hooks/useMarketplace';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { triggerHaptic } from '@/lib/design';
+import { apiFetch } from '@/lib/fetcher';
 import { useSystemStore } from '@/store/useSystemStore';
 import useSWR from 'swr';
 
@@ -29,7 +30,7 @@ export default function NotificationDrawer() {
     const { data: serverData, mutate } = useSWR<{ notifications: ServerNotification[], unread_count: number }>('/api/v1/auth/notifications', { refreshInterval: 5000 });
     const serverNotifications = serverData?.notifications || [];
 
-    const activeApps = apps ? apps.filter(app => app.status === 'installing' || app.status === 'uninstalling') : [];
+    const activeApps = apps ? apps.filter(app => app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating') : [];
 
     useEffect(() => {
         if (hideTimerRef.current) {
@@ -50,7 +51,7 @@ export default function NotificationDrawer() {
         triggerHaptic(8, hapticFeedback);
         clearAll();
         if (serverNotifications.length > 0) {
-            await fetch('/api/v1/auth/notifications/dismiss-all', { method: 'POST' });
+            await apiFetch('/api/v1/auth/notifications/dismiss-all', { method: 'POST' });
             mutate();
         }
     };

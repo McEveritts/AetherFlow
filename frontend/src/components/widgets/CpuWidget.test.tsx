@@ -11,6 +11,7 @@ jest.mock('@/components/charts/Sparkline', () => {
         timestamps,
         selectedWindow,
         hasSharedSummary,
+        height,
     }: {
         timeContext?: string;
         isPercentage?: boolean;
@@ -18,6 +19,7 @@ jest.mock('@/components/charts/Sparkline', () => {
         timestamps?: number[];
         selectedWindow?: string;
         hasSharedSummary?: boolean;
+        height?: number;
     }) {
         return (
             <div
@@ -28,12 +30,13 @@ jest.mock('@/components/charts/Sparkline', () => {
                 data-is-percentage={String(isPercentage)}
                 data-y-domain={JSON.stringify(yDomain)}
                 data-has-shared-summary={String(Boolean(hasSharedSummary))}
+                data-height={height}
             />
         );
     };
 });
 
-describe('CpuWidget hardware terminology and disclosure behavior', () => {
+describe('CpuWidget hardware terminology and inline processor controls', () => {
     const mockHistory: MetricsHistory = {
         cpu: [14.8, 14.8, 14.8],
         memory: [44.4, 44.4],
@@ -66,7 +69,11 @@ describe('CpuWidget hardware terminology and disclosure behavior', () => {
         );
 
         expect(screen.getByText('AMD EPYC 7763 64-Core Processor')).toBeInTheDocument();
+        expect(screen.getByText('Physical Cores (64)')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^Processor / })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Inspect cores' }));
         expect(screen.getByText('Logical Processors (128)')).toBeInTheDocument();
+        expect(screen.getAllByRole('button', { name: /^Processor / })).toHaveLength(16);
         expect(screen.getByText(/Load Legend:/)).toBeInTheDocument();
 
         const sparklineElement = screen.getByTestId('sparkline');
@@ -100,7 +107,7 @@ describe('CpuWidget hardware terminology and disclosure behavior', () => {
         expect(screen.getByText('Logical Processors (128)')).toBeInTheDocument();
     });
 
-    it('provides expandable disclosure for processor grid and allows selecting individual processors', () => {
+    it('keeps processors collapsed by default and allows inspection, selection, and collapse', () => {
         const sampleCores = [12, 34, 56, 78];
 
         render(
@@ -112,15 +119,34 @@ describe('CpuWidget hardware terminology and disclosure behavior', () => {
         );
 
         expect(screen.getByText('4 Logical Processors')).toBeInTheDocument();
+        const inspectButton = screen.getByRole('button', { name: 'Inspect cores' });
+        expect(inspectButton).toHaveAttribute('aria-expanded', 'false');
+        expect(inspectButton).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+        expect(screen.queryByRole('region', { name: 'Per-core utilization' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^Processor / })).not.toBeInTheDocument();
+        fireEvent.click(inspectButton);
+        expect(inspectButton).toHaveAttribute('aria-expanded', 'true');
+        expect(screen.getByRole('region', { name: 'Per-core utilization' })).toBeVisible();
 
         const firstProcessorButton = screen.getByRole('button', { name: 'Processor 0: 12.0%' });
-        expect(firstProcessorButton).toBeInTheDocument();
+        expect(firstProcessorButton).toBeVisible();
+        expect(firstProcessorButton.closest('details')).toBeNull();
+        expect(firstProcessorButton).toHaveAttribute('aria-pressed', 'false');
 
         fireEvent.click(firstProcessorButton);
         expect(screen.getByText('Processor 0: 12.0% utilization')).toBeInTheDocument();
+        expect(firstProcessorButton).toHaveAttribute('aria-pressed', 'true');
 
         fireEvent.click(firstProcessorButton);
         expect(screen.queryByText('Processor 0: 12.0% utilization')).not.toBeInTheDocument();
+
+        fireEvent.click(firstProcessorButton);
+        fireEvent.click(screen.getByRole('button', { name: 'Hide cores' }));
+        expect(inspectButton).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByRole('button', { name: /^Processor / })).not.toBeInTheDocument();
+        expect(screen.getByTestId('sparkline').closest('.obs-vital-card')).toHaveAttribute('data-cores-expanded', 'false');
+        fireEvent.click(inspectButton);
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
     it('forwards hasSharedSummary to Sparkline component', () => {
@@ -137,17 +163,40 @@ describe('CpuWidget hardware terminology and disclosure behavior', () => {
         expect(sparklineElement).toHaveAttribute('data-has-shared-summary', 'true');
     });
 
-    it('ensures logical processors disclosure summary meets mobile min-h-[44px] touch target', () => {
+    it('limits the visible grid to 16 processors with an accessible inline expand toggle', () => {
         render(
             <CpuWidget
-                cpuData={{ usage: 20, freq: 3000, cores: [20] }}
+                cpuData={{ usage: 20, freq: 3000, cores: Array.from({ length: 32 }, () => 20) }}
                 hardware={null}
                 history={mockHistory}
             />
         );
 
-        const summaryElement = screen.getByTestId('cpu-processors-summary');
-        expect(summaryElement).toHaveClass('min-h-[44px]');
+        fireEvent.click(screen.getByRole('button', { name: 'Inspect cores' }));
+        expect(screen.getAllByRole('button', { name: /^Processor / })).toHaveLength(16);
+        const expandButton = screen.getByRole('button', { name: 'Show all 32 processors' });
+        expect(expandButton).toHaveClass('min-h-[44px]');
+        expect(expandButton).toHaveAttribute('aria-expanded', 'false');
+        fireEvent.click(expandButton);
+        expect(screen.getAllByRole('button', { name: /^Processor / })).toHaveLength(32);
+        expect(expandButton).toHaveAttribute('aria-expanded', 'true');
+        fireEvent.click(screen.getByRole('button', { name: 'Processor 31: 20.0%' }));
+        expect(screen.getByRole('status')).toHaveTextContent('Processor 31: 20.0% utilization');
+        fireEvent.click(screen.getByRole('button', { name: 'Show first 16 processors' }));
+        expect(screen.getAllByRole('button', { name: /^Processor / })).toHaveLength(16);
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it.each(['compact', 'immersive'] as const)('matches the shared telemetry bands in %s density', (density) => {
+        render(<CpuWidget cpuData={{ usage: 20, freq: 4080, cores: [20] }} hardware={null} history={mockHistory} density={density} />);
+        const sparkline = screen.getByTestId('sparkline');
+        const card = sparkline.closest('.obs-vital-card');
+        expect(sparkline.parentElement).toHaveClass('obs-vital-plot');
+        expect(sparkline).toHaveAttribute('data-height', density === 'immersive' ? '120' : '88');
+        expect(screen.getByText('CPU Utilization').closest('.obs-vital-header')).toBeInTheDocument();
+        expect(screen.getByText('Logical Processors (1)').closest('.obs-vital-footer')).toBeInTheDocument();
+        expect(card).toHaveClass('flex', 'flex-col');
+        expect(screen.getByText('4.08 GHz')).toBeVisible();
     });
 
     it('renders a truthful proportional utilization meter with accessible values separate from history', () => {
@@ -162,6 +211,7 @@ describe('CpuWidget hardware terminology and disclosure behavior', () => {
 
         const meterElement = screen.getByRole('meter', { name: 'Current CPU utilization' });
         expect(meterElement).toBeInTheDocument();
+        expect(meterElement.closest('.obs-vital-footer')).toBeInTheDocument();
         expect(meterElement).toHaveAttribute('aria-valuenow', '14.8');
         expect(meterElement).toHaveAttribute('aria-valuemin', '0');
         expect(meterElement).toHaveAttribute('aria-valuemax', '100');

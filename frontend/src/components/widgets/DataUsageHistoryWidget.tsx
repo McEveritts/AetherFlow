@@ -223,9 +223,9 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
     const isPartialCoverage = recordedDayCount > 0 && recordedDayCount < daysWindow;
 
     return (
-        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`obs-telemetry-surface relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
             <div>
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3.5 border-b border-slate-800/80">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3.5 border-b border-white/[0.06]">
                     <div className="flex items-center gap-2.5">
                         <div className="h-8 w-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0">
                             <Activity size={16} />
@@ -238,7 +238,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="flex bg-slate-950/70 p-1 rounded-xl border border-slate-800" role="group" aria-label="History Range Selection">
+                        <div className="flex bg-white/[0.03] p-1 rounded-xl border border-white/[0.08] backdrop-blur-md" role="group" aria-label="History Range Selection">
                             {[7, 30, 90].map((dayOption) => (
                                 <button
                                     key={dayOption}
@@ -258,7 +258,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                     </div>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3 px-1">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2 text-xs text-slate-300">
                         <Calendar size={13} className="text-indigo-400" />
                         <span className="font-mono text-slate-200">
@@ -280,7 +280,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                     </div>
                 </div>
 
-                <p role="note" className="mb-3 px-1 text-xs leading-relaxed text-slate-400">
+                <p role="note" className="mb-3 text-xs leading-relaxed text-slate-400">
                     Counter deltas are assigned to the UTC day of the ending sample; sparse intervals may span days, so daily allocation is estimated.
                     {counterResetCount > 0 ? ` ${counterResetCount} counter reset${counterResetCount === 1 ? '' : 's'} detected; only post-reset values are counted.` : ''}
                     {ignoredSampleCount > 0 ? ` ${ignoredSampleCount} invalid or conflicting sample${ignoredSampleCount === 1 ? '' : 's'} ignored.` : ''}
@@ -288,7 +288,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
 
                 {errorMessage && !isLoading && (
                     <div
-                        className="flex flex-col items-center justify-center bg-slate-950/60 rounded-xl border border-slate-800/80 text-center"
+                        className="flex flex-col items-center justify-center text-center"
                         style={{ height: chartHeight }}
                     >
                         <ServerCrash className="text-rose-400/70 mb-2" size={28} />
@@ -299,7 +299,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
 
                 {!errorMessage && (
                     <div
-                        className="relative select-none w-full bg-slate-950/60 rounded-xl border border-slate-800/60 overflow-hidden pt-3 pr-2"
+                        className="relative select-none w-full min-w-0 overflow-hidden pt-3 pr-2"
                         style={{ height: chartHeight, touchAction: 'pan-y' }}
                     >
                         {isLoading && usageData.length === 0 ? (
@@ -383,8 +383,8 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                 )}
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 mt-3.5">
-                <div className="bg-slate-950/60 rounded-xl px-3.5 py-2.5 border border-slate-800/60 flex items-center justify-between">
+            <div className="grid grid-cols-2 gap-0 mt-3.5 pt-3 border-t border-white/[0.06] divide-x divide-white/[0.06]">
+                <div className="min-w-0 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pr-3 last:pr-0 last:pl-3">
                     <div className="flex items-center gap-2">
                         <Download size={14} className="text-cyan-400 shrink-0" />
                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Download ({daysWindow}d)</span>
@@ -393,7 +393,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         {isLoading ? '...' : hasMeasuredInterval ? formatBytes(totalDownloadedBytes) : 'Unavailable'}
                     </span>
                 </div>
-                <div className="bg-slate-950/60 rounded-xl px-3.5 py-2.5 border border-slate-800/60 flex items-center justify-between">
+                <div className="min-w-0 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pr-3 last:pr-0 last:pl-3">
                     <div className="flex items-center gap-2">
                         <Upload size={14} className="text-indigo-400 shrink-0" />
                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Upload ({daysWindow}d)</span>

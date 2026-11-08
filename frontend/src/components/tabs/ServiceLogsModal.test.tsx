@@ -98,6 +98,31 @@ describe('ServiceLogsModal', () => {
         );
     });
 
+    it('provides wrapping named toolbar controls and component tabs with touch-sized targets', () => {
+        render(<ServiceLogsModal serviceName="sonarr" units={['sonarr', 'sonarr-helper']} onClose={jest.fn()} />);
+        expect(screen.getByRole('group', { name: 'Log controls' })).toHaveClass('flex-wrap', 'min-w-0');
+        for (const name of ['FlowAI Auto-Debug', 'Pause log following', 'Sync logs', 'Download logs']) {
+            expect(screen.getByRole('button', { name })).toHaveClass('min-h-[40px]', 'min-w-[40px]');
+        }
+        for (const tab of screen.getAllByRole('tab')) {
+            expect(tab).toHaveClass('min-h-[40px]', 'min-w-[40px]', 'max-w-full', 'break-all');
+        }
+    });
+
+    it('pauses auto-follow without interrupting the unit subscription and resumes on request', () => {
+        const { rerender } = render(<ServiceLogsModal serviceName="sonarr" onClose={jest.fn()} />);
+        const scrollIntoView = Element.prototype.scrollIntoView as jest.Mock;
+        scrollIntoView.mockClear();
+        fireEvent.click(screen.getByRole('button', { name: 'Pause log following' }));
+        expect(screen.getByRole('button', { name: 'Follow logs' })).toHaveAttribute('aria-pressed', 'false');
+        rerender(<ServiceLogsModal serviceName="sonarr" onClose={jest.fn()} />);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(mockUseSWR).toHaveBeenLastCalledWith('/api/v1/admin/logs?unit=sonarr', expect.objectContaining({ refreshInterval: 2000 }));
+        fireEvent.click(screen.getByRole('button', { name: 'Follow logs' }));
+        expect(screen.getByRole('button', { name: 'Pause log following' })).toHaveAttribute('aria-pressed', 'true');
+        expect(scrollIntoView).toHaveBeenCalled();
+    });
+
     it('does not poll a hidden modal even when its component list remains available', () => {
         render(<ServiceLogsModal onClose={jest.fn()} serviceName={null} units={['wg-quick@wg0.service', 'wg-dashboard.service']} />);
         expect(mockUseSWR).not.toHaveBeenCalled();

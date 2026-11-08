@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -77,6 +78,12 @@ export default function Dashboard() {
   );
 
   const { data: settingsData, mutate: mutateSettings } = useSWR('/api/v1/auth/settings');
+  const mainRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+    window.scrollTo(0, 0);
+  }, [activeTab]);
 
   const renderContent = () => {
     if (activeTab === 'mcbrowser') {
@@ -131,15 +138,15 @@ export default function Dashboard() {
 
       <Sidebar />
 
-      <main className="flex-1 min-w-0 max-w-full relative z-10 h-screen overflow-y-auto no-scrollbar">
+      <main ref={mainRef} className="flex-1 min-w-0 max-w-full relative z-10 h-screen overflow-y-auto no-scrollbar">
         <Header />
 
-        <div className="mt-4">
+        <div className={activeTab === 'overview' ? undefined : 'mt-4'}>
           <GlobalBanners />
         </div>
 
         {/* Scrollable Content with mobile dock bottom clearance (pb-24) */}
-        <div className="px-4 pb-24 md:px-10 md:pb-10 max-w-[1600px] mx-auto min-h-[calc(100vh-8rem)] min-w-0 max-w-full">
+        <div className={`pb-24 md:pb-10 min-h-[calc(100vh-8rem)] min-w-0 max-w-full ${activeTab === 'overview' ? 'w-full' : 'px-4 md:px-10 max-w-[1600px] mx-auto'}`}>
           <div hidden={activeTab !== 'mcbrowser'}>
             {user && <ErrorBoundary key={`mcbrowser-${user.id}`}>
               <McBrowserTab isActive={activeTab === 'mcbrowser'} />

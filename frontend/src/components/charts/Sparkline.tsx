@@ -30,6 +30,7 @@ export interface SparklineProps {
     selectedWindow?: string;
     interpolation?: 'linear' | 'monotone';
     hasSharedSummary?: boolean;
+    variant?: 'default' | 'mini';
 }
 
 export interface ChartDataPoint {
@@ -139,7 +140,7 @@ export function computeTimeContext({
     return `${sampleCount} samples (${spanString} span)`;
 }
 
-const CHART_MARGIN = { top: 5, right: 0, left: 0, bottom: 0 };
+const CHART_MARGIN = { top: 5, right: 6, left: 6, bottom: 5 };
 
 const TOOLTIP_CONTENT_STYLE: React.CSSProperties = {
     backgroundColor: 'rgba(15, 23, 42, 0.9)',
@@ -391,6 +392,7 @@ export default function Sparkline({
     selectedWindow,
     interpolation = 'linear',
     hasSharedSummary = false,
+    variant = 'default',
 }: SparklineProps) {
     const rawId = useId();
     const id = useMemo(() => rawId.replace(/:/g, ''), [rawId]);
@@ -501,9 +503,16 @@ export default function Sparkline({
     const gTo2 = gradientTo2 || 'transparent';
 
     if (isSparseHistory) {
+        if (variant === 'mini') {
+            return (
+                <div className={`relative w-full min-w-0 max-w-full ${className}`} style={{ height }}>
+                    <span className="sr-only">{sparseStatusMessage}</span>
+                </div>
+            );
+        }
         return (
             <div
-                className={`relative select-none flex flex-col w-full min-w-0 max-w-full py-1 px-3 ${className}`}
+                className={`relative select-none flex flex-col w-full min-w-0 max-w-full py-1 ${className}`}
                 style={{ touchAction: 'pan-y' }}
                 onMouseEnter={handleMouseEnter}
                 onMouseLeave={handleMouseLeave}
@@ -516,15 +525,15 @@ export default function Sparkline({
                         {label && (
                             <div className="flex items-center gap-1.5">
                                 <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</span>
-                                {currentValue && <span className="text-xs font-bold text-slate-200 ml-1">{currentValue}</span>}
+                                <span className="text-xs font-medium text-slate-400">{label}</span>
+                                {currentValue && <span className="sr-only">{currentValue}</span>}
                             </div>
                         )}
                         {label2 && (
                             <div className="flex items-center gap-1.5">
                                 <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color2 }} />
-                                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label2}</span>
-                                {currentValue2 && <span className="text-xs font-bold text-slate-200 ml-1">{currentValue2}</span>}
+                                <span className="text-xs font-medium text-slate-400">{label2}</span>
+                                {currentValue2 && <span className="sr-only">{currentValue2}</span>}
                             </div>
                         )}
                     </div>
@@ -540,7 +549,7 @@ export default function Sparkline({
                     </div>
                 ) : null}
                 {hasSharedSummary ? null : (
-                    <div className="flex flex-col gap-y-0.5 text-xs font-mono text-slate-400 min-w-0 max-w-full">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs font-mono text-slate-400 min-w-0 max-w-full">
                         {sparseStatusMessage && (
                             <span
                                 data-testid="sparse-history-status"
@@ -573,34 +582,34 @@ export default function Sparkline({
             onTouchEnd={handleMouseLeave}
             onTouchCancel={handleMouseLeave}
         >
-            {(label || label2 || resolvedTimeContext) && (
-                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-1 px-1 z-10 relative pointer-events-none w-full min-w-0 max-w-full">
+            {variant !== 'mini' && (label || label2 || resolvedTimeContext) && (
+                <div className={`${hasSharedSummary && !label && !label2 ? 'sr-only' : 'flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2 z-10 relative pointer-events-none w-full min-w-0 max-w-full'}`}>
                     {(label || label2) && (
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 max-w-full">
                             {label && (
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</span>
-                                    {currentValue && <span className="text-xs font-bold text-slate-200 ml-1">{currentValue}</span>}
+                                    <span className="text-xs font-medium text-slate-400">{label}</span>
+                                    {currentValue && <span className="sr-only">{currentValue}</span>}
                                 </div>
                             )}
                             {label2 && (
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color2 }} />
-                                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label2}</span>
-                                    {currentValue2 && <span className="text-xs font-bold text-slate-200 ml-1">{currentValue2}</span>}
+                                    <span className="text-xs font-medium text-slate-400">{label2}</span>
+                                    {currentValue2 && <span className="sr-only">{currentValue2}</span>}
                                 </div>
                             )}
                         </div>
                     )}
                     {resolvedTimeContext ? (
-                        <span className="text-xs font-mono text-slate-400 tabular-nums shrink-0">
+                        <span className={hasSharedSummary ? 'sr-only' : 'text-xs font-mono text-slate-400 tabular-nums min-w-0'}>
                             {resolvedTimeContext}
                         </span>
                     ) : null}
                 </div>
             )}
-            <div style={{ height: height, touchAction: 'pan-y' }} className="w-full flex items-stretch">
+            <div style={{ height: height, touchAction: 'pan-y' }} className="w-full relative flex gap-2">
                 <div className="flex-1 min-w-0 h-full relative">
                     <MemoizedSparklineChart
                         chartData={activeChartData}
@@ -623,8 +632,8 @@ export default function Sparkline({
                         interpolation={interpolation}
                     />
                 </div>
-                {showMagnitudeReferences && (
-                    <div className="shrink-0 flex flex-col justify-between items-end pl-2 py-0.5 pointer-events-none text-xs font-mono text-slate-400 select-none">
+                {showMagnitudeReferences && variant !== 'mini' && (
+                    <div className="shrink-0 flex flex-col justify-between items-end py-0.5 pointer-events-none text-xs font-mono text-slate-300 select-none">
                         <span className="tabular-nums leading-none">
                             {isPercentage ? '100%' : formatMagnitude(effectiveDomain[1], unit)}
                         </span>
@@ -637,14 +646,14 @@ export default function Sparkline({
                     </div>
                 )}
             </div>
-            {sampleCount > 0 && (
-                <div className="flex items-center justify-between text-xs font-mono text-slate-400 pt-1.5 px-1 select-none">
+            {sampleCount > 0 && variant !== 'mini' && (
+                <div className="flex flex-wrap items-center justify-between gap-x-2 text-xs font-mono text-slate-400 pt-1.5 select-none">
                     <span>
                         {alignment.isValid && effectiveTimestamps
                             ? formatTimeEndpoint(alignment.startTimestamp ?? effectiveTimestamps[0])
                             : 'Sample 1'}
                     </span>
-                    <span className="text-slate-400 font-medium">
+                    <span className="sr-only">
                         {sampleCount === 1
                             ? 'single sample'
                             : alignment.isValid && alignment.spanSeconds !== undefined

@@ -73,16 +73,16 @@ export default function BandwidthCard() {
     };
 
     return (
-        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 relative overflow-hidden flex flex-col justify-between h-full">
+        <div className="obs-telemetry-surface p-5 relative overflow-hidden min-w-0 flex flex-col justify-between h-full">
             <div>
-                <div className="flex items-center justify-between pb-3.5 mb-4 border-b border-white/[0.06] relative z-10">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 mb-4 border-b border-white/[0.06] relative z-10">
                     <div className="flex items-center gap-2.5">
                         <div className="h-8 w-8 bg-cyan-500/10 rounded-lg flex items-center justify-center border border-cyan-500/20 text-cyan-400 shrink-0">
                             <Gauge size={16} />
                         </div>
                         <div>
                             <h3 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Bandwidth Optimizer</h3>
-                            <p className="text-[11px] text-slate-500 mt-1">AI-assisted swarm &amp; peering rate tuning</p>
+                            <p className="text-xs text-slate-400 mt-1">AI-assisted swarm &amp; peering rate tuning</p>
                         </div>
                     </div>
                     <button
@@ -104,37 +104,37 @@ export default function BandwidthCard() {
                 {recommendation && (
                     <div className="space-y-3.5 relative z-10">
                         {/* Speed Recommendations */}
-                        <div className="grid grid-cols-2 gap-2.5">
-                            <div className="bg-black/30 rounded-xl p-3.5 border border-white/[0.04]">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
+                            <div className="min-w-0 py-3.5 sm:pr-4">
                                 <div className="flex items-center gap-1.5 text-emerald-400 mb-1.5">
                                     <ArrowDownCircle size={13} />
-                                    <span className="text-[10px] uppercase tracking-wider font-bold">Download Ceiling</span>
+                                    <span className="text-xs uppercase tracking-wider font-semibold">Download Ceiling</span>
                                 </div>
                                 <p className="text-lg font-extrabold text-slate-100 font-mono tabular-nums">{formatKBps(recommendation.recommended_download_kbps)}</p>
                             </div>
-                            <div className="bg-black/30 rounded-xl p-3.5 border border-white/[0.04]">
+                            <div className="min-w-0 py-3.5 sm:pl-4">
                                 <div className="flex items-center gap-1.5 text-blue-400 mb-1.5">
                                     <ArrowUpCircle size={13} />
-                                    <span className="text-[10px] uppercase tracking-wider font-bold">Upload Ceiling</span>
+                                    <span className="text-xs uppercase tracking-wider font-semibold">Upload Ceiling</span>
                                 </div>
                                 <p className="text-lg font-extrabold text-slate-100 font-mono tabular-nums">{formatKBps(recommendation.recommended_upload_kbps)}</p>
                             </div>
                         </div>
 
                         {/* Swarm Health & Confidence Row */}
-                        <div className="grid grid-cols-2 gap-2.5">
-                            <div className="flex items-center justify-between bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04]">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 border-y border-white/[0.06] divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
+                            <div className="min-w-0 flex flex-wrap items-center justify-between gap-2 py-2.5 sm:pr-4">
                                 <div className="flex items-center gap-1.5">
                                     <Wifi size={13} className="text-slate-400" />
-                                    <span className="text-[11px] font-medium text-slate-400">Swarm Health</span>
+                                    <span className="text-xs font-medium text-slate-400">Swarm Health</span>
                                 </div>
-                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border uppercase ${healthColor(recommendation.swarm_health)}`}>
+                                <span className={`px-2 py-0.5 rounded-md text-xs font-semibold border uppercase ${healthColor(recommendation.swarm_health)}`}>
                                     {recommendation.swarm_health}
                                 </span>
                             </div>
 
-                            <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex flex-col justify-center">
-                                <div className="flex items-center justify-between text-[11px] mb-1">
+                            <div className="min-w-0 py-2.5 sm:pl-4 flex flex-col justify-center">
+                                <div className="flex items-center justify-between text-xs mb-1">
                                     <span className="text-slate-400">Confidence</span>
                                     <span className="text-cyan-400 font-mono font-bold">{(recommendation.confidence * 100).toFixed(0)}%</span>
                                 </div>
@@ -145,7 +145,7 @@ export default function BandwidthCard() {
                         </div>
 
                         {/* Reasoning */}
-                        <p className="text-xs text-slate-300 leading-relaxed bg-black/30 rounded-xl p-3 border border-white/[0.04]">
+                        <p className="text-xs text-slate-300 leading-relaxed py-3">
                             {recommendation.reasoning}
                         </p>
 
@@ -179,10 +179,10 @@ export default function BandwidthCard() {
                 )}
 
                 {!recommendation && !error && !isAnalyzing && (
-                    <div className="bg-black/30 border border-white/[0.04] rounded-xl p-6 text-center my-2">
+                    <div className="py-6 text-center my-2">
                         <Gauge size={24} className="mx-auto text-cyan-400/50 mb-2" />
                         <p className="text-xs font-semibold text-slate-300">Swarm Rate Optimizer Ready</p>
-                        <p className="text-[11px] text-slate-500 mt-1">
+                        <p className="text-xs text-slate-400 mt-1">
                             Analyze current NIC saturation, disk write queues, and peer counts to calculate optimal transfer ceilings.
                         </p>
                     </div>

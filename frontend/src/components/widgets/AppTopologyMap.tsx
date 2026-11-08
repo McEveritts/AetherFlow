@@ -25,6 +25,27 @@ interface D3Link extends d3.SimulationLinkDatum<D3Node> {
     value: number;
 }
 
+export function computeTopologyLayout(nodeCount: number, width: number, minimumHeight: number) {
+    const paddingX = 48;
+    const paddingY = 32;
+    const columns = Math.max(1, Math.floor((width - paddingX * 2) / 112) + 1);
+    const rows = Math.max(1, Math.ceil(nodeCount / columns));
+    const height = Math.max(minimumHeight, (rows - 1) * 112 + paddingY * 2);
+    const positions = Array.from({ length: nodeCount }, (_, nodeIndex) => {
+        const row = Math.floor(nodeIndex / columns);
+        const nodesInRow = Math.min(columns, nodeCount - row * columns);
+        return {
+            x: nodesInRow === 1 ? width / 2 : paddingX + (nodeIndex % columns) * (width - paddingX * 2) / (nodesInRow - 1),
+            y: rows === 1 ? height / 2 : paddingY + row * (height - paddingY * 2) / (rows - 1),
+        };
+    });
+    return { height, positions, paddingX, paddingY };
+}
+
+export function formatTopologyLabel(name: string) {
+    return name.length > 16 ? `${name.slice(0, 15)}…` : name;
+}
+
 export default function AppTopologyMap({ topologyData, density = 'compact' }: AppTopologyMapProps) {
     const isImmersive = density === 'immersive';
     const [viewMode, setViewMode] = useState<'list' | 'graph'>('list');
@@ -42,6 +63,9 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     );
 
     const svgRef = useRef<SVGSVGElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [containerSize, setContainerSize] = useState({ width: 720, height: 300 });
+    const layoutSizeRef = useRef({ width: 0, height: 0 });
     const graphSvgRef = useRef<SVGSVGElement | null>(null);
     const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
     const simulationRef = useRef<d3.Simulation<D3Node, D3Link> | null>(null);
@@ -122,6 +146,29 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     };
 
     useEffect(() => {
+        if (viewMode !== 'graph' || !containerRef.current) return;
+        const container = containerRef.current;
+        const updateSize = (width = container.clientWidth, height = container.clientHeight) => {
+            if (width <= 0) return;
+            setContainerSize(previous => previous.width === width && previous.height === height
+                ? previous
+                : { width, height });
+        };
+        updateSize();
+        if (typeof ResizeObserver === 'undefined') {
+            const handleResize = () => updateSize();
+            window.addEventListener('resize', handleResize);
+            return () => window.removeEventListener('resize', handleResize);
+        }
+        const observer = new ResizeObserver(entries => {
+            const entry = entries.find(candidate => candidate.target === container);
+            if (entry) updateSize(entry.contentRect.width, entry.contentRect.height);
+        });
+        observer.observe(container);
+        return () => observer.disconnect();
+    }, [viewMode]);
+
+    useEffect(() => {
         if (viewMode !== 'graph' || !svgRef.current) {
             if (viewMode !== 'graph' && simulationRef.current) {
                 simulationRef.current.on('tick', null);
@@ -130,8 +177,11 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             return;
         }
 
-        const containerWidth = svgRef.current.parentElement?.clientWidth || 720;
-        const containerHeight = isImmersive ? 380 : 300;
+        const containerWidth = containerSize.width;
+        const layout = computeTopologyLayout(totalNodesCount, containerWidth, isImmersive ? 380 : 300);
+        const containerHeight = layout.height;
+        const dimensionsChanged = layoutSizeRef.current.width !== containerWidth || layoutSizeRef.current.height !== containerHeight;
+        layoutSizeRef.current = { width: containerWidth, height: containerHeight };
         const isCoarseTouchDevice = typeof window !== 'undefined' && ((typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches) || document.documentElement.dataset.touchMode === 'true');
 
         const svgSelection = d3.select(svgRef.current)
@@ -160,14 +210,14 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
         if (!simulationRef.current) {
             simulationRef.current = d3.forceSimulation<D3Node, D3Link>()
-                .force('link', d3.forceLink<D3Node, D3Link>().id((nodeDatum) => (nodeDatum as D3Node).id).distance(isImmersive ? 110 : 80))
-                .force('charge', d3.forceManyBody().strength(isImmersive ? -380 : -260))
+                .force('link', d3.forceLink<D3Node, D3Link>().id((nodeDatum) => (nodeDatum as D3Node).id).distance(112).strength(0.04))
+                .force('charge', d3.forceManyBody().strength(-80))
                 .force('center', d3.forceCenter(containerWidth / 2, containerHeight / 2))
-                .force('collide', d3.forceCollide().radius(isImmersive ? 40 : 30));
+                .force('collide', d3.forceCollide().radius(52));
 
             if (d3.select('body').select('.d3-topology-tooltip').empty()) {
                 d3.select('body').append('div')
-                    .attr('class', 'd3-topology-tooltip fixed opacity-0 bg-slate-900 border border-slate-700/80 p-2.5 rounded-xl text-xs text-white shadow-2xl pointer-events-none z-[100] font-mono');
+                    .attr('class', 'd3-topology-tooltip fixed opacity-0 glass-panel border border-white/[0.08] backdrop-blur-xl p-2.5 rounded-xl text-xs text-white shadow-2xl pointer-events-none z-[100] font-mono');
             }
         } else {
             simulationRef.current.force('center', d3.forceCenter(containerWidth / 2, containerHeight / 2));
@@ -230,8 +280,12 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             return JSON.stringify([source, target, link.value]);
         }).sort().join('\u0000');
         const graphChanged = nodeIds(previousNodes) !== nodeIds(nextNodes) || linkIds(linksRef.current) !== linkIds(nextLinks);
-        const mergedNodes = nextNodes.map(freshNode => {
+        const mergedNodes = nextNodes.map((freshNode, nodeIndex) => {
             const existingNodeMatch = previousNodes.find(candidateNode => candidateNode.id === freshNode.id);
+            const position = layout.positions[nodeIndex];
+            if (dimensionsChanged || graphChanged || isNewGraphContainer) {
+                return { ...freshNode, ...position, vx: 0, vy: 0, fx: null, fy: null };
+            }
             if (existingNodeMatch) {
                 return { ...existingNodeMatch, status: freshNode.status, group: freshNode.group, details: freshNode.details };
             }
@@ -240,6 +294,13 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
         nodesRef.current = mergedNodes;
         linksRef.current = nextLinks.map(linkItem => ({ ...linkItem }));
+        const targetPositions = new Map(mergedNodes.map((node, nodeIndex) => [node.id, layout.positions[nodeIndex]]));
+        simulation
+            .force('x', d3.forceX<D3Node>(node => targetPositions.get(node.id)?.x ?? containerWidth / 2).strength(0.6))
+            .force('y', d3.forceY<D3Node>(node => targetPositions.get(node.id)?.y ?? containerHeight / 2).strength(0.6));
+        if ((dimensionsChanged || isNewGraphContainer) && zoomBehaviorRef.current) {
+            svgSelection.call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+        }
 
         const tooltipElement = d3.select('body').select<HTMLDivElement>('.d3-topology-tooltip');
 
@@ -274,14 +335,20 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 if (nodeDatum.group === 4) return '#06b6d4';
                 return '#3b82f6';
             })
-            .style('cursor', 'pointer');
+            .style('cursor', 'pointer')
+            .attr('aria-label', nodeDatum => `${nodeDatum.id}: ${nodeDatum.status}`);
+        nodeSelection.selectAll<SVGTitleElement, D3Node>('title')
+            .data(nodeDatum => [nodeDatum])
+            .join('title')
+            .text(nodeDatum => nodeDatum.id);
 
         const displayTooltip = (mouseEvent: MouseEvent | TouchEvent, nodeDatum: D3Node) => {
             const pointerPageX = 'touches' in mouseEvent && mouseEvent.touches.length > 0 ? mouseEvent.touches[0].pageX : (mouseEvent as MouseEvent).pageX;
             const pointerPageY = 'touches' in mouseEvent && mouseEvent.touches.length > 0 ? mouseEvent.touches[0].pageY : (mouseEvent as MouseEvent).pageY;
             tooltipElement.transition().duration(120).style('opacity', 0.98);
             const statusTextColor = (nodeDatum.status === 'running' || nodeDatum.status === 'healthy') ? '#34d399' : (nodeDatum.status === 'stopped' ? '#94a3b8' : '#f87171');
-            tooltipElement.html(`<div class="space-y-1"><div class="font-bold text-slate-100">${nodeDatum.id}</div><div class="text-xs text-slate-400">Status: <span style="color: ${statusTextColor}" class="font-semibold">${nodeDatum.status}</span></div></div>`)
+            tooltipElement.text(`${nodeDatum.id} · ${nodeDatum.status}`)
+                .style('color', statusTextColor)
                 .style('left', `${pointerPageX + 12}px`)
                 .style('top', `${pointerPageY - 32}px`);
             d3.select(mouseEvent.currentTarget as SVGCircleElement).attr('stroke', '#ffffff').attr('stroke-width', 3);
@@ -304,23 +371,27 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             .selectAll<SVGTextElement, D3Node>('text')
             .data(mergedNodes, (nodeDatum) => nodeDatum.id)
             .join('text')
-            .text((nodeDatum) => nodeDatum.id)
-            .attr('font-size', '11px')
+            .text((nodeDatum) => formatTopologyLabel(nodeDatum.id))
+            .attr('font-size', '12px')
             .attr('font-weight', '600')
             .attr('fill', '#e2e8f0')
-            .attr('dx', 15)
-            .attr('dy', 4)
+            .attr('text-anchor', 'middle')
+            .attr('dx', 0)
+            .attr('dy', nodeDatum => nodeDatum.group === 1 ? 26 : 22)
+            .attr('textLength', nodeDatum => Math.min(96, formatTopologyLabel(nodeDatum.id).length * 6))
+            .attr('lengthAdjust', 'spacingAndGlyphs')
+            .attr('aria-label', nodeDatum => nodeDatum.id)
             .style('pointer-events', 'none');
 
         simulation.nodes(mergedNodes);
         simulation.force<d3.ForceLink<D3Node, D3Link>>('link')?.links(linksRef.current);
 
-        if (graphChanged || isNewGraphContainer) {
+        if (graphChanged || isNewGraphContainer || dimensionsChanged) {
             simulation.alpha(0.3).restart();
         }
 
-        const marginHorizontal = 80;
-        const marginVertical = 20;
+        const marginHorizontal = layout.paddingX;
+        const marginVertical = layout.paddingY;
 
         simulation.on('tick', () => {
             graphContainer.select('g.links')
@@ -376,7 +447,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             dragEvent.subject.fy = null;
         }
 
-    }, [topologyData, isImmersive, realTopology, viewMode, canonicalCoreEntry]);
+    }, [topologyData, isImmersive, realTopology, viewMode, canonicalCoreEntry, containerSize, totalNodesCount]);
 
     useEffect(() => () => {
         if (simulationRef.current) {
@@ -386,9 +457,9 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     }, []);
 
     return (
-        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`obs-telemetry-surface relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
             <div>
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3.5 border-b border-slate-800/80">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3.5 border-b border-white/[0.06]">
                     <div className="flex items-center gap-2.5">
                         <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                             <Network size={16} />
@@ -404,7 +475,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                     </div>
 
                     <div className="flex items-center gap-2">
-                        <div className="flex bg-slate-950/70 p-1 rounded-xl border border-slate-800" role="group" aria-label="Topology View Mode">
+                        <div className="flex flex-wrap bg-white/[0.03] p-1 rounded-xl border border-white/[0.08] backdrop-blur-md" role="group" aria-label="Topology View Mode">
                             <button
                                 type="button"
                                 onClick={() => setViewMode('list')}
@@ -437,7 +508,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
                 {viewMode === 'list' ? (
                     <div className="space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/60 border border-slate-800/70 text-xs text-slate-400">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 text-xs text-slate-400">
                             <span className="font-medium text-slate-300">
                                 Showing {isListExpanded ? `all ${totalManagedServicesCount}` : `${displayedCards.length} of ${totalManagedServicesCount}`} services
                             </span>
@@ -446,7 +517,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                                     <button
                                         type="button"
                                         onClick={() => setIsListExpanded(!isListExpanded)}
-                                        className="min-h-[44px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition-colors flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                        className="min-h-[44px] px-3.5 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-slate-200 font-semibold text-xs transition-colors flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500"
                                         aria-label={isListExpanded ? 'Collapse service list to preview' : 'Expand service list to show all services'}
                                     >
                                         {isListExpanded ? (
@@ -474,139 +545,79 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                        <div role="list" aria-label="Managed service health" className="divide-y divide-white/[0.06]">
                             {displayedCards.map(([serviceName, serviceInfo]) => {
                                 const hasException = isServiceException(serviceInfo);
                                 const isCore = isCoreService(serviceName);
-                                if (hasException) {
-                                    const exceptionDetail = getServiceExceptionDetail(serviceInfo);
-                                    const isInstallFailure = serviceInfo.job_status === 'install_failed' || (serviceInfo.last_job?.action === 'install' && serviceInfo.last_job?.status !== 'completed');
-                                    const badgeLabel = isInstallFailure ? 'Install Failed' : (serviceInfo.status === 'error' ? 'Failed' : 'Degraded');
-                                    return (
-                                        <div key={serviceName} className="bg-slate-950/70 border border-rose-500/40 rounded-xl p-3 flex flex-col justify-between">
-                                            <div>
-                                                <div className="space-y-1.5 mb-1">
-                                                    <div className="text-sm font-bold text-slate-100 whitespace-normal break-words leading-tight">
-                                                        {formatServiceName(serviceName)}
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                        {isCore && (
-                                                            <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                                                                Core
-                                                            </span>
-                                                        )}
-                                                        <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                                                            <AlertTriangle size={11} className="text-rose-400" /> {badgeLabel}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <p className="text-xs text-rose-400 mt-1 font-medium whitespace-normal break-words" title={exceptionDetail}>
-                                                    {exceptionDetail}
-                                                </p>
-                                            </div>
-                                            <div className="flex items-center justify-between text-[13px] text-slate-300 mt-2 font-mono">
-                                                {serviceInfo.version ? (
-                                                    <span>v{serviceInfo.version}</span>
-                                                ) : (
-                                                    <span className="text-slate-500">--</span>
-                                                )}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setActiveTab('services')}
-                                                    className="text-rose-400 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-rose-500 rounded p-1"
-                                                    title={`Inspect ${serviceName}`}
-                                                >
-                                                    <ExternalLink size={13} />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    );
-                                }
-
-                                if (serviceInfo.status === 'running') {
-                                    return (
-                                        <div key={serviceName} className={`bg-slate-950/60 rounded-xl p-3 flex flex-col justify-between ${isCore ? 'border border-indigo-500/30' : 'border border-slate-800/80'}`}>
-                                            <div>
-                                                <div className="space-y-1.5 mb-1">
-                                                    <div className="text-sm font-bold text-slate-100 whitespace-normal break-words leading-tight">
-                                                        {formatServiceName(serviceName)}
-                                                    </div>
-                                                    <div className="flex flex-wrap items-center gap-1.5">
-                                                        {isCore && (
-                                                            <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                                                                Core
-                                                            </span>
-                                                        )}
-                                                        <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                                                            <CheckCircle2 size={11} className="text-emerald-400" /> Running
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <p className="text-xs text-slate-400 mt-1 whitespace-normal break-words">
-                                                    {serviceInfo.uptime ? `Up ${serviceInfo.uptime}` : (isCore ? 'Core System Daemon' : 'Operational')}
-                                                </p>
-                                            </div>
-                                            <div className="flex items-center justify-between text-[13px] text-slate-300 mt-2 font-mono">
-                                                {serviceInfo.version ? (
-                                                    <span>v{serviceInfo.version}</span>
-                                                ) : (
-                                                    <span className="text-slate-500">--</span>
-                                                )}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setActiveTab('services')}
-                                                    className="text-slate-400 hover:text-slate-200 focus-visible:ring-2 focus-visible:ring-indigo-500 rounded p-1"
-                                                    title={`Inspect ${serviceName}`}
-                                                >
-                                                    <ExternalLink size={13} />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    );
-                                }
+                                const isRunning = serviceInfo.status === 'running';
+                                const isInstallFailure = serviceInfo.job_status === 'install_failed' || (serviceInfo.last_job?.action === 'install' && serviceInfo.last_job?.status !== 'completed');
+                                const statusLabel = hasException
+                                    ? (isInstallFailure ? 'Install Failed' : serviceInfo.status === 'error' ? 'Failed' : 'Degraded')
+                                    : isRunning ? 'Running' : 'Stopped';
+                                const exceptionDetail = hasException ? getServiceExceptionDetail(serviceInfo) : '';
+                                const detail = hasException
+                                    ? exceptionDetail
+                                    : isRunning
+                                        ? (serviceInfo.uptime ? `Up ${serviceInfo.uptime}` : isCore ? 'Core System Daemon' : 'Operational')
+                                        : isCore ? 'Core System Daemon (Standby)' : 'Inactive daemon';
 
                                 return (
-                                    <div key={serviceName} className="bg-slate-950/40 border border-slate-800/60 rounded-xl p-3 flex flex-col justify-between opacity-80">
-                                        <div>
-                                            <div className="space-y-1.5 mb-1">
-                                                <div className="text-sm font-bold text-slate-200 whitespace-normal break-words leading-tight">
+                                    <div key={serviceName} role="listitem" className="flex items-start gap-3 py-3 first:pt-0 last:pb-0 min-w-0">
+                                        <span aria-hidden="true" className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${
+                                            hasException ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.4)]' : isRunning ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.3)]' : 'bg-slate-500'
+                                        }`} />
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                <div className="text-sm font-semibold text-slate-100 whitespace-normal break-words leading-tight">
                                                     {formatServiceName(serviceName)}
                                                 </div>
-                                                <div className="flex flex-wrap items-center gap-1.5">
-                                                    {isCore && (
-                                                        <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                                                            Core
-                                                        </span>
-                                                    )}
-                                                    <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                                                        <PauseCircle size={11} /> Stopped
-                                                    </span>
-                                                </div>
+                                                {isCore && <span className="text-xs font-medium text-indigo-300">Core</span>}
+                                                <span className={`inline-flex items-center gap-1 text-xs font-medium ${
+                                                    hasException ? 'text-rose-300' : isRunning ? 'text-emerald-300' : 'text-slate-400'
+                                                }`}>
+                                                    {hasException ? <AlertTriangle size={11} /> : isRunning ? <CheckCircle2 size={11} /> : <PauseCircle size={11} />}
+                                                    {statusLabel}
+                                                </span>
                                             </div>
-                                            <p className="text-xs text-slate-500 mt-1">{isCore ? 'Core System Daemon (Standby)' : 'Inactive daemon'}</p>
+                                            <p className={`text-xs mt-1 whitespace-normal break-words ${hasException ? 'text-rose-300/80' : 'text-slate-400'}`} title={exceptionDetail || undefined}>
+                                                {detail}
+                                            </p>
                                         </div>
-                                        <div className="text-[13px] text-slate-300 mt-2 font-mono">
-                                            {serviceInfo.version ? `v${serviceInfo.version} · Standby` : 'Standby (non-critical)'}
+                                        <div className="flex shrink-0 items-center gap-1 text-xs font-mono text-slate-400">
+                                            <span className="max-w-[7rem] break-words text-right">
+                                                {!hasException && !isRunning
+                                                    ? (serviceInfo.version ? `v${serviceInfo.version} · Standby` : 'Standby (non-critical)')
+                                                    : serviceInfo.version ? `v${serviceInfo.version}` : '--'}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveTab('services')}
+                                                aria-label={`Inspect ${serviceName}`}
+                                                title={`Inspect ${serviceName}`}
+                                                className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${hasException ? 'text-rose-400 hover:text-rose-200' : 'text-slate-400 hover:text-slate-200'}`}
+                                            >
+                                                <ExternalLink size={13} />
+                                            </button>
                                         </div>
                                     </div>
                                 );
                             })}
                         </div>
                         {displayedCards.length === 0 && (
-                            <div className="p-4 rounded-xl bg-slate-950/40 border border-slate-800/60 text-xs text-slate-400 text-center">
+                            <div className="py-6 text-xs text-slate-400 text-center">
                                 No managed services registered.
                             </div>
                         )}
                     </div>
                 ) : (
                     <div>
-                        <div className="relative w-full bg-slate-950/60 rounded-xl border border-slate-800/60 overflow-hidden">
-                            <div className="absolute top-2.5 right-2.5 z-20 flex items-center gap-1 bg-slate-900/90 border border-slate-800 rounded-lg p-1">
+                        <div ref={containerRef} className="relative w-full min-w-0 max-h-[420px] overflow-y-auto obs-scroller">
+                            <div className="sticky top-0 z-20 flex justify-end items-center gap-1 glass-panel backdrop-blur-xl border border-white/[0.08] rounded-lg p-1 w-fit ml-auto mb-2">
                                 <button
                                     type="button"
                                     onClick={handleZoomIn}
                                     aria-label="Zoom in"
-                                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-slate-800 transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    className="min-h-[40px] min-w-[40px] obs-touch-target-standard flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-white/[0.06] transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
                                 >
                                     <ZoomIn size={16} />
                                 </button>
@@ -614,7 +625,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                                     type="button"
                                     onClick={handleZoomOut}
                                     aria-label="Zoom out"
-                                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-slate-800 transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    className="min-h-[40px] min-w-[40px] obs-touch-target-standard flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-white/[0.06] transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
                                 >
                                     <ZoomOut size={16} />
                                 </button>
@@ -622,7 +633,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                                     type="button"
                                     onClick={handleResetZoom}
                                     aria-label="Reset zoom"
-                                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-slate-800 transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    className="min-h-[40px] min-w-[40px] obs-touch-target-standard flex items-center justify-center rounded text-slate-300 hover:text-white hover:bg-white/[0.06] transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500"
                                 >
                                     <RotateCcw size={14} />
                                 </button>
@@ -630,7 +641,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                             <svg ref={svgRef} className="w-full cursor-grab active:cursor-grabbing touch-none block" />
                         </div>
                         {selectedNodeId && (
-                            <div className="mt-2.5 px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between text-xs">
+                            <div className="mt-2.5 py-2 border-t border-white/[0.06] flex items-center justify-between text-xs">
                                 <div className="flex items-center gap-2">
                                     <span className="font-bold text-slate-200">{selectedNodeId}</span>
                                     <span className="text-slate-400">Node details active</span>
@@ -638,7 +649,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                                 <button
                                     type="button"
                                     onClick={() => setSelectedNodeId(null)}
-                                    className="text-slate-400 hover:text-slate-200 px-2 py-1 rounded text-xs focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    className="min-h-[40px] obs-touch-target-standard text-slate-400 hover:text-slate-200 px-2 py-1 rounded text-xs focus-visible:ring-2 focus-visible:ring-indigo-500"
                                 >
                                     Dismiss
                                 </button>
@@ -648,8 +659,8 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 )}
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 mt-3.5">
-                <div className="bg-slate-950/60 rounded-xl px-3.5 py-2.5 border border-slate-800/60 flex items-center justify-between">
+            <div className="grid grid-cols-2 gap-0 mt-3.5 pt-3 border-t border-white/[0.06] divide-x divide-white/[0.06]">
+                <div className="min-w-0 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pr-3 last:pr-0 last:pl-3">
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
                         {viewMode === 'list' ? 'Registered Services' : 'Indexed Nodes'}
                     </span>
@@ -657,7 +668,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                         {viewMode === 'list' ? `${totalManagedServicesCount} Services` : `${totalNodesCount} Nodes`}
                     </span>
                 </div>
-                <div className="bg-slate-950/60 rounded-xl px-3.5 py-2.5 border border-slate-800/60 flex items-center justify-between">
+                <div className="min-w-0 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pr-3 last:pr-0 last:pl-3">
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
                         {viewMode === 'list' ? 'Healthy Services' : 'Healthy Daemons'}
                     </span>
