@@ -86,25 +86,42 @@ if ! command -v cargo >/dev/null 2>&1; then
     apt-get install --no-remove -y -qq cargo rustc >> "$LOGFILE" 2>&1
 fi
 
-report_progress 35 "Resolving latest McVNC release tag..."
+report_progress 35 "Resolving McVNC release tag..."
+MCVNC_REPO="McEveritts/McVNC"
+REPO_URL="https://github.com/${MCVNC_REPO}.git"
 TMP_DIR="$(mktemp -d /tmp/af-mcvnc-XXXXXX)"
 chmod 755 "$TMP_DIR"
-if ! curl -fsSL https://api.github.com/repos/McEveritts/McVNC/tags -o "${TMP_DIR}/tags.json"; then
-    print_error "Unable to resolve a McVNC release tag from McEveritts/McVNC."
-    exit 1
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TAG="${AF_TARGET_VERSION}"
+else
+    TAG="$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+    if [[ -z "$TAG" ]]; then
+        TAG="$(curl -fsSL "https://api.github.com/repos/${MCVNC_REPO}/tags" 2>/dev/null | jq -r '.[].name' 2>/dev/null | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+    fi
+    if [[ -z "$TAG" ]]; then
+        TAG="v0.11.0"
+    fi
 fi
-TAG="$(jq -er '.[0].name' "${TMP_DIR}/tags.json")" || {
-    print_error "Unable to resolve a McVNC release tag from McEveritts/McVNC."
-    exit 1
-}
-if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ ! "$TAG" =~ ^v?[0-9]+(\.[0-9]+)+$ ]]; then
     print_error "Invalid McVNC tag format: ${TAG}"
     exit 1
 fi
 VERSION="${TAG#v}"
 
 report_progress 55 "Cloning and compiling McVNC ${VERSION}..."
-git clone --depth 1 --branch "$TAG" https://github.com/McEveritts/McVNC.git "${TMP_DIR}/src" >> "$LOGFILE" 2>&1
+if ! git clone --depth 1 --branch "$TAG" "$REPO_URL" "${TMP_DIR}/src" >> "$LOGFILE" 2>&1; then
+    if [[ "$TAG" =~ ^v ]]; then
+        ALT_TAG="${TAG#v}"
+    else
+        ALT_TAG="v${TAG}"
+    fi
+    git clone --depth 1 --branch "$ALT_TAG" "$REPO_URL" "${TMP_DIR}/src" >> "$LOGFILE" 2>&1 || {
+        print_error "Failed to clone McVNC repository at tag ${TAG}."
+        exit 1
+    }
+    TAG="$ALT_TAG"
+    VERSION="${TAG#v}"
+fi
 cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml" >> "$LOGFILE" 2>&1
 RUNTIME_BACKUP="$(mktemp -d /tmp/af-mcvnc-runtime.XXXXXX)"
 if [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl is-active --quiet af-mcvnc.service 2>/dev/null; then

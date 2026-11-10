@@ -1,9 +1,27 @@
 use af_models::{
-    AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse, HostsRunnerRequest,
+    AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse,
     NetworkRunnerRequest, Package, PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest,
     RunnerResponse, SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest,
     SelfUpdateStatusRequest, SystemctlRequest,
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostsUpdateRequest {
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub action: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub domain: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub domains: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub ip: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_domains: Option<Vec<String>>,
+}
+
+pub type HostsRunnerRequest = HostsUpdateRequest;
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -3264,98 +3282,379 @@ where
     }
 }
 
-async fn handle_hosts(Json(req): Json<HostsRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
-    let mut domains = req.domains;
-    if domains.is_empty() && !req.domain.is_empty() {
-        domains.push(req.domain);
+pub fn validate_hosts_domain(domain: &str) -> Result<String, RunnerError> {
+    if domain.is_empty()
+        || domain != domain.trim()
+        || domain.len() > 253
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+        || domain.chars().any(|c| matches!(c, ' ' | '\t' | '\r' | '\n' | ';' | '"' | '\'' | '$' | '`' | '\\'))
+        || domain.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+    {
+        return Err(RunnerError::InvalidRequest(format!(
+            "invalid domain format: {:?}",
+            domain
+        )));
     }
-    if domains.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: "no domains specified".to_string(),
-            }),
-        );
+    Ok(domain.to_string())
+}
+
+pub async fn apply_hosts_update(req: HostsUpdateRequest) -> Result<RunnerResponse, RunnerError> {
+    let mut domains = req.domains.clone();
+    if domains.is_empty() && !req.domain.is_empty() {
+        domains.push(req.domain.clone());
+    }
+    let is_reconcile = req.action.eq_ignore_ascii_case("reconcile");
+    let is_remove = req.action.eq_ignore_ascii_case("remove");
+    if domains.is_empty() && !is_reconcile {
+        return Err(RunnerError::InvalidRequest("no domains specified".to_string()));
     }
 
+    let ip = if !req.ip.is_empty() {
+        validate_hosts_ip(&req.ip)?;
+        req.ip.as_str()
+    } else {
+        "127.0.0.1"
+    };
+
+    let mut validated_domains = Vec::with_capacity(domains.len());
     for d in &domains {
-        if !d.ends_with(".aether.local")
-            || d.chars()
-                .any(|c| matches!(c, ' ' | '\t' | '\r' | '\n' | ';' | '"' | '\'' | '$' | '`'))
-            || d.len() > 253
-        {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(RunnerResponse {
-                    success: false,
-                    output: String::new(),
-                    error: format!("invalid domain format: {:?}", d),
-                }),
-            );
+        let val = validate_hosts_domain(d)?;
+        validated_domains.push(val);
+    }
+
+    let effective_provider_ip = if let Some(ref pip) = req.provider_ip {
+        validate_hosts_ip(pip)?;
+        pip.as_str()
+    } else {
+        ip
+    };
+
+    let mut validated_provider_domains = Vec::new();
+    if let Some(ref pdomains) = req.provider_domains {
+        for d in pdomains {
+            let val = validate_hosts_domain(d)?;
+            validated_provider_domains.push(val);
         }
     }
+    let effective_provider_domains: &[String] = if req.provider_domains.is_some() {
+        &validated_provider_domains
+    } else {
+        &validated_domains
+    };
 
-    let remove = req.action.eq_ignore_ascii_case("remove");
-    match update_hosts_file_local(&domains, remove) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(RunnerResponse {
-                success: true,
-                output: "hosts updated".to_string(),
-                error: String::new(),
-            }),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: e.to_string(),
-            }),
-        ),
+    if is_reconcile {
+        reconcile_hosts_file(&validated_domains, ip)?;
+        sync_dns_provider_files_with_mode(effective_provider_ip, effective_provider_domains, true)
+            .map_err(RunnerError::from)?;
+        Ok(RunnerResponse {
+            success: true,
+            output: "hosts reconciled".to_string(),
+            error: String::new(),
+        })
+    } else if is_remove {
+        update_hosts_file_local(&validated_domains, true).map_err(RunnerError::from)?;
+        remove_dns_provider_files(effective_provider_domains).map_err(RunnerError::from)?;
+        Ok(RunnerResponse {
+            success: true,
+            output: "hosts updated".to_string(),
+            error: String::new(),
+        })
+    } else {
+        update_hosts_file(&validated_domains, ip)?;
+        sync_dns_provider_files_with_mode(effective_provider_ip, effective_provider_domains, false)
+            .map_err(RunnerError::from)?;
+        Ok(RunnerResponse {
+            success: true,
+            output: "hosts updated".to_string(),
+            error: String::new(),
+        })
     }
 }
 
-pub fn update_hosts_file_local(domains: &[String], remove: bool) -> anyhow::Result<()> {
-    let hosts_path = env::var("AETHERFLOW_HOSTS_FILE").unwrap_or_else(|_| "/etc/hosts".to_string());
-    let existing = fs::read_to_string(&hosts_path).unwrap_or_default();
+async fn handle_hosts(Json(req): Json<HostsRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
+    match apply_hosts_update(req).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)),
+        Err(e) => {
+            let status = match e {
+                RunnerError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (
+                status,
+                Json(RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: e.to_string(),
+                }),
+            )
+        }
+    }
+}
 
-    const START_MARKER: &str = "# --- AETHERFLOW INTERNAL DNS ---";
-    const END_MARKER: &str = "# --- END AETHERFLOW INTERNAL DNS ---";
+pub fn filter_hosts_line<F>(line: &str, should_filter_host: F) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Some(line.to_string());
+    }
 
-    let mut outside_lines = Vec::new();
-    let mut managed_domains = Vec::new();
+    // Split off trailing comment if present
+    let (body, comment) = match line.split_once('#') {
+        Some((b, c)) => (b, Some(c)),
+        None => (line, None),
+    };
+
+    let mut tokens = body.split_whitespace();
+    let ip = match tokens.next() {
+        Some(ip) => ip,
+        None => return Some(line.to_string()),
+    };
+
+    let remaining_hosts: Vec<&str> = tokens.filter(|host| !should_filter_host(host)).collect();
+
+    if remaining_hosts.is_empty() {
+        if let Some(c) = comment {
+            let inline_comment = format!("#{}", c);
+            let trimmed_comment = inline_comment.trim_start();
+            if trimmed_comment != "#" && !trimmed_comment[1..].trim().is_empty() {
+                return Some(trimmed_comment.to_string());
+            }
+        }
+        None
+    } else {
+        let hosts_str = remaining_hosts.join("\t");
+        let line_content = format!("{}\t{}", ip, hosts_str);
+        if let Some(c) = comment {
+            Some(format!("{} #{}", line_content, c))
+        } else {
+            Some(line_content)
+        }
+    }
+}
+
+pub fn remove_hosts_file_at_path(hosts_path: &Path, domains: &[String]) -> anyhow::Result<()> {
+    update_hosts_file_at_path(hosts_path, domains, true)
+}
+
+fn resolve_hosts_lock_path(hosts_path: &Path) -> PathBuf {
+    if hosts_path == Path::new("/etc/hosts") {
+        let var_lock = Path::new("/var/lock");
+        if var_lock.is_dir() {
+            var_lock.join("aetherflow-hosts.lock")
+        } else {
+            let run_lock = Path::new("/run/lock");
+            if run_lock.is_dir() {
+                run_lock.join("aetherflow-hosts.lock")
+            } else {
+                hosts_path.with_extension("lock")
+            }
+        }
+    } else {
+        hosts_path.with_extension("lock")
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RunnerError {
+    #[error("{0}")]
+    InvalidRequest(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+pub fn validate_hosts_ip(ip: &str) -> Result<std::net::IpAddr, RunnerError> {
+    if ip.is_empty()
+        || ip != ip.trim()
+        || ip.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(RunnerError::InvalidRequest(
+            "Invalid IP address for hosts modification".into(),
+        ));
+    }
+    ip.parse::<std::net::IpAddr>()
+        .map_err(|_| RunnerError::InvalidRequest("Invalid IP address for hosts modification".into()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostsModifyAction<'a> {
+    Update { ip: &'a str },
+    Remove,
+    Reconcile { ip: &'a str },
+}
+
+pub fn modify_hosts_file_at_path(
+    hosts_path: &Path,
+    lock_path: &Path,
+    domains: &[String],
+    action: HostsModifyAction,
+) -> Result<(), RunnerError> {
+    let canonical_ip_opt = match action {
+        HostsModifyAction::Update { ip } | HostsModifyAction::Reconcile { ip } => {
+            let validated_ip = validate_hosts_ip(ip)?;
+            let canonical_ip = validated_ip.to_string();
+            Some(canonical_ip)
+        }
+        HostsModifyAction::Remove => None,
+    };
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|e| anyhow::anyhow!("failed to open hosts lockfile {}: {}", lock_path.display(), e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(anyhow::anyhow!(
+                "failed to acquire exclusive lock on {}: {}",
+                lock_path.display(),
+                std::io::Error::last_os_error()
+            ).into());
+        }
+    }
+
+    let existing = match fs::read_to_string(hosts_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to read hosts file {}: {}",
+                hosts_path.display(),
+                e
+            ).into());
+        }
+    };
+
+    let is_start_marker = |t: &str| -> bool {
+        t == "# BEGIN AETHERFLOW MANAGED BLOCK" || t == "# --- AETHERFLOW INTERNAL DNS ---"
+    };
+    let is_end_marker = |t: &str| -> bool {
+        t == "# END AETHERFLOW MANAGED BLOCK" || t == "# --- END AETHERFLOW INTERNAL DNS ---"
+    };
+
+    let chosen_start_marker = if existing.contains("# --- AETHERFLOW INTERNAL DNS ---") {
+        "# --- AETHERFLOW INTERNAL DNS ---"
+    } else {
+        "# BEGIN AETHERFLOW MANAGED BLOCK"
+    };
+    let chosen_end_marker = if existing.contains("# --- END AETHERFLOW INTERNAL DNS ---") {
+        "# --- END AETHERFLOW INTERNAL DNS ---"
+    } else {
+        "# END AETHERFLOW MANAGED BLOCK"
+    };
+
+    let mut outside_lines: Vec<String> = Vec::new();
+    let mut managed_comments: Vec<String> = Vec::new();
+    let mut existing_managed: Vec<(String, String)> = Vec::new(); // (domain, ip)
     let mut in_block = false;
 
     for line in existing.lines() {
         let trimmed = line.trim();
-        if trimmed == START_MARKER {
+        if is_start_marker(trimmed) {
             in_block = true;
             continue;
         }
-        if trimmed == END_MARKER {
+        if is_end_marker(trimmed) {
             in_block = false;
             continue;
         }
+
         if in_block {
-            if let Some(dom) = trimmed.split_whitespace().nth(1) {
-                if !managed_domains.contains(&dom.to_string()) {
-                    managed_domains.push(dom.to_string());
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('#') {
+                managed_comments.push(line.to_string());
+                continue;
+            }
+
+            let (code_part, comment_opt) = match line.split_once('#') {
+                Some((b, c)) => (b.trim(), Some(c)),
+                None => (line.trim(), None),
+            };
+            let mut tokens = code_part.split_whitespace();
+            let line_ip = match tokens.next() {
+                Some(ip) => ip,
+                None => {
+                    if let Some(c) = comment_opt {
+                        managed_comments.push(format!("#{}", c));
+                    }
+                    continue;
+                }
+            };
+            let mut non_aether = Vec::new();
+            for tok in tokens {
+                if tok.ends_with(".aether.local") {
+                    if !existing_managed.iter().any(|(d, _)| d == tok) {
+                        existing_managed.push((tok.to_string(), line_ip.to_string()));
+                    }
+                } else {
+                    non_aether.push(tok);
                 }
             }
+            if !non_aether.is_empty() {
+                let line_str = format!("{}\t{}", line_ip, non_aether.join("\t"));
+                if let Some(c) = comment_opt {
+                    outside_lines.push(format!("{} #{}", line_str, c));
+                } else {
+                    outside_lines.push(line_str);
+                }
+            } else if let Some(c) = comment_opt {
+                managed_comments.push(format!("#{}", c));
+            }
         } else {
-            outside_lines.push(line.to_string());
+            let filter_fn = |tok: &str| -> bool {
+                match action {
+                    HostsModifyAction::Update { .. } => domains.contains(&tok.to_string()),
+                    HostsModifyAction::Remove => domains.contains(&tok.to_string()),
+                    HostsModifyAction::Reconcile { .. } => {
+                        tok.ends_with(".aether.local") || domains.contains(&tok.to_string())
+                    }
+                }
+            };
+            if let Some(filtered) = filter_hosts_line(line, filter_fn) {
+                outside_lines.push(filtered);
+            }
         }
     }
 
-    if remove {
-        managed_domains.retain(|d| !domains.contains(d));
-    } else {
-        for d in domains {
-            if !managed_domains.contains(d) {
-                managed_domains.push(d.clone());
+    let mut final_managed: Vec<(String, String)> = Vec::new();
+    match action {
+        HostsModifyAction::Update { .. } => {
+            let canonical_ip = canonical_ip_opt.as_deref().unwrap_or("");
+            for (dom, old_ip) in existing_managed {
+                if !domains.contains(&dom) {
+                    final_managed.push((dom, old_ip));
+                }
+            }
+            for dom in domains {
+                if !final_managed.iter().any(|(d, _)| d == dom) {
+                    final_managed.push((dom.clone(), canonical_ip.to_string()));
+                }
+            }
+        }
+        HostsModifyAction::Remove => {
+            for (dom, old_ip) in existing_managed {
+                if !domains.contains(&dom) {
+                    final_managed.push((dom, old_ip));
+                }
+            }
+        }
+        HostsModifyAction::Reconcile { .. } => {
+            let canonical_ip = canonical_ip_opt.as_deref().unwrap_or("");
+            for dom in domains {
+                if !final_managed.iter().any(|(d, _)| d == dom) {
+                    final_managed.push((dom.clone(), canonical_ip.to_string()));
+                }
             }
         }
     }
@@ -3364,17 +3663,613 @@ pub fn update_hosts_file_local(domains: &[String], remove: bool) -> anyhow::Resu
     if !out.ends_with('\n') && !out.is_empty() {
         out.push('\n');
     }
-    if !managed_domains.is_empty() {
-        out.push_str(START_MARKER);
+    if !final_managed.is_empty() || !managed_comments.is_empty() {
+        out.push_str(chosen_start_marker);
         out.push('\n');
-        for d in &managed_domains {
-            out.push_str(&format!("127.0.0.1\t{}\n", d));
+        for c in &managed_comments {
+            out.push_str(c);
+            out.push('\n');
         }
-        out.push_str(END_MARKER);
+        for (dom, ip) in &final_managed {
+            out.push_str(&format!("{}\t{}\n", ip, dom));
+        }
+        out.push_str(chosen_end_marker);
         out.push('\n');
     }
 
-    fs::write(&hosts_path, out)?;
+    write_hosts_file_atomically(hosts_path, &out).map_err(RunnerError::from)
+}
+
+pub fn update_hosts_file(domains: &[String], ip: &str) -> Result<(), RunnerError> {
+    let validated_ip = validate_hosts_ip(ip)?;
+    let canonical_ip = validated_ip.to_string();
+    let hosts_path = env::var("AF_HOSTS_FILE")
+        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
+        .unwrap_or_else(|_| "/etc/hosts".to_string());
+    let path = Path::new(&hosts_path);
+    let lock_path = resolve_hosts_lock_path(path);
+    update_hosts_file_with_ip_at_path(path, &lock_path, domains, &canonical_ip, false)
+}
+
+pub fn update_hosts_file_local(domains: &[String], remove: bool) -> anyhow::Result<()> {
+    let hosts_path = env::var("AF_HOSTS_FILE")
+        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
+        .unwrap_or_else(|_| "/etc/hosts".to_string());
+    update_hosts_file_at_path(Path::new(&hosts_path), domains, remove)
+}
+
+pub fn update_hosts_file_with_ip_at_path(
+    hosts_path: &Path,
+    lock_path: &Path,
+    domains: &[String],
+    ip: &str,
+    remove: bool,
+) -> Result<(), RunnerError> {
+    if remove {
+        modify_hosts_file_at_path(hosts_path, lock_path, domains, HostsModifyAction::Remove)
+    } else {
+        let validated_ip = validate_hosts_ip(ip)?;
+        let canonical_ip = validated_ip.to_string();
+        modify_hosts_file_at_path(hosts_path, lock_path, domains, HostsModifyAction::Update { ip: &canonical_ip })
+    }
+}
+
+pub fn update_hosts_file_at_path(hosts_path: &Path, domains: &[String], remove: bool) -> anyhow::Result<()> {
+    let lock_path = resolve_hosts_lock_path(hosts_path);
+    if remove {
+        modify_hosts_file_at_path(hosts_path, &lock_path, domains, HostsModifyAction::Remove)?;
+    } else {
+        let validated_ip = validate_hosts_ip("127.0.0.1")?;
+        let canonical_ip = validated_ip.to_string();
+        modify_hosts_file_at_path(hosts_path, &lock_path, domains, HostsModifyAction::Update { ip: &canonical_ip })?;
+    }
+    Ok(())
+}
+
+pub fn reconcile_hosts_file_at_path(
+    hosts_path: &Path,
+    lock_path: &Path,
+    domains: &[String],
+    ip: &str,
+) -> Result<(), RunnerError> {
+    let validated_ip = validate_hosts_ip(ip)?;
+    let canonical_ip = validated_ip.to_string();
+    modify_hosts_file_at_path(hosts_path, lock_path, domains, HostsModifyAction::Reconcile { ip: &canonical_ip })
+}
+
+pub fn reconcile_hosts_file(domains: &[String], ip: &str) -> Result<(), RunnerError> {
+    let validated_ip = validate_hosts_ip(ip)?;
+    let canonical_ip = validated_ip.to_string();
+    let hosts_path = env::var("AF_HOSTS_FILE")
+        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
+        .unwrap_or_else(|_| "/etc/hosts".to_string());
+    let path = Path::new(&hosts_path);
+    let lock_path = resolve_hosts_lock_path(path);
+    reconcile_hosts_file_at_path(path, &lock_path, domains, &canonical_ip)
+}
+
+pub fn sync_dns_provider_files(ip: &str, domains: &[String]) -> anyhow::Result<()> {
+    sync_dns_provider_files_with_mode(ip, domains, true)
+}
+
+fn resolve_provider_dir(env_var: &str, default_path: &str) -> PathBuf {
+    if let Ok(dir) = env::var(env_var) {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    for root_key in ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"] {
+        if let Ok(root) = env::var(root_key) {
+            let root_trim = root.trim();
+            if !root_trim.is_empty() {
+                let rel = default_path.trim_start_matches(['/', '\\']);
+                return Path::new(root_trim).join(rel);
+            }
+        }
+    }
+    PathBuf::from(default_path)
+}
+
+fn render_dnsmasq_content(
+    existing: Option<&str>,
+    canonical_ip: &str,
+    domains: &[String],
+    is_reconcile: bool,
+) -> String {
+    let mut domain_set: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    if !is_reconcile {
+        if let Some(content) = existing {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("address=/") {
+                    if let Some((dom, ip)) = rest.split_once('/') {
+                        let dom_clean = dom.trim().to_ascii_lowercase();
+                        if !dom_clean.is_empty() {
+                            domain_set.insert(dom_clean, ip.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for d in domains {
+        domain_set.insert(d.trim().to_ascii_lowercase(), canonical_ip.to_string());
+    }
+    let mut lines = vec!["# Automatically managed by AetherFlow".to_string()];
+    for (d, ip) in domain_set {
+        lines.push(format!("address=/{}/{}", d, ip));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+pub fn reconcile_pihole_custom_list_content(
+    existing: &str,
+    canonical_ip: &str,
+    domains: &[String],
+    is_reconcile: bool,
+) -> String {
+    let target_domains: HashSet<String> = domains.iter().map(|d| d.to_ascii_lowercase()).collect();
+    let mut emitted_domains: HashSet<String> = HashSet::new();
+    let mut out_lines: Vec<String> = Vec::new();
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out_lines.push(line.to_string());
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            if trimmed == "# --- AETHERFLOW MANAGED DNS ---"
+                || trimmed == "# --- END AETHERFLOW MANAGED DNS ---"
+            {
+                continue;
+            }
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        let (entry_part, comment_part) = match line.find('#') {
+            Some(idx) => (&line[..idx], Some(&line[idx..])),
+            None => (line, None),
+        };
+
+        let parts: Vec<&str> = entry_part.split_whitespace().collect();
+        if parts.len() < 2 {
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        let line_ip = parts[0];
+        let hostnames = &parts[1..];
+        let is_line_tagged_managed = comment_part
+            .map(|c| c.contains("aetherflow-managed"))
+            .unwrap_or(false);
+        let single_host_managed = is_line_tagged_managed && hostnames.len() == 1;
+
+        let mut unmanaged_tokens: Vec<&str> = Vec::new();
+        let mut managed_tokens: Vec<&str> = Vec::new();
+
+        for host in hostnames {
+            let h_lower = host.to_ascii_lowercase();
+            let is_managed = h_lower.ends_with(".aether.local")
+                || target_domains.contains(&h_lower)
+                || single_host_managed;
+            if is_managed {
+                managed_tokens.push(host);
+            } else {
+                unmanaged_tokens.push(host);
+            }
+        }
+
+        if !unmanaged_tokens.is_empty() {
+            let mut preserved_line = format!("{} {}", line_ip, unmanaged_tokens.join(" "));
+            if let Some(c) = comment_part {
+                let trimmed_c = c.trim();
+                if !trimmed_c.is_empty() && trimmed_c != "# aetherflow-managed" {
+                    preserved_line.push(' ');
+                    preserved_line.push_str(trimmed_c);
+                }
+            }
+            out_lines.push(preserved_line);
+
+            if !is_reconcile {
+                for m in managed_tokens {
+                    let m_lower = m.to_ascii_lowercase();
+                    if !target_domains.contains(&m_lower) && !emitted_domains.contains(&m_lower) {
+                        emitted_domains.insert(m_lower);
+                        out_lines.push(format!("{} {} # aetherflow-managed", line_ip, m));
+                    }
+                }
+            }
+        } else {
+            for m in managed_tokens {
+                let m_lower = m.to_ascii_lowercase();
+                if target_domains.contains(&m_lower) {
+                    if !emitted_domains.contains(&m_lower) {
+                        emitted_domains.insert(m_lower.clone());
+                        let comment = if let Some(c) = comment_part {
+                            let trimmed_c = c.trim();
+                            if !trimmed_c.is_empty() && trimmed_c != "# aetherflow-managed" {
+                                trimmed_c
+                            } else {
+                                "# aetherflow-managed"
+                            }
+                        } else {
+                            "# aetherflow-managed"
+                        };
+                        out_lines.push(format!("{} {} {}", canonical_ip, m, comment));
+                    }
+                } else if !is_reconcile && !emitted_domains.contains(&m_lower) {
+                    emitted_domains.insert(m_lower.clone());
+                    let comment = if let Some(c) = comment_part {
+                        let trimmed_c = c.trim();
+                        if !trimmed_c.is_empty() {
+                            trimmed_c
+                        } else {
+                            "# aetherflow-managed"
+                        }
+                    } else {
+                        "# aetherflow-managed"
+                    };
+                    out_lines.push(format!("{} {} {}", line_ip, m, comment));
+                }
+            }
+        }
+    }
+
+    for d in domains {
+        let d_lower = d.to_ascii_lowercase();
+        if !emitted_domains.contains(&d_lower) {
+            emitted_domains.insert(d_lower);
+            out_lines.push(format!("{} {} # aetherflow-managed", canonical_ip, d));
+        }
+    }
+
+    let mut result = out_lines.join("\n");
+    if !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+pub fn remove_pihole_custom_list_content(existing: &str, domains_to_remove: &[String]) -> String {
+    if domains_to_remove.is_empty() {
+        return existing.to_string();
+    }
+    let lower_remove: HashSet<String> = domains_to_remove
+        .iter()
+        .map(|d| d.to_ascii_lowercase())
+        .collect();
+
+    let mut out_lines: Vec<String> = Vec::new();
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        let (entry_part, comment_part) = match line.find('#') {
+            Some(idx) => (&line[..idx], Some(&line[idx..])),
+            None => (line, None),
+        };
+
+        let parts: Vec<&str> = entry_part.split_whitespace().collect();
+        if parts.len() < 2 {
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        let line_ip = parts[0];
+        let hostnames = &parts[1..];
+
+        let mut remaining_hosts: Vec<&str> = Vec::new();
+        let mut had_matching = false;
+
+        for host in hostnames {
+            let h_lower = host.to_ascii_lowercase();
+            if lower_remove.contains(&h_lower) {
+                had_matching = true;
+            } else {
+                remaining_hosts.push(host);
+            }
+        }
+
+        if !had_matching {
+            out_lines.push(line.to_string());
+        } else if !remaining_hosts.is_empty() {
+            let mut line_str = format!("{} {}", line_ip, remaining_hosts.join(" "));
+            if let Some(c) = comment_part {
+                let trimmed_c = c.trim();
+                if !trimmed_c.is_empty() {
+                    line_str.push(' ');
+                    line_str.push_str(trimmed_c);
+                }
+            }
+            out_lines.push(line_str);
+        }
+    }
+
+    let mut result = out_lines.join("\n");
+    if !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+pub fn sync_dns_provider_files_with_mode(
+    ip: &str,
+    domains: &[String],
+    is_reconcile: bool,
+) -> anyhow::Result<()> {
+    let validated_ip = validate_hosts_ip(ip)?;
+    let canonical_ip = validated_ip.to_string();
+    let dnsmasq_dir = resolve_provider_dir("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d");
+    if dnsmasq_dir.is_dir() {
+        for conf_name in [
+            "aetherflow-local-dns.conf",
+            "aetherflow.conf",
+            "aetherflow-local.conf",
+            "05-aetherflow-dns.conf",
+        ] {
+            let conf_path = dnsmasq_dir.join(conf_name);
+            let existing = match fs::read_to_string(&conf_path) {
+                Ok(content) => Some(content),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read {}: {}",
+                        conf_path.display(),
+                        e
+                    ));
+                }
+            };
+            let payload = render_dnsmasq_content(
+                existing.as_deref(),
+                &canonical_ip,
+                domains,
+                is_reconcile,
+            );
+            write_hosts_file_atomically(&conf_path, &payload)?;
+        }
+    }
+
+    let pihole_dir = resolve_provider_dir("AETHERFLOW_PIHOLE_DIR", "/etc/pihole");
+    if pihole_dir.is_dir() {
+        let custom_list = pihole_dir.join("custom.list");
+        let existing = match fs::read_to_string(&custom_list) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to read {}: {}",
+                    custom_list.display(),
+                    e
+                ));
+            }
+        };
+        let payload = reconcile_pihole_custom_list_content(
+            &existing,
+            &canonical_ip,
+            domains,
+            is_reconcile,
+        );
+        write_hosts_file_atomically(&custom_list, &payload)?;
+    }
+    Ok(())
+}
+
+pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
+    if domains.is_empty() {
+        return Ok(());
+    }
+    let lower_domains: std::collections::HashSet<String> =
+        domains.iter().map(|d| d.to_ascii_lowercase()).collect();
+
+    let dnsmasq_dir = resolve_provider_dir("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d");
+    if dnsmasq_dir.is_dir() {
+        for conf_name in [
+            "aetherflow-local-dns.conf",
+            "aetherflow.conf",
+            "aetherflow-local.conf",
+            "05-aetherflow-dns.conf",
+        ] {
+            let conf_path = dnsmasq_dir.join(conf_name);
+            match fs::read_to_string(&conf_path) {
+                Ok(content) => {
+                    let mut out_lines = Vec::new();
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if let Some(rest) = trimmed.strip_prefix("address=/") {
+                            if let Some((dom, _)) = rest.split_once('/') {
+                                if lower_domains.contains(&dom.trim().to_ascii_lowercase()) {
+                                    continue;
+                                }
+                            }
+                        }
+                        out_lines.push(line.to_string());
+                    }
+                    out_lines.push(String::new());
+                    write_hosts_file_atomically(&conf_path, &out_lines.join("\n"))?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read {}: {}",
+                        conf_path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    let pihole_dir = resolve_provider_dir("AETHERFLOW_PIHOLE_DIR", "/etc/pihole");
+    if pihole_dir.is_dir() {
+        let custom_list = pihole_dir.join("custom.list");
+        match fs::read_to_string(&custom_list) {
+            Ok(content) => {
+                let payload = remove_pihole_custom_list_content(&content, domains);
+                if payload != content {
+                    write_hosts_file_atomically(&custom_list, &payload)?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to read {}: {}",
+                    custom_list.display(),
+                    e
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn remove_dns_provider_domain(domain: &str) -> anyhow::Result<()> {
+    remove_dns_provider_files(&[domain.to_string()])
+}
+
+pub fn execute_hosts_cli_command(
+    action: &str,
+    ip: &str,
+    domains: &[String],
+) -> anyhow::Result<String> {
+    if action.eq_ignore_ascii_case("update")
+        || action.eq_ignore_ascii_case("reconcile")
+        || action.eq_ignore_ascii_case("add")
+        || !ip.is_empty()
+    {
+        validate_hosts_ip(ip)?;
+    }
+    match action {
+        "reconcile" => {
+            let validated_ip = validate_hosts_ip(ip)?;
+            let canonical_ip = validated_ip.to_string();
+            reconcile_hosts_file(domains, &canonical_ip)?;
+            sync_dns_provider_files_with_mode(&canonical_ip, domains, true)?;
+            Ok(format!("reconciled {} domain(s) to {}", domains.len(), canonical_ip))
+        }
+        "update" | "add" => {
+            let validated_ip = validate_hosts_ip(ip)?;
+            let canonical_ip = validated_ip.to_string();
+            update_hosts_file(domains, &canonical_ip)?;
+            sync_dns_provider_files_with_mode(&canonical_ip, domains, false)?;
+            Ok(format!("updated {} domain(s) to {}", domains.len(), canonical_ip))
+        }
+        "remove" => {
+            update_hosts_file_local(domains, true)?;
+            for d in domains {
+                remove_dns_provider_domain(d)?;
+            }
+            Ok(format!("removed {} domain(s)", domains.len()))
+        }
+        other => anyhow::bail!("unknown hosts action {:?}, expected reconcile, update, or remove", other),
+    }
+}
+
+pub fn run_hosts_cli(args: &[String]) -> anyhow::Result<String> {
+    if args.is_empty() {
+        anyhow::bail!("missing hosts action (update, remove, reconcile)");
+    }
+    let action = args[0].to_ascii_lowercase();
+    match action.as_str() {
+        "reconcile" => {
+            let ip = args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1");
+            let domains: Vec<String> = if args.len() > 2 {
+                args[2..].to_vec()
+            } else {
+                Vec::new()
+            };
+            execute_hosts_cli_command("reconcile", ip, &domains)
+        }
+        "update" | "add" => {
+            if args.len() < 2 {
+                anyhow::bail!("usage: hosts update <ip> <domain...>");
+            }
+            let ip = &args[1];
+            let domains = args[2..].to_vec();
+            execute_hosts_cli_command(&action, ip, &domains)
+        }
+        "remove" => {
+            if args.len() < 2 {
+                anyhow::bail!("usage: hosts remove <domain...>");
+            }
+            let domains = args[1..].to_vec();
+            execute_hosts_cli_command("remove", "127.0.0.1", &domains)
+        }
+        other => anyhow::bail!("unknown hosts action {:?}, expected reconcile, update, or remove", other),
+    }
+}
+
+fn write_hosts_file_atomically(hosts_path: &Path, content: &str) -> anyhow::Result<()> {
+    let parent = hosts_path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(".hosts.tmp.{}", uuid::Uuid::new_v4()));
+    {
+        use std::io::Write;
+        let mut temp_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644));
+        }
+        temp_file.write_all(content.as_bytes())?;
+        temp_file.sync_all()?;
+    }
+
+    if let Err(err) = fs::rename(&temp_path, hosts_path) {
+        #[cfg(unix)]
+        let is_cross_device = err.raw_os_error() == Some(libc::EXDEV)
+            || err.raw_os_error() == Some(libc::EBUSY);
+        #[cfg(not(unix))]
+        let is_cross_device = false;
+
+        if is_cross_device {
+            use std::io::Write;
+            let dest_file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(hosts_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = dest_file.as_raw_fd();
+                let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if rc != 0 {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(anyhow::anyhow!(
+                        "failed to lock hosts file on cross-device fallback: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            }
+            dest_file.set_len(0)?;
+            let mut writer = std::io::BufWriter::new(dest_file);
+            writer.write_all(content.as_bytes())?;
+            writer.flush()?;
+            let inner = writer.into_inner()?;
+            inner.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = inner.as_raw_fd();
+                unsafe { libc::flock(fd, libc::LOCK_UN) };
+            }
+            let _ = fs::remove_file(&temp_path);
+        } else {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err.into());
+        }
+    }
+
     Ok(())
 }
 
@@ -5743,6 +6638,30 @@ pub async fn dispatch_package_action_with_options<F>(
     script_name: &str,
     app_port: i32,
     delete_data: bool,
+    on_line: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    dispatch_package_action_with_target(
+        action,
+        pkg_id,
+        script_name,
+        app_port,
+        delete_data,
+        None,
+        on_line,
+    )
+    .await
+}
+
+pub async fn dispatch_package_action_with_target<F>(
+    action: &str,
+    pkg_id: &str,
+    script_name: &str,
+    app_port: i32,
+    delete_data: bool,
+    expected_target_version: Option<String>,
     mut on_line: F,
 ) -> anyhow::Result<()>
 where
@@ -5765,6 +6684,8 @@ where
             lifecycle_job_id: current_package_job_id(),
             app_port,
             delete_data,
+            expected_target_version,
+            achieved_version: None,
         };
         let body_bytes = serde_json::to_vec(&req_payload)?;
 
@@ -5906,6 +6827,7 @@ where
         lifecycle_job_id: current_package_job_id(),
         app_port,
         delete_data: false,
+        ..Default::default()
     };
     let stream = execute_package_request_stream(req);
     futures::pin_mut!(stream);
@@ -6000,30 +6922,84 @@ pub async fn dispatch_sandbox(pkg_id: &str) -> anyhow::Result<()> {
     dispatch_sandbox_apply(pkg_id).await
 }
 
-pub async fn dispatch_hosts_update(domains: &[String]) -> anyhow::Result<()> {
-    let req = HostsRunnerRequest {
-        action: "update".to_string(),
-        domains: domains.to_vec(),
-        ..Default::default()
-    };
-    let result = post_runner_json("/v1/hosts", &req, Duration::from_secs(15)).await?;
+pub async fn dispatch_hosts_request(req: &HostsUpdateRequest) -> anyhow::Result<()> {
+    let result = post_runner_json("/v1/hosts", req, Duration::from_secs(15)).await?;
     if !result.success {
         anyhow::bail!("runner hosts error: {}", result.error);
     }
     Ok(())
 }
 
+pub async fn dispatch_hosts_update(domains: &[String]) -> anyhow::Result<()> {
+    let req = HostsUpdateRequest {
+        action: "update".to_string(),
+        domains: domains.to_vec(),
+        ..Default::default()
+    };
+    dispatch_hosts_request(&req).await
+}
+
+pub async fn dispatch_hosts_update_with_provider(
+    domains: &[String],
+    provider_ip: Option<&str>,
+    provider_domains: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let req = HostsUpdateRequest {
+        action: "update".to_string(),
+        domains: domains.to_vec(),
+        provider_ip: provider_ip.map(|s| s.to_string()),
+        provider_domains: provider_domains.map(|d| d.to_vec()),
+        ..Default::default()
+    };
+    dispatch_hosts_request(&req).await
+}
+
 pub async fn dispatch_hosts_remove(domains: &[String]) -> anyhow::Result<()> {
-    let req = HostsRunnerRequest {
+    let req = HostsUpdateRequest {
         action: "remove".to_string(),
         domains: domains.to_vec(),
         ..Default::default()
     };
-    let result = post_runner_json("/v1/hosts", &req, Duration::from_secs(15)).await?;
-    if !result.success {
-        anyhow::bail!("runner hosts remove error: {}", result.error);
-    }
-    Ok(())
+    dispatch_hosts_request(&req).await
+}
+
+pub async fn update_hosts_file_via_runner(domains: &[String]) -> anyhow::Result<()> {
+    dispatch_hosts_update(domains).await
+}
+
+pub async fn remove_hosts_file_via_runner(domains: &[String]) -> anyhow::Result<()> {
+    dispatch_hosts_remove(domains).await
+}
+
+pub async fn dispatch_hosts_reconcile(domains: &[String], ip: &str) -> anyhow::Result<()> {
+    let req = HostsUpdateRequest {
+        action: "reconcile".to_string(),
+        domains: domains.to_vec(),
+        ip: ip.to_string(),
+        ..Default::default()
+    };
+    dispatch_hosts_request(&req).await
+}
+
+pub async fn dispatch_hosts_reconcile_with_provider(
+    domains: &[String],
+    ip: &str,
+    provider_ip: Option<&str>,
+    provider_domains: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let req = HostsUpdateRequest {
+        action: "reconcile".to_string(),
+        domains: domains.to_vec(),
+        ip: ip.to_string(),
+        provider_ip: provider_ip.map(|s| s.to_string()),
+        provider_domains: provider_domains.map(|d| d.to_vec()),
+        ..Default::default()
+    };
+    dispatch_hosts_request(&req).await
+}
+
+pub async fn reconcile_hosts_file_via_runner(domains: &[String], ip: &str) -> anyhow::Result<()> {
+    dispatch_hosts_reconcile(domains, ip).await
 }
 
 pub async fn dispatch_network_control(
@@ -6717,6 +7693,7 @@ mod tests {
                 lifecycle_job_id: String::new(),
                 app_port: 0,
                 delete_data: true,
+                ..Default::default()
             }))
             .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{}", action);
@@ -7388,5 +8365,430 @@ mod tests {
         assert!(is_exempt_sandbox_unit("wg-quick@wg0.service"));
         assert!(is_exempt_sandbox_unit("wireguard.service"));
         assert!(!is_exempt_sandbox_unit("sonarr.service"));
+    }
+
+    #[test]
+    fn test_hosts_file_preserves_unrelated_host_aliases_and_multi_app() {
+        let scratch_dir = env::temp_dir().join(format!("af-hosts-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+
+        // Initial hosts file with unrelated alias on the same line as appa.aether.local
+        let initial_content = "127.0.0.1 localhost\n192.168.1.10 server.lan appa.aether.local\n";
+        fs::write(&hosts_file, initial_content).unwrap();
+
+        // 1. Update with appb.aether.local: both apps and server.lan must be preserved!
+        update_hosts_file_at_path(&hosts_file, &["appb.aether.local".to_string()], false).unwrap();
+        let content_after_appb = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_appb.contains("server.lan"));
+        assert!(content_after_appb.contains("appb.aether.local"));
+
+        // 2. Remove appa.aether.local: server.lan must remain!
+        update_hosts_file_at_path(&hosts_file, &["appa.aether.local".to_string()], true).unwrap();
+        let content_after_remove = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_remove.contains("192.168.1.10\tserver.lan"));
+        assert!(!content_after_remove.contains("appa.aether.local"));
+        assert!(content_after_remove.contains("appb.aether.local"));
+
+        // 3. Reconcile with authoritative list [appc.aether.local]:
+        // server.lan must still remain, appb pruned, appc added.
+        let lock_file = scratch_dir.join("hosts.lock");
+        reconcile_hosts_file_at_path(
+            &hosts_file,
+            &lock_file,
+            &["appc.aether.local".to_string()],
+            "127.0.0.1",
+        )
+        .unwrap();
+        let content_after_reconcile = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_reconcile.contains("192.168.1.10\tserver.lan"));
+        assert!(!content_after_reconcile.contains("appb.aether.local"));
+        assert!(content_after_reconcile.contains("appc.aether.local"));
+
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn test_hosts_managed_block_preserves_comments_and_multi_alias_lines() {
+        let _env_guard = ENV_TEST_MUTEX.blocking_lock();
+        let scratch_dir = env::temp_dir().join(format!("af-hosts-comment-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        let lock_file = scratch_dir.join("hosts.lock");
+
+        // Initial hosts file containing managed block with internal comments and multi-alias lines
+        let initial = "\
+127.0.0.1 localhost
+# BEGIN AETHERFLOW MANAGED BLOCK
+# Internal managed note
+10.0.0.5 app1.aether.local custom.lan # note
+127.0.0.1 app2.aether.local
+# END AETHERFLOW MANAGED BLOCK
+";
+        fs::write(&hosts_file, initial).unwrap();
+
+        // 1. Update: add app3.aether.local
+        update_hosts_file_at_path(&hosts_file, &["app3.aether.local".to_string()], false).unwrap();
+        let content_after_update = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_update.contains("# Internal managed note"), "managed comments must be preserved");
+        assert!(content_after_update.contains("10.0.0.5\tcustom.lan # note"), "non-aether alias must be preserved with comment");
+        assert!(content_after_update.contains("app1.aether.local"));
+        assert!(content_after_update.contains("app2.aether.local"));
+        assert!(content_after_update.contains("app3.aether.local"));
+
+        // 2. Remove: remove app1.aether.local
+        update_hosts_file_at_path(&hosts_file, &["app1.aether.local".to_string()], true).unwrap();
+        let content_after_remove = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_remove.contains("# Internal managed note"));
+        assert!(content_after_remove.contains("10.0.0.5\tcustom.lan # note"));
+        assert!(!content_after_remove.contains("app1.aether.local"));
+        assert!(content_after_remove.contains("app2.aether.local"));
+        assert!(content_after_remove.contains("app3.aether.local"));
+
+        // 3. Reconcile: authoritative list is [app4.aether.local]
+        reconcile_hosts_file_at_path(&hosts_file, &lock_file, &["app4.aether.local".to_string()], "127.0.0.1").unwrap();
+        let content_after_reconcile = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_reconcile.contains("# Internal managed note"));
+        assert!(content_after_reconcile.contains("10.0.0.5\tcustom.lan # note"));
+        assert!(!content_after_reconcile.contains("app2.aether.local"));
+        assert!(!content_after_reconcile.contains("app3.aether.local"));
+        assert!(content_after_reconcile.contains("127.0.0.1\tapp4.aether.local"));
+
+        // 4. CLI reconcile test: empty domains clears managed entries while preserving comments & custom aliases
+        let dnsmasq_dir = scratch_dir.join("dnsmasq.d");
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&dnsmasq_dir).unwrap();
+        fs::create_dir_all(&pihole_dir).unwrap();
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+
+        let cli_res = run_hosts_cli(&["reconcile".to_string(), "127.0.0.1".to_string()]);
+        assert!(cli_res.is_ok());
+        let content_after_cli_empty = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_cli_empty.contains("# Internal managed note"));
+        assert!(content_after_cli_empty.contains("10.0.0.5\tcustom.lan # note"));
+        assert!(!content_after_cli_empty.contains("app4.aether.local"));
+
+        // Check dnsmasq and pihole files were written
+        assert!(dnsmasq_dir.join("aetherflow.conf").exists());
+        assert!(pihole_dir.join("custom.list").exists());
+
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_DNSMASQ_DIR");
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn test_hosts_ip_validation_rejects_injections_and_invalid_ips() {
+        let scratch_dir = env::temp_dir().join(format!("af-hosts-ip-val-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        let lock_file = scratch_dir.join("hosts.lock");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        let domains = vec!["sonarr.aether.local".to_string()];
+
+        let injection_ip = "127.0.0.1\n10.0.0.1 injected.host";
+        let invalid_ip = "not-an-ip";
+        let leading_space_ip = " 127.0.0.1";
+        let trailing_space_ip = "127.0.0.1 ";
+        let tab_ip = "\t127.0.0.1\t";
+
+        for bad_ip in [
+            injection_ip,
+            invalid_ip,
+            leading_space_ip,
+            trailing_space_ip,
+            tab_ip,
+        ] {
+            assert!(validate_hosts_ip(bad_ip).is_err());
+            // Verify update_hosts_file_with_ip_at_path and reconcile_hosts_file_at_path reject invalid IPs
+            assert!(update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &domains, bad_ip, false).is_err());
+            assert!(reconcile_hosts_file_at_path(&hosts_file, &lock_file, &domains, bad_ip).is_err());
+
+            // Verify modify_hosts_file_at_path directly
+            assert!(modify_hosts_file_at_path(&hosts_file, &lock_file, &domains, HostsModifyAction::Update { ip: bad_ip }).is_err());
+            assert!(modify_hosts_file_at_path(&hosts_file, &lock_file, &domains, HostsModifyAction::Reconcile { ip: bad_ip }).is_err());
+
+            // Verify sync_dns_provider_files and execute_hosts_cli_command
+            assert!(sync_dns_provider_files(bad_ip, &domains).is_err());
+            assert!(execute_hosts_cli_command("update", bad_ip, &domains).is_err());
+            assert!(execute_hosts_cli_command("reconcile", bad_ip, &domains).is_err());
+        }
+
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn test_hosts_removes_or_updates_last_alias_preserves_standalone_comment() {
+        let scratch_dir = env::temp_dir().join(format!("af-hosts-comment-preserve-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        let lock_file = scratch_dir.join("hosts.lock");
+
+        // 1. Direct filter_hosts_line test
+        let line = "127.0.0.1 sonarr.aether.local # admin note";
+        let filtered = filter_hosts_line(line, |host| host == "sonarr.aether.local");
+        assert_eq!(filtered, Some("# admin note".to_string()));
+
+        // 2. Removing last alias on an outside-block line preserves # admin note as standalone comment line
+        let initial_remove = "127.0.0.1 sonarr.aether.local # admin note\n";
+        fs::write(&hosts_file, initial_remove).unwrap();
+        update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &["sonarr.aether.local".to_string()], "127.0.0.1", true).unwrap();
+        let content_after_remove = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_remove.contains("# admin note"), "standalone comment must be preserved on removal: {}", content_after_remove);
+        assert!(!content_after_remove.contains("sonarr.aether.local"));
+        assert!(content_after_remove.lines().any(|l| l.trim() == "# admin note"));
+
+        // 3. Updating last alias on an outside-block line preserves # admin note as standalone comment line
+        let initial_update = "127.0.0.1 sonarr.aether.local # admin note\n";
+        fs::write(&hosts_file, initial_update).unwrap();
+        update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &["sonarr.aether.local".to_string()], "10.0.0.2", false).unwrap();
+        let content_after_update = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_update.contains("# admin note"), "standalone comment must be preserved on update: {}", content_after_update);
+        assert!(content_after_update.lines().any(|l| l.trim() == "# admin note"));
+        assert!(content_after_update.contains("10.0.0.2\tsonarr.aether.local"));
+
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_pihole_custom_list_preserves_unmanaged_records_aliases_and_comments() {
+        let initial_content = "\
+# Pi-hole Custom Domain List
+192.168.1.1 router.home
+192.168.1.50 nas.home.lan
+192.168.1.10 app.aether.local keep.lan # custom note
+192.168.1.20 oldapp.aether.local # aetherflow-managed
+192.168.1.30 sonarr.aether.local # user note
+";
+        let reconciled = reconcile_pihole_custom_list_content(
+            initial_content,
+            "192.168.1.200",
+            &["sonarr.aether.local".to_string(), "radarr.aether.local".to_string()],
+            true,
+        );
+
+        // Header and unmanaged records preserved
+        assert!(reconciled.contains("# Pi-hole Custom Domain List"));
+        assert!(reconciled.contains("192.168.1.1 router.home"));
+        assert!(reconciled.contains("192.168.1.50 nas.home.lan"));
+
+        // Multi-alias line with unmanaged hostname keep.lan preserved intact without app.aether.local
+        assert!(reconciled.contains("192.168.1.10 keep.lan # custom note"));
+        assert!(!reconciled.contains("192.168.1.10 app.aether.local"));
+
+        // Multi-alias line with # aetherflow-managed tag preserves unmanaged aliases
+        let managed_multi_line = "192.168.1.10 old.aether.local unrelated.lan # aetherflow-managed\n";
+        let reconciled_multi = reconcile_pihole_custom_list_content(
+            managed_multi_line,
+            "192.168.1.200",
+            &["sonarr.aether.local".to_string()],
+            true,
+        );
+        assert!(
+            reconciled_multi.contains("192.168.1.10 unrelated.lan"),
+            "unrelated.lan must be preserved even if line has # aetherflow-managed: {}",
+            reconciled_multi
+        );
+        assert!(
+            !reconciled_multi.contains("old.aether.local"),
+            "old.aether.local must be dropped on reconcile: {}",
+            reconciled_multi
+        );
+        assert!(reconciled_multi.contains("192.168.1.200 sonarr.aether.local # aetherflow-managed"));
+
+        // Old managed domain dropped on reconcile
+        assert!(!reconciled.contains("oldapp.aether.local"));
+
+        // Single-domain user note preserved with updated IP
+        assert!(reconciled.contains("192.168.1.200 sonarr.aether.local # user note"));
+
+        // Newly added domain appended
+        assert!(reconciled.contains("192.168.1.200 radarr.aether.local # aetherflow-managed"));
+
+        // Now test removal
+        let after_removal = remove_pihole_custom_list_content(
+            &reconciled,
+            &["sonarr.aether.local".to_string()],
+        );
+        assert!(!after_removal.contains("sonarr.aether.local"));
+        assert!(after_removal.contains("192.168.1.1 router.home"));
+        assert!(after_removal.contains("192.168.1.10 keep.lan # custom note"));
+        assert!(after_removal.contains("192.168.1.200 radarr.aether.local # aetherflow-managed"));
+
+        // Test removing one alias from multi-alias line
+        let multi_alias = "192.168.1.99 host1.lan host2.lan host3.lan # my comment\n";
+        let removed_alias = remove_pihole_custom_list_content(multi_alias, &["host2.lan".to_string()]);
+        assert_eq!(removed_alias.trim(), "192.168.1.99 host1.lan host3.lan # my comment");
+    }
+
+    #[tokio::test]
+    async fn test_pihole_custom_list_invalid_utf8_fails_closed_and_leaves_file_intact() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-pihole-utf8-test-{}", uuid::Uuid::new_v4()));
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&pihole_dir).unwrap();
+
+        let custom_list = pihole_dir.join("custom.list");
+        let invalid_bytes = vec![0xff, 0xfe, b'a', b'b', b'c'];
+        fs::write(&custom_list, &invalid_bytes).unwrap();
+
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+
+        // Test sync fails closed
+        let sync_res = sync_dns_provider_files_with_mode(
+            "192.168.1.100",
+            &["sonarr.aether.local".to_string()],
+            true,
+        );
+        assert!(sync_res.is_err(), "sync must fail on invalid UTF-8");
+        // Verify file is untouched on disk
+        let on_disk_after_sync = fs::read(&custom_list).unwrap();
+        assert_eq!(on_disk_after_sync, invalid_bytes);
+
+        // Test remove fails closed
+        let rm_res = remove_dns_provider_files(&["sonarr.aether.local".to_string()]);
+        assert!(rm_res.is_err(), "remove must fail on invalid UTF-8");
+        // Verify file is untouched on disk
+        let on_disk_after_rm = fs::read(&custom_list).unwrap();
+        assert_eq!(on_disk_after_rm, invalid_bytes);
+
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_runner_hosts_handler_separates_loopback_hosts_from_provider_lan_ip_and_public_domains() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-runner-sep-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+
+        let hosts_file = scratch_dir.join("hosts");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        let dnsmasq_dir = scratch_dir.join("dnsmasq.d");
+        fs::create_dir_all(&dnsmasq_dir).unwrap();
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&pihole_dir).unwrap();
+
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+
+        let req = HostsUpdateRequest {
+            action: "reconcile".to_string(),
+            ip: "127.0.0.1".to_string(),
+            domains: vec!["sonarr.aether.local".to_string()],
+            provider_ip: Some("192.168.1.50".to_string()),
+            provider_domains: Some(vec![
+                "sonarr.aether.local".to_string(),
+                "media.example.com".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let resp = apply_hosts_update(req).await.unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.output, "hosts reconciled");
+
+        // 1. /etc/hosts must contain 127.0.0.1 sonarr.aether.local only
+        let hosts_content = fs::read_to_string(&hosts_file).unwrap();
+        assert!(hosts_content.contains("127.0.0.1\tsonarr.aether.local"));
+        assert!(!hosts_content.contains("192.168.1.50"));
+        assert!(!hosts_content.contains("media.example.com"));
+
+        // 2. dnsmasq must contain 192.168.1.50 and both domains, but not 127.0.0.1
+        let dnsmasq_conf = fs::read_to_string(dnsmasq_dir.join("aetherflow.conf")).unwrap();
+        assert!(dnsmasq_conf.contains("address=/sonarr.aether.local/192.168.1.50"));
+        assert!(dnsmasq_conf.contains("address=/media.example.com/192.168.1.50"));
+        assert!(!dnsmasq_conf.contains("127.0.0.1"));
+
+        // 3. Pi-hole custom.list must contain 192.168.1.50 and both domains, but not 127.0.0.1
+        let pihole_list = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(pihole_list.contains("192.168.1.50 sonarr.aether.local # aetherflow-managed"));
+        assert!(pihole_list.contains("192.168.1.50 media.example.com # aetherflow-managed"));
+        assert!(!pihole_list.contains("127.0.0.1"));
+
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_DNSMASQ_DIR");
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_hosts_cli_remove_clears_providers_and_propagates_errors() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-cli-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+
+        let hosts_file = scratch_dir.join("hosts");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        let dnsmasq_dir = scratch_dir.join("dnsmasq.d");
+        fs::create_dir_all(&dnsmasq_dir).unwrap();
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&pihole_dir).unwrap();
+
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+
+        // 1. Add entry
+        let add_res = run_hosts_cli(&[
+            "update".to_string(),
+            "10.0.0.50".to_string(),
+            "sonarr.aether.local".to_string(),
+        ]);
+        assert!(add_res.is_ok(), "{:?}", add_res);
+
+        let hosts_after_add = fs::read_to_string(&hosts_file).unwrap();
+        assert!(hosts_after_add.contains("sonarr.aether.local"));
+        let dnsmasq_after_add = fs::read_to_string(dnsmasq_dir.join("aetherflow.conf")).unwrap();
+        assert!(dnsmasq_after_add.contains("sonarr.aether.local"));
+        let pihole_after_add = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(pihole_after_add.contains("sonarr.aether.local"));
+
+        // 2. Remove entry via CLI
+        let rm_res = run_hosts_cli(&[
+            "remove".to_string(),
+            "sonarr.aether.local".to_string(),
+        ]);
+        assert!(rm_res.is_ok(), "{:?}", rm_res);
+
+        let hosts_after_rm = fs::read_to_string(&hosts_file).unwrap();
+        assert!(!hosts_after_rm.contains("sonarr.aether.local"));
+        let dnsmasq_after_rm = fs::read_to_string(dnsmasq_dir.join("aetherflow.conf")).unwrap();
+        assert!(!dnsmasq_after_rm.contains("sonarr.aether.local"));
+        let pihole_after_rm = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(!pihole_after_rm.contains("sonarr.aether.local"));
+
+        // 3. Provider error propagation: write to read-only dir
+        let ro_dir = scratch_dir.join("ro_dir");
+        fs::create_dir_all(&ro_dir).unwrap();
+        fs::write(ro_dir.join("custom.list"), "10.0.0.50 testfail.aether.local\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o444));
+            env::set_var("AETHERFLOW_PIHOLE_DIR", ro_dir.to_string_lossy().as_ref());
+            let err_res = run_hosts_cli(&[
+                "update".to_string(),
+                "10.0.0.50".to_string(),
+                "testfail.aether.local".to_string(),
+            ]);
+            assert!(err_res.is_err(), "provider sync error must be propagated");
+
+            let err_rm = run_hosts_cli(&[
+                "remove".to_string(),
+                "testfail.aether.local".to_string(),
+            ]);
+            assert!(err_rm.is_err(), "remove provider error must be propagated");
+            let _ = fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755));
+        }
+
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_DNSMASQ_DIR");
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        let _ = fs::remove_dir_all(&scratch_dir);
     }
 }

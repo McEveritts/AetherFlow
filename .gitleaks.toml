@@ -47,3 +47,46 @@ id = "generic-api-key"
   regexes = [
     '''^\s*sessionKey: 'hist-2-legacy',\s*$''',
   ]
+
+  [[rules.allowlists]]
+  description = "Synthetic lifecycle redaction canary in the API persistence regression"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^backend-rs/crates/af-api/src/routes\.rs$''']
+  regexes = ['''^secret_(?:gh_tok_789|api_key_000)$''']
+
+[[rules]]
+id = "curl-auth-header"
+
+  [[rules.allowlists]]
+  description = "Synthetic bearer canary in the authenticated WebSocket redaction regression"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^backend-rs/crates/af-api/src/ws\.rs$''']
+  regexes = ['''^my_super_secret_bearer_token$''']
+
+  [[rules.allowlists]]
+  description = "Exact synthetic header canary in the final lifecycle masking regression"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^backend-rs/crates/af-services/src/package_jobs\.rs$''']
+  regexes = ['''^FRAGMENT_CANARY$''']
+
+[[rules]]
+id = "curl-auth-user"
+
+  [[rules.allowlists]]
+  description = "Exact synthetic curl credentials in lifecycle and diagnostic redaction regressions"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = [
+    '''^backend-rs/crates/af-api/src/(?:routes|ws)\.rs$''',
+    '''^backend-rs/crates/af-release/src/lifecycle\.rs$''',
+    '''^backend-rs/crates/af-runner/src/package_lifecycle\.rs$''',
+    '''^backend-rs/crates/af-services/src/(?:package_jobs|workers)\.rs$''',
+  ]
+  regexes = [
+    '''^admin:(?:mysecret123|hunter2|synthetic-secret|secret_pass|secret|supersecret|super_secret_curl|SECRET)$''',
+    '''^"admin:(?:my secret|SECRET words)"$''',
+    '''^operator:SENTINEL$''',
+  ]

@@ -57,14 +57,47 @@ case "${ARCH}" in
 esac
 
 report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
-RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
-LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.[0].tag_name // empty' || true)"
+AUTH_HEADER=()
+GH_TOKEN="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+if [[ -n "$GH_TOKEN" ]]; then
+    AUTH_HEADER=(-H "Authorization: Bearer $GH_TOKEN")
+fi
+
+RELEASES_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
+
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" '
+        .[] | select((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) |
+        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
+    ' | head -n1 || true)"
+    if [[ -z "$MATCH_LINE" ]]; then
+        TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
+        TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
+        if [[ -z "$TAG_RELEASE_JSON" && ! "$TARGET_TAG_LOOKUP" =~ ^v ]]; then
+            TARGET_TAG_LOOKUP="v${TARGET_TAG_LOOKUP}"
+            TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
+        fi
+        if [[ -n "$TAG_RELEASE_JSON" ]]; then
+            MATCH_LINE="$(echo "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
+                "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url // empty)"
+            ' || true)"
+        fi
+    fi
+    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
+    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
+else
+    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
+        .[] | select(any(.assets[]?; .name | endswith($arch))) |
+        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
+    ' | sort -V -k1,1 | tail -n1 || true)"
+    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
+    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
+fi
+
 if [[ -z "${LATEST_TAG}" ]]; then
-    print_error "Failed to discover latest GitHub release for Listenarrs/Listenarr"
+    print_error "Failed to discover GitHub release for Listenarrs/Listenarr"
     exit 1
 fi
-ASSET_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '.[0].assets[]? | select(.name | endswith($arch)) | .browser_download_url' | head -n1 || true)"
-
 if [[ -z "${ASSET_URL}" ]]; then
     log_error "Failed to locate Listenarr release asset for ${L_ARCH}"
     exit 1

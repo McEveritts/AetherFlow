@@ -278,20 +278,57 @@ pub(crate) fn sanitize_services_for_viewer(services: &mut serde_json::Value) {
             outcome.retain(|field, _| {
                 matches!(
                     field.as_str(),
-                    "job_id" | "package_id" | "action" | "status" | "started_at" | "finished_at"
+                    "job_id" | "package_id" | "action" | "status" | "started_at" | "finished_at" | "expected_target_version" | "achieved_version"
                 )
             });
         }
     }
 }
 
-fn websocket_message_for_session(message: String, diagnostics_allowed: bool) -> Option<String> {
-    if diagnostics_allowed {
-        return Some(message);
+pub fn sanitize_log_line(line: &str) -> String {
+    af_services::redact_secrets(line)
+}
+
+pub fn sanitize_diagnostic_text_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if matches!(
+                    k.as_str(),
+                    "sanitized_summary"
+                        | "message"
+                        | "error"
+                        | "log_line"
+                        | "line"
+                        | "output"
+                        | "update_error"
+                        | "stderr"
+                        | "stdout"
+                ) {
+                    if let Some(s) = v.as_str() {
+                        *v = sanitize_log_line(s).into();
+                    }
+                }
+                sanitize_diagnostic_text_fields(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                sanitize_diagnostic_text_fields(item);
+            }
+        }
+        _ => {}
     }
+}
+
+fn websocket_message_for_session(message: String, diagnostics_allowed: bool) -> Option<String> {
     let mut payload: serde_json::Value = serde_json::from_str(&message).ok()?;
     match payload.get("type").and_then(serde_json::Value::as_str) {
         Some("package:progress") => {
+            if diagnostics_allowed {
+                sanitize_diagnostic_text_fields(&mut payload);
+                return serde_json::to_string(&payload).ok();
+            }
             let mut sanitized = serde_json::json!({"type": "package:progress"});
             for field in [
                 "package_id",
@@ -300,6 +337,8 @@ fn websocket_message_for_session(message: String, diagnostics_allowed: bool) -> 
                 "status",
                 "started_at",
                 "finished_at",
+                "expected_target_version",
+                "achieved_version",
             ] {
                 if let Some(value) = payload.get(field).and_then(serde_json::Value::as_str) {
                     sanitized[field] = value.into();
@@ -321,15 +360,25 @@ fn websocket_message_for_session(message: String, diagnostics_allowed: bool) -> 
             payload = sanitized;
         }
         Some("METRICS_UPDATE") => {
-            if let Some(services) = payload
-                .get_mut("data")
-                .and_then(|data| data.get_mut("services"))
-            {
-                sanitize_services_for_viewer(services);
+            if !diagnostics_allowed {
+                if let Some(services) = payload
+                    .get_mut("data")
+                    .and_then(|data| data.get_mut("services"))
+                {
+                    sanitize_services_for_viewer(services);
+                }
             }
         }
-        _ => {}
+        _ => {
+            if let Some(line) = payload.get("line").and_then(serde_json::Value::as_str) {
+                payload["line"] = sanitize_log_line(line).into();
+            }
+            if let Some(log) = payload.get("log").and_then(serde_json::Value::as_str) {
+                payload["log"] = sanitize_log_line(log).into();
+            }
+        }
     }
+    sanitize_diagnostic_text_fields(&mut payload);
     serde_json::to_string(&payload).ok()
 }
 
@@ -366,6 +415,104 @@ mod telemetry_tests {
         let safe: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(safe["data"]["services"]["Fixture"]["update_error"], "Update status could not be confirmed");
         assert_eq!(safe["data"]["services"]["Fixture"]["status"], "running");
+    }
+
+    #[test]
+    fn admin_package_progress_redacts_raw_secrets() {
+        let frame = json!({
+            "type": "package:progress",
+            "package_id": "radarr",
+            "action": "install",
+            "status": "installing",
+            "line": "Configuring secret AF_PASS=supersecretpassword123 for installation",
+            "progress": 50,
+        });
+        let serialized = super::websocket_message_for_session(frame.to_string(), true).unwrap();
+        assert!(!serialized.contains("supersecretpassword123"));
+        assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn admin_ws_metrics_and_marketplace_snapshot_redacts_diagnostic_secrets() {
+        let frame = json!({
+            "type": "METRICS_UPDATE",
+            "data": {
+                "services": {
+                    "sonarr": {
+                        "id": "sonarr",
+                        "status": "running",
+                        "log_line": "Starting service with admin_passwd=supersecretpassword123",
+                        "last_job": {
+                            "job_id": "job-1",
+                            "action": "update",
+                            "status": "failed",
+                            "message": "failed with auth_token=secret_auth_token_999",
+                            "sanitized_summary": "failure details: db_secret=secret_db_pass_888",
+                            "error": "encountered rclone_rc_pass=super_secret_rc_pass",
+                            "output": "curl -H 'Authorization: Bearer my_super_secret_bearer_token'"
+                        }
+                    }
+                }
+            }
+        });
+        let serialized = super::websocket_message_for_session(frame.to_string(), true).unwrap();
+        assert!(!serialized.contains("supersecretpassword123"));
+        assert!(!serialized.contains("secret_auth_token_999"));
+        assert!(!serialized.contains("secret_db_pass_888"));
+        assert!(!serialized.contains("super_secret_rc_pass"));
+        assert!(!serialized.contains("my_super_secret_bearer_token"));
+        assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn admin_ws_projections_redact_basic_auth_curl_and_json_boundary_secrets() {
+        let frame = json!({
+            "type": "package:progress",
+            "package_id": "radarr",
+            "action": "install",
+            "status": "installing",
+            "line": "Executing curl -u admin:mysecret123 http://repo.local with --pass pass_val_456 and Authorization: Basic dXNlcjpwYXNz and password={\"raw\":\"boundary_pass_789\"}",
+            "progress": 70,
+        });
+        let serialized = super::websocket_message_for_session(frame.to_string(), true).unwrap();
+        assert!(!serialized.contains("mysecret123"));
+        assert!(!serialized.contains("pass_val_456"));
+        assert!(!serialized.contains("dXNlcjpwYXNz"));
+        assert!(!serialized.contains("boundary_pass_789"));
+        assert!(serialized.contains("curl -u [REDACTED]"));
+        assert!(serialized.contains("--pass [REDACTED]"));
+        assert!(serialized.contains("Basic [REDACTED]"));
+        assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn admin_ws_final_gate_fragments_and_marked_headers_are_masked() {
+        let long_key = format!(r#""{}Pass\u0077ordEncoded":"FRAGMENT_CANARY""#, "x".repeat(125));
+        for line in [
+            long_key.as_str(),
+            r#""databaseCookieEncoded":"FRAGMENT_CANARY""#,
+            r#""databaseSessionEncoded":"FRAGMENT_CANARY""#,
+            r#""incomingWebhookEncoded":"FRAGMENT_CANARY""#,
+            r#""databasePass\u0077ordEncoded":"FRAGMENT_CANARY""#,
+            "Cookie: [REDACTED] sid=FRAGMENT_CANARY",
+            "Authorization: [REDACTED] FRAGMENT_CANARY",
+        ] {
+            let mut input = line.to_string();
+            for _ in 0..3 {
+                let frame = json!({
+                    "type": "package:progress", "package_id": "sonarr",
+                    "action": "update", "status": "updating", "line": input,
+                    "progress": 50,
+                }).to_string();
+                for privileged in [true, false] {
+                    let projected = super::websocket_message_for_session(frame.clone(), privileged).unwrap();
+                    assert!(!projected.contains("FRAGMENT_CANARY"), "{projected}");
+                    let repeated = super::websocket_message_for_session(projected, privileged).unwrap();
+                    assert!(!repeated.contains("FRAGMENT_CANARY"), "{repeated}");
+                }
+                input = format!("AF_DIAG_FAILURE={}", json!({"summary": input}));
+            }
+        }
     }
 
     #[tokio::test]
@@ -665,13 +812,19 @@ mod lifecycle_tests {
             "type": "package:progress", "package_id": "sonarr", "job_id": "job-42",
             "action": "update", "status": "updating", "progress": 42,
             "started_at": "fixture", "line": "PASSWORD=private-installer-output",
-            "message": "PASSWORD=private-installer-output", "stderr": "private-installer-output",
+            "message": "PASSWORD=private-installer-output", "stderr": "TOKEN=private-installer-output",
         })
         .to_string();
-        assert_eq!(
-            websocket_message_for_session(message.clone(), true).unwrap(),
-            message
-        );
+        let admin = websocket_message_for_session(message.clone(), true).unwrap();
+        assert!(!admin.contains("private-installer-output"), "raw secrets must be redacted for admin");
+        assert!(admin.contains("[REDACTED]"), "sanitized secrets must be marked REDACTED");
+        let admin_val: serde_json::Value = serde_json::from_str(&admin).unwrap();
+        assert_eq!(admin_val["job_id"], "job-42");
+        assert_eq!(admin_val["package_id"], "sonarr");
+        assert_eq!(admin_val["status"], "updating");
+        assert_eq!(admin_val["progress"], 42);
+        assert_eq!(admin_val["line"], "PASSWORD=[REDACTED]");
+
         let ordinary = websocket_message_for_session(message, false).unwrap();
         assert!(!ordinary.contains("private-installer-output"));
         let ordinary: serde_json::Value = serde_json::from_str(&ordinary).unwrap();
@@ -685,6 +838,24 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn test_websocket_progress_escaped_quote_and_nested_json_redaction() {
+        let message = serde_json::json!({
+            "type": "package:progress", "package_id": "sonarr", "job_id": "job-99",
+            "action": "install", "status": "installing", "progress": 50,
+            "line": "{\"password\": \"my\\\"super\\\\secret\"}",
+            "message": "auth config: {\"credentials\": {\"token\": \"nested\\\"token\\\"val\"}}",
+            "stderr": "error: password=\"truncated\\\"pass",
+        })
+        .to_string();
+
+        let admin = websocket_message_for_session(message, true).unwrap();
+        assert!(!admin.contains("super\\secret"));
+        assert!(!admin.contains("nested\\\"token"));
+        assert!(!admin.contains("truncated\\\"pass"));
+        assert!(admin.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn websocket_service_snapshots_cannot_bypass_progress_sanitization() {
         let message = serde_json::json!({
             "type": "METRICS_UPDATE", "data": {
@@ -692,7 +863,7 @@ mod lifecycle_tests {
                     "job_id": "job-42", "job_status": "updating", "progress": 42,
                     "api_key": "synthetic-service-credential",
                     "future_private_field": "synthetic-private-config",
-                    "log_line": "PASSWORD=private-installer-output",
+                    "log_line": "STEP=private-installer-output",
                     "last_job": {"job_id": "old-job", "status": "failed", "message": "private-installer-output"},
                 }}
             }

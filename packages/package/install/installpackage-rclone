@@ -17,13 +17,17 @@ else
 fi
 
 PACKAGE_NAME="rclone"
+af_prepare_job_scratch "${PACKAGE_NAME}"
+check_disk_space "${AF_JOB_SCRATCH_DIR}" 512
+check_disk_space "/usr/bin" 512
+
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5572}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
-validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf
+validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf /etc/aetherflow/rclone.env
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system dependencies and FUSE runtime for Rclone..."
 
@@ -45,48 +49,119 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading official Rclone binary (${RCLONE_ARCH})..."
-TMP_ZIP=$(mktemp /tmp/rclone-XXXXXX.zip)
-TMP_DIR=$(mktemp -d /tmp/rclone-extract-XXXXXX)
+TMP_ZIP=$(mktemp "${AF_JOB_SCRATCH_DIR}/rclone-XXXXXX.zip")
+TMP_DIR=$(mktemp -d "${AF_JOB_SCRATCH_DIR}/rclone-extract-XXXXXX")
 
-RCLONE_RELEASE="$(github_latest_tag rclone/rclone)"
+cleanup_rclone_staging() {
+    local rc="$?"
+    trap - EXIT INT TERM
+    set +e
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
+    [[ -z "${TMP_ZIP:-}" ]] || rm -f -- "$TMP_ZIP" || true
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
+    fi
+    exit "$rc"
+}
+trap cleanup_rclone_staging EXIT
+
+RCLONE_RELEASE="${AF_TARGET_VERSION:-$(github_latest_tag rclone/rclone)}"
+RCLONE_RELEASE="${RCLONE_RELEASE#v}"
 RCLONE_URL="https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-${RCLONE_ARCH}.zip"
 download_file "$RCLONE_URL" "$TMP_ZIP" >> "$LOGFILE" 2>&1
 unzip -qo "$TMP_ZIP" -d "$TMP_DIR" >> "$LOGFILE" 2>&1
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_ZIP"' EXIT
 RCLONE_BINARY="$(find "$TMP_DIR" -type f -name rclone -print -quit)"
 VFS_WAS_ACTIVE=0
 if systemctl is-active --quiet rclone-vfs; then VFS_WAS_ACTIVE=1; fi
 chmod 755 "$RCLONE_BINARY"
 stage_app_archive "$TMP_DIR" /usr/bin/rclone "${RCLONE_BINARY#"$TMP_DIR"/}" /etc/rclone "$PACKAGE_NAME" "." /var/lib/rclone "" binary
+ROLLBACK_NEEDED=1
+RCLONE_BACKUP_ARCHIVE="${AF_ARCHIVE_BACKUP:-}"
 if [[ -e /etc/systemd/system/rclone-vfs.service ]]; then
     cp -a /etc/systemd/system/rclone-vfs.service "$AF_ARCHIVE_BACKUP/vfs-unit"
 fi
-rollback_rclone_update() {
-    local status="$?" restore_failed=false
+quiesce_rclone_services() {
+    quiesce_services_for_rollback rclone-vfs "${AF_ARCHIVE_UNIT:-rclone}"
+}
+cleanup_and_rollback() {
+    local rc="$?"
+    local status="$rc" restore_failed=false quiesce_failed=0
     trap - EXIT INT TERM
-    [[ "${INSTALL_COMMITTED:-false}" != true ]] || exit "$status"
-    quiesce_services_for_rollback rclone-vfs "$AF_ARCHIVE_UNIT" || { restore_failed=true; exit 1; }
-    (rollback_app_archive_update "$status") || true
-    [[ ! -e "$AF_ARCHIVE_BACKUP/.af-archive-pending" ]] || restore_failed=true
-    if [[ -e "$AF_ARCHIVE_BACKUP/vfs-unit" ]]; then
-        safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/vfs-unit" /etc/systemd/system/rclone-vfs.service || restore_failed=true
-    else
-        rm -f /etc/systemd/system/rclone-vfs.service || restore_failed=true
+    set +e
+    if ! declare -F quiesce_rclone_services >/dev/null 2>&1; then
+        quiesce_rclone_services() {
+            quiesce_services_for_rollback rclone-vfs "${AF_ARCHIVE_UNIT:-rclone}"
+        }
     fi
-    systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
-    if [[ "$restore_failed" == false && "$VFS_WAS_ACTIVE" == 1 && ! -e "$AF_ARCHIVE_BACKUP/.af-archive-pending" ]]; then
-        systemctl restart rclone-vfs >> "$LOGFILE" 2>&1 || restore_failed=true
+    if [[ "${INSTALL_COMMITTED:-false}" != true && "${ROLLBACK_NEEDED:-1}" == "1" ]]; then
+        [[ "$rc" -ne 0 ]] || rc=1
+        if ! quiesce_rclone_services; then
+            quiesce_failed=1
+            restore_failed=true
+            local recovery_archive="${RCLONE_BACKUP_ARCHIVE:-${AF_ARCHIVE_BACKUP:-unknown}}"
+            echo "ERROR: Rclone rollback aborted because service quiescence failed; preserving recovery archive at ${recovery_archive} (incomplete-rollback)" >&2
+            if declare -F print_error >/dev/null 2>&1; then
+                print_error "Rclone rollback aborted because service quiescence failed; preserving recovery archive at ${recovery_archive} (incomplete-rollback)"
+            fi
+            if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                af_write_failure_receipt "${rc:-1}" "rollback" "incomplete_rollback" "Rclone rollback aborted because service quiescence failed; preserving recovery archive at ${recovery_archive} (incomplete-rollback)"
+            else
+                printf 'AF_DIAG_FAILURE={"stage":"rollback","exit_code":%d,"category":"incomplete_rollback","summary":"Rclone rollback aborted because service quiescence failed; preserving recovery archive at %s (incomplete-rollback)"}\n' "${rc:-1}" "$recovery_archive" >&2
+            fi
+            if [[ -n "${AF_ARCHIVE_BACKUP:-}" && -d "$AF_ARCHIVE_BACKUP" ]]; then
+                touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+            fi
+        else
+            (rollback_app_archive_update "$status") || true
+            [[ ! -e "${AF_ARCHIVE_BACKUP:-}/.af-archive-pending" ]] || restore_failed=true
+            if [[ -n "${AF_ARCHIVE_BACKUP:-}" && -e "$AF_ARCHIVE_BACKUP/vfs-unit" ]]; then
+                safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/vfs-unit" /etc/systemd/system/rclone-vfs.service || restore_failed=true
+            else
+                rm -f /etc/systemd/system/rclone-vfs.service || restore_failed=true
+            fi
+            systemctl daemon-reload >> "${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
+            if [[ "$restore_failed" == false && "${VFS_WAS_ACTIVE:-0}" == 1 && -n "${AF_ARCHIVE_BACKUP:-}" && ! -e "$AF_ARCHIVE_BACKUP/.af-archive-pending" ]]; then
+                systemctl restart rclone-vfs >> "${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
+            fi
+            if [[ "$restore_failed" == true && -n "${AF_ARCHIVE_BACKUP:-}" && -d "$AF_ARCHIVE_BACKUP" ]]; then
+                touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+                print_warn "Rollback incomplete; recovery backup preserved at $AF_ARCHIVE_BACKUP"
+            fi
+            if [[ "$restore_failed" == true || -e "${AF_ARCHIVE_BACKUP:-}/.af-archive-pending" ]]; then
+                if declare -F af_write_failure_receipt >/dev/null 2>&1; then
+                    af_write_failure_receipt "${rc:-1}" "rollback" "incomplete_rollback" "Rclone rollback incomplete; recovery backup preserved at ${AF_ARCHIVE_BACKUP:-unknown} (incomplete-rollback)"
+                else
+                    printf 'AF_DIAG_FAILURE={"stage":"rollback","exit_code":%d,"category":"incomplete_rollback","summary":"Rclone rollback incomplete; recovery backup preserved at %s (incomplete-rollback)"}\n' "${rc:-1}" "${AF_ARCHIVE_BACKUP:-unknown}" >&2
+                fi
+            fi
+        fi
     fi
-    if [[ "$restore_failed" == true ]]; then
-        touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
-        print_warn "Rollback incomplete; recovery backup preserved at $AF_ARCHIVE_BACKUP"
+    [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
+    [[ -z "${TMP_ZIP:-}" ]] || rm -f -- "$TMP_ZIP" || true
+    local scratch_has_recovery=0
+    local check_rec="${RCLONE_BACKUP_ARCHIVE:-${AF_ARCHIVE_BACKUP:-}}"
+    if [[ -n "${AF_JOB_SCRATCH_DIR:-}" && -d "${AF_JOB_SCRATCH_DIR}" && -n "$check_rec" ]]; then
+        if [[ "$check_rec" == "${AF_JOB_SCRATCH_DIR}"* ]]; then
+            scratch_has_recovery=1
+        fi
+    fi
+    if [[ "$scratch_has_recovery" -eq 0 ]] && declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
+    fi
+    if [[ "$quiesce_failed" -ne 0 || "$restore_failed" == true ]]; then
+        [[ "$rc" -ne 0 ]] && exit "$rc" || exit 1
     fi
     exit "$status"
 }
-trap rollback_rclone_update EXIT
+rollback_rclone_update() {
+    cleanup_and_rollback "$@"
+}
+trap cleanup_and_rollback EXIT
 stop_systemd_unit rclone-vfs
 chmod 755 /usr/bin/rclone
 rm -rf "$TMP_ZIP" "$TMP_DIR"
+TMP_ZIP=""
+TMP_DIR=""
 
 # Record version
 RCLONE_VER="$(/usr/bin/rclone version 2>/dev/null | head -n1 | awk '{print $2}' || true)"
@@ -96,41 +171,165 @@ fi
 
 # Ensure baseline rclone.conf and credentials env exist
 validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf
+mkdir -p /etc/aetherflow /etc/rclone
+validate_config_paths /etc/rclone/rclone.env /etc/rclone/rclone.conf /etc/aetherflow/rclone.env
 if [[ ! -e /etc/rclone/rclone.conf ]]; then
     printf '' | write_config_file /etc/rclone/rclone.conf 0600
 fi
-if [[ ! -s /etc/rclone/rclone.env || ( -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != 1 ) ]]; then
-AF_SEED_USER="${AF_CONFIG_USER:-$MASTER_USER}" AF_SEED_PASS="${AF_CONFIG_PASS:-$MASTER_PASS}" python3 - <<'PYEOF' | write_config_file /etc/rclone/rclone.env 0600
-import os
-username, password = [value.replace('\\', '\\\\').replace('"', '\\"') for value in (os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"])]
-print(f'RCLONE_RC_USER="{username}"')
-print(f'RCLONE_RC_PASS="{password}"')
-PYEOF
+
+MASTER_PASS=""
+for info_file in /root/.master.info /.master.info; do
+    if [[ -f "$info_file" ]]; then
+        MASTER_PASS="$(grep -E '^MASTER_PASS=' "$info_file" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"'\'' ' || true)"
+        if [[ -z "$MASTER_PASS" ]]; then
+            MASTER_PASS="$(head -n1 "$info_file" 2>/dev/null | tr -d '\r\n' || true)"
+        fi
+        [[ -z "$MASTER_PASS" ]] || break
+    fi
+done
+
+CURR_PASS=""
+CURR_USER=""
+if [[ -s /etc/rclone/rclone.env ]]; then
+    CURR_PASS="$(grep -E '^(RCLONE_RC_PASS|RCLONE_PASS)=' /etc/rclone/rclone.env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"'\'' ' || true)"
+    CURR_USER="$(grep -E '^(RCLONE_RC_USER|RCLONE_USER)=' /etc/rclone/rclone.env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"'\'' ' || true)"
 fi
-validate_config_paths /etc/rclone/rclone.conf /etc/rclone/rclone.env
+if [[ -z "$CURR_PASS" && -s /etc/aetherflow/rclone.env ]]; then
+    CURR_PASS="$(grep -E '^(RCLONE_RC_PASS|RCLONE_PASS)=' /etc/aetherflow/rclone.env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"'\'' ' || true)"
+fi
+if [[ -z "$CURR_USER" && -s /etc/aetherflow/rclone.env ]]; then
+    CURR_USER="$(grep -E '^(RCLONE_RC_USER|RCLONE_USER)=' /etc/aetherflow/rclone.env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '"'\'' ' || true)"
+fi
+
+FINAL_USER="${CURR_USER:-${AF_CONFIG_USER:-admin}}"
+FINAL_PASS="${CURR_PASS:-}"
+if [[ -z "$FINAL_PASS" || ( -n "$MASTER_PASS" && "$FINAL_PASS" == "$MASTER_PASS" ) ]]; then
+    FINAL_PASS="$(openssl rand -hex 24)"
+fi
+
+cat <<EOF | write_config_file /etc/aetherflow/rclone.env 0600
+RCLONE_RC_USER="${FINAL_USER}"
+RCLONE_RC_PASS="${FINAL_PASS}"
+RCLONE_USER="${FINAL_USER}"
+RCLONE_PASS="${FINAL_PASS}"
+EOF
+set_config_file_mode 0600 /etc/aetherflow/rclone.env
+cp -a /etc/aetherflow/rclone.env /etc/rclone/rclone.env
 set_config_file_mode 0600 /etc/rclone/rclone.conf /etc/rclone/rclone.env
 chown -hRP rclone:rclone /etc/rclone /var/lib/rclone
 
 wait_for_service_ready() {
     local service="${1:-rclone}" port="${2:-$APP_PORT}" path="${3:-/}"
-    systemctl is-active --quiet "$service" || return 1
-    safe_config_python /etc/rclone/rclone.env <<'PYEOF' | curl -K - -fsS -o /dev/null \
-        --connect-timeout 2 --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
-        "http://127.0.0.1:${port}${path}" >> "$LOGFILE" 2>&1 || return 1
-import json, shlex
+    local env_file="${RCLONE_ENV_FILE:-/etc/aetherflow/rclone.env}"
+    local attempts="${4:-30}" attempt rc_unauth_code metrics_unauth_code rc_auth_code metrics_auth_code gui_status curl_auth_config
+    [[ -s "$env_file" ]] || env_file="/etc/rclone/rclone.env"
+
+    local rclone_mode="${RCLONE_MODE:-}"
+    if [[ -z "$rclone_mode" ]]; then
+        local rclone_bin="/usr/bin/rclone"
+        [[ -x "$rclone_bin" ]] || rclone_bin="$(command -v rclone 2>/dev/null || true)"
+        if [[ -n "$rclone_bin" ]] && "$rclone_bin" rcd --help 2>&1 | grep -q -- '--rc-web-gui'; then
+            rclone_mode="rcd"
+        else
+            rclone_mode="gui"
+        fi
+    fi
+
+    local rc_check_port="${RCLONE_API_PORT:-}"
+    if [[ -z "$rc_check_port" ]]; then
+        if [[ "$rclone_mode" == "gui" ]]; then
+            rc_check_port=5573
+        else
+            rc_check_port="$port"
+        fi
+    fi
+
+    curl_auth_config="$(safe_config_python "$env_file" <<'PYEOF'
+import json, shlex, sys
+env_path = sys.argv[1]
 settings = {}
-for assignment in shlex.split(safe_read_text('/etc/rclone/rclone.env'), comments=True):
+for assignment in shlex.split(safe_read_text(env_path), comments=True):
     key, separator, value = assignment.partition('=')
-    if separator and key.strip() in ('RCLONE_RC_USER', 'RCLONE_RC_PASS'):
+    if separator and key.strip() in ('RCLONE_RC_USER', 'RCLONE_RC_PASS', 'RCLONE_USER', 'RCLONE_PASS'):
         settings[key.strip()] = value
-credentials = settings.get('RCLONE_RC_USER', '') + ':' + settings.get('RCLONE_RC_PASS', '')
-print('user = ' + json.dumps(credentials, ensure_ascii=False))
+user = settings.get('RCLONE_RC_USER') or settings.get('RCLONE_USER', '')
+passwd = settings.get('RCLONE_RC_PASS') or settings.get('RCLONE_PASS', '')
+print('user = ' + json.dumps(f"{user}:{passwd}", ensure_ascii=False))
 PYEOF
-    systemctl is-active --quiet "$service"
+    )" || return 1
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if systemctl is-active --quiet "$service"; then
+            # b) Verify unauthenticated request to RC listener is rejected with 401 or 403
+            rc_unauth_code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 -X POST "http://127.0.0.1:${rc_check_port}/core/version" 2>/dev/null || true)"
+            metrics_unauth_code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 "http://127.0.0.1:${rc_check_port}/metrics" 2>/dev/null || true)"
+
+            if [[ "$rc_unauth_code" =~ ^2[0-9][0-9]$ || "$metrics_unauth_code" =~ ^2[0-9][0-9]$ ]]; then
+                print_error "Authentication bypass detected on Rclone RC listener port ${rc_check_port} (unauthenticated 2xx returned: /core/version=${rc_unauth_code}, /metrics=${metrics_unauth_code})"
+                return 1
+            fi
+
+            if [[ ( "$rc_unauth_code" == "401" || "$rc_unauth_code" == "403" ) && ( "$metrics_unauth_code" == "401" || "$metrics_unauth_code" == "403" ) ]]; then
+                # c) Verify authenticated requests return 200 via curl -K - via stdin
+                rc_auth_code="$(printf '%s\n' "$curl_auth_config" | curl -K - -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 -X POST "http://127.0.0.1:${rc_check_port}/core/version" 2>/dev/null || true)"
+                metrics_auth_code="$(printf '%s\n' "$curl_auth_config" | curl -K - -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 "http://127.0.0.1:${rc_check_port}/metrics" 2>/dev/null || true)"
+
+                if [[ "$rc_auth_code" == "200" && "$metrics_auth_code" == "200" ]]; then
+                    # d) Split-port gui mode (RCLONE_API_PORT != APP_PORT) also independently verifies GUI listener
+                    if [[ "$rclone_mode" == "gui" && "$rc_check_port" != "$port" ]]; then
+                        gui_status="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 "http://127.0.0.1:${port}/" 2>/dev/null || true)"
+                        case "$gui_status" in
+                            200|301|302|307|308)
+                                return 0
+                                ;;
+                        esac
+                    else
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+        if (( attempt < attempts )); then sleep 1; fi
+    done
+
+    print_error "Rclone service ${service} did not become ready (RC port ${rc_check_port}, GUI port ${port})"
+    return 1
 }
 
 report_progress 70 "Scaffolding rclone.service (GUI on ${APP_PORT}) and companion rclone-vfs.service..."
-sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_ADDRESS@/${AF_BIND_ADDRESS:-127.0.0.1}/g" <<'EOF' > /etc/systemd/system/rclone.service
+RCLONE_BIND_HOST="${RCLONE_BIND_HOST:-${AF_BIND_ADDRESS:-127.0.0.1}}"
+RCLONE_BIN="/usr/bin/rclone"
+[[ -x "$RCLONE_BIN" ]] || RCLONE_BIN="$(command -v rclone 2>/dev/null || true)"
+if [[ -n "$RCLONE_BIN" ]] && "$RCLONE_BIN" rcd --help 2>&1 | grep -q -- '--rc-web-gui'; then
+    RCLONE_MODE="rcd"
+    RCLONE_API_PORT="${RCLONE_API_PORT:-$APP_PORT}"
+    RCLONE_RCD_FLAGS="--rc-web-gui --rc-addr=${RCLONE_BIND_HOST}:${APP_PORT} --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache"
+    if "$RCLONE_BIN" rcd --help 2>&1 | grep -q -- '--rc-web-gui-no-open-browser'; then
+        RCLONE_RCD_FLAGS="${RCLONE_RCD_FLAGS} --rc-web-gui-no-open-browser"
+    fi
+    RCLONE_EXEC_START="/usr/bin/rclone rcd ${RCLONE_RCD_FLAGS}"
+else
+    RCLONE_MODE="gui"
+    RCLONE_GUI_FLAGS="--config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache"
+    if [[ -n "$RCLONE_BIN" ]] && "$RCLONE_BIN" gui --help 2>&1 | grep -q -- '--addr'; then
+        RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --addr=${RCLONE_BIND_HOST}:${APP_PORT}"
+    else
+        RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --rc-addr=${RCLONE_BIND_HOST}:${APP_PORT}"
+    fi
+    if [[ -n "$RCLONE_BIN" ]] && "$RCLONE_BIN" gui --help 2>&1 | grep -q -- '--api-addr'; then
+        RCLONE_API_PORT="${RCLONE_API_PORT:-5573}"
+        RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --api-addr=${RCLONE_BIND_HOST}:${RCLONE_API_PORT}"
+    else
+        RCLONE_API_PORT="${RCLONE_API_PORT:-$APP_PORT}"
+    fi
+    if [[ -n "$RCLONE_BIN" ]] && "$RCLONE_BIN" gui --help 2>&1 | grep -q -- '--no-open-browser'; then
+        RCLONE_GUI_FLAGS="${RCLONE_GUI_FLAGS} --no-open-browser"
+    fi
+    RCLONE_EXEC_START="/usr/bin/rclone gui ${RCLONE_GUI_FLAGS}"
+fi
+export RCLONE_MODE RCLONE_API_PORT
+
+cat <<EOF > /etc/systemd/system/rclone.service
 [Unit]
 Description=Rclone Remote Control GUI Daemon
 After=network-online.target
@@ -140,8 +339,9 @@ Wants=network-online.target
 Type=simple
 User=rclone
 Group=rclone
-EnvironmentFile=/etc/rclone/rclone.env
-ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=@AF_BIND_ADDRESS@:@AF_APP_PORT@ --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
+EnvironmentFile=/etc/aetherflow/rclone.env
+ExecStart=${RCLONE_EXEC_START}
+LogFilterPatterns=~.*(pass|password|token|login_token)=.*
 Restart=on-failure
 RestartSec=5
 
@@ -176,6 +376,8 @@ if [[ "$VFS_WAS_ACTIVE" == 1 ]]; then
     systemctl start rclone-vfs >> "$LOGFILE" 2>&1
 fi
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
+INSTALL_COMMITTED=true
+ROLLBACK_NEEDED=0
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

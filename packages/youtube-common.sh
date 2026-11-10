@@ -21,7 +21,7 @@ youtube_init() {
     validate_config_paths "$INSTALL_DIR/.af-version" "$DATA_DIR/.af-version" "$CONFIG_DIR/runtime.env" "$CONFIG_DIR/companion.env" "$CONFIG_DIR/config.yml" "$CONFIG_DIR/config.properties" "$CONFIG_DIR/httpd.conf"
     export LOGFILE="/var/log/aetherflow/install-${APP_NAME}.log"
     export DEBIAN_FRONTEND=noninteractive
-    trap 'print_error "Installation failed; see ${LOGFILE}."' ERR
+    trap 'youtube_abort_install "Installation failed; see ${LOGFILE}."' ERR
     if ! id "$APP_NAME" >/dev/null 2>&1; then
         useradd --system --user-group --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_NAME"
     fi
@@ -32,12 +32,57 @@ youtube_init() {
     apt-get install --no-remove -y -qq ca-certificates curl git jq openssl python3 postgresql >> "$LOGFILE" 2>&1
 }
 
+youtube_abort_install() {
+    local rc="$?"
+    local msg="${1:-Installation failed; see ${LOGFILE:-/var/log/aetherflow/install.log}.}"
+    if [[ "$1" =~ ^[0-9]+$ && -n "${2:-}" ]]; then
+        rc="$1"
+        msg="$2"
+    fi
+    [[ "$rc" -ne 0 ]] || rc=1
+    af_write_failure_receipt "$rc" "${AF_CURRENT_STAGE:-build}" "installer" "$msg"
+    print_error "$msg"
+}
+
 youtube_source() {
-    local repo="$1" destination="$2"
-    if [[ -d "$destination/.git" ]]; then
-        runuser -u "$APP_NAME" -- git -C "$destination" pull --ff-only >> "$LOGFILE" 2>&1
+    local repo="$1" destination="$2" dir="$2"
+    if [[ $# -ge 3 ]]; then
+        local target_ref="$3"
+    else
+        local target_ref="${AF_TARGET_VERSION:-}"
+        case "$repo" in
+            iv-org/invidious|TeamPiped/*)
+                if [[ "$target_ref" == *","* || "$target_ref" == *":"* ]]; then
+                    target_ref=""
+                fi
+                ;;
+            *)
+                target_ref=""
+                ;;
+        esac
+    fi
+    local OUTPUT_LOG="${LOGFILE:-/dev/null}"
+    if [[ -d "${dir}/.git" ]]; then
+        if [[ -z "$target_ref" ]]; then
+            if [[ -n "${APP_NAME:-}" ]] && id "$APP_NAME" >/dev/null 2>&1; then
+                runuser -u "$APP_NAME" -- git -C "$dir" fetch --depth 1 origin HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && \
+                runuser -u "$APP_NAME" -- git -C "$dir" checkout --detach FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && \
+                runuser -u "$APP_NAME" -- git -C "$dir" reset --hard FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1
+            else
+                git -C "$dir" fetch --depth 1 origin HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && git -C "$dir" checkout --detach FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && git -C "$dir" reset --hard FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1
+            fi
+        fi
     else
         runuser -u "$APP_NAME" -- git clone --depth 1 "https://github.com/${repo}.git" "$destination" >> "$LOGFILE" 2>&1
+    fi
+    if [[ -n "$target_ref" ]]; then
+        if ! runuser -u "$APP_NAME" -- git -C "$destination" fetch --depth 1 origin "$target_ref" >> "$LOGFILE" 2>&1 || \
+           ! runuser -u "$APP_NAME" -- git -C "$destination" checkout --detach FETCH_HEAD >> "$LOGFILE" 2>&1; then
+            if ! runuser -u "$APP_NAME" -- git -C "$destination" checkout "$target_ref" >> "$LOGFILE" 2>&1; then
+                youtube_abort_install "Failed to check out requested target ref ${target_ref} for ${repo}"
+                exit 1
+            fi
+        fi
     fi
 }
 
@@ -95,15 +140,33 @@ SQL
 }
 
 youtube_asset() {
-    local repo="$1" tag="$2" asset="$3" output="$4" metadata url digest
-    metadata="$(curl --fail --silent --show-error --location "https://api.github.com/repos/${repo}/releases/tags/${tag}")"
-    url="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' <<< "$metadata")"
-    digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest // empty' <<< "$metadata")" || return 1
+    local repo="$1" tag="$2" asset="$3" output="$4" metadata="" url="" digest=""
+    if [[ -n "${AF_TARGET_VERSION:-}" && "$tag" != "release-master" ]]; then
+        case "$repo" in
+            iv-org/invidious|TeamPiped/*)
+                tag="${AF_TARGET_VERSION}"
+                ;;
+        esac
+    fi
+    local auth_header=()
+    local token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -n "$token" ]]; then
+        auth_header=(-H "Authorization: Bearer $token")
+    fi
+    metadata="$(curl --fail --silent --show-error --location "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/tags/${tag}" 2>/dev/null || true)"
+    if [[ -n "$metadata" ]]; then
+        url="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' <<< "$metadata" 2>/dev/null || true)"
+        digest="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest // empty' <<< "$metadata" 2>/dev/null || true)"
+    fi
+    if [[ -z "$url" ]]; then
+        url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+        digest=""
+    fi
     [[ "$url" == "https://github.com/${repo}/releases/download/"* && ( -z "$digest" || "$digest" =~ ^sha256:[a-fA-F0-9]{64}$ ) ]] || {
         print_error "Missing trusted download URL or SHA-256 digest for ${asset}."
         return 1
     }
-    RELEASE_JSON="$metadata" download_file "$url" "$output" "${APP_NAME:-${PACKAGE_NAME:-youtube}}" "${digest#sha256:}"
+    RELEASE_JSON="${metadata:-}" download_file "$url" "$output" "${APP_NAME:-${PACKAGE_NAME:-youtube}}" "${digest#sha256:}"
 }
 
 youtube_unit() {

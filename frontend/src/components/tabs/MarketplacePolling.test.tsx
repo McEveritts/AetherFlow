@@ -15,7 +15,7 @@ jest.mock('@/components/deploy/DeploymentStatus', () => ({ DeploymentStatus: () 
 const mockApiFetch = jest.fn();
 jest.mock('@/lib/fetcher', () => ({ apiFetch: (...args: unknown[]) => mockApiFetch(...args) }));
 
-const app = (extra: Partial<App> = {}): App => ({ id: 'fixture', name: 'Fixture', desc: 'Application', hits: 0, category: 'Media', status: 'installed', progress: 0, update_available: true, latest_version: '2.0', ...extra });
+const app = (extra: Partial<App> = {}): App => ({ id: 'fixture', name: 'Fixture', desc: 'Application', hits: 0, category: 'Media', status: 'installed', progress: 0, update_available: true, latest_version: '2.0', inventory_authenticated: true, ...extra });
 let server: 'idle' | 'active' | 'down' | 'failed' = 'idle';
 let fetches = 0;
 const fetcher = async () => {
@@ -60,7 +60,7 @@ it('automatically recovers after a prolonged outage and reports the late exact f
     await act(async () => { await jest.advanceTimersByTimeAsync(200000); });
     const unknownDuringOutage = count('may have been superseded');
     const fetchesAtRecovery = fetches;
-    const unreachableShown = !!screen.queryByText('Marketplace Unreachable');
+    const unreachableShown = !!(screen.queryByText(/Marketplace (?:API )?unreachable/i) || screen.queryByText(/cached inventory/i));
     server = 'failed';
     await act(async () => { await jest.advanceTimersByTimeAsync(300000); });
     const fetchesAfterRecovery = fetches - fetchesAtRecovery;

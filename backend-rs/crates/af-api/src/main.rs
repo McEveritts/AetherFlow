@@ -123,6 +123,8 @@ fn build_cors_layer() -> CorsLayer {
         HeaderName::from_static("upload-path"),
         HeaderName::from_static("x-api-version"),
         HeaderName::from_static("deprecation"),
+        HeaderName::from_static("x-aetherflow-inventory-mode"),
+        HeaderName::from_static("x-aetherflow-inventory-authenticated"),
         header::LINK,
     ];
 

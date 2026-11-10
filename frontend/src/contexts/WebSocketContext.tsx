@@ -27,6 +27,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const FALLBACK_POLL_INTERVAL_MS = 5_000;
 const MAX_RECONNECT_BEFORE_FALLBACK = 3;
+const MARKETPLACE_REFRESH_INTERVAL_MS = 1000;
 
 // ── Types ──────────────────────────────────────────────────────
 interface WebSocketData {
@@ -112,6 +113,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const heartbeatTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const pollTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
     const pollInFlightRef = useRef(false);
+    const marketplaceRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const transportGenRef = useRef(0);
     const attemptRef = useRef(0);                    // mirrors Zustand but non-reactive
     const hasConnectedOnceRef = useRef(false);       // suppress "restored" toast on first connect
@@ -124,6 +126,28 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const suppressedMetricsBufferRef = useRef<SystemMetrics | null>(null);
     // FALLBACK: Treat control-plane events as standard throttled metrics until unconditional bypass is ratified.
     const suppressedControlEventsRef = useRef<{type: string, data: unknown}[]>([]);
+
+    const clearMarketplaceRefresh = useCallback(() => {
+        if (marketplaceRefreshTimerRef.current !== undefined) {
+            clearTimeout(marketplaceRefreshTimerRef.current);
+            marketplaceRefreshTimerRef.current = undefined;
+        }
+    }, []);
+
+    const refreshMarketplace = useCallback((immediate: boolean) => {
+        const refresh = () => {
+            marketplaceRefreshTimerRef.current = undefined;
+            if (!isMountedRef.current) return;
+            globalMutate('/api/v1/public/marketplace');
+            globalMutate('/api/v1/auth/services');
+        };
+        if (immediate) {
+            clearMarketplaceRefresh();
+            refresh();
+        } else if (marketplaceRefreshTimerRef.current === undefined) {
+            marketplaceRefreshTimerRef.current = setTimeout(refresh, MARKETPLACE_REFRESH_INTERVAL_MS);
+        }
+    }, [clearMarketplaceRefresh]);
 
     // ── Heartbeat ──────────────────────────────────────────────
     const clearHeartbeat = useCallback(() => {
@@ -352,22 +376,32 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 } 
                 // Process current message and any queued control messages
                 const eventsToProcess = [...suppressedControlEventsRef.current];
-                if (['MARKETPLACE_UPDATE', 'SYSTEM_HEAL', 'ACTION_QUEUED'].includes(message.type)) {
-                    eventsToProcess.push({ type: message.type, data: message.data });
+                if (['MARKETPLACE_UPDATE', 'package:progress', 'SYSTEM_HEAL', 'ACTION_QUEUED'].includes(message.type)) {
+                    eventsToProcess.push({ type: message.type, data: message.data ?? message });
                 }
                 suppressedControlEventsRef.current = [];
 
                 eventsToProcess.forEach(ev => {
-                    if (ev.type === 'MARKETPLACE_UPDATE') {
-                        globalMutate('/api/v1/public/marketplace');
-                        globalMutate('/api/v1/auth/services');
-                    } else if (ev.type === 'SYSTEM_HEAL') {
-                        const healData = ev.data as { service?: string, reason?: string, action?: string };
-                        addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
-                    } else if (ev.type === 'ACTION_QUEUED') {
-                        const actionData = ev.data as { action_id?: number, classification?: string, source?: string, action?: string };
-                        globalMutate('/api/v1/admin/actions/pending?status=pending');
-                        addToast(`New action queued: ${actionData.action || 'Unknown'} (#${actionData.action_id || '?'})`, 'info');
+                    switch (ev.type) {
+                        case 'MARKETPLACE_UPDATE':
+                            refreshMarketplace(true);
+                            break;
+                        case 'package:progress': {
+                            const progressData = ev.data as { status?: string } | null;
+                            refreshMarketplace(['completed', 'failed', 'interrupted', 'cancelled'].includes(progressData?.status ?? ''));
+                            break;
+                        }
+                        case 'SYSTEM_HEAL': {
+                            const healData = ev.data as { service?: string, reason?: string, action?: string };
+                            addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
+                            break;
+                        }
+                        case 'ACTION_QUEUED': {
+                            const actionData = ev.data as { action_id?: number, classification?: string, source?: string, action?: string };
+                            globalMutate('/api/v1/admin/actions/pending?status=pending');
+                            addToast(`New action queued: ${actionData.action || 'Unknown'} (#${actionData.action_id || '?'})`, 'info');
+                            break;
+                        }
                     }
                 });
 
@@ -410,7 +444,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     }, [
         setConnectionState, setReconnectAttempt, setLastMessageAt,
         startHeartbeat, clearHeartbeat, resetHeartbeatTimeout,
-        stopPolling, addToast,
+        stopPolling, addToast, refreshMarketplace,
     ]);
 
     useEffect(() => {
@@ -439,9 +473,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         useWebSocketDataStore.getState().resetData();
         return () => {
             isMountedRef.current = false;
+            clearMarketplaceRefresh();
             useWebSocketDataStore.getState().resetData();
         };
-    }, []);
+    }, [clearMarketplaceRefresh]);
 
     const exposedData = useMemo<WebSocketData>(
         () => (!isAuthenticated || pathname === '/login' ? { system: null, services: null } : data),
@@ -462,6 +497,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
     // ── Primary Transport Lifecycle ──────────────────────────────
     useEffect(() => {
+        clearMarketplaceRefresh();
         if (!isAuthenticated || pathname === '/login') {
             transportGenRef.current += 1;
             hasConnectedOnceRef.current = false;
@@ -524,7 +560,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 wsRef.current = null;
             }
         };
-    }, [isAuthenticated, pathname, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt, resetConnection]);
+    }, [isAuthenticated, pathname, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt, resetConnection, clearMarketplaceRefresh]);
 
     const contextValue = useMemo(
         () => ({ data: exposedData, connectionState, reconnectAttempt, manualReconnect }),

@@ -191,6 +191,8 @@ pub struct Package {
     pub update_repo_url: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_package: String,
+    #[serde(default)]
+    pub update_channel: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub version_command: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -236,6 +238,8 @@ pub struct PackageAutomation {
     pub update_repo_url: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_package: String,
+    #[serde(default)]
+    pub update_channel: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub version_command: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -297,12 +301,23 @@ pub struct MarketplaceApp {
     pub update_url: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_error: String,
+    #[serde(default)]
+    pub inventory_known: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub inventory_authenticated: bool,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub inventory_mode: String,
     /// Terminal outcome of the most recent lifecycle job. Deliberately carries
     /// no error text because this catalog is served without authentication;
     /// failure detail is available from the authenticated progress endpoint.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_job: Option<MarketplaceJobOutcome>,
 }
+
+pub const INVENTORY_MODE_AUTHENTICATED: &str = "authenticated";
+pub const INVENTORY_MODE_PUBLIC_REDACTED: &str = "public_redacted";
+pub const INVENTORY_MODE_HEADER: &str = "X-AetherFlow-Inventory-Mode";
+pub const INVENTORY_AUTHENTICATED_HEADER: &str = "X-AetherFlow-Inventory-Authenticated";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MarketplaceJobOutcome {
@@ -312,6 +327,68 @@ pub struct MarketplaceJobOutcome {
     pub status: String,
     pub started_at: String,
     pub finished_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achieved_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_summary: Option<String>,
+}
+
+pub type MarketplaceLastJob = MarketplaceJobOutcome;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PackageLifecycleRecord {
+    pub package_id: String,
+    pub job_id: String,
+    pub action: String,
+    pub status: String,
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: String,
+    #[serde(default)]
+    pub owner_id: String,
+    #[serde(default)]
+    pub service_units: Vec<String>,
+    #[serde(default)]
+    pub failure_category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achieved_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PackageJobOutcomeRecord {
+    pub job_id: String,
+    pub package_id: String,
+    pub action: String,
+    /// completed, failed, or interrupted (completion could not be confirmed).
+    pub status: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub message: String,
+    pub started_at: String,
+    pub finished_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achieved_version: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +416,10 @@ pub struct PackageRunnerRequest {
     /// `DELETE_DATA` from its own environment; ordinary removals retain data.
     #[serde(skip_serializing_if = "is_false", default)]
     pub delete_data: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achieved_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1806,5 +1887,47 @@ mod tests {
         };
         let value = serde_json::to_value(app).unwrap();
         assert_eq!(value["tls_enabled"], false);
+    }
+
+    #[test]
+    fn test_package_lifecycle_and_inventory_models() {
+        let app = MarketplaceApp {
+            inventory_known: true,
+            ..Default::default()
+        };
+        let val = serde_json::to_value(&app).unwrap();
+        assert_eq!(val["inventory_known"], true);
+
+        let req = PackageRunnerRequest {
+            action: "update".to_string(),
+            package_id: "radarr".to_string(),
+            script_name: "installpackage-radarr".to_string(),
+            expected_target_version: Some("5.3.6.8612".to_string()),
+            achieved_version: Some("5.3.6.8612".to_string()),
+            ..Default::default()
+        };
+        let req_json = serde_json::to_string(&req).unwrap();
+        assert!(req_json.contains("expected_target_version"));
+        let parsed: PackageRunnerRequest = serde_json::from_str(&req_json).unwrap();
+        assert_eq!(parsed.expected_target_version.as_deref(), Some("5.3.6.8612"));
+        assert_eq!(parsed.achieved_version.as_deref(), Some("5.3.6.8612"));
+
+        let rec = PackageLifecycleRecord {
+            package_id: "radarr".to_string(),
+            job_id: "job-1".to_string(),
+            action: "update".to_string(),
+            status: "failed".to_string(),
+            started_at: "2026-11-08T12:00:00Z".to_string(),
+            failed_stage: Some("target_verification".to_string()),
+            exit_code: Some(1),
+            sanitized_summary: Some("verification mismatch".to_string()),
+            expected_target_version: Some("5.3.6".to_string()),
+            achieved_version: Some("5.3.5".to_string()),
+            ..Default::default()
+        };
+        let rec_json = serde_json::to_string(&rec).unwrap();
+        let parsed_rec: PackageLifecycleRecord = serde_json::from_str(&rec_json).unwrap();
+        assert_eq!(parsed_rec.failed_stage.as_deref(), Some("target_verification"));
+        assert_eq!(parsed_rec.exit_code, Some(1));
     }
 }

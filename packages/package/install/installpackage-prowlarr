@@ -45,7 +45,7 @@ esac
 
 report_progress 35 "Downloading Prowlarr (${PROWLARR_ARCH})..."
 PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
-PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
+PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?version=${PROWLARR_VERSION#v}&os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/prowlarr-XXXXXX.tar.gz)
 download_file "$PROWLARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
@@ -53,8 +53,47 @@ download_file "$PROWLARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 report_progress 65 "Extracting Prowlarr to /opt/Prowlarr..."
 stage_app_archive "$TMP_TAR" "/opt/Prowlarr" "Prowlarr" "/var/lib/prowlarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
-if [[ -n "$PROWLARR_VERSION" ]]; then
-    queue_app_version /opt/Prowlarr/.af-version "$(resolve_installed_binary_version /opt/Prowlarr/Prowlarr "${PROWLARR_VERSION#v}")"
+
+if [[ ! -x /opt/Prowlarr/Prowlarr ]]; then
+    print_error "Prowlarr binary /opt/Prowlarr/Prowlarr missing or not executable"
+    exit 1
+fi
+
+PROBED_VER="$(resolve_installed_binary_version /opt/Prowlarr/Prowlarr "" || true)"
+if [[ -n "$PROBED_VER" ]]; then
+    RESOLVED_VER="$PROBED_VER"
+elif [[ "${AF_ALLOW_VERSION_FALLBACK:-1}" != "0" ]]; then
+    RESOLVED_VER="${PROWLARR_VERSION#v}"
+else
+    print_error "Failed to resolve installed binary version for Prowlarr"
+    exit 1
+fi
+
+NORM_RESOLVED="${RESOLVED_VER#release-}"
+NORM_RESOLVED="${NORM_RESOLVED#Release-}"
+NORM_RESOLVED="${NORM_RESOLVED#[vV]}"
+
+NORM_PROWLARR="${PROWLARR_VERSION#release-}"
+NORM_PROWLARR="${NORM_PROWLARR#Release-}"
+NORM_PROWLARR="${NORM_PROWLARR#[vV]}"
+
+if [[ "${RESOLVED_VER#v}" != "${PROWLARR_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_PROWLARR" ]]; then
+    echo "ERROR: Installed Prowlarr version '${RESOLVED_VER}' does not match expected version '${PROWLARR_VERSION}'" >&2
+    exit 1
+fi
+
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    NORM_TARGET="${AF_TARGET_VERSION#release-}"
+    NORM_TARGET="${NORM_TARGET#Release-}"
+    NORM_TARGET="${NORM_TARGET#[vV]}"
+    if [[ "${RESOLVED_VER#v}" != "${AF_TARGET_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_TARGET" ]]; then
+        echo "ERROR: Installed Prowlarr version '${RESOLVED_VER}' does not match requested target version '${AF_TARGET_VERSION}'" >&2
+        exit 1
+    fi
+fi
+
+if [[ -n "$RESOLVED_VER" ]]; then
+    queue_app_version /opt/Prowlarr/.af-version "$RESOLVED_VER"
 fi
 set_config_value "/var/lib/prowlarr/config.xml" xml "Port" "$APP_PORT" "Config"
 

@@ -455,6 +455,7 @@ async fn native_cached_observations_keep_lifecycle_and_credentials_fresh() {
             started_at: "now".into(),
             progress: 42,
             last_line: "fresh progress".into(),
+            expected_target_version: None,
         },
     );
     let (services, mut jobs) =
@@ -487,6 +488,11 @@ async fn native_cached_observations_keep_lifecycle_and_credentials_fresh() {
             message: "done".into(),
             started_at: "now".into(),
             finished_at: "later".into(),
+            failed_stage: None,
+            exit_code: None,
+            sanitized_summary: None,
+            expected_target_version: None,
+            achieved_version: None,
         },
     );
     let services = tokio::task::spawn_blocking(move || get_active_services_with_jobs(&jobs))

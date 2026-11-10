@@ -13,8 +13,13 @@ else
     source /opt/AetherFlow/packages/common.sh
 fi
 
+PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}"
+af_prepare_job_scratch "${PACKAGE_NAME}"
+check_disk_space "${AF_JOB_SCRATCH_DIR}" 512
+check_disk_space "/opt" 512
+
 require_root
-validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password
+validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password /etc/kasmvnc/kasmvnc.crt /etc/kasmvnc/kasmvnc.key /etc/kasmvnc/kasmvnc.yaml
 export LOGFILE="/var/log/aetherflow/install-kasmvnc.log"
 APP_PORT="${AF_APP_PORT:-6081}"
 DATA_DIR="/var/lib/kasmvnc"
@@ -34,14 +39,17 @@ if [[ ! "${ID:-}" =~ ^(debian|ubuntu)$ || ! "$ARCH" =~ ^(amd64|arm64)$ || -z "${
     exit 1
 fi
 
-PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}"
 KASMVNC_WAS_ENABLED=false
 if systemctl is-enabled --quiet af-kasmvnc.service; then KASMVNC_WAS_ENABLED=true; fi
 AF_STATE_RESTART_ON_ROLLBACK=true
 begin_state_transaction "af-kasmvnc.service" "0" "/" "/var/lib/kasmvnc" "/etc/kasmvnc" "/usr/local/bin/af-kasmvnc-start" "/etc/systemd/system/af-kasmvnc.service" "/usr/bin/Xkasmvnc" "/usr/bin/kasmvncserver" "/usr/bin/kasmvncpasswd" "/usr/bin/vncserver" "/usr/bin/Xvnc" "/usr/lib/kasmvnc" "/usr/share/kasmvnc" "/usr/lib/kasmvncserver" "/usr/share/kasmvncserver"
 cleanup_kasmvnc() {
-    local status="$?"
+    local rc="$?"
+    local status="$rc"
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc"
+    fi
     cleanup_state_transaction "$status" return
     status=$?
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$KASMVNC_WAS_ENABLED" != true ]]; then
@@ -55,15 +63,24 @@ prepare_apt_package_transaction /var/lib/kasmvnc/.af-version kasmvncserver
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq python3 curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq python3 python3-yaml curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
 
 report_progress 30 "Resolving the matching KasmVNC release..."
-TMP_DIR="$(mktemp -d /tmp/af-kasmvnc-XXXXXX)"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/kasmvnc.XXXXXX")"
 chmod 755 "$TMP_DIR"
-if ! curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json" \
-    || ! VERSION="$(jq -er '.tag_name | ltrimstr("v")' "${TMP_DIR}/release.json")" || [[ -z "$VERSION" ]]; then
-    print_error "Failed to discover latest GitHub release for kasmtech/KasmVNC"
-    exit 1
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    VERSION="${AF_TARGET_VERSION#v}"
+    if ! curl -fsSL "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/v${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null && \
+       ! curl -fsSL "https://api.github.com/repos/kasmtech/KasmVNC/releases/tags/${VERSION}" -o "${TMP_DIR}/release.json" 2>/dev/null; then
+        print_error "Failed to discover GitHub release for kasmtech/KasmVNC tag ${AF_TARGET_VERSION}"
+        exit 1
+    fi
+else
+    if ! curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest -o "${TMP_DIR}/release.json" \
+        || ! VERSION="$(jq -er '.tag_name | ltrimstr("v")' "${TMP_DIR}/release.json")" || [[ -z "$VERSION" ]]; then
+        print_error "Failed to discover latest GitHub release for kasmtech/KasmVNC"
+        exit 1
+    fi
 fi
 ASSET_NAME="kasmvncserver_${ID}_${VERSION_CODENAME}_${VERSION}_${ARCH}.deb"
 ASSET_URL="$(jq -er --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' "${TMP_DIR}/release.json")" || {
@@ -104,54 +121,123 @@ if [[ ! -s "${DATA_DIR}/.kasmpasswd" ]]; then
 fi
 chmod 600 "${DATA_DIR}/.kasmpasswd"
 chown af-kasmvnc:af-kasmvnc "${DATA_DIR}/.kasmpasswd"
-TLS_CERT="${DATA_DIR}/.vnc/aetherflow-cert.pem"
-TLS_KEY="${DATA_DIR}/.vnc/aetherflow-key.pem"
-validate_config_paths "$TLS_CERT" "$TLS_KEY"
+TLS_CERT="/etc/kasmvnc/kasmvnc.crt"
+TLS_KEY="/etc/kasmvnc/kasmvnc.key"
+validate_config_paths "$TLS_CERT" "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-cert.pem" "${DATA_DIR}/.vnc/aetherflow-key.pem"
 if [[ ! -s "$TLS_CERT" || ! -s "$TLS_KEY" ]]; then
     (umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$TLS_KEY" -out "$TLS_CERT") >> "$LOGFILE" 2>&1
 fi
-chmod 600 "$TLS_KEY" "$TLS_CERT"
+chmod 0600 "$TLS_KEY" "$TLS_CERT"
 chown af-kasmvnc:af-kasmvnc "$TLS_KEY" "$TLS_CERT"
+ln -sf "$TLS_CERT" "${DATA_DIR}/.vnc/aetherflow-cert.pem"
+ln -sf "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-key.pem"
 
-validate_config_paths "${DATA_DIR}/.vnc/kasmvnc.yaml"
-if [[ -f "${DATA_DIR}/.vnc/kasmvnc.yaml" ]]; then
-    safe_config_python "${DATA_DIR}/.vnc/kasmvnc.yaml" "$APP_PORT" <<'PYEOF'
-import re, sys
-cfg_path, port = sys.argv[1], sys.argv[2]
-text = safe_read_text(cfg_path)
-lines = text.splitlines(keepends=True)
-network = next((index for index, line in enumerate(lines) if re.match(r"^network:[ \t]*(?:#.*)?$", line.rstrip("\r\n"))), None)
-if network is None:
-    if re.search(r"^network:", text, re.MULTILINE):
-        raise SystemExit("KasmVNC network settings must be a YAML block mapping")
-    text = text.rstrip("\n") + f"\nnetwork:\n  websocket_port: {port}\n"
-else:
-    end = next((index for index in range(network + 1, len(lines)) if re.match(r"^[^ \t#\r\n]", lines[index])), len(lines))
-    setting = next((index for index in range(network + 1, end) if re.match(r"^[ \t]+websocket_port:", lines[index])), None)
-    if setting is None:
-        if not lines[network].endswith("\n"):
-            lines[network] += "\n"
-        lines.insert(network + 1, f"  websocket_port: {port}\n")
-    else:
-        indentation = re.match(r"^[ \t]+", lines[setting]).group()
-        lines[setting] = f"{indentation}websocket_port: {port}\n"
-    text = "".join(lines)
-safe_write_text(cfg_path, text)
-PYEOF
-else
-    write_config_file "${DATA_DIR}/.vnc/kasmvnc.yaml" <<EOF
-network:
-  interface: 127.0.0.1
-  websocket_port: ${APP_PORT}
-  use_ipv6: false
-  ssl:
-    require_ssl: false
-    pem_certificate: ${TLS_CERT}
-    pem_key: ${TLS_KEY}
-command_line:
-  prompt: false
-EOF
+if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    apt-get install --no-remove -y -qq python3-yaml >> "$LOGFILE" 2>&1 || true
 fi
+
+for cfg_yaml in "/etc/kasmvnc/kasmvnc.yaml" "${DATA_DIR}/.vnc/kasmvnc.yaml"; do
+    validate_config_paths "$cfg_yaml"
+    python3 - "$cfg_yaml" "$TLS_CERT" "$TLS_KEY" "$APP_PORT" <<'PYEOF'
+import os, sys, tempfile
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+cfg_path, cert_path, key_path, port_str = sys.argv[1:5]
+port = int(port_str)
+
+data = {}
+if os.path.exists(cfg_path):
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            if yaml is not None:
+                loaded = yaml.safe_load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            else:
+                current_section = None
+                for raw_line in f:
+                    line = raw_line.rstrip('\r\n')
+                    if not line or line.startswith('#'):
+                        continue
+                    if not line.startswith(' ') and line.endswith(':'):
+                        current_section = line[:-1].strip()
+                        data.setdefault(current_section, {})
+                    elif line.startswith('  ') and ':' in line and current_section:
+                        k, _, v = line.strip().partition(':')
+                        k = k.strip()
+                        v = v.strip()
+                        if v.lower() == 'true': v = True
+                        elif v.lower() == 'false': v = False
+                        elif v.isdigit(): v = int(v)
+                        data[current_section][k] = v
+    except Exception:
+        data = {}
+
+existing_net = data.get("network", {})
+if not isinstance(existing_net, dict):
+    existing_net = {}
+
+network = {
+    "websocket_port": port,
+    "interface": "127.0.0.1",
+    "use_ipv6": False,
+    "ssl": {
+        "pem_certificate": cert_path,
+        "pem_key": key_path,
+        "require_ssl": True,
+    },
+}
+for k, v in existing_net.items():
+    if k not in network:
+        network[k] = v
+
+data["network"] = network
+
+if "ssl" in data:
+    del data["ssl"]
+
+cmdline = data.setdefault("command_line", {})
+if isinstance(cmdline, dict):
+    cmdline.setdefault("prompt", False)
+
+dir_name = os.path.dirname(cfg_path)
+os.makedirs(dir_name, exist_ok=True)
+tmp_file = tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8')
+try:
+    if yaml is not None:
+        yaml.safe_dump(data, tmp_file, default_flow_style=False, sort_keys=False)
+    else:
+        lines = []
+        for sec_k, sec_v in data.items():
+            if isinstance(sec_v, dict):
+                lines.append(f"{sec_k}:")
+                for sub_k, sub_v in sec_v.items():
+                    if isinstance(sub_v, dict):
+                        lines.append(f"  {sub_k}:")
+                        for deep_k, deep_v in sub_v.items():
+                            val = str(deep_v).lower() if isinstance(deep_v, bool) else str(deep_v)
+                            lines.append(f"    {deep_k}: {val}")
+                    else:
+                        val = str(sub_v).lower() if isinstance(sub_v, bool) else str(sub_v)
+                        lines.append(f"  {sub_k}: {val}")
+            else:
+                lines.append(f"{sec_k}: {sec_v}")
+        tmp_file.write("\n".join(lines) + "\n")
+    tmp_file.flush()
+    os.fsync(tmp_file.fileno())
+    tmp_file.close()
+    os.replace(tmp_file.name, cfg_path)
+except Exception:
+    if os.path.exists(tmp_file.name):
+        os.unlink(tmp_file.name)
+    raise
+PYEOF
+    chmod 0644 "$cfg_yaml"
+    chown af-kasmvnc:af-kasmvnc "$cfg_yaml"
+done
 if [[ ! -s "${DATA_DIR}/.vnc/xstartup" ]]; then
 write_config_file "${DATA_DIR}/.vnc/xstartup" 0755 <<'EOF'
 #!/bin/sh
@@ -173,7 +259,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :20 -fg -cert ${TLS_CERT} -key ${TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/bin/vncserver :20 -fg -interface 127.0.0.1 -cert ${TLS_CERT} -key ${TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -192,8 +278,8 @@ for attempt in {1..30}; do
     if ! systemctl is-active --quiet af-kasmvnc.service; then
         break
     fi
-    HTTP_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" || true)"
-    if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "401" ]]; then
+    HTTP_STATUS="$(curl -k -s -o /dev/null -w '%{http_code}' "https://127.0.0.1:${APP_PORT}/" 2>/dev/null || curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" 2>/dev/null || true)"
+    if [[ "$HTTP_STATUS" =~ ^(200|401|301|302|307)$ ]]; then
         READY=true
         break
     fi

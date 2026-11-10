@@ -76,6 +76,11 @@ fn snapshots_bound_and_coalesce_slow_observations_without_caching_jobs() {
             message: "fresh failure".into(),
             started_at: String::new(),
             finished_at: String::new(),
+            failed_stage: None,
+            exit_code: None,
+            sanitized_summary: None,
+            expected_target_version: None,
+            achieved_version: None,
         },
     );
     let changed = Instant::now();
@@ -102,6 +107,7 @@ fn snapshots_bound_and_coalesce_slow_observations_without_caching_jobs() {
             started_at: String::new(),
             progress: 5,
             last_line: "fresh progress".into(),
+            expected_target_version: None,
         },
     );
     let repeated = Instant::now();

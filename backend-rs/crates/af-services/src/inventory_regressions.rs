@@ -253,6 +253,7 @@ fn systemctl_status_timeout_kills_reaps_and_does_not_inherit_guard() {
         progress: 0,
         last_line: String::new(),
         started_at: Utc::now().to_rfc3339(),
+        expected_target_version: None,
     };
     assert!(try_start_package_job(job));
     env::set_var("AF_TEST_ROOT", &fixture.root);

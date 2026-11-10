@@ -1,58 +1,814 @@
 #!/bin/bash
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SELF_DIR}/../../common.sh"
-source "${SELF_DIR}/../../youtube-common.sh"
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+fi
+
+if [[ -f "${SELF_DIR}/../../youtube-common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../youtube-common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/youtube-common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/youtube-common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/youtube-common.sh
+fi
+
+declare -F af_set_stage >/dev/null 2>&1 || af_set_stage() { :; }
+declare -F af_prepare_job_scratch >/dev/null 2>&1 || af_prepare_job_scratch() { AF_JOB_SCRATCH_DIR="${TMPDIR:-/tmp}"; export AF_JOB_SCRATCH_DIR; }
+declare -F af_write_failure_receipt >/dev/null 2>&1 || af_write_failure_receipt() { :; }
+
+PIPED_ROOT="${PIPED_ROOT:-${INSTALL_DIR:-/opt/piped}}"
+for p in "${PIPED_ROOT}/.af-components.json" "/var/lib/piped/.af-components.json" "${PIPED_ROOT}/.af-version" "/var/lib/piped/.af-version"; do
+    if [[ -L "$p" || ( -e "$p" && ! -f "$p" ) ]]; then
+        if declare -F print_error >/dev/null 2>&1; then
+            print_error "Pre-existing symlink or non-regular file detected at $p"
+        else
+            printf "Pre-existing symlink or non-regular file detected at %s\n" "$p" >&2
+        fi
+        exit 1
+    fi
+done
+
+af_set_stage "preflight" 5
+af_prepare_job_scratch "piped" 2048 16384
+
+write_piped_receipt_safely() {
+    local dir_path="$1"
+    local filename="$2"
+    local owner_user="${3:-root}"
+    local owner_group="${4:-root}"
+    local mode_octal="${5:-644}"
+
+    python3 -c '
+import os, sys, stat, pwd, grp, secrets
+
+dir_path = sys.argv[1]
+filename = sys.argv[2]
+owner_user = sys.argv[3] if len(sys.argv) > 3 else "root"
+owner_group = sys.argv[4] if len(sys.argv) > 4 else "root"
+mode_str = sys.argv[5] if len(sys.argv) > 5 else "644"
+
+if "/" in filename or filename in (".", ".."):
+    sys.exit(1)
+
+if not dir_path or not dir_path.startswith("/"):
+    sys.exit(1)
+
+parts = [p for p in dir_path.split("/") if p]
+if any(p in (".", "..") for p in parts):
+    sys.exit(1)
+
+dir_fd = None
+tmp_fd = -1
+tmp_name = None
+try:
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        sys.exit(1)
+
+    for part in parts:
+        try:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        except OSError:
+            sys.exit(1)
+        prev_fd = dir_fd
+        dir_fd = next_fd
+        os.close(prev_fd)
+        try:
+            st = os.fstat(dir_fd)
+            if not stat.S_ISDIR(st.st_mode):
+                sys.exit(1)
+        except OSError:
+            sys.exit(1)
+
+    try:
+        st = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            sys.exit(1)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        sys.exit(1)
+
+    mode_int = int(mode_str, 8)
+    tmp_name = f".tmp_{filename}_{secrets.token_hex(8)}"
+    try:
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode_int, dir_fd=dir_fd)
+    except OSError:
+        sys.exit(1)
+
+    try:
+        content_bytes = sys.stdin.buffer.read()
+        view = memoryview(content_bytes)
+        total_written = 0
+        while total_written < len(view):
+            n = os.write(tmp_fd, view[total_written:])
+            if n <= 0:
+                raise OSError("short write to temporary receipt file")
+            total_written += n
+
+        os.fchmod(tmp_fd, mode_int)
+
+        if os.geteuid() == 0:
+            uid = pwd.getpwnam(owner_user).pw_uid if owner_user else 0
+            gid = grp.getgrnam(owner_group).gr_gid if owner_group else 0
+            os.fchown(tmp_fd, uid, gid)
+        else:
+            uid = os.geteuid()
+            gid = os.getegid()
+            if owner_user:
+                try:
+                    pw = pwd.getpwnam(owner_user)
+                    if pw.pw_uid == os.geteuid():
+                        uid = pw.pw_uid
+                except (KeyError, TypeError):
+                    pass
+            if owner_group:
+                try:
+                    gr = grp.getgrnam(owner_group)
+                    if gr.gr_gid == os.getegid():
+                        gid = gr.gr_gid
+                except (KeyError, TypeError):
+                    pass
+            os.fchown(tmp_fd, uid, gid)
+
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = -1
+
+        os.replace(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except Exception:
+        if tmp_fd >= 0:
+            try:
+                os.close(tmp_fd)
+            except Exception:
+                pass
+            tmp_fd = -1
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        sys.exit(1)
+finally:
+    if tmp_fd >= 0:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+    if dir_fd is not None:
+        try:
+            os.close(dir_fd)
+        except Exception:
+            pass
+' "$dir_path" "$filename" "$owner_user" "$owner_group" "$mode_octal"
+}
+
+publish_piped_artifact_safely() {
+    local src_path="${1:?missing src_path}"
+    local dst_path="${2:?missing dst_path}"
+    local mode_octal="${3:-644}"
+    local owner_user="${4:-root}"
+    local expected_src_user="${5:-${APP_NAME:-piped}}"
+
+    python3 -c '
+import os, sys, stat, pwd, grp, secrets, hashlib
+
+src_path = sys.argv[1]
+dst_path = sys.argv[2]
+mode_str = sys.argv[3] if len(sys.argv) > 3 else "644"
+owner_user = sys.argv[4] if len(sys.argv) > 4 else "root"
+expected_src_user = sys.argv[5] if len(sys.argv) > 5 else "piped"
+
+if not src_path or not src_path.startswith("/") or not dst_path or not dst_path.startswith("/"):
+    sys.exit(1)
+
+src_dir, src_name = os.path.split(src_path)
+dst_dir, dst_name = os.path.split(dst_path)
+
+if not src_name or not dst_name or "/" in src_name or "/" in dst_name:
+    sys.exit(1)
+if src_name in (".", "..") or dst_name in (".", ".."):
+    sys.exit(1)
+
+def open_dir_safely(dir_path):
+    parts = [p for p in dir_path.split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        sys.exit(1)
+    try:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        sys.exit(1)
+    for part in parts:
+        try:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=fd)
+        except OSError:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            sys.exit(1)
+        os.close(fd)
+        fd = next_fd
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode):
+                os.close(fd)
+                sys.exit(1)
+        except OSError:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            sys.exit(1)
+    return fd
+
+src_dir_fd = None
+dst_dir_fd = None
+src_fd = -1
+tmp_fd = -1
+tmp_name = None
+
+try:
+    src_dir_fd = open_dir_safely(src_dir)
+    dst_dir_fd = open_dir_safely(dst_dir)
+
+    expected_uid = None
+    try:
+        if expected_src_user:
+            expected_uid = pwd.getpwnam(expected_src_user).pw_uid
+    except (KeyError, TypeError):
+        pass
+
+    def verify_stat_and_uid(s):
+        if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1:
+            return False
+        if os.geteuid() == 0:
+            if expected_uid is not None:
+                return s.st_uid == expected_uid
+            return s.st_uid == 0
+        else:
+            if expected_uid is not None and s.st_uid == expected_uid:
+                return True
+            return s.st_uid == os.geteuid()
+
+    try:
+        pre_st = os.stat(src_name, dir_fd=src_dir_fd, follow_symlinks=False)
+    except OSError:
+        sys.exit(1)
+
+    if not verify_stat_and_uid(pre_st):
+        sys.exit(1)
+
+    try:
+        src_fd = os.open(
+            src_name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=src_dir_fd,
+        )
+    except OSError:
+        sys.exit(1)
+
+    st = os.fstat(src_fd)
+    if not verify_stat_and_uid(st):
+        sys.exit(1)
+
+    if (st.st_dev, st.st_ino) != (pre_st.st_dev, pre_st.st_ino):
+        sys.exit(1)
+
+    try:
+        dst_st = os.stat(dst_name, dir_fd=dst_dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(dst_st.st_mode):
+            sys.exit(1)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        sys.exit(1)
+
+    mode_int = int(mode_str, 8)
+    tmp_name = f".tmp_{dst_name}_{secrets.token_hex(8)}"
+    try:
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode_int, dir_fd=dst_dir_fd)
+    except OSError:
+        sys.exit(1)
+
+    src_hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(src_fd, 65536)
+        if not chunk:
+            break
+        src_hasher.update(chunk)
+        view = memoryview(chunk)
+        total_written = 0
+        while total_written < len(view):
+            n = os.write(tmp_fd, view[total_written:])
+            if n <= 0:
+                raise OSError("short write to temporary artifact file")
+            total_written += n
+
+    src_digest = src_hasher.hexdigest()
+
+    os.fchmod(tmp_fd, mode_int)
+
+    if os.geteuid() == 0:
+        uid = pwd.getpwnam(owner_user).pw_uid if owner_user else 0
+        gid = grp.getgrnam(owner_user).gr_gid if owner_user else 0
+        os.fchown(tmp_fd, uid, gid)
+    else:
+        uid = os.geteuid()
+        gid = os.getegid()
+        if owner_user:
+            try:
+                pw = pwd.getpwnam(owner_user)
+                if pw.pw_uid == os.geteuid():
+                    uid = pw.pw_uid
+                    gid = pw.pw_gid
+            except (KeyError, TypeError):
+                pass
+        os.fchown(tmp_fd, uid, gid)
+
+    os.fsync(tmp_fd)
+    os.close(tmp_fd)
+    tmp_fd = -1
+
+    os.replace(tmp_name, dst_name, src_dir_fd=dst_dir_fd, dst_dir_fd=dst_dir_fd)
+    tmp_name = None
+
+    dst_check_fd = -1
+    try:
+        dst_check_fd = os.open(dst_name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dst_dir_fd)
+        dst_check_st = os.fstat(dst_check_fd)
+        if not stat.S_ISREG(dst_check_st.st_mode) or dst_check_st.st_nlink != 1:
+            sys.exit(1)
+        dst_hasher = hashlib.sha256()
+        while True:
+            c = os.read(dst_check_fd, 65536)
+            if not c:
+                break
+            dst_hasher.update(c)
+        if dst_hasher.hexdigest() != src_digest:
+            sys.exit(1)
+    finally:
+        if dst_check_fd >= 0:
+            try:
+                os.close(dst_check_fd)
+            except Exception:
+                pass
+
+    print(src_digest)
+except Exception:
+    if tmp_fd >= 0:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+        tmp_fd = -1
+    if tmp_name is not None and dst_dir_fd is not None:
+        try:
+            os.unlink(tmp_name, dir_fd=dst_dir_fd)
+        except OSError:
+            pass
+    sys.exit(1)
+finally:
+    if tmp_fd >= 0:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+    if tmp_name is not None and dst_dir_fd is not None:
+        try:
+            os.unlink(tmp_name, dir_fd=dst_dir_fd)
+        except OSError:
+            pass
+    if src_fd >= 0:
+        try:
+            os.close(src_fd)
+        except Exception:
+            pass
+    if src_dir_fd is not None:
+        try:
+            os.close(src_dir_fd)
+        except Exception:
+            pass
+    if dst_dir_fd is not None:
+        try:
+            os.close(dst_dir_fd)
+        except Exception:
+            pass
+' "$src_path" "$dst_path" "$mode_octal" "$owner_user" "$expected_src_user"
+}
+
+sha256_regular_file_nofollow() {
+    local target_path="${1:?missing target_path}"
+    local expected_owner="${2:-}"
+
+    python3 -c '
+import os, sys, stat, pwd, hashlib
+
+target_path = sys.argv[1]
+expected_owner = sys.argv[2] if len(sys.argv) > 2 else ""
+
+if not target_path or not target_path.startswith("/"):
+    sys.exit(1)
+
+parts = [p for p in target_path.split("/") if p]
+if not parts or any(p in (".", "..") for p in parts):
+    sys.exit(1)
+
+filename = parts[-1]
+dir_parts = parts[:-1]
+
+cloexec = getattr(os, "O_CLOEXEC", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+expected_uid = None
+if expected_owner:
+    try:
+        expected_uid = pwd.getpwnam(expected_owner).pw_uid
+    except (KeyError, TypeError):
+        pass
+
+dir_fd = None
+file_fd = -1
+try:
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | cloexec)
+    except OSError:
+        sys.exit(1)
+
+    for part in dir_parts:
+        try:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec, dir_fd=dir_fd)
+        except OSError:
+            sys.exit(1)
+        prev_fd = dir_fd
+        dir_fd = next_fd
+        try:
+            os.close(prev_fd)
+        except Exception:
+            pass
+        st = os.fstat(dir_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            sys.exit(1)
+
+    try:
+        pre_st = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        sys.exit(1)
+
+    if not stat.S_ISREG(pre_st.st_mode) or pre_st.st_nlink != 1:
+        sys.exit(1)
+
+    if expected_uid is not None:
+        if os.geteuid() == 0 and pre_st.st_uid != expected_uid:
+            sys.exit(1)
+        elif os.geteuid() != 0 and pre_st.st_uid != expected_uid and pre_st.st_uid != os.geteuid():
+            sys.exit(1)
+
+    try:
+        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | nonblock | cloexec, dir_fd=dir_fd)
+    except OSError:
+        sys.exit(1)
+
+    st = os.fstat(file_fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        sys.exit(1)
+
+    if (st.st_dev, st.st_ino) != (pre_st.st_dev, pre_st.st_ino):
+        sys.exit(1)
+
+    if expected_uid is not None:
+        if os.geteuid() == 0 and st.st_uid != expected_uid:
+            sys.exit(1)
+        elif os.geteuid() != 0 and st.st_uid != expected_uid and st.st_uid != os.geteuid():
+            sys.exit(1)
+
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(file_fd, 65536)
+        if not chunk:
+            break
+        hasher.update(chunk)
+
+    print(hasher.hexdigest())
+finally:
+    if file_fd >= 0:
+        try:
+            os.close(file_fd)
+        except Exception:
+            pass
+    if dir_fd is not None:
+        try:
+            os.close(dir_fd)
+        except Exception:
+            pass
+' "$target_path" "$expected_owner"
+}
+
+sha256_proc_exe_matching_file() {
+    local proc_exe_path="${1:?missing proc_exe_path}"
+    local dest_path="${2:?missing dest_path}"
+
+    python3 - "$proc_exe_path" "$dest_path" << 'PYEOF'
+import sys, os, stat, hashlib
+
+proc_exe_path = sys.argv[1]
+dest_path = sys.argv[2]
+
+cloexec = getattr(os, "O_CLOEXEC", 0)
+dest_fd = -1
+proc_fd = -1
+
+try:
+    try:
+        dest_fd = os.open(dest_path, os.O_RDONLY | os.O_NOFOLLOW | cloexec)
+    except OSError:
+        sys.exit(1)
+
+    dest_st = os.fstat(dest_fd)
+    if not stat.S_ISREG(dest_st.st_mode) or dest_st.st_nlink < 1:
+        sys.exit(1)
+
+    try:
+        proc_fd = os.open(proc_exe_path, os.O_RDONLY | cloexec)
+    except OSError:
+        sys.exit(1)
+
+    proc_st = os.fstat(proc_fd)
+    if not stat.S_ISREG(proc_st.st_mode) or proc_st.st_nlink < 1:
+        sys.exit(1)
+
+    if (proc_st.st_dev, proc_st.st_ino) != (dest_st.st_dev, dest_st.st_ino):
+        sys.exit(1)
+
+    proc_hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(proc_fd, 65536)
+        if not chunk:
+            break
+        proc_hasher.update(chunk)
+    proc_digest = proc_hasher.hexdigest()
+
+    dest_hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(dest_fd, 65536)
+        if not chunk:
+            break
+        dest_hasher.update(chunk)
+    dest_digest = dest_hasher.hexdigest()
+
+    if proc_digest != dest_digest:
+        sys.exit(1)
+
+    sys.stdout.write(proc_digest + "\n")
+    sys.exit(0)
+finally:
+    if dest_fd >= 0:
+        try:
+            os.close(dest_fd)
+        except Exception:
+            pass
+    if proc_fd >= 0:
+        try:
+            os.close(proc_fd)
+        except Exception:
+            pass
+PYEOF
+}
+
+PIPED_USER="${PIPED_USER:-${APP_NAME:-piped}}"
+run_as_piped_clean_env() {
+    local home_dir="${1:?missing home_dir}"
+    shift
+    local user="${PIPED_USER:-${APP_NAME:-piped}}"
+    runuser -u "$user" -- env -i \
+        HOME="$home_dir" \
+        USER="$user" \
+        LOGNAME="$user" \
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        LANG="${LANG:-C.UTF-8}" \
+        LC_ALL="${LC_ALL:-C.UTF-8}" \
+        NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" \
+        CI="true" \
+        "$@"
+}
+
+TARGET_FRONTEND_REF=""
+TARGET_BACKEND_REF=""
+TARGET_PROXY_REF=""
+PIPED_FRONTEND_REF=""
+PIPED_BACKEND_REF=""
+PIPED_PROXY_REF=""
+
+piped_target_raw="${PIPED_TARGET_VERSION:-${AF_TARGET_VERSION:-}}"
+raw_target="$piped_target_raw"
+if [[ -n "$raw_target" ]]; then
+    if [[ "$raw_target" == *","* || "$raw_target" == *"="* || "$raw_target" == *"frontend"* || "$raw_target" == *"backend"* || "$raw_target" == *"proxy"* ]]; then
+        if [[ "$raw_target" == ,* || "$raw_target" == *, || "$raw_target" == *,,* ]]; then
+            if declare -F print_error >/dev/null 2>&1; then
+                print_error "Invalid Piped manifest: leading, trailing, or empty consecutive commas in '$raw_target'"
+            else
+                printf "Invalid Piped manifest: leading, trailing, or empty consecutive commas in '%s'\n" "$raw_target" >&2
+            fi
+            exit 1
+        fi
+        seen_frontend=0
+        seen_backend=0
+        seen_proxy=0
+        IFS=',' read -ra PARTS <<< "$raw_target"
+        for part in "${PARTS[@]}"; do
+            part="$(echo "$part" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ -z "$part" ]]; then
+                if declare -F print_error >/dev/null 2>&1; then
+                    print_error "Empty component in Piped manifest: '$raw_target'"
+                else
+                    printf "Empty component in Piped manifest: '%s'\n" "$raw_target" >&2
+                fi
+                exit 1
+            fi
+            case "$part" in
+                frontend=*)
+                    if [[ "$seen_frontend" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: frontend"
+                        else
+                            printf "Duplicate component in Piped target manifest: frontend\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_frontend=1
+                    PIPED_FRONTEND_REF="${part#frontend=}"
+                    ;;
+                frontend:*)
+                    if [[ "$seen_frontend" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: frontend"
+                        else
+                            printf "Duplicate component in Piped target manifest: frontend\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_frontend=1
+                    PIPED_FRONTEND_REF="${part#frontend:}"
+                    ;;
+                backend=*)
+                    if [[ "$seen_backend" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: backend"
+                        else
+                            printf "Duplicate component in Piped target manifest: backend\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_backend=1
+                    PIPED_BACKEND_REF="${part#backend=}"
+                    ;;
+                backend:*)
+                    if [[ "$seen_backend" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: backend"
+                        else
+                            printf "Duplicate component in Piped target manifest: backend\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_backend=1
+                    PIPED_BACKEND_REF="${part#backend:}"
+                    ;;
+                proxy=*)
+                    if [[ "$seen_proxy" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: proxy"
+                        else
+                            printf "Duplicate component in Piped target manifest: proxy\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_proxy=1
+                    PIPED_PROXY_REF="${part#proxy=}"
+                    ;;
+                proxy:*)
+                    if [[ "$seen_proxy" -eq 1 ]]; then
+                        if declare -F print_error >/dev/null 2>&1; then
+                            print_error "Duplicate component in Piped target manifest: proxy"
+                        else
+                            printf "Duplicate component in Piped target manifest: proxy\n" >&2
+                        fi
+                        exit 1
+                    fi
+                    seen_proxy=1
+                    PIPED_PROXY_REF="${part#proxy:}"
+                    ;;
+                *)
+                    if declare -F print_error >/dev/null 2>&1; then
+                        print_error "Invalid component in Piped manifest: '$part'"
+                    else
+                        printf "Invalid component in Piped manifest: '%s'\n" "$part" >&2
+                    fi
+                    exit 1
+                    ;;
+            esac
+        done
+        if [[ -z "$PIPED_FRONTEND_REF" || -z "$PIPED_BACKEND_REF" || -z "$PIPED_PROXY_REF" ]]; then
+            if declare -F print_error >/dev/null 2>&1; then
+                print_error "Incomplete Piped manifest: '$raw_target'. All 3 components (frontend, backend, proxy) must be specified and non-empty."
+            else
+                printf "Incomplete Piped manifest: '%s'. All 3 components (frontend, backend, proxy) must be specified and non-empty.\n" "$raw_target" >&2
+            fi
+            exit 1
+        fi
+    else
+        PIPED_FRONTEND_REF="$raw_target"
+    fi
+fi
+TARGET_FRONTEND_REF="$PIPED_FRONTEND_REF"
+TARGET_BACKEND_REF="$PIPED_BACKEND_REF"
+TARGET_PROXY_REF="$PIPED_PROXY_REF"
 
 youtube_init piped 8280
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-piped-runtime-XXXXXX)"
+RUNTIME_BACKUP="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-piped-runtime-XXXXXX")"
+backup_dir="$RUNTIME_BACKUP"
 RUNTIME_PATHS=("$INSTALL_DIR" "$DATA_DIR" "$CONFIG_DIR" /etc/systemd/system/af-piped.service /etc/systemd/system/af-piped-api.service /etc/systemd/system/af-piped-proxy.service)
 RUNTIME_HAD_PREVIOUS=false
 RUNTIME_CHANGED=false
 SERVICE_STOPPED=false
+PIPED_INSTALL_COMPLETED=0
+PIPED_CERTIFIED=0
 [[ ! -f "$INSTALL_DIR/piped.jar" ]] || RUNTIME_HAD_PREVIOUS=true
 BUILD_DIR=""
-rollback_piped_runtime() {
-    local status="$?" runtime_index runtime_path restored=true restore_failed=false
+cleanup_piped_install() {
+    local rc=$?
     trap - EXIT INT TERM
     set +e
-    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
-        if ! quiesce_services_for_rollback af-piped af-piped-api af-piped-proxy; then
-            restore_failed=true
-            print_error "Cannot stop Piped; recovery retained in $RUNTIME_BACKUP"
-            exit "$status"
+    local runtime_index runtime_path restored=true restore_failed=false
+    if [[ "${PIPED_INSTALL_COMPLETED:-0}" -ne 1 || "${PIPED_CERTIFIED:-0}" -ne 1 ]]; then
+        [[ "$rc" -eq 0 ]] && rc=1
+        if [[ "${INSTALL_COMMITTED:-false}" != true ]]; then
+            af_write_failure_receipt "$rc" "${AF_CURRENT_STAGE:-unknown}" "installer" "Piped installation failed at stage ${AF_CURRENT_STAGE:-unknown}"
         fi
-        restore_postgresql_database "$RUNTIME_BACKUP" piped || restored=false
-        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
-            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
-            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
-        done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
-        if [[ "$restored" != true || "$restore_failed" == true ]]; then
-            print_error "Piped recovery incomplete; backups retained in $RUNTIME_BACKUP"
-            exit "$status"
+        if [[ "${INSTALL_COMMITTED:-false}" != true && "$RUNTIME_CHANGED" == true ]]; then
+            if ! quiesce_services_for_rollback af-piped af-piped-api af-piped-proxy; then
+                restore_failed=true
+                export AF_PRESERVE_SCRATCH=1
+                print_error "Cannot stop Piped; recovery retained in $RUNTIME_BACKUP"
+            else
+                restore_postgresql_database "$RUNTIME_BACKUP" piped || restored=false
+                for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+                    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+                    safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+                done
+                systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+                if [[ "$restored" != true || "$restore_failed" == true ]]; then
+                    restore_failed=true
+                    export AF_PRESERVE_SCRATCH=1
+                    print_error "Piped recovery incomplete; backups retained in $RUNTIME_BACKUP"
+                elif [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+                    systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                fi
+            fi
+        elif [[ "${INSTALL_COMMITTED:-false}" != true && "$SERVICE_STOPPED" == true && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
+            systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
         fi
-        if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || restore_failed=true
-        fi
-    elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$SERVICE_STOPPED" == true && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-        systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || restore_failed=true
     fi
     [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
-    if [[ "$restore_failed" == true ]]; then
-        status=1
-        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    if [[ "${PIPED_INSTALL_COMPLETED:-0}" -ne 1 || "${PIPED_CERTIFIED:-0}" -ne 1 ]]; then
+        rc=1
+        export AF_PRESERVE_SCRATCH=1
+        if [[ "$restore_failed" == true ]]; then
+            print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+        else
+            print_warn "Rollback preserved recovery backup at $RUNTIME_BACKUP"
+        fi
     else
-        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+        rm -rf -- "$RUNTIME_BACKUP" "${backup_dir:-}" 2>/dev/null || true
     fi
-    exit "$status"
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
+    fi
+    return "$rc"
 }
-trap rollback_piped_runtime EXIT
+rollback_piped_runtime() {
+    cleanup_piped_install "$@"
+}
+trap cleanup_piped_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-report_progress 10 "Preparing experimental native Piped stack..."
+
+af_set_stage "dependencies" 10
 apt-get install --no-remove -y -qq openjdk-21-jdk-headless apache2-bin build-essential pkg-config libssl-dev cargo rustc >> "$LOGFILE" 2>&1
 ensure_node 24
+
+af_set_stage "backup" 20
 stop_systemd_unit af-piped.service af-piped-api.service af-piped-proxy.service
 SERVICE_STOPPED=true
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
@@ -68,14 +824,17 @@ youtube_database
 backup_postgresql_database "$RUNTIME_BACKUP" piped
 PROXY_SECRET="$(youtube_secret proxy-secret)"
 
+af_set_stage "fetch_source" 25
 report_progress 25 "Building Piped frontend, API and media proxy as the service user..."
-youtube_source TeamPiped/Piped "${INSTALL_DIR}/frontend"
-youtube_source TeamPiped/Piped-Backend "${INSTALL_DIR}/backend"
-youtube_source TeamPiped/Piped-Proxy "${INSTALL_DIR}/proxy"
+youtube_source TeamPiped/Piped "${INSTALL_DIR}/frontend" "${PIPED_FRONTEND_REF:-${TARGET_FRONTEND_REF:-}}"
+youtube_source TeamPiped/Piped-Backend "${INSTALL_DIR}/backend" "${PIPED_BACKEND_REF:-${TARGET_BACKEND_REF:-}}"
+youtube_source TeamPiped/Piped-Proxy "${INSTALL_DIR}/proxy" "${PIPED_PROXY_REF:-${TARGET_PROXY_REF:-}}"
+
+af_set_stage "build_backend" 40
 BUILD_DIR="$(mktemp -d "${DATA_DIR}/backend-build-XXXXXX")"
 chown "$APP_NAME:$APP_NAME" "$BUILD_DIR"
 validate_config_paths "${INSTALL_DIR}/backend/src/main/java/me/kavin/piped/server/ServerLauncher.java"
-runuser -u "$APP_NAME" -- cp -a "${INSTALL_DIR}/backend/." "${BUILD_DIR}/"
+run_as_piped_clean_env "$DATA_DIR" cp -a "${INSTALL_DIR}/backend/." "${BUILD_DIR}/"
 safe_config_python "${BUILD_DIR}/src/main/java/me/kavin/piped/server/ServerLauncher.java" <<'PY'
 import pathlib
 import sys
@@ -88,28 +847,45 @@ if old not in source and new not in source:
     sys.exit('Piped listener contract changed; refusing to expose the API on all interfaces')
 safe_write_text(path, source.replace(old, new))
 PY
-node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0 >> "$LOGFILE" 2>&1
-node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
-RUST_VERSION="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" rustc --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
+
+af_set_stage "build_frontend" 50
+node_build run_as_piped_clean_env "$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0 >> "$LOGFILE" 2>&1
+node_build run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
+run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
+
+af_set_stage "build_proxy" 65
+RUST_VERSION=0
 RUST_BUILD_PATH="$PATH"
 RUST_TOOLCHAIN_DIR=""
+if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1 && \
+   [[ "$(stat -c '%u' "$(command -v cargo)" 2>/dev/null || stat -f '%u' "$(command -v cargo)" 2>/dev/null || true)" == "0" && \
+      "$(stat -c '%u' "$(command -v rustc)" 2>/dev/null || stat -f '%u' "$(command -v rustc)" 2>/dev/null || true)" == "0" ]]; then
+    RUST_VERSION="$(run_as_piped_clean_env "$DATA_DIR" rustc --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
+fi
 if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
-    for RUST_COMPILER in /root/.rustup/toolchains/*/bin/rustc /home/*/.rustup/toolchains/*/bin/rustc /root/.cargo/bin/rustc /home/*/.cargo/bin/rustc; do
+    for RUST_COMPILER in /root/.rustup/toolchains/*/bin/rustc /usr/local/rustup/toolchains/*/bin/rustc /opt/rust/toolchains/*/bin/rustc /root/.cargo/bin/rustc /usr/local/cargo/bin/rustc; do
         [[ -x "$RUST_COMPILER" ]] || continue
+        compiler_owner="$(stat -c '%u' "$RUST_COMPILER" 2>/dev/null || stat -f '%u' "$RUST_COMPILER" 2>/dev/null || true)"
+        if [[ "$compiler_owner" != "0" ]]; then
+            continue
+        fi
         if [[ "$RUST_COMPILER" == */.cargo/bin/rustc ]]; then
             RUST_HOME="${RUST_COMPILER%/.cargo/bin/rustc}/.rustup"
-            if [[ "$RUST_COMPILER" == /root/* ]]; then
-                RUST_COMPILER="$(RUSTUP_HOME="$RUST_HOME" "${RUST_COMPILER%/rustc}/rustup" which rustc 2>/dev/null)" || continue
-            else
-                RUST_COMPILER="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" RUSTUP_HOME="$RUST_HOME" "${RUST_COMPILER%/rustc}/rustup" which rustc 2>/dev/null)" || continue
+            RUST_COMPILER="$(RUSTUP_HOME="$RUST_HOME" "${RUST_COMPILER%/rustc}/rustup" which rustc 2>/dev/null)" || continue
+            compiler_owner="$(stat -c '%u' "$RUST_COMPILER" 2>/dev/null || stat -f '%u' "$RUST_COMPILER" 2>/dev/null || true)"
+            if [[ "$compiler_owner" != "0" ]]; then
+                continue
             fi
         fi
         [[ -x "${RUST_COMPILER%/rustc}/cargo" ]] || continue
+        cargo_owner="$(stat -c '%u' "${RUST_COMPILER%/rustc}/cargo" 2>/dev/null || stat -f '%u' "${RUST_COMPILER%/rustc}/cargo" 2>/dev/null || true)"
+        if [[ "$cargo_owner" != "0" ]]; then
+            continue
+        fi
         RUST_TOOLCHAIN_DIR="$(mktemp -d "${DATA_DIR}/rust-toolchain-XXXXXX")"
         cp -a -- "${RUST_COMPILER%/bin/rustc}/." "$RUST_TOOLCHAIN_DIR/"
         chmod -R a+rX "$RUST_TOOLCHAIN_DIR"
-        RUST_VERSION="$(runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" "$RUST_TOOLCHAIN_DIR/bin/rustc" --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
+        RUST_VERSION="$(run_as_piped_clean_env "$DATA_DIR" "$RUST_TOOLCHAIN_DIR/bin/rustc" --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
         if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
             safe_rm_rf "$RUST_TOOLCHAIN_DIR"
             RUST_TOOLCHAIN_DIR=""
@@ -123,13 +899,43 @@ if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
         exit 1
     fi
 fi
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" CARGO_HOME="${DATA_DIR}/.cargo" RUSTC=rustc PATH="$RUST_BUILD_PATH" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
+rm -f "${INSTALL_DIR}/proxy/target/release/piped-proxy" 2>/dev/null || run_as_piped_clean_env "$DATA_DIR" rm -f "${INSTALL_DIR}/proxy/target/release/piped-proxy" 2>/dev/null || true
+run_as_piped_clean_env "$DATA_DIR" env CARGO_HOME="${DATA_DIR}/.cargo" RUSTC=rustc PATH="$RUST_BUILD_PATH" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
 [[ -z "$RUST_TOOLCHAIN_DIR" ]] || safe_rm_rf "$RUST_TOOLCHAIN_DIR"
-stop_systemd_unit af-piped-api
-STAGED_JAR="$(mktemp "${INSTALL_DIR}/.piped.jar.XXXXXX")"
-install -m 644 "${BUILD_DIR}/build/libs/piped-1.0-all.jar" "$STAGED_JAR"
-mv -fT -- "$STAGED_JAR" "${INSTALL_DIR}/piped.jar"
+stop_systemd_unit af-piped-api af-piped-proxy
 
+BUILT_JAR="$(find "${BUILD_DIR}/build/libs" -maxdepth 2 -type f \( -name 'piped-*-all.jar' -o -name 'piped.jar' -o -name 'piped-1.0-all.jar' \) 2>/dev/null | head -n1)"
+if [[ -z "$BUILT_JAR" && -f "${BUILD_DIR}/build/libs/piped-1.0-all.jar" && ! -L "${BUILD_DIR}/build/libs/piped-1.0-all.jar" ]]; then
+    BUILT_JAR="${BUILD_DIR}/build/libs/piped-1.0-all.jar"
+fi
+if [[ -z "${BUILT_JAR:-}" || ! -f "$BUILT_JAR" ]]; then
+    echo "ERROR: Built piped backend JAR not found after gradle build" >&2
+    if declare -F print_error >/dev/null 2>&1; then
+        print_error "Built piped backend JAR not found after gradle build in ${BUILD_DIR}/build/libs"
+    fi
+    exit 1
+fi
+DEPLOYED_BACKEND_SHA256="$(publish_piped_artifact_safely "$BUILT_JAR" "${PIPED_BACKEND_DIR:-${INSTALL_DIR}}/piped.jar" "0644" "root" "$APP_NAME")"
+if [[ -z "${DEPLOYED_BACKEND_SHA256:-}" ]]; then
+    echo "ERROR: Deployed piped backend JAR SHA-256 mismatch or empty" >&2
+    exit 1
+fi
+
+BUILT_PROXY="$(find "${INSTALL_DIR}/proxy/target/release" -maxdepth 1 -type f -name 'piped-proxy' 2>/dev/null | head -n1)"
+if [[ -z "${BUILT_PROXY:-}" || ! -f "$BUILT_PROXY" ]]; then
+    echo "ERROR: Built piped-proxy binary not found after cargo build" >&2
+    if declare -F print_error >/dev/null 2>&1; then
+        print_error "Built piped-proxy binary not found after cargo build in ${INSTALL_DIR}/proxy/target/release"
+    fi
+    exit 1
+fi
+DEPLOYED_PROXY_SHA256="$(publish_piped_artifact_safely "$BUILT_PROXY" "${PIPED_PROXY_DIR:-${INSTALL_DIR}}/piped-proxy" "0755" "root" "$APP_NAME")"
+if [[ -z "${DEPLOYED_PROXY_SHA256:-}" ]]; then
+    echo "ERROR: Deployed piped-proxy binary SHA-256 mismatch or empty" >&2
+    exit 1
+fi
+
+af_set_stage "configure" 70
 report_progress 70 "Configuring private Piped API, proxy and Apache frontend..."
 write_config_file "${CONFIG_DIR}/managed.properties" <<EOF
 PORT:${API_PORT}
@@ -193,18 +999,369 @@ ProxyPassReverse /proxy/ http://127.0.0.1:${PROXY_PORT}/
 EOF
 chown "root:$APP_NAME" "${CONFIG_DIR}/config.properties" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/httpd.conf"
 chmod 640 "${CONFIG_DIR}/config.properties" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/httpd.conf"
-youtube_unit af-piped-api "/usr/bin/java -jar ${INSTALL_DIR}/piped.jar"
-youtube_unit af-piped-proxy "${INSTALL_DIR}/proxy/target/release/piped-proxy"
+youtube_unit af-piped-api "/usr/bin/java -jar ${PIPED_BACKEND_DIR:-${INSTALL_DIR}}/piped.jar"
+youtube_unit af-piped-proxy "${PIPED_PROXY_DIR:-${INSTALL_DIR}}/piped-proxy"
 youtube_unit af-piped "/usr/sbin/apache2 -f ${CONFIG_DIR}/httpd.conf -DFOREGROUND" "af-piped-api.service af-piped-proxy.service"
+
+af_set_stage "activate" 85
 systemctl daemon-reload
 systemctl enable af-piped.service >> "$LOGFILE" 2>&1
 systemctl restart af-piped-api.service af-piped-proxy.service af-piped.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
 youtube_ready "http://127.0.0.1:${APP_PORT}/api/healthcheck"
 systemctl is-active --quiet af-piped-api.service af-piped-proxy.service
-PIPED_VERSION="$(runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD)"
+
+certify_piped() {
+    if ! declare -F sha256_regular_file_nofollow >/dev/null 2>&1; then
+        sha256_regular_file_nofollow() {
+            local target_path="${1:?missing target_path}"
+            local expected_owner="${2:-}"
+            python3 -c '
+import os, sys, stat, pwd, hashlib
+target_path = sys.argv[1]
+expected_owner = sys.argv[2] if len(sys.argv) > 2 else ""
+if not target_path or not target_path.startswith("/"):
+    sys.exit(1)
+parts = [p for p in target_path.split("/") if p]
+if not parts or any(p in (".", "..") for p in parts):
+    sys.exit(1)
+filename = parts[-1]
+dir_parts = parts[:-1]
+cloexec = getattr(os, "O_CLOEXEC", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+expected_uid = None
+if expected_owner:
+    try:
+        expected_uid = pwd.getpwnam(expected_owner).pw_uid
+    except (KeyError, TypeError):
+        pass
+dir_fd = None
+file_fd = -1
+try:
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | cloexec)
+    except OSError:
+        sys.exit(1)
+    for part in dir_parts:
+        try:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec, dir_fd=dir_fd)
+        except OSError:
+            sys.exit(1)
+        prev_fd = dir_fd
+        dir_fd = next_fd
+        try:
+            os.close(prev_fd)
+        except Exception:
+            pass
+        st = os.fstat(dir_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            sys.exit(1)
+    try:
+        pre_st = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        sys.exit(1)
+    if not stat.S_ISREG(pre_st.st_mode) or pre_st.st_nlink != 1:
+        sys.exit(1)
+    if expected_uid is not None:
+        if os.geteuid() == 0 and pre_st.st_uid != expected_uid:
+            sys.exit(1)
+        elif os.geteuid() != 0 and pre_st.st_uid != expected_uid and pre_st.st_uid != os.geteuid():
+            sys.exit(1)
+    try:
+        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | nonblock | cloexec, dir_fd=dir_fd)
+    except OSError:
+        sys.exit(1)
+    st = os.fstat(file_fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        sys.exit(1)
+    if (st.st_dev, st.st_ino) != (pre_st.st_dev, pre_st.st_ino):
+        sys.exit(1)
+    if expected_uid is not None:
+        if os.geteuid() == 0 and st.st_uid != expected_uid:
+            sys.exit(1)
+        elif os.geteuid() != 0 and st.st_uid != expected_uid and st.st_uid != os.geteuid():
+            sys.exit(1)
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(file_fd, 65536)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    print(hasher.hexdigest())
+finally:
+    if file_fd >= 0:
+        try:
+            os.close(file_fd)
+        except Exception:
+            pass
+    if dir_fd is not None:
+        try:
+            os.close(dir_fd)
+        except Exception:
+            pass
+' "$target_path" "$expected_owner"
+        }
+    fi
+    if ! declare -F sha256_proc_exe_matching_file >/dev/null 2>&1; then
+        sha256_proc_exe_matching_file() {
+            local proc_exe_path="${1:?missing proc_exe_path}"
+            local dest_path="${2:?missing dest_path}"
+
+            python3 - "$proc_exe_path" "$dest_path" << 'PYEOF'
+import sys, os, stat, hashlib
+
+proc_exe_path = sys.argv[1]
+dest_path = sys.argv[2]
+
+cloexec = getattr(os, "O_CLOEXEC", 0)
+dest_fd = -1
+proc_fd = -1
+
+try:
+    try:
+        dest_fd = os.open(dest_path, os.O_RDONLY | os.O_NOFOLLOW | cloexec)
+    except OSError:
+        sys.exit(1)
+
+    dest_st = os.fstat(dest_fd)
+    if not stat.S_ISREG(dest_st.st_mode) or dest_st.st_nlink < 1:
+        sys.exit(1)
+
+    try:
+        proc_fd = os.open(proc_exe_path, os.O_RDONLY | cloexec)
+    except OSError:
+        sys.exit(1)
+
+    proc_st = os.fstat(proc_fd)
+    if not stat.S_ISREG(proc_st.st_mode) or proc_st.st_nlink < 1:
+        sys.exit(1)
+
+    if (proc_st.st_dev, proc_st.st_ino) != (dest_st.st_dev, dest_st.st_ino):
+        sys.exit(1)
+
+    proc_hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(proc_fd, 65536)
+        if not chunk:
+            break
+        proc_hasher.update(chunk)
+    proc_digest = proc_hasher.hexdigest()
+
+    dest_hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(dest_fd, 65536)
+        if not chunk:
+            break
+        dest_hasher.update(chunk)
+    dest_digest = dest_hasher.hexdigest()
+
+    if proc_digest != dest_digest:
+        sys.exit(1)
+
+    sys.stdout.write(proc_digest + "\n")
+    sys.exit(0)
+finally:
+    if dest_fd >= 0:
+        try:
+            os.close(dest_fd)
+        except Exception:
+            pass
+    if proc_fd >= 0:
+        try:
+            os.close(proc_fd)
+        except Exception:
+            pass
+PYEOF
+        }
+    fi
+    local comp comp_dir expected_ref current_sha
+    for comp in frontend backend proxy; do
+        comp_dir="${INSTALL_DIR}/${comp}"
+        if [[ ! -d "${comp_dir}/.git" ]] && ! git -C "$comp_dir" rev-parse --git-dir >/dev/null 2>&1; then
+            if declare -F print_error >/dev/null 2>&1; then
+                print_error "Piped certification failed: $comp repository not found at $comp_dir"
+            else
+                printf "Piped certification failed: %s repository not found at %s\n" "$comp" "$comp_dir" >&2
+            fi
+            return 1
+        fi
+
+        current_sha="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --short=12 HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --short=12 HEAD 2>/dev/null || git -C "$comp_dir" rev-parse --short=12 HEAD 2>/dev/null || true)"
+        if [[ -z "$current_sha" ]]; then
+            if declare -F print_error >/dev/null 2>&1; then
+                print_error "Piped certification failed: missing HEAD ref for $comp"
+            else
+                printf "Piped certification failed: missing HEAD ref for %s\n" "$comp" >&2
+            fi
+            return 1
+        fi
+
+        case "$comp" in
+            frontend) expected_ref="${PIPED_FRONTEND_REF:-}" ;;
+            backend)  expected_ref="${PIPED_BACKEND_REF:-}" ;;
+            proxy)    expected_ref="${PIPED_PROXY_REF:-}" ;;
+        esac
+
+        if [[ -n "$expected_ref" ]]; then
+            local target_sha=""
+            target_sha="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || git -C "$comp_dir" rev-parse --short=12 "${expected_ref}^{commit}" 2>/dev/null || git -C "$comp_dir" rev-parse --short=12 "$expected_ref" 2>/dev/null || true)"
+            if [[ -n "$target_sha" ]]; then
+                if [[ "$current_sha" != "$target_sha" ]]; then
+                    if declare -F print_error >/dev/null 2>&1; then
+                        print_error "Piped certification failed: $comp HEAD ($current_sha) does not match target ref $expected_ref ($target_sha)"
+                    else
+                        printf "Piped certification failed: %s HEAD (%s) does not match target ref %s (%s)\n" "$comp" "$current_sha" "$expected_ref" "$target_sha" >&2
+                    fi
+                    return 1
+                fi
+            else
+                local head_full=""
+                head_full="$(run_as_piped_clean_env "${DATA_DIR:-$INSTALL_DIR}" git -C "$comp_dir" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "$comp_dir" rev-parse HEAD 2>/dev/null || git -C "$comp_dir" rev-parse HEAD 2>/dev/null || true)"
+                if [[ ! "$expected_ref" =~ ^[0-9a-fA-F]{7,40}$ || ! "$head_full" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                    if declare -F print_error >/dev/null 2>&1; then
+                        print_error "Piped certification failed: $comp expected ref '$expected_ref' is not a valid 7-40 hex SHA"
+                    else
+                        printf "Piped certification failed: %s expected ref '%s' is not a valid 7-40 hex SHA\n" "$comp" "$expected_ref" >&2
+                    fi
+                    return 1
+                fi
+                local exp_lower="${expected_ref,,}"
+                local head_lower="${head_full,,}"
+                if [[ "$head_lower" != "$exp_lower"* && "$exp_lower" != "$head_lower"* ]]; then
+                    if declare -F print_error >/dev/null 2>&1; then
+                        print_error "Piped certification failed: $comp HEAD ($current_sha) does not match target ref $expected_ref"
+                    else
+                        printf "Piped certification failed: %s HEAD (%s) does not match target ref %s\n" "$comp" "$current_sha" "$expected_ref" >&2
+                    fi
+                    return 1
+                fi
+            fi
+        fi
+    done
+
+    if ! youtube_ready "http://127.0.0.1:${APP_PORT}/"; then
+        if declare -F print_error >/dev/null 2>&1; then
+            print_error "Piped certification failed: frontend readiness check failed"
+        else
+            printf "Piped certification failed: frontend readiness check failed\n" >&2
+        fi
+        return 1
+    fi
+    if ! youtube_ready "http://127.0.0.1:${APP_PORT}/api/healthcheck"; then
+        if declare -F print_error >/dev/null 2>&1; then
+            print_error "Piped certification failed: API healthcheck failed"
+        else
+            printf "Piped certification failed: API healthcheck failed\n" >&2
+        fi
+        return 1
+    fi
+    systemctl is-active --quiet piped-backend.service || systemctl is-active --quiet af-piped-api.service || {
+        echo "ERROR: piped-backend.service is not active during certification." >&2
+        return 1
+    }
+    systemctl is-active --quiet piped-proxy.service || systemctl is-active --quiet af-piped-proxy.service || {
+        echo "ERROR: piped-proxy.service is not active during certification." >&2
+        return 1
+    }
+
+    local backend_dest="${PIPED_BACKEND_DIR:-${INSTALL_DIR}}/piped.jar"
+    local proxy_dest="${PIPED_PROXY_DIR:-${INSTALL_DIR}}/piped-proxy"
+
+    if [[ -z "${DEPLOYED_BACKEND_SHA256:-}" ]]; then
+        echo "ERROR: Piped certification failed: missing expected DEPLOYED_BACKEND_SHA256" >&2
+        return 1
+    fi
+    if [[ -z "${DEPLOYED_PROXY_SHA256:-}" ]]; then
+        echo "ERROR: Piped certification failed: missing expected DEPLOYED_PROXY_SHA256" >&2
+        return 1
+    fi
+
+    if [[ ! -f "$backend_dest" || -L "$backend_dest" ]]; then
+        echo "ERROR: Piped certification failed: deployed backend JAR at $backend_dest is missing, not a regular file, or is a symlink" >&2
+        return 1
+    fi
+    if [[ ! -f "$proxy_dest" || -L "$proxy_dest" ]]; then
+        echo "ERROR: Piped certification failed: deployed proxy binary at $proxy_dest is missing, not a regular file, or is a symlink" >&2
+        return 1
+    fi
+
+    local current_backend_sha current_proxy_sha
+    current_backend_sha="$(sha256_regular_file_nofollow "$backend_dest" 2>/dev/null || true)"
+    if [[ -z "$current_backend_sha" || "$current_backend_sha" != "$DEPLOYED_BACKEND_SHA256" ]]; then
+        echo "ERROR: Piped certification failed: deployed backend JAR SHA-256 ($current_backend_sha) does not match expected deployed artifact ($DEPLOYED_BACKEND_SHA256)" >&2
+        return 1
+    fi
+
+    current_proxy_sha="$(sha256_regular_file_nofollow "$proxy_dest" 2>/dev/null || true)"
+    if [[ -z "$current_proxy_sha" || "$current_proxy_sha" != "$DEPLOYED_PROXY_SHA256" ]]; then
+        echo "ERROR: Piped certification failed: deployed proxy binary SHA-256 ($current_proxy_sha) does not match expected deployed artifact ($DEPLOYED_PROXY_SHA256)" >&2
+        return 1
+    fi
+
+    local proxy_pid="" running_proxy_exe="" running_proxy_sha=""
+    proxy_pid="$(systemctl show -p ExecMainPID --value piped-proxy.service 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+    if [[ -z "$proxy_pid" || "$proxy_pid" == "0" ]]; then
+        proxy_pid="$(systemctl show -p ExecMainPID --value af-piped-proxy.service 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+    fi
+
+    local proc_root="${AF_PROC_ROOT:-/proc}"
+    if [[ -z "$proxy_pid" || ! "$proxy_pid" =~ ^[0-9]+$ || "$proxy_pid" -le 0 || ! -d "$proc_root/$proxy_pid" ]]; then
+        echo "ERROR: Piped certification failed: unable to resolve valid running ExecMainPID (${proxy_pid:-none}) for piped-proxy service" >&2
+        return 1
+    fi
+
+    local raw_proxy_exe=""
+    raw_proxy_exe="$(readlink "$proc_root/$proxy_pid/exe" 2>/dev/null || true)"
+    running_proxy_exe="$(readlink -f "$proc_root/$proxy_pid/exe" 2>/dev/null || true)"
+    if [[ ! -L "$proc_root/$proxy_pid/exe" || -z "$running_proxy_exe" || "$raw_proxy_exe" == *" (deleted)" || "$running_proxy_exe" == *" (deleted)" || ! -f "$running_proxy_exe" ]]; then
+        echo "ERROR: Piped certification failed: running piped-proxy process ($proxy_pid) executable (${raw_proxy_exe:-unresolved}) is missing, deleted, or not a regular file" >&2
+        return 1
+    fi
+
+    local canonical_proxy_dest=""
+    canonical_proxy_dest="$(readlink -f "$proxy_dest" 2>/dev/null || echo "$proxy_dest")"
+    if [[ "$running_proxy_exe" != "$canonical_proxy_dest" ]]; then
+        echo "ERROR: Piped certification failed: running piped-proxy process ($proxy_pid) executable ($running_proxy_exe) does not match deployed path ($canonical_proxy_dest)" >&2
+        return 1
+    fi
+
+    running_proxy_sha="$(sha256_proc_exe_matching_file "$proc_root/$proxy_pid/exe" "$proxy_dest" 2>/dev/null)" || {
+        echo "ERROR: Piped certification failed: running piped-proxy process ($proxy_pid) executable failed inode identity verification against $proxy_dest" >&2
+        return 1
+    }
+    if [[ -z "$running_proxy_sha" || "$running_proxy_sha" != "$DEPLOYED_PROXY_SHA256" ]]; then
+        echo "ERROR: Piped certification failed: running piped-proxy process ($proxy_pid) binary SHA-256 (${running_proxy_sha:-empty}) does not match newly published binary ($DEPLOYED_PROXY_SHA256)" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+af_set_stage "certification" 90
+if ! certify_piped; then
+    if declare -F print_error >/dev/null 2>&1; then
+        print_error "Piped certification failed before commit; invoking rollback"
+    else
+        printf "Piped certification failed before commit; invoking rollback\n" >&2
+    fi
+    rollback_piped_runtime 1
+    exit 1
+fi
+PIPED_CERTIFIED=1
+
+af_set_stage "record_version" 95
+FRONTEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD 2>/dev/null || echo "${PIPED_FRONTEND_REF:-unknown}")"
+BACKEND_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/backend" rev-parse HEAD 2>/dev/null || echo "${PIPED_BACKEND_REF:-unknown}")"
+PROXY_SHA="$(run_as_piped_clean_env "$DATA_DIR" git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/proxy" rev-parse HEAD 2>/dev/null || echo "${PIPED_PROXY_REF:-unknown}")"
+
+printf '{"frontend":"%s","backend":"%s","proxy":"%s"}\n' "${FRONTEND_SHA}" "${BACKEND_SHA}" "${PROXY_SHA}" | \
+    write_piped_receipt_safely "${INSTALL_DIR}" ".af-components.json" "root" "root" "0644"
+
+PIPED_VERSION="frontend:${FRONTEND_SHA},backend:${BACKEND_SHA},proxy:${PROXY_SHA}"
+printf '%s\n' "$PIPED_VERSION" | write_piped_receipt_safely "${INSTALL_DIR}" ".af-version" "root" "root" "0644"
 queue_app_version "${INSTALL_DIR}/.af-version" "$PIPED_VERSION"
 commit_app_versions
 write_lock piped
 RUNTIME_CHANGED=false
+PIPED_INSTALL_COMPLETED=1
 report_progress 100 "Experimental Piped installed. YouTube playback may require additional upstream anti-bot configuration."

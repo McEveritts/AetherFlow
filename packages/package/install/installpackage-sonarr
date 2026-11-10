@@ -45,14 +45,54 @@ esac
 
 report_progress 35 "Downloading Sonarr v4 (${SONARR_ARCH})..."
 SONARR_VERSION="$(github_latest_tag "Sonarr/Sonarr" "4.0.12.2823")"
+SONARR_URL="https://github.com/Sonarr/Sonarr/releases/download/v${SONARR_VERSION#v}/Sonarr.main.${SONARR_VERSION#v}.linux-${SONARR_ARCH}.tar.gz"
 TMP_TAR=$(mktemp /tmp/sonarr-XXXXXX.tar.gz)
-download_file "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "$SONARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Sonarr to /opt/Sonarr..."
 stage_app_archive "$TMP_TAR" "/opt/Sonarr" "Sonarr" "/var/lib/sonarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
-if [[ -n "$SONARR_VERSION" ]]; then
-    queue_app_version /opt/Sonarr/.af-version "$(resolve_installed_binary_version /opt/Sonarr/Sonarr "${SONARR_VERSION#v}")"
+
+if [[ ! -x /opt/Sonarr/Sonarr ]]; then
+    print_error "Sonarr binary /opt/Sonarr/Sonarr missing or not executable"
+    exit 1
+fi
+
+PROBED_VER="$(resolve_installed_binary_version /opt/Sonarr/Sonarr "" || true)"
+if [[ -n "$PROBED_VER" ]]; then
+    RESOLVED_VER="$PROBED_VER"
+elif [[ "${AF_ALLOW_VERSION_FALLBACK:-1}" != "0" ]]; then
+    RESOLVED_VER="${SONARR_VERSION#v}"
+else
+    print_error "Failed to resolve installed binary version for Sonarr"
+    exit 1
+fi
+
+NORM_RESOLVED="${RESOLVED_VER#release-}"
+NORM_RESOLVED="${NORM_RESOLVED#Release-}"
+NORM_RESOLVED="${NORM_RESOLVED#[vV]}"
+
+NORM_SONARR="${SONARR_VERSION#release-}"
+NORM_SONARR="${NORM_SONARR#Release-}"
+NORM_SONARR="${NORM_SONARR#[vV]}"
+
+if [[ "${RESOLVED_VER#v}" != "${SONARR_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_SONARR" ]]; then
+    echo "ERROR: Installed Sonarr version '${RESOLVED_VER}' does not match expected version '${SONARR_VERSION}'" >&2
+    exit 1
+fi
+
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    NORM_TARGET="${AF_TARGET_VERSION#release-}"
+    NORM_TARGET="${NORM_TARGET#Release-}"
+    NORM_TARGET="${NORM_TARGET#[vV]}"
+    if [[ "${RESOLVED_VER#v}" != "${AF_TARGET_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_TARGET" ]]; then
+        echo "ERROR: Installed Sonarr version '${RESOLVED_VER}' does not match requested target version '${AF_TARGET_VERSION}'" >&2
+        exit 1
+    fi
+fi
+
+if [[ -n "$RESOLVED_VER" ]]; then
+    queue_app_version /opt/Sonarr/.af-version "$RESOLVED_VER"
 fi
 set_config_value "/var/lib/sonarr/config.xml" xml "Port" "$APP_PORT" "Config"
 

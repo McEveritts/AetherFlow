@@ -1,3 +1,40 @@
+## Nightly Patch Notes — November 10, 2026 — Marketplace Lifecycle
+
+Marketplace lifecycle, installer reliability, update certification, and diagnostic-safety improvements since `2d3715e4` (`v4.0.0-nightly.101.2`). These notes describe source changes; they do not claim successful live installation of every catalog application.
+
+### Marketplace Updates & Inventory
+
+* Keep authenticated installed-app inventory distinct from the public, redacted catalog. Session expiry and unavailable inventory no longer silently turn installed apps into provisioning candidates.
+* Preserve a previously known update while reporting release-check freshness and discovery errors separately. Coalesce noisy package-progress inventory refreshes while refreshing terminal outcomes immediately.
+* Track accepted jobs by lifecycle identity, retain terminal outcomes, and reconcile polling, event updates, interrupted requests, and authentication changes without accepting stale completion signals.
+* Require an admitted target and matching achieved version before certifying an update. Use explicit candidate receipts, strict commit identities, and complete component manifests rather than treating any successful process exit as proof of the requested update.
+
+### Installer & Recovery Reliability
+
+* Harden Rclone GUI/service compatibility, credential handling, target selection, staged replacement, and rollback of both the primary and VFS services.
+* Improve Piped component provenance and transactional recovery, Invidious build diagnostics and scratch preflight, KasmVNC TLS/runtime setup, and FileBot lifecycle handling.
+* Align release/version tracking for Calibre-Web, Listenarr, Maintainerr, McVNC, Organizr, pyLoad, Readarr, Seedcross, Tautulli, Uptime Kuma, and the supported Servarr applications.
+* Make release discovery more resilient to unavailable upstream metadata and GitHub rate limits; distinguish ordering from exact installed-version identity.
+* Route privileged host changes through the runner, strengthen lifecycle admission/finalization and cancellation handling, and retain recovery evidence when restoration cannot complete.
+* Clean up partially captured runtime snapshots after capture failure without deleting backups needed for an incomplete rollback. Check scratch capacity before destructive work.
+
+### Diagnostic Safety
+
+* Restrict Marketplace lifecycle diagnostics to human administrators. Dedicated and legacy plugin read scopes retain authorized inventory access without gaining operator-only failure details.
+* Apply shared sensitive-key rules to scalar fragments, containers, and persisted diagnostics, including long Unicode-escaped keys and repeatedly wrapped receipts. Preserve genuinely closed quoted command context while masking credential tails.
+* Sanitize durable failure receipts and authenticated API/WebSocket diagnostics, including multiline and whitespace-leading quoted values, attached curl credentials, partially masked values, encoded sensitive keys, and malformed or truncated sensitive containers. Remove intermediate diagnostic debug output.
+* Keep detailed Python and awk receipt masking consistent. When neither interpreter is available, redact complete diagnostic fields rather than risk leaking sensitive suffixes; the receipt remains valid JSON with its numeric exit code.
+* Bound receipt fields without SIGPIPE-induced exits or operating-system argument-size failures, including long installer diagnostics.
+* Expand Rust, Python, and frontend regression coverage for target certification, recovery cleanup, diagnostic masking, inventory boundaries, and lifecycle reconciliation.
+
+### Rollout Notes
+
+* Keep the API, runner, shared installer helpers, package scripts, catalog metadata, and frontend on the same release revision.
+* A branch push triggers the existing nightly build/publication workflow; it does not itself verify or authorize a live host update or service restart.
+* Automated source/fixture checks are recorded, but the final independent Terra Max and Sol Max review requests were blocked by the provider and produced no approval. This publication does not claim independent review completion or live rollout certification.
+
+---
+
 ## Nightly Patch Notes — November 10, 2026 — Open Canvas UI
 
 This UI-focused nightly refresh improves the dashboard's open-canvas presentation, responsive layouts, and operator controls. It does not include the separate Marketplace lifecycle, backend, or package-installer changes under development.

@@ -96,10 +96,24 @@ if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
     python3 -m venv "${INSTALL_DIR}/.venv" >> "$LOGFILE" 2>&1
 fi
 "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
-"${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" >> "$LOGFILE" 2>&1 || \
-    "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng >> "$LOGFILE" 2>&1
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TARGET_VER="${AF_TARGET_VERSION#v}"
+    "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng[plugins]==${TARGET_VER}" >> "$LOGFILE" 2>&1 || \
+        "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng==${TARGET_VER}" >> "$LOGFILE" 2>&1
+else
+    "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" >> "$LOGFILE" 2>&1 || \
+        "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng >> "$LOGFILE" 2>&1
+fi
 
-PYLOAD_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || echo '0.5.0')"
+PYLOAD_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || true)"
+if [[ -z "$PYLOAD_VER" ]]; then
+    print_error "Failed to extract pyload-ng version from ${INSTALL_DIR}/.venv"
+    exit 1
+fi
+if [[ -n "${AF_TARGET_VERSION:-}" && "$PYLOAD_VER" != "${AF_TARGET_VERSION#v}" ]]; then
+    print_error "Installed pyload-ng version ($PYLOAD_VER) does not match requested AF_TARGET_VERSION (${AF_TARGET_VERSION#v})"
+    exit 1
+fi
 queue_app_version "${INSTALL_DIR}/.af-version" "${PYLOAD_VER}"
 
 report_progress 75 "Configuring ${APP_NAME} Web UI settings on port ${APP_PORT}..."

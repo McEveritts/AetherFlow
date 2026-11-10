@@ -44,19 +44,34 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-report_progress 35 "Downloading Readarr (${READARR_ARCH})..."
-READARR_VERSION="$(github_latest_tag "Readarr/Readarr" "0.4.12.2738")"
-READARR_URL="https://readarr.servarr.com/v1/update/develop/updatefile?os=linux&runtime=netcore&arch=${READARR_ARCH}"
-
-TMP_TAR=$(mktemp /tmp/readarr-XXXXXX.tar.gz)
-download_file "$READARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
-
-report_progress 65 "Extracting Readarr to /opt/Readarr..."
-stage_app_archive "$TMP_TAR" "/opt/Readarr" "Readarr" "/var/lib/readarr" "${PACKAGE_NAME}"
-rm -f "$TMP_TAR"
-if [[ -n "$READARR_VERSION" ]]; then
-    queue_app_version /opt/Readarr/.af-version "$(resolve_installed_binary_version /opt/Readarr/Readarr "${READARR_VERSION#v}")"
+READARR_VERSION=""
+if [[ -x /opt/Readarr/Readarr && -f /opt/Readarr/Readarr.dll ]]; then
+    READARR_VERSION="$(strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 fi
+
+if [[ -n "$READARR_VERSION" ]]; then
+    report_progress 50 "Using verified existing Readarr binary (version ${READARR_VERSION})..."
+elif [[ -n "${AF_READARR_VERIFIED_ARCHIVE:-}" && -f "${AF_READARR_VERIFIED_ARCHIVE}" && -n "${AF_READARR_SHA256:-}" ]]; then
+    report_progress 35 "Verifying pinned Readarr archive..."
+    printf '%s  %s\n' "${AF_READARR_SHA256}" "${AF_READARR_VERIFIED_ARCHIVE}" | sha256sum -c - >> "$LOGFILE" 2>&1 || {
+        af_write_failure_receipt 1 "verify" "archive_corrupt" "Readarr archive SHA256 verification failed"
+        exit 1
+    }
+    report_progress 65 "Extracting verified Readarr archive to /opt/Readarr..."
+    stage_app_archive "${AF_READARR_VERIFIED_ARCHIVE}" "/opt/Readarr" "Readarr" "/var/lib/readarr" "${PACKAGE_NAME}"
+    INSTALLED_VER="$(strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+    if [[ -z "$INSTALLED_VER" ]]; then
+        af_write_failure_receipt 1 "verify" "version_probe_failed" "Failed to extract verified Readarr version from /opt/Readarr/Readarr.dll"
+        exit 1
+    fi
+    READARR_VERSION="$INSTALLED_VER"
+else
+    af_write_failure_receipt 1 "retired" "retired_upstream" "Readarr is retired upstream; new unpinned downloads are disabled without a pinned SHA-256 artifact"
+    exit 1
+fi
+
+queue_app_version /opt/Readarr/.af-version "${READARR_VERSION#v}"
+printf '%s\n' "${READARR_VERSION#v}" > /opt/Readarr/.af-version 2>/dev/null || true
 set_config_value "/var/lib/readarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
 chown -hRP readarr:readarr /opt/Readarr /var/lib/readarr

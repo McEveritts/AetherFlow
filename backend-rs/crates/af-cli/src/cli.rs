@@ -68,6 +68,7 @@ pub enum HelpTopic {
     Backup,
     Provision,
     Maintenance,
+    Hosts,
 }
 
 /// Typed administrative command AST for the `af` CLI.
@@ -530,6 +531,33 @@ impl ProvisionCliCommand {
     }
 }
 
+/// Local DNS and /etc/hosts reconciliation commands mediated by `af-runner`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HostsCliCommand {
+    Update {
+        ip: String,
+        domains: Vec<String>,
+    },
+    Remove {
+        domains: Vec<String>,
+    },
+    Reconcile {
+        ip: String,
+        domains: Vec<String>,
+    },
+}
+
+impl HostsCliCommand {
+    pub const fn action_name(&self) -> &'static str {
+        match self {
+            HostsCliCommand::Update { .. } => "update",
+            HostsCliCommand::Remove { .. } => "remove",
+            HostsCliCommand::Reconcile { .. } => "reconcile",
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Typed Runner Request Builders & Validators
 // ─────────────────────────────────────────────────────────────────────────────
@@ -593,6 +621,8 @@ pub fn build_package_runner_request(
         )));
     }
 
+    let target = std::env::var("AF_TARGET_VERSION").ok().filter(|s| !s.trim().is_empty());
+
     Ok(PackageRunnerRequest {
         action: action.to_string(),
         package_id: clean_pkg.to_string(),
@@ -600,7 +630,23 @@ pub fn build_package_runner_request(
         lifecycle_job_id: String::new(),
         app_port: port,
         delete_data: false,
+        expected_target_version: target,
+        ..Default::default()
     })
+}
+
+/// Validates and builds a [`PackageRunnerRequest`] with an explicit target version.
+pub fn build_package_runner_request_with_target(
+    action: &str,
+    pkg_id: &str,
+    app_port: Option<i32>,
+    expected_target_version: Option<String>,
+) -> CliResult<PackageRunnerRequest> {
+    let mut req = build_package_runner_request(action, pkg_id, app_port)?;
+    if let Some(target) = expected_target_version.filter(|s| !s.trim().is_empty()) {
+        req.expected_target_version = Some(target.trim().to_string());
+    }
+    Ok(req)
 }
 
 /// Validates and builds a [`SystemctlRequest`] for `/v1/systemctl`.
@@ -914,7 +960,49 @@ fn parse_help_topic(raw: &str) -> HelpTopic {
         "maintenance" | "tune" | "sentinel" | "clean-log" | "clean-logs" | "showspace" => {
             HelpTopic::Maintenance
         }
+        "hosts" | "dns" => HelpTopic::Hosts,
         _ => HelpTopic::General,
+    }
+}
+
+pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        return Err(CliError::Usage(
+            "missing hosts subcommand (expected: update, remove, reconcile)".to_string(),
+        ));
+    };
+    let tail = &args[1..];
+    match sub {
+        "update" => {
+            if tail.len() < 2 {
+                return Err(CliError::Usage("usage: af hosts update <ip> <domain...>".to_string()));
+            }
+            Ok(HostsCliCommand::Update {
+                ip: tail[0].clone(),
+                domains: tail[1..].to_vec(),
+            })
+        }
+        "remove" => {
+            if tail.is_empty() {
+                return Err(CliError::Usage("usage: af hosts remove <domain...>".to_string()));
+            }
+            Ok(HostsCliCommand::Remove {
+                domains: tail.to_vec(),
+            })
+        }
+        "reconcile" => {
+            let ip = tail.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+            let domains = if tail.len() > 1 {
+                tail[1..].to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(HostsCliCommand::Reconcile { ip, domains })
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown hosts subcommand {:?} (expected: update, remove, reconcile)",
+            other
+        ))),
     }
 }
 
@@ -1128,6 +1216,18 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
             }
             s if s.starts_with("--channel=") => {
                 channel = ReleaseChannel::from_str(s.trim_start_matches("--channel="))?;
+                i += 1;
+            }
+            "--target-version" | "-t" => {
+                let raw_target = args.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--target-version requires a version argument".to_string())
+                })?;
+                std::env::set_var("AF_TARGET_VERSION", raw_target.trim());
+                i += 2;
+            }
+            s if s.starts_with("--target-version=") => {
+                let raw_target = s.trim_start_matches("--target-version=");
+                std::env::set_var("AF_TARGET_VERSION", raw_target.trim());
                 i += 1;
             }
             pkg => {
@@ -2675,5 +2775,54 @@ Pure-Rust replacements for legacy packages/system/* utilities:
   showspace: calculates disk usage for /home/<user> entries with human-readable formatting
 "
         .to_string(),
+        HelpTopic::Hosts => "\
+USAGE:
+  af hosts <update|remove|reconcile> [ip] [domains...]
+
+Manage local /etc/hosts, dnsmasq, and Pi-hole DNS mappings.
+  update <ip> <domains...>      Map domains to IP in managed block
+  remove <domains...>           Remove domains from hosts
+  reconcile [ip] [domains...]   Reconcile /etc/hosts to authoritative domain set (defaults to 127.0.0.1)
+"
+        .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_hosts_subcommand() {
+        let update_args = vec!["update".to_string(), "10.0.0.1".to_string(), "app.aether.local".to_string()];
+        let cmd = parse_hosts_subcommand(&update_args).unwrap();
+        assert_eq!(cmd, HostsCliCommand::Update {
+            ip: "10.0.0.1".to_string(),
+            domains: vec!["app.aether.local".to_string()],
+        });
+
+        let remove_args = vec!["remove".to_string(), "app.aether.local".to_string()];
+        let cmd = parse_hosts_subcommand(&remove_args).unwrap();
+        assert_eq!(cmd, HostsCliCommand::Remove {
+            domains: vec!["app.aether.local".to_string()],
+        });
+
+        let reconcile_args = vec!["reconcile".to_string(), "127.0.0.1".to_string(), "app1.aether.local".to_string()];
+        let cmd = parse_hosts_subcommand(&reconcile_args).unwrap();
+        assert_eq!(cmd, HostsCliCommand::Reconcile {
+            ip: "127.0.0.1".to_string(),
+            domains: vec!["app1.aether.local".to_string()],
+        });
+
+        let reconcile_empty = vec!["reconcile".to_string()];
+        let cmd = parse_hosts_subcommand(&reconcile_empty).unwrap();
+        assert_eq!(cmd, HostsCliCommand::Reconcile {
+            ip: "127.0.0.1".to_string(),
+            domains: Vec::new(),
+        });
+
+        assert_eq!(parse_help_topic("hosts"), HelpTopic::Hosts);
+        assert_eq!(parse_help_topic("dns"), HelpTopic::Hosts);
+        assert!(render_help_text(HelpTopic::Hosts).contains("af hosts <update|remove|reconcile>"));
     }
 }

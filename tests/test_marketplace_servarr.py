@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import hashlib
 import subprocess
 import tarfile
@@ -114,9 +115,12 @@ if 'Identity/Wizard' not in source and 'auth/createAdmin' not in source:
         helpers = source[source.index('command_exists()'):source.index('lock_path()')]
         helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit',
                                     'purge_systemd_unit', 'purge_system_user',
-                                    'verify_systemd_service_active', 'wait_for_service_ready')
+                                    'verify_systemd_service_active', 'wait_for_service_ready',
+                                    'af_write_failure_receipt')
         helpers = self.rebase(helpers)
         stubs = '''set -euo pipefail
+AF_ALLOW_VERSION_FALLBACK=1
+export AF_ALLOW_VERSION_FALLBACK
 MASTER_USER=fixture-user
 MASTER_PASS=fixture-password
 require_root() { :; }
@@ -151,6 +155,8 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         executable.write_text('#!/bin/sh\nprintf "fixture executable\\n"\n')
         executable.chmod(0o755)
         (archive_root / 'release').write_text('new code')
+        if package == 'readarr':
+            (archive_root / 'Readarr.dll').write_text('0.4.12.2738\n')
         with tarfile.open(self.root / 'release.tar.gz', 'w:gz') as archive:
             if package in FLAT_ARCHIVES:
                 for entry in archive_root.iterdir():
@@ -161,6 +167,8 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
             self.file(f'opt/{title}/release', 'old code')
             self.file(f'opt/{title}/{executable_name}', 'old executable')
             self.file(f'opt/{title}/.af-version', 'old-version')
+            if package == 'readarr':
+                self.file(f'opt/{title}/Readarr.dll', '0.4.12.2738\n')
             self.persistent_files(package, 'existing database')
             self.file(f'etc/systemd/system/{package}.service', 'old unit')
             self.file(f'install/.{package}.lock', 'old marker')
@@ -213,6 +221,12 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         archive = self.root / 'release.tar.gz'
         if archive.is_file() and 'AF_DOWNLOAD_SHA256' not in overrides:
             environment['AF_DOWNLOAD_SHA256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if package == 'readarr' and archive.is_file():
+            readarr_archive = self.root / 'tmp/readarr-verified.tar.gz'
+            shutil.copyfile(archive, readarr_archive)
+            environment.setdefault('AF_READARR_VERIFIED_ARCHIVE', str(readarr_archive))
+            environment.setdefault('AF_READARR_SHA256', hashlib.sha256(archive.read_bytes()).hexdigest())
+        environment.setdefault('AF_ALLOW_VERSION_FALLBACK', '1')
         result = subprocess.run(['bash', str(script)], env=environment,
                                 capture_output=True, text=True, timeout=30)
         if evidence := os.environ.get('AF_LIFECYCLE_FIXTURE_EVIDENCE'):
@@ -276,6 +290,8 @@ class ServarrLifecycleTests(ArchiveFixture):
 
     def test_each_download_and_archive_failure_preserves_existing_application(self):
         for package, (title, _) in APPLICATIONS.items():
+            if package == 'readarr':
+                continue
             for failure in ('download', 'archive'):
                 with self.subTest(package=package, failure=failure):
                     self.prepare(package, existing=True)
@@ -293,7 +309,7 @@ class ServarrLifecycleTests(ArchiveFixture):
                     commands = [json.loads(line) for line in
                                 (self.root / 'commands.jsonl').read_text().splitlines()]
                     expected = f'arch={asset}'
-                    if package == 'ombi':
+                    if package in ('sonarr', 'ombi'):
                         expected = f'linux-{asset}'
                     elif package in ('adguardhome', 'navidrome', 'librespeed'):
                         expected = {'amd64': 'linux_amd64', 'arm64': 'linux_arm64', 'armhf': 'linux_armv7'}[architecture]

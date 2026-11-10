@@ -110,6 +110,11 @@ mod tests {
             message: String::new(),
             started_at: "start".into(),
             finished_at: "finish".into(),
+            failed_stage: None,
+            exit_code: None,
+            sanitized_summary: None,
+            expected_target_version: None,
+            achieved_version: None,
         }
     }
 
@@ -143,6 +148,7 @@ mod tests {
                 started_at: "later".into(),
                 progress: 5,
                 last_line: String::new(),
+                expected_target_version: None,
             },
         );
         assert!(observer.take_pending(&snapshot).is_empty());

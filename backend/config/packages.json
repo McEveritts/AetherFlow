@@ -63,8 +63,9 @@
     {
         "name": "readarr",
         "label": "Readarr",
-        "description": "Legacy book and audiobook manager. Upstream retired Readarr on June 27, 2025 due to unusable metadata; discovery and updates may not work. Existing lifecycle and data remain available; no unofficial fork is substituted.",
+        "description": "Retired legacy book and audiobook manager. Upstream retired Readarr on June 27, 2025 due to unusable metadata; updates are frozen at 0.4.18.2805 and upstream discovery has been sunset. Existing lifecycle and data remain available; no unofficial fork is substituted.",
         "lock_file": "/install/.readarr.lock",
+        "status": "retired",
         "category": "Media",
         "service_type": "systemd",
         "service_name": "readarr",

@@ -46,13 +46,52 @@ esac
 report_progress 35 "Downloading Radarr (${RADARR_ARCH})..."
 RADARR_VERSION="$(github_latest_tag "Radarr/Radarr" "5.16.3.9541")"
 TMP_TAR=$(mktemp /tmp/radarr-XXXXXX.tar.gz)
-download_file "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
+download_file "https://radarr.servarr.com/v1/update/master/updatefile?version=${RADARR_VERSION#v}&os=linux&runtime=netcore&arch=${RADARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Extracting Radarr to /opt/Radarr..."
 stage_app_archive "$TMP_TAR" "/opt/Radarr" "Radarr" "/var/lib/radarr" "${PACKAGE_NAME}"
 rm -f "$TMP_TAR"
-if [[ -n "$RADARR_VERSION" ]]; then
-    queue_app_version /opt/Radarr/.af-version "$(resolve_installed_binary_version /opt/Radarr/Radarr "${RADARR_VERSION#v}")"
+
+if [[ ! -x /opt/Radarr/Radarr ]]; then
+    print_error "Radarr binary /opt/Radarr/Radarr missing or not executable"
+    exit 1
+fi
+
+PROBED_VER="$(resolve_installed_binary_version /opt/Radarr/Radarr "" || true)"
+if [[ -n "$PROBED_VER" ]]; then
+    RESOLVED_VER="$PROBED_VER"
+elif [[ "${AF_ALLOW_VERSION_FALLBACK:-1}" != "0" ]]; then
+    RESOLVED_VER="${RADARR_VERSION#v}"
+else
+    print_error "Failed to resolve installed binary version for Radarr"
+    exit 1
+fi
+
+NORM_RESOLVED="${RESOLVED_VER#release-}"
+NORM_RESOLVED="${NORM_RESOLVED#Release-}"
+NORM_RESOLVED="${NORM_RESOLVED#[vV]}"
+
+NORM_RADARR="${RADARR_VERSION#release-}"
+NORM_RADARR="${NORM_RADARR#Release-}"
+NORM_RADARR="${NORM_RADARR#[vV]}"
+
+if [[ "${RESOLVED_VER#v}" != "${RADARR_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_RADARR" ]]; then
+    echo "ERROR: Installed Radarr version '${RESOLVED_VER}' does not match expected version '${RADARR_VERSION}'" >&2
+    exit 1
+fi
+
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    NORM_TARGET="${AF_TARGET_VERSION#release-}"
+    NORM_TARGET="${NORM_TARGET#Release-}"
+    NORM_TARGET="${NORM_TARGET#[vV]}"
+    if [[ "${RESOLVED_VER#v}" != "${AF_TARGET_VERSION#v}" && "$NORM_RESOLVED" != "$NORM_TARGET" ]]; then
+        echo "ERROR: Installed Radarr version '${RESOLVED_VER}' does not match requested target version '${AF_TARGET_VERSION}'" >&2
+        exit 1
+    fi
+fi
+
+if [[ -n "$RESOLVED_VER" ]]; then
+    queue_app_version /opt/Radarr/.af-version "$RESOLVED_VER"
 fi
 set_config_value "/var/lib/radarr/config.xml" xml "Port" "$APP_PORT" "Config"
 

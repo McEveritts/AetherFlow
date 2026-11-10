@@ -25,7 +25,7 @@ jest.mock('@/components/deploy/DeploymentStatus', () => ({ DeploymentStatus: () 
 const mockApiFetch = jest.fn();
 jest.mock('@/lib/fetcher', () => ({ apiFetch: (...args: unknown[]) => mockApiFetch(...args) }));
 
-const app = (extra: Partial<App> = {}): App => ({ id: 'fixture', name: 'Fixture', desc: 'Application', hits: 0, category: 'Media', status: 'installed', progress: 0, update_available: true, ...extra });
+const app = (extra: Partial<App> = {}): App => ({ id: 'fixture', name: 'Fixture', desc: 'Application', hits: 0, category: 'Media', status: 'installed', progress: 0, update_available: true, latest_version: '2.0', inventory_authenticated: true, ...extra });
 
 describe('Marketplace mounted receipt tracking', () => {
     beforeEach(() => {
@@ -45,7 +45,7 @@ describe('Marketplace mounted receipt tracking', () => {
             act(() => mockOptions.onSuccess(mockApps));
             expect(mockAddToast.mock.calls.some(call => String(call[0]).includes('may have been superseded'))).toBe(false);
         }
-        mockApps = [app({ last_job: { job_id: 'A', action: 'update', status, started_at: 'now', finished_at: 'later' } })];
+        mockApps = [app({ last_job: { job_id: 'A', action: 'update', status, started_at: 'now', finished_at: 'later', expected_target_version: '2.0', achieved_version: '2.0' } })];
         view.rerender(<MarketplaceTab />);
         const outcomeText = status === 'failed' ? 'update failed' : 'successfully updated';
         expect(mockAddToast.mock.calls.filter(call => String(call[0]).includes(outcomeText))).toHaveLength(1);
@@ -64,7 +64,7 @@ describe('Marketplace mounted receipt tracking', () => {
         expect(mockAddToast.mock.calls.filter(call => String(call[0]).includes('may have been superseded'))).toHaveLength(1);
         mockError = undefined;
         // No active observation is required between unknown and the late receipt.
-        mockApps = [app({ last_job: { job_id: 'A', action: 'update', status, started_at: 'now', finished_at: 'later' } })];
+        mockApps = [app({ last_job: { job_id: 'A', action: 'update', status, started_at: 'now', finished_at: 'later', expected_target_version: '2.0', achieved_version: '2.0' } })];
         view.rerender(<MarketplaceTab />);
         const outcomeText = status === 'failed' ? 'update failed' : 'successfully updated';
         expect(mockAddToast.mock.calls.filter(call => String(call[0]).includes(outcomeText))).toHaveLength(1);

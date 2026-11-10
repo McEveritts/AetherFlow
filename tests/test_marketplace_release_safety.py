@@ -19,6 +19,8 @@ class ReleaseDiscoveryTests(unittest.TestCase):
     def discover(self, fallback="1.22.3", strip_v="true", **environment):
         body = common_functions("github_latest_tag") + r'''
 print_error() { printf '%s\n' "$*" >&2; }
+print_warning() { printf '%s\n' "$*" >&2; }
+print_warn() { printf '%s\n' "$*" >&2; }
 curl() {
     printf '%s\n' "$*" >> "$AF_DISCOVERY_LOG"
     case "$*" in

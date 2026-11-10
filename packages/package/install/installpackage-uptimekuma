@@ -36,16 +36,46 @@ if ! id -u uptimekuma >/dev/null 2>&1; then
 fi
 
 report_progress 40 "Preparing Uptime Kuma update while preserving monitors and history..."
+REPO_URL="https://github.com/louislam/uptime-kuma.git"
+FALLBACK_TAG="1.23.15"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TARGET_TAG="$AF_TARGET_VERSION"
+else
+    TARGET_TAG="$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+    if [[ -z "$TARGET_TAG" ]]; then
+        TARGET_TAG="$FALLBACK_TAG"
+    fi
+fi
+if ! git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TARGET_TAG}" >/dev/null 2>&1; then
+    if [[ "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TARGET_TAG#v}" >/dev/null 2>&1; then
+        TARGET_TAG="${TARGET_TAG#v}"
+    elif [[ ! "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/v${TARGET_TAG}" >/dev/null 2>&1; then
+        TARGET_TAG="v${TARGET_TAG}"
+    else
+        af_write_failure_receipt 1 "download" "invalid_target_tag" "Upstream tag refs/tags/${TARGET_TAG} not found in ${REPO_URL}"
+        exit 1
+    fi
+fi
 BUILD_DIR="$(mktemp -d /opt/.uptime-kuma-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
-git clone https://github.com/louislam/uptime-kuma.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+if ! git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1; then
+    if [[ "$TARGET_TAG" =~ ^v ]]; then
+        ALT_TAG="${TARGET_TAG#v}"
+    else
+        ALT_TAG="v${TARGET_TAG}"
+    fi
+    git clone --branch "$ALT_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1 || {
+        log_error "Failed to clone Uptime Kuma repository at tag $TARGET_TAG"
+        exit 1
+    }
+    TARGET_TAG="$ALT_TAG"
+fi
 
 report_progress 65 "Building Uptime Kuma production bundle..."
 cd "$BUILD_DIR"
 node_build npm run setup >> "$LOGFILE" 2>&1
 
-UK_VERSION="$(git_checkout_version "$BUILD_DIR" /opt/uptime-kuma/.af-version)"
-queue_app_version "/opt/uptime-kuma/.af-version" "${UK_VERSION#v}"
+queue_app_version "/opt/uptime-kuma/.af-version" "${TARGET_TAG#v}"
 
 UK_DATA_REL="data"
 mkdir -p "$BUILD_DIR/$UK_DATA_REL"

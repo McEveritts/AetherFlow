@@ -171,19 +171,19 @@ fn load_config_file_or_embedded(
         }
     }
     let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
         PathBuf::from("config").join(filename),
         PathBuf::from("../config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
+        PathBuf::from("../../config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.insert(2, exe_dir.join("config").join(filename));
+            candidates.insert(5, exe_dir.join("config").join(filename));
         }
     }
     for c in candidates {
@@ -228,6 +228,7 @@ pub fn get_package_catalog() -> anyhow::Result<Vec<Package>> {
             p.update_repo = auto.update_repo.clone();
             p.update_repo_url = auto.update_repo_url.clone();
             p.update_package = auto.update_package.clone();
+            p.update_channel = auto.update_channel.clone();
             p.version_command = auto.version_command.clone();
             p.version_regex = auto.version_regex.clone();
             p.sandbox_profile = auto.sandbox_profile.clone();
@@ -317,6 +318,7 @@ pub struct AppUpdateRecord {
     pub update_url: String,
     pub checked_at: String,
     pub last_error: String,
+    pub source_key: String,
 }
 
 pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
@@ -324,8 +326,11 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
     let Ok(conn) = af_db::get_conn() else {
         return map;
     };
+    let _ = conn.execute_batch(
+        "ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';",
+    );
     let Ok(mut stmt) = conn.prepare(
-        "SELECT package_name, installed_version, latest_version, update_available, update_url, COALESCE(CAST(checked_at AS TEXT), ''), last_error FROM app_updates",
+        "SELECT package_name, installed_version, latest_version, update_available, update_url, COALESCE(CAST(checked_at AS TEXT), ''), last_error, COALESCE(source_key, '') FROM app_updates",
     ) else {
         return map;
     };
@@ -338,6 +343,7 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
             update_url: r.get(4)?,
             checked_at: r.get(5)?,
             last_error: r.get(6)?,
+            source_key: r.get(7)?,
         })
     }) {
         for r in rows.flatten() {
@@ -2778,6 +2784,7 @@ mod tests {
             progress: 0,
             last_line: String::new(),
             started_at: String::new(),
+            expected_target_version: None,
         };
         assert!(try_start_package_job(job.clone()));
         assert!(!try_start_package_job(job.clone()));
@@ -2891,10 +2898,31 @@ mod tests {
             assert_eq!(package.service_name, format!("af-{app}"));
             let tracking = automation.get(app).unwrap();
             assert_eq!(tracking.update_source, "git");
-            assert_eq!(
+            assert!(!tracking.version_command.is_empty());
+            assert_ne!(
                 tracking.version_command,
                 vec!["cat".to_string(), format!("/opt/{app}/.af-version")]
             );
+            assert!(!tracking.version_command.iter().any(|arg| arg.contains(".af-version")));
+            if app == "piped" {
+                assert_eq!(
+                    tracking.version_command,
+                    vec![
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "fe=$(git -C /opt/piped/frontend rev-parse HEAD 2>/dev/null || git -C /opt/piped rev-parse HEAD 2>/dev/null) && be=$(git -C /opt/piped/backend rev-parse HEAD 2>/dev/null || git -C /opt/piped-backend rev-parse HEAD 2>/dev/null) && pr=$(git -C /opt/piped/proxy rev-parse HEAD 2>/dev/null || git -C /opt/piped-proxy rev-parse HEAD 2>/dev/null) && [ -n \"$fe\" ] && [ -n \"$be\" ] && [ -n \"$pr\" ] && printf 'frontend:%s,backend:%s,proxy:%s\\n' \"$fe\" \"$be\" \"$pr\"".to_string(),
+                    ]
+                );
+            } else if app == "invidious" {
+                assert_eq!(
+                    tracking.version_command,
+                    vec![
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "git -C /opt/invidious/source rev-parse HEAD 2>/dev/null || git -C /opt/invidious rev-parse HEAD 2>/dev/null".to_string(),
+                    ]
+                );
+            }
             assert_eq!(tracking.sandbox_service_ids, units);
         }
     }
@@ -3140,6 +3168,7 @@ mod tests {
             progress: 5,
             last_line: String::new(),
             started_at: started_at.to_string(),
+            expected_target_version: None,
         }
     }
 

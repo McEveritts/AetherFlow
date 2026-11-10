@@ -1,59 +1,109 @@
 #!/bin/bash
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SELF_DIR}/../../common.sh"
-source "${SELF_DIR}/../../youtube-common.sh"
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+fi
+
+if [[ -f "${SELF_DIR}/../../youtube-common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../youtube-common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/youtube-common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/youtube-common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/youtube-common.sh
+fi
+
+declare -F af_set_stage >/dev/null 2>&1 || af_set_stage() { :; }
+declare -F af_prepare_job_scratch >/dev/null 2>&1 || af_prepare_job_scratch() { AF_JOB_SCRATCH_DIR="${TMPDIR:-/tmp}"; export AF_JOB_SCRATCH_DIR; }
+declare -F af_write_failure_receipt >/dev/null 2>&1 || af_write_failure_receipt() { :; }
+
+af_set_stage "preflight" 5
+af_prepare_job_scratch "invidious" 2048 16384
 
 youtube_init invidious 8281
 TMP_DIR=""
-RUNTIME_BACKUP="$(mktemp -d /tmp/af-invidious-runtime.XXXXXX)"
+RUNTIME_BACKUP="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-invidious-runtime.XXXXXX")"
 RUNTIME_PATHS=("$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR" /etc/systemd/system/af-invidious.service /etc/systemd/system/af-invidious-companion.service)
 RUNTIME_UNITS=(af-invidious.service af-invidious-companion.service)
 PREVIOUS_UNITS=()
 RUNTIME_CHANGED=false
-cleanup() {
-    local status=$? runtime_index runtime_path runtime_unit restored=true restore_failed=false
+INVIDIOUS_INSTALL_COMPLETED=0
+cleanup_invidious_install() {
+    local rc=$?
     trap - EXIT INT TERM
     set +e
-    if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_CHANGED" == true ]]; then
-        if ! quiesce_services_for_rollback "${RUNTIME_UNITS[@]}"; then
-            restore_failed=true
-            print_error "Cannot stop Invidious; recovery retained in $RUNTIME_BACKUP"
-            exit "$status"
+    local runtime_index runtime_path runtime_unit restored=true restore_failed=false
+    if [[ "${INVIDIOUS_INSTALL_COMPLETED:-0}" -ne 1 ]]; then
+        [[ "$rc" -eq 0 ]] && rc=1
+        if [[ "${INSTALL_COMMITTED:-false}" != true ]]; then
+            af_write_failure_receipt "$rc" "${AF_CURRENT_STAGE:-unknown}" "installer" "Invidious installation failed at stage ${AF_CURRENT_STAGE:-unknown}"
         fi
-        restore_postgresql_database "$RUNTIME_BACKUP" invidious || restored=false
-        for runtime_index in "${!RUNTIME_PATHS[@]}"; do
-            runtime_path="${RUNTIME_PATHS[$runtime_index]}"
-            safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
-        done
-        for runtime_unit in "${RUNTIME_UNITS[@]}"; do
-            [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl disable "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
-        done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
-        if [[ "$restored" != true || "$restore_failed" == true ]]; then
-            print_error "Invidious recovery incomplete; backups retained in $RUNTIME_BACKUP"
-            exit "$status"
+        if [[ "${INSTALL_COMMITTED:-false}" != true && "$RUNTIME_CHANGED" == true ]]; then
+            if ! quiesce_services_for_rollback "${RUNTIME_UNITS[@]}"; then
+                restore_failed=true
+                export AF_PRESERVE_SCRATCH=1
+                print_error "Cannot stop Invidious; recovery retained in $RUNTIME_BACKUP"
+            else
+                restore_postgresql_database "$RUNTIME_BACKUP" invidious || restored=false
+                for runtime_index in "${!RUNTIME_PATHS[@]}"; do
+                    runtime_path="${RUNTIME_PATHS[$runtime_index]}"
+                    safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
+                done
+                for runtime_unit in "${RUNTIME_UNITS[@]}"; do
+                    [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl disable "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+                done
+                systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+                if [[ "$restored" != true || "$restore_failed" == true ]]; then
+                    restore_failed=true
+                    export AF_PRESERVE_SCRATCH=1
+                    print_error "Invidious recovery incomplete; backups retained in $RUNTIME_BACKUP"
+                else
+                    for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
+                        systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                    done
+                fi
+            fi
+        else
+            for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
+                systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+            done
         fi
-        for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-            systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
-        done
-    elif [[ "$status" -ne 0 ]]; then
-        for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-            systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
-        done
     fi
     [[ -z "$TMP_DIR" ]] || rm -rf -- "$TMP_DIR"
-    if [[ "$restore_failed" == true ]]; then
-        status=1
-        print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+    if [[ "${INVIDIOUS_INSTALL_COMPLETED:-0}" -ne 1 ]]; then
+        if [[ "$restore_failed" == true ]]; then
+            rc=1
+            export AF_PRESERVE_SCRATCH=1
+            print_warn "Rollback incomplete; recovery backup preserved at $RUNTIME_BACKUP"
+        else
+            rm -rf -- "$RUNTIME_BACKUP" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+        fi
     else
-        rm -rf -- "$RUNTIME_BACKUP" || restore_failed=true
+        rm -rf -- "$RUNTIME_BACKUP" 2>/dev/null || true
     fi
-    exit "$status"
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
+    fi
+    return "$rc"
 }
-trap cleanup EXIT
+cleanup() {
+    cleanup_invidious_install "$@"
+}
+trap cleanup_invidious_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+af_set_stage "backup" 15
 for runtime_unit in "${RUNTIME_UNITS[@]}"; do
     if [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl is-active --quiet "$runtime_unit" 2>/dev/null; then
         PREVIOUS_UNITS+=("$runtime_unit")
@@ -72,6 +122,7 @@ if [[ ! "$COMPANION_KEY" =~ ^[a-zA-Z0-9]{16}$ ]]; then
     print_error "Invidious companion key must contain exactly 16 alphanumeric characters. Back up and remove ${CONFIG_DIR}/companion-key before reinstalling to generate a compatible key."
     exit 1
 fi
+af_set_stage "dependencies" 20
 report_progress 10 "Preparing experimental native Invidious and companion..."
 apt-get install --no-remove -y -qq build-essential libssl-dev libxml2-dev libyaml-dev libgmp-dev libreadline-dev librsvg2-bin libsqlite3-dev zlib1g-dev libpcre3-dev libevent-dev fonts-open-sans python3-yaml >> "$LOGFILE" 2>&1
 case "$(uname -m)" in
@@ -79,7 +130,7 @@ case "$(uname -m)" in
     aarch64) ARCH=aarch64 ;;
     *) print_error "Invidious requires Linux x86_64 or aarch64."; exit 1 ;;
 esac
-TMP_DIR="$(mktemp -d /tmp/af-invidious-XXXXXX)"
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/af-invidious-build.XXXXXX")"
 CRYSTAL_VERSION=1.22.2
 youtube_asset crystal-lang/crystal "$CRYSTAL_VERSION" "crystal-${CRYSTAL_VERSION}-1-linux-${ARCH}-bundled.tar.gz" "${TMP_DIR}/crystal.tar.gz"
 install -d "${INSTALL_DIR}/crystal"
@@ -92,9 +143,14 @@ youtube_asset iv-org/invidious-companion release-master "invidious_companion-${A
 tar -xzf "${TMP_DIR}/companion.tar.gz" -C "$TMP_DIR"
 install -m 755 "${TMP_DIR}/invidious_companion" "${INSTALL_DIR}/invidious_companion"
 
-report_progress 35 "Building Invidious as the service user..."
+af_set_stage "fetch_source" 30
 youtube_source iv-org/invidious "${INSTALL_DIR}/source"
+
+af_set_stage "build" 40
+report_progress 35 "Building Invidious as the service user..."
 runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${CRYSTAL_PATH}:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+
+af_set_stage "configure" 70
 youtube_database
 backup_postgresql_database "$RUNTIME_BACKUP" invidious
 HMAC_KEY="$(youtube_secret hmac-key)"
@@ -138,14 +194,19 @@ youtube_unit af-invidious-companion "${INSTALL_DIR}/invidious_companion"
 sed -i 's|/runtime.env|/companion.env|' /etc/systemd/system/af-invidious-companion.service
 youtube_unit af-invidious "${INSTALL_DIR}/source/invidious" af-invidious-companion.service
 sed -i "s|WorkingDirectory=${DATA_DIR}|WorkingDirectory=${INSTALL_DIR}/source|" /etc/systemd/system/af-invidious.service
+
+af_set_stage "activate" 85
 systemctl daemon-reload
 systemctl enable af-invidious.service >> "$LOGFILE" 2>&1
 systemctl restart af-invidious.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
 systemctl is-active --quiet af-invidious.service
 systemctl is-active --quiet af-invidious-companion.service
+
+af_set_stage "record_version" 95
 queue_app_version "${INSTALL_DIR}/.af-version" "$(runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/source" rev-parse HEAD)"
 commit_app_versions
 write_lock invidious
 RUNTIME_CHANGED=false
+INVIDIOUS_INSTALL_COMPLETED=1
 report_progress 100 "Experimental Invidious installed. YouTube playback depends on upstream anti-bot compatibility."

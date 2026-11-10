@@ -1267,6 +1267,7 @@ async fn f01_reinstall_action_preserves_existing_secrets_in_legacy_and_declarati
         lifecycle_job_id: "job-reinstall-f01".to_string(),
         app_port: 8989,
         delete_data: false,
+        ..Default::default()
     };
     assert_eq!(PackageAction::parse("reinstall"), Some(PackageAction::Reinstall));
     assert_eq!(PackageOperation::parse("reinstall"), Some(PackageOperation::Reinstall));

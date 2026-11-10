@@ -124,14 +124,44 @@ fi
 mkdir -p /var/lib/calibre-web /var/lib/calibre-library /opt /var/backups
 
 report_progress 35 "Cloning Calibre-Web repository into staging directory..."
+REPO_URL="https://github.com/janeczku/calibre-web.git"
+FALLBACK_TAG="0.6.27"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    TARGET_TAG="$AF_TARGET_VERSION"
+else
+    TARGET_TAG="$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+    if [[ -z "$TARGET_TAG" ]]; then
+        TARGET_TAG="$FALLBACK_TAG"
+    fi
+fi
+if ! git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TARGET_TAG}" >/dev/null 2>&1; then
+    if [[ "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TARGET_TAG#v}" >/dev/null 2>&1; then
+        TARGET_TAG="${TARGET_TAG#v}"
+    elif [[ ! "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/v${TARGET_TAG}" >/dev/null 2>&1; then
+        TARGET_TAG="v${TARGET_TAG}"
+    else
+        af_write_failure_receipt 1 "download" "invalid_target_tag" "Upstream tag refs/tags/${TARGET_TAG} not found in ${REPO_URL}"
+        exit 1
+    fi
+fi
 BUILD_DIR="$(mktemp -d /opt/.calibre-web-build.XXXXXX)"
 chmod 755 "$BUILD_DIR"
-git clone --depth 1 https://github.com/janeczku/calibre-web.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+if ! git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1; then
+    if [[ "$TARGET_TAG" =~ ^v ]]; then
+        ALT_TAG="${TARGET_TAG#v}"
+    else
+        ALT_TAG="v${TARGET_TAG}"
+    fi
+    git clone --branch "$ALT_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1 || {
+        log_error "Failed to clone Calibre-Web repository at tag $TARGET_TAG"
+        exit 1
+    }
+    TARGET_TAG="$ALT_TAG"
+fi
 test -s "$BUILD_DIR/cps.py" || { log_error "Failed to clone Calibre-Web repository"; exit 1; }
 
-CW_TAG="$(git_checkout_version "$BUILD_DIR" "/opt/calibre-web/.af-version")"
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-calibreweb.XXXXXX)"
-queue_app_version "/opt/calibre-web/.af-version" "${CW_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"
+queue_app_version "/opt/calibre-web/.af-version" "${TARGET_TAG#v}" "$BUILD_DIR" "$BACKUP_DIR"
 
 report_progress 60 "Setting up Python virtual environment and dependencies..."
 chmod 700 "$BACKUP_DIR"

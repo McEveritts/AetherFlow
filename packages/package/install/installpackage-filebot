@@ -109,15 +109,15 @@ test -s "${FB_BUILD}/filebot.sh"
 chmod +x "${FB_BUILD}/filebot.sh"
 
 report_progress 70 "Downloading FileBot Node Web UI..."
-RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/filebot/filebot-node/releases/latest 2>/dev/null || true)"
-NODE_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
-if [[ -z "${NODE_TAG}" || "${NODE_TAG}" == "null" ]]; then
-    if [[ "${AF_ALLOW_RELEASE_FALLBACK:-0}" == "1" ]]; then
-        NODE_TAG="0.4.8.1"
-    else
-        print_error "Failed to discover latest GitHub release for filebot/filebot-node"
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    if [[ ! "${AF_TARGET_VERSION}" =~ ^[vV]?[0-9][0-9A-Za-z._+-]*$ ]]; then
+        print_error "Invalid AF_TARGET_VERSION for filebot: ${AF_TARGET_VERSION}"
         exit 1
     fi
+    NODE_TAG="${AF_TARGET_VERSION#[vV]}"
+else
+    NODE_TAG=$(github_latest_tag "filebot/filebot-node" "v0.4.8.1")
+    NODE_TAG="${NODE_TAG#[vV]}"
 fi
 NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/filebot-node_${NODE_TAG}.tar.xz"
 
@@ -125,6 +125,18 @@ TMP_NODE="$(mktemp --suffix=.tar.xz)"
 download_file "${NODE_URL}" "${TMP_NODE}" >> "$LOGFILE" 2>&1
 tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}" >> "$LOGFILE" 2>&1
 rm -f "${TMP_NODE}"
+
+if [[ ! -f "${NODE_BUILD}/package.json" ]]; then
+    server_has_version=false
+    if [[ -f "${NODE_BUILD}/server/package.json" ]]; then
+        if grep -Eq '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${NODE_BUILD}/server/package.json" 2>/dev/null; then
+            server_has_version=true
+        fi
+    fi
+    if [[ "$server_has_version" != "true" ]]; then
+        printf '{"name":"filebot-node","version":"%s"}\n' "${NODE_TAG#v}" > "${NODE_BUILD}/package.json"
+    fi
+fi
 
 if [[ -f "${NODE_BUILD}/server/package.json" ]]; then
     pushd "${NODE_BUILD}/server" >/dev/null

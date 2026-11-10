@@ -14,11 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HOSTS_BLOCK_START: &str = "# --- AETHERFLOW INTERNAL DNS ---";
-const HOSTS_BLOCK_END: &str = "# --- END AETHERFLOW INTERNAL DNS ---";
-const PIHOLE_BLOCK_START: &str = "# --- AETHERFLOW MANAGED DNS ---";
-const PIHOLE_BLOCK_END: &str = "# --- END AETHERFLOW MANAGED DNS ---";
-
 static SAFE_SQL_IDENT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$").unwrap());
 static SAFE_XML_TAG: Lazy<Regex> =
@@ -1037,101 +1032,35 @@ fn validate_dns_domain(domain: &str) -> Result<String, String> {
     Ok(clean)
 }
 
+pub fn detect_lan_ip_strict() -> Result<String, String> {
+    if let Ok(raw_val) = env::var("AETHERFLOW_LAN_IP") {
+        af_runner::validate_hosts_ip(&raw_val)
+            .map_err(|e| format!("Invalid AETHERFLOW_LAN_IP: {e}"))?;
+        return Ok(raw_val);
+    }
+    Ok("127.0.0.1".to_string())
+}
+
 fn detect_primary_lan_ip() -> String {
-    if let Ok(ip) = env::var("AETHERFLOW_LAN_IP") {
-        let trimmed = ip.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    "127.0.0.1".to_string()
+    detect_lan_ip()
 }
 
-fn update_hosts_atomic_fallback(domains: &[String], remove: bool) -> Result<(), String> {
-    let hosts_path_str =
-        env::var("AETHERFLOW_HOSTS_FILE").unwrap_or_else(|_| "/etc/hosts".to_string());
-    let hosts_path = Path::new(&hosts_path_str);
-
-    let existing = match fs::read_to_string(hosts_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(format!(
-                "failed to read hosts file {}: {}",
-                hosts_path.display(),
-                e
-            ))
-        }
-    };
-
-    let mut outside_lines: Vec<String> = Vec::new();
-    let mut managed_domains: BTreeSet<String> = BTreeSet::new();
-    let mut in_block = false;
-
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed == HOSTS_BLOCK_START {
-            in_block = true;
-            continue;
-        }
-        if trimmed == HOSTS_BLOCK_END {
-            in_block = false;
-            continue;
-        }
-        if in_block {
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 2 && parts[0] == "127.0.0.1" {
-                for dom in &parts[1..] {
-                    managed_domains.insert((*dom).to_string());
-                }
-            }
-        } else {
-            outside_lines.push(line.to_string());
-        }
-    }
-
-    if remove {
-        for d in domains {
-            managed_domains.remove(d.trim());
-        }
-    } else {
-        for d in domains {
-            managed_domains.insert(d.trim().to_lowercase());
-        }
-    }
-
-    while outside_lines
-        .last()
-        .map(|l| l.trim().is_empty())
-        .unwrap_or(false)
-    {
-        outside_lines.pop();
-    }
-
-    let mut final_lines = outside_lines;
-    if !managed_domains.is_empty() {
-        if !final_lines.is_empty() {
-            final_lines.push(String::new());
-        }
-        final_lines.push(HOSTS_BLOCK_START.to_string());
-        for dom in &managed_domains {
-            final_lines.push(format!("127.0.0.1\t{}", dom));
-        }
-        final_lines.push(HOSTS_BLOCK_END.to_string());
-    }
-
-    let final_content = format!("{}\n", final_lines.join("\n"));
-    if final_content == existing && hosts_path.exists() {
-        return Ok(());
-    }
-    write_file_atomic(hosts_path, final_content.as_bytes())
+pub fn detect_lan_ip() -> String {
+    detect_lan_ip_strict().unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
-fn update_pihole_custom_list(
+pub fn remove_dns_provider_domain(domain: &str) -> Result<(), String> {
+    af_runner::remove_dns_provider_domain(domain).map_err(|e| e.to_string())
+}
+
+pub fn update_pihole_custom_list(
     custom_list_path: &Path,
     lan_ip: &str,
     domains: &[String],
 ) -> Result<(), String> {
+    af_runner::validate_hosts_ip(lan_ip)
+        .map_err(|e| format!("Invalid LAN IP for Pi-hole custom list: {e}"))?;
+
     let existing = match fs::read_to_string(custom_list_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1144,53 +1073,32 @@ fn update_pihole_custom_list(
         }
     };
 
-    let mut preserved: Vec<String> = Vec::new();
-    let mut managed: BTreeSet<String> = BTreeSet::new();
-    let mut in_block = false;
-
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed == PIHOLE_BLOCK_START {
-            in_block = true;
-            continue;
-        }
-        if trimmed == PIHOLE_BLOCK_END {
-            in_block = false;
-            continue;
-        }
-        if in_block {
-            if let Some(dom) = trimmed.split_whitespace().nth(1) {
-                managed.insert(dom.to_lowercase());
-            }
-        } else {
-            preserved.push(line.to_string());
-        }
-    }
-
-    for d in domains {
-        managed.insert(d.to_lowercase());
-    }
-
-    let mut final_lines = preserved;
-    final_lines.push(PIHOLE_BLOCK_START.to_string());
-    for dom in &managed {
-        final_lines.push(format!("{} {}", lan_ip, dom));
-    }
-    final_lines.push(PIHOLE_BLOCK_END.to_string());
-
-    let content = format!("{}\n", final_lines.join("\n"));
+    let content = af_runner::reconcile_pihole_custom_list_content(&existing, lan_ip, domains, false);
     if content == existing && custom_list_path.exists() {
         return Ok(());
     }
     write_file_atomic(custom_list_path, content.as_bytes())
 }
 
-fn update_dnsmasq_conf(
+pub fn update_dnsmasq_conf(
     dnsmasq_conf_path: &Path,
     lan_ip: &str,
     domains: &[String],
 ) -> Result<(), String> {
-    let existing = fs::read_to_string(dnsmasq_conf_path).unwrap_or_default();
+    af_runner::validate_hosts_ip(lan_ip)
+        .map_err(|e| format!("Invalid LAN IP for dnsmasq config: {e}"))?;
+
+    let existing = match fs::read_to_string(dnsmasq_conf_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(format!(
+                "failed to read dnsmasq config {}: {}",
+                dnsmasq_conf_path.display(),
+                e
+            ))
+        }
+    };
     let mut managed: BTreeSet<String> = BTreeSet::new();
 
     for line in existing.lines() {
@@ -1219,6 +1127,14 @@ fn update_dnsmasq_conf(
     write_file_atomic(dnsmasq_conf_path, content.as_bytes())
 }
 
+pub fn update_dnsmasq_config(
+    dnsmasq_conf_path: &Path,
+    lan_ip: &str,
+    domains: &[String],
+) -> Result<(), String> {
+    update_dnsmasq_conf(dnsmasq_conf_path, lan_ip, domains)
+}
+
 /// Synchronizes internal `.aether.local` (and configured public) domains into:
 /// 1. `/etc/hosts` (via `af_runner::update_hosts_file_local` or atomic local fallback),
 /// 2. `/etc/dnsmasq.d/aetherflow-local.conf` (and `05-aetherflow-dns.conf`) if `/etc/dnsmasq.d` exists,
@@ -1227,6 +1143,10 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
     if domains.is_empty() {
         return Ok(());
     }
+
+    let lan_ip = detect_lan_ip_strict()?;
+    af_runner::validate_hosts_ip(&lan_ip)
+        .map_err(|e| format!("Invalid LAN IP: {e}"))?;
 
     let mut validated: Vec<String> = Vec::with_capacity(domains.len());
     let mut aether_local_domains: Vec<String> = Vec::new();
@@ -1238,46 +1158,163 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
         validated.push(clean);
     }
 
-    // 1. Update /etc/hosts for .aether.local domains
-    if !aether_local_domains.is_empty() {
-        if let Err(fallback_err) = update_hosts_atomic_fallback(&aether_local_domains, false) {
-            if let Err(runner_err) = af_runner::update_hosts_file_local(&aether_local_domains, false) {
-                return Err(format!(
-                    "Local DNS synchronization failed: {runner_err}; {fallback_err}"
-                ));
-            }
+    #[cfg(unix)]
+    let is_root = {
+        extern "C" {
+            fn geteuid() -> u32;
         }
-    }
+        unsafe { geteuid() == 0 }
+    };
+    #[cfg(not(unix))]
+    let is_root = false;
 
-    let lan_ip = detect_primary_lan_ip();
+    let test_override = env::var("AF_HOSTS_FILE").is_ok()
+        || env::var("AETHERFLOW_HOSTS_FILE").is_ok()
+        || env::var("AETHERFLOW_DNSMASQ_DIR").is_ok()
+        || env::var("AETHERFLOW_PIHOLE_DIR").is_ok()
+        || env::var("AETHERFLOW_FS_ROOT").is_ok()
+        || env::var("AETHERFLOW_CONFIG_ROOT").is_ok();
 
-    // 2. Write /etc/dnsmasq.d/aetherflow-local.conf if directory exists
-    let dnsmasq_dir = env::var("AETHERFLOW_DNSMASQ_DIR")
-        .ok()
-        .map(|s| PathBuf::from(s.trim()))
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| resolve_config_path("/etc/dnsmasq.d"));
+    if is_root || test_override {
+        // 1. Update /etc/hosts for .aether.local domains locally
+        if !aether_local_domains.is_empty() {
+            af_runner::update_hosts_file(&aether_local_domains, "127.0.0.1")
+                .map_err(|e| format!("Local DNS synchronization failed: {e}"))?;
+        }
 
-    if dnsmasq_dir.is_dir() {
-        let conf_path = dnsmasq_dir.join("aetherflow-local.conf");
-        update_dnsmasq_conf(&conf_path, &lan_ip, &validated)?;
-        let custom_dns_path = dnsmasq_dir.join("05-aetherflow-dns.conf");
-        update_dnsmasq_conf(&custom_dns_path, &lan_ip, &validated)?;
-    }
+        // 2. Write /etc/dnsmasq.d/aetherflow-local.conf if directory exists
+        let dnsmasq_dir = env::var("AETHERFLOW_DNSMASQ_DIR")
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| resolve_config_path("/etc/dnsmasq.d"));
 
-    // 3. Write Pi-hole custom.list if /etc/pihole exists
-    let pihole_dir = env::var("AETHERFLOW_PIHOLE_DIR")
-        .ok()
-        .map(|s| PathBuf::from(s.trim()))
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| resolve_config_path("/etc/pihole"));
+        if dnsmasq_dir.is_dir() {
+            let conf_path = dnsmasq_dir.join("aetherflow-local.conf");
+            update_dnsmasq_conf(&conf_path, &lan_ip, &validated)?;
+            let local_dns_path = dnsmasq_dir.join("aetherflow-local-dns.conf");
+            update_dnsmasq_conf(&local_dns_path, &lan_ip, &validated)?;
+            let custom_dns_path = dnsmasq_dir.join("05-aetherflow-dns.conf");
+            update_dnsmasq_conf(&custom_dns_path, &lan_ip, &validated)?;
+        }
 
-    if pihole_dir.is_dir() {
-        let custom_list = pihole_dir.join("custom.list");
-        update_pihole_custom_list(&custom_list, &lan_ip, &validated)?;
+        // 3. Write Pi-hole custom.list if /etc/pihole exists
+        let pihole_dir = env::var("AETHERFLOW_PIHOLE_DIR")
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| resolve_config_path("/etc/pihole"));
+
+        if pihole_dir.is_dir() {
+            let custom_list = pihole_dir.join("custom.list");
+            update_pihole_custom_list(&custom_list, &lan_ip, &validated)?;
+        }
+    } else {
+        run_privileged_hosts_command_with_provider(
+            "update",
+            "127.0.0.1",
+            &aether_local_domains,
+            Some(&lan_ip),
+            Some(&validated),
+        )
+        .await?;
     }
 
     Ok(())
+}
+
+/// Fully reconciles internal `.aether.local` domains in `/etc/hosts` against the authoritative complete list of active domains.
+pub async fn reconcile_local_dns_domains(authoritative_domains: &[String]) -> Result<(), String> {
+    if authoritative_domains.is_empty() {
+        return Ok(());
+    }
+
+    let lan_ip = detect_lan_ip_strict()?;
+    af_runner::validate_hosts_ip(&lan_ip)
+        .map_err(|e| format!("Invalid LAN IP: {e}"))?;
+
+    let mut aether_local_domains: Vec<String> = Vec::new();
+    let mut validated_authoritative: Vec<String> = Vec::with_capacity(authoritative_domains.len());
+    for d in authoritative_domains {
+        let clean = validate_dns_domain(d)?;
+        if clean.ends_with(".aether.local") {
+            aether_local_domains.push(clean.clone());
+        }
+        validated_authoritative.push(clean);
+    }
+
+    #[cfg(unix)]
+    let is_root = {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() == 0 }
+    };
+    #[cfg(not(unix))]
+    let is_root = false;
+
+    let test_override = env::var("AF_HOSTS_FILE").is_ok()
+        || env::var("AETHERFLOW_HOSTS_FILE").is_ok()
+        || env::var("AETHERFLOW_DNSMASQ_DIR").is_ok()
+        || env::var("AETHERFLOW_PIHOLE_DIR").is_ok()
+        || env::var("AETHERFLOW_FS_ROOT").is_ok()
+        || env::var("AETHERFLOW_CONFIG_ROOT").is_ok();
+
+    if is_root || test_override {
+        af_runner::reconcile_hosts_file(&aether_local_domains, "127.0.0.1")
+            .map_err(|e| format!("Local DNS reconciliation failed: {e}"))?;
+        af_runner::sync_dns_provider_files(&lan_ip, &validated_authoritative)
+            .map_err(|e| format!("Local DNS provider synchronization failed: {e}"))?;
+    } else {
+        run_privileged_hosts_command_with_provider(
+            "reconcile",
+            "127.0.0.1",
+            &aether_local_domains,
+            Some(&lan_ip),
+            Some(&validated_authoritative),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Executes privileged hosts manipulation via the privileged runner socket daemon.
+pub async fn run_privileged_hosts_command(
+    action: &str,
+    ip: &str,
+    domains: &[String],
+) -> Result<(), String> {
+    run_privileged_hosts_command_with_provider(action, ip, domains, None, None).await
+}
+
+pub async fn run_privileged_hosts_command_with_provider(
+    action: &str,
+    ip: &str,
+    domains: &[String],
+    provider_ip: Option<&str>,
+    provider_domains: Option<&[String]>,
+) -> Result<(), String> {
+    match action {
+        "reconcile" => af_runner::dispatch_hosts_reconcile_with_provider(
+            domains,
+            ip,
+            provider_ip,
+            provider_domains,
+        )
+        .await
+        .map_err(|e| format!("privileged runner hosts reconcile failed: {e}")),
+        "remove" => af_runner::dispatch_hosts_remove(domains)
+            .await
+            .map_err(|e| format!("privileged runner hosts remove failed: {e}")),
+        _ => af_runner::dispatch_hosts_update_with_provider(
+            domains,
+            provider_ip,
+            provider_domains,
+        )
+        .await
+        .map_err(|e| format!("privileged runner hosts update failed: {e}")),
+    }
 }
 
 /// Collects all active internal (`.aether.local`) and external (`public_domain` / `<app>.<baseDomain>`)
@@ -1330,6 +1367,7 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
     domain_set.insert("aetherflow.aether.local".into());
 
     let domains: Vec<String> = domain_set.into_iter().collect();
+    reconcile_local_dns_domains(&domains).await?;
     sync_local_dns_domains(&domains).await?;
     Ok(true)
 }
@@ -4603,18 +4641,21 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
         external_access_enabled,
     )?;
 
-    if let Err(err) = sync_local_dns_domains(&dns_domains).await {
-        if is_unprivileged_host_write_error(&err) {
-            tracing::info!(
-                app = %canonical,
-                "skipping local DNS hosts sync in unprivileged API process (handled by privileged runner): {}",
-                err
-            );
-        } else {
-            return Err(err);
+    let dns_synced = match sync_local_dns_domains(&dns_domains).await {
+        Ok(()) => true,
+        Err(err) => {
+            if is_unprivileged_host_write_error(&err) {
+                tracing::info!(
+                    app = %canonical,
+                    "skipping local DNS hosts sync in unprivileged API process (handled by privileged runner): {}",
+                    err
+                );
+                false
+            } else {
+                return Err(err);
+            }
         }
-    }
-    let dns_synced = true;
+    };
     clear_app_runtime_meta_cache();
 
     let mut summary = BTreeMap::new();
@@ -4857,9 +4898,12 @@ mod tests {
         assert_eq!(dk.len(), 64);
     }
 
+    static TEST_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
     #[tokio::test]
     async fn test_afmp004_service_jellyfin_blueprint_preserves_operator_remote_access_and_known_proxies(
     ) {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
         let dir = temp_test_dir("afmp004-jellyfin-service");
         for subdir in ["etc/jellyfin", "etc/apache2/sites-available", "var/lib/aetherflow"] {
             fs::create_dir_all(dir.join(subdir)).unwrap();
@@ -4930,6 +4974,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_afmp_sol_001_service_vhost_sync_preserves_apache_access_policy() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
         let dir = temp_test_dir("afmp-sol-001-service-apache");
         let sites_avail = dir.join("etc/apache2/sites-available");
         let sites_en = dir.join("etc/apache2/sites-enabled");
@@ -5038,5 +5083,175 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_sync_local_dns_domains_preserves_multiple_apps() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-dns-sync-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+
+        // Install App A -> syncs appa.aether.local
+        sync_local_dns_domains(&["appa.aether.local".to_string()]).await.unwrap();
+        let content_after_a = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_a.contains("appa.aether.local"));
+
+        // Install App B -> syncs appb.aether.local without wiping appa
+        sync_local_dns_domains(&["appb.aether.local".to_string()]).await.unwrap();
+        let content_after_b = fs::read_to_string(&hosts_file).unwrap();
+        assert!(content_after_b.contains("appa.aether.local"), "App A must be preserved when installing App B: {content_after_b}");
+        assert!(content_after_b.contains("appb.aether.local"), "App B must be present: {content_after_b}");
+
+        env::remove_var("AF_HOSTS_FILE");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_local_dns_domains_non_root_invokes_runner_and_propagates_error() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_HOSTS_FILE");
+
+        let dummy_sock = env::temp_dir().join(format!("nonexistent-runner-{}.sock", uuid::Uuid::new_v4()));
+        env::set_var("AETHERFLOW_RUNNER_SOCK", dummy_sock.to_string_lossy().as_ref());
+
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            if unsafe { geteuid() != 0 } {
+                let err = reconcile_local_dns_domains(&["testapp.aether.local".to_string()])
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.contains("runner hosts reconcile error") || err.contains("privileged runner hosts reconcile failed"),
+                    "Expected runner error, got: {err}"
+                );
+            }
+        }
+
+        env::remove_var("AETHERFLOW_RUNNER_SOCK");
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_and_sync_dns_separates_hosts_loopback_and_provider_lan_ip() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-mutators-dns-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+
+        let hosts_file = scratch_dir.join("hosts");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        let dnsmasq_dir = scratch_dir.join("dnsmasq.d");
+        fs::create_dir_all(&dnsmasq_dir).unwrap();
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&pihole_dir).unwrap();
+
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_LAN_IP", "192.168.1.150");
+
+        let domains = vec![
+            "sonarr.aether.local".to_string(),
+            "media.example.com".to_string(),
+        ];
+
+        // Run reconcile
+        reconcile_local_dns_domains(&domains).await.unwrap();
+
+        // 1. /etc/hosts must contain 127.0.0.1 and sonarr.aether.local, but NOT media.example.com or 192.168.1.150
+        let hosts_content = fs::read_to_string(&hosts_file).unwrap();
+        assert!(hosts_content.contains("127.0.0.1\tsonarr.aether.local"));
+        assert!(!hosts_content.contains("media.example.com"));
+        assert!(!hosts_content.contains("192.168.1.150"));
+
+        // 2. dnsmasq must contain LAN IP 192.168.1.150 and both domains, but not 127.0.0.1
+        let dnsmasq_conf = fs::read_to_string(dnsmasq_dir.join("aetherflow.conf")).unwrap();
+        assert!(dnsmasq_conf.contains("address=/sonarr.aether.local/192.168.1.150"));
+        assert!(dnsmasq_conf.contains("address=/media.example.com/192.168.1.150"));
+        assert!(!dnsmasq_conf.contains("127.0.0.1"));
+
+        // 3. Pi-hole custom.list must contain LAN IP 192.168.1.150 and both domains
+        let pihole_list = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(pihole_list.contains("192.168.1.150 sonarr.aether.local # aetherflow-managed"));
+        assert!(pihole_list.contains("192.168.1.150 media.example.com # aetherflow-managed"));
+        assert!(!pihole_list.contains("127.0.0.1"));
+
+        // Test remove_dns_provider_domain
+        remove_dns_provider_domain("sonarr.aether.local").unwrap();
+        let pihole_after_rm = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(!pihole_after_rm.contains("sonarr.aether.local"));
+        assert!(pihole_after_rm.contains("media.example.com"));
+
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_DNSMASQ_DIR");
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        env::remove_var("AETHERFLOW_LAN_IP");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_untrimmed_or_invalid_lan_ip_fails_closed_without_modifications() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        let scratch_dir = env::temp_dir().join(format!("af-mutators-invalid-lan-ip-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+
+        let hosts_file = scratch_dir.join("hosts");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        let dnsmasq_dir = scratch_dir.join("dnsmasq.d");
+        fs::create_dir_all(&dnsmasq_dir).unwrap();
+        let pihole_dir = scratch_dir.join("pihole");
+        fs::create_dir_all(&pihole_dir).unwrap();
+        let initial_custom_list = "192.168.1.10 existing.local # aetherflow-managed\n";
+        fs::write(pihole_dir.join("custom.list"), initial_custom_list).unwrap();
+
+        env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
+        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+
+        let invalid_ips = [
+            " 192.168.1.50 ",
+            "192.168.1.50\nmalicious",
+            "192.168.1.50\r\nmalicious",
+            "192.168.1.50 ",
+            " 192.168.1.50",
+            "invalid-ip",
+            "",
+        ];
+
+        let test_domains = vec!["app.aether.local".to_string()];
+
+        for bad_ip in invalid_ips {
+            env::set_var("AETHERFLOW_LAN_IP", bad_ip);
+
+            assert!(detect_lan_ip_strict().is_err(), "detect_lan_ip_strict must fail for {bad_ip:?}");
+
+            let sync_res = sync_local_dns_domains(&test_domains).await;
+            assert!(sync_res.is_err(), "sync_local_dns_domains must fail closed for {bad_ip:?}");
+
+            let rec_res = reconcile_local_dns_domains(&test_domains).await;
+            assert!(rec_res.is_err(), "reconcile_local_dns_domains must fail closed for {bad_ip:?}");
+
+            // Verify files were not modified
+            let hosts_cur = fs::read_to_string(&hosts_file).unwrap();
+            assert_eq!(hosts_cur, "127.0.0.1 localhost\n", "hosts file must remain untouched for {bad_ip:?}");
+
+            assert!(!dnsmasq_dir.join("aetherflow.conf").exists(), "dnsmasq must not be created");
+            assert!(!dnsmasq_dir.join("aetherflow-local.conf").exists(), "dnsmasq must not be created");
+
+            let pihole_cur = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+            assert_eq!(pihole_cur, initial_custom_list, "custom.list must remain untouched for {bad_ip:?}");
+        }
+
+        env::remove_var("AF_HOSTS_FILE");
+        env::remove_var("AETHERFLOW_DNSMASQ_DIR");
+        env::remove_var("AETHERFLOW_PIHOLE_DIR");
+        env::remove_var("AETHERFLOW_LAN_IP");
+        let _ = fs::remove_dir_all(&scratch_dir);
     }
 }

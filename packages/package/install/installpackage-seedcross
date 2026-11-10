@@ -56,7 +56,13 @@ trap 'exit 143' TERM
 chmod 755 "$BUILD_DIR"
 
 report_progress 45 "Cloning ${APP_NAME} repository..."
-git clone --depth 1 https://github.com/ccf-2012/seedcross.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+git clone https://github.com/ccf-2012/seedcross.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+    git -C "$BUILD_DIR" checkout "$AF_TARGET_VERSION" >> "$LOGFILE" 2>&1 || {
+        log_error "Failed to checkout commit ${AF_TARGET_VERSION} for ${APP_NAME}"
+        exit 1
+    }
+fi
 [[ -s "$BUILD_DIR/manage.py" && -s "$BUILD_DIR/csui/settings.py" ]]
 if [[ -f "$INSTALL_DIR/csui/settings.py" ]]; then
     cp -a "$INSTALL_DIR/csui/settings.py" "$BUILD_DIR/csui/settings.py"
@@ -64,8 +70,8 @@ elif [[ -f "$DATA_DIR/legacy-settings.py" ]]; then
     cp -a "$DATA_DIR/legacy-settings.py" "$BUILD_DIR/csui/settings.py"
 fi
 
-COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse --short HEAD)"
-queue_app_version "/opt/seedcross/.af-version" "0.1.0-${COMMIT_VER}"
+COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse HEAD)"
+queue_app_version "/opt/seedcross/.af-version" "${COMMIT_VER}"
 
 report_progress 65 "Creating Python virtualenv and installing dependencies..."
 python3 -m venv "$BUILD_DIR/.venv" >> "$LOGFILE" 2>&1

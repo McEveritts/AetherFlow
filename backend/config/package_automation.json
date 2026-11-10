@@ -64,7 +64,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/emby-server/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' emby-server 2>/dev/null"
+      "dpkg-query -W -f='${Version}' emby-server 2>/dev/null"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -97,7 +97,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Sonarr/.af-version 2>/dev/null || strings /opt/Sonarr/Sonarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Sonarr/Sonarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -131,7 +131,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Radarr/.af-version 2>/dev/null || strings /opt/Radarr/Radarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Radarr/Radarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -165,7 +165,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Lidarr/.af-version 2>/dev/null || strings /opt/Lidarr/Lidarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Lidarr/Lidarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -193,13 +193,14 @@
     ]
   },
   "readarr": {
-    "update_source": "github",
+    "update_source": "retired",
+    "update_package": "0.4.18.2805",
     "require_download_sha256": true,
     "update_repo": "Readarr/Readarr",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Readarr/.af-version 2>/dev/null || strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -233,7 +234,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Prowlarr/.af-version 2>/dev/null || strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -263,7 +264,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/bazarr/.af-version 2>/dev/null || cat /opt/bazarr/VERSION 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/bazarr/bazarr/app/get_args.py 2>/dev/null | head -n1"
+      "cat /opt/bazarr/VERSION 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/bazarr/bazarr/app/get_args.py 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -298,7 +299,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/overseerr/.af-version 2>/dev/null || node -p \"require('/opt/overseerr/package.json').version\" 2>/dev/null"
+      "node -p \"require('/opt/overseerr/package.json').version\" 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -328,7 +329,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Ombi/.af-version 2>/dev/null || strings /opt/Ombi/Ombi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Ombi/Ombi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -378,7 +379,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Tautulli/.af-version 2>/dev/null || git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
+      "git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -408,7 +409,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /opt/Jackett/.af-version ]; then cat /opt/Jackett/.af-version; else /opt/Jackett/jackett --version; fi"
+      "/opt/Jackett/jackett --version"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -438,7 +439,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/flaresolverr/.af-version 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/flaresolverr/package.json 2>/dev/null | head -n1"
+      "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/flaresolverr/package.json 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -468,7 +469,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /opt/navidrome/.af-version ]; then cat /opt/navidrome/.af-version; else /opt/navidrome/navidrome --version; fi"
+      "/opt/navidrome/navidrome --version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -502,7 +503,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/threadfin/.af-version 2>/dev/null || /usr/local/bin/threadfin -info 2>/dev/null | grep -oP 'Version:\\s*\\K\\S+'"
+      "/usr/local/bin/threadfin -info 2>/dev/null | grep -oP 'Version:\\s*\\K\\S+'"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -622,7 +623,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/SABnzbd/.af-version 2>/dev/null || /opt/SABnzbd/.venv/bin/python /opt/SABnzbd/SABnzbd.py --version 2>/dev/null || python3 /opt/SABnzbd/SABnzbd.py --version 2>/dev/null"
+      "/opt/SABnzbd/.venv/bin/python /opt/SABnzbd/SABnzbd.py --version 2>/dev/null || python3 /opt/SABnzbd/SABnzbd.py --version 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -656,7 +657,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /opt/nzbget/.af-version ]; then cat /opt/nzbget/.af-version; else /opt/nzbget/nzbget -v; fi"
+      "/opt/nzbget/nzbget -v"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -690,7 +691,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/flood/.af-version 2>/dev/null || flood --version 2>/dev/null"
+      "flood --version 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -723,7 +724,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/autobrr/.af-version ]; then cat /var/lib/autobrr/.af-version; else /usr/local/bin/autobrr version; fi"
+      "/usr/local/bin/autobrr version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -756,7 +757,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/qui/.af-version 2>/dev/null || /usr/local/bin/qui version 2>/dev/null || /usr/local/bin/qui --version 2>/dev/null"
+      "/usr/local/bin/qui version 2>/dev/null || /usr/local/bin/qui --version 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -789,7 +790,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/www/nextcloud/.af-version 2>/dev/null || grep -oE \"OC_VersionString = '[^']+'\" /var/www/nextcloud/version.php 2>/dev/null | cut -d\"'\" -f2"
+      "grep -oE \"OC_VersionString = '[^']+'\" /var/www/nextcloud/version.php 2>/dev/null | cut -d\"'\" -f2"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -850,7 +851,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /opt/filebrowser/.af-version ]; then cat /opt/filebrowser/.af-version; else /usr/local/bin/filebrowser version; fi"
+      "/usr/local/bin/filebrowser version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -925,7 +926,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "pihole -v -p -c 2>/dev/null || cat /etc/pihole/.af-version 2>/dev/null"
+      "pihole -v -p -c 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -977,7 +978,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/vaultwarden/.af-version 2>/dev/null || /opt/vaultwarden/vaultwarden --version 2>/dev/null"
+      "/opt/vaultwarden/vaultwarden --version 2>/dev/null"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1092,7 +1093,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/uptime-kuma/.af-version 2>/dev/null || git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null || git -C /opt/uptime-kuma rev-parse --short HEAD 2>/dev/null"
+      "git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null || git -C /opt/uptime-kuma rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1148,7 +1149,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/jellyseerr/.af-version 2>/dev/null || node -p \"require('/opt/jellyseerr/package.json').version\" 2>/dev/null"
+      "node -p \"require('/opt/jellyseerr/package.json').version\" 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1182,7 +1183,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/AdGuardHome/.af-version 2>/dev/null || /opt/AdGuardHome/AdGuardHome --version 2>/dev/null"
+      "/opt/AdGuardHome/AdGuardHome --version 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1244,7 +1245,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/www/rutorrent/.af-version 2>/dev/null || git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1 || git -C /var/www/rutorrent rev-parse --short HEAD 2>/dev/null"
+      "git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1 || git -C /var/www/rutorrent rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1272,14 +1273,15 @@
     ]
   },
   "rclone": {
-    "update_source": "github",
+    "update_source": "github_release",
     "require_download_sha256": true,
     "update_repo": "rclone/rclone",
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/rclone/.af-version ]; then cat /var/lib/rclone/.af-version; else /usr/bin/rclone version; fi"
+      "/usr/bin/rclone version"
     ],
+    "version_regex": "rclone\\s+v?([0-9]+\\.[0-9]+\\.[0-9]+[^\\s]*)",
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
       "/etc/rclone",
@@ -1312,7 +1314,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/mergerfs/.af-version ]; then cat /var/lib/mergerfs/.af-version; else bash -lc 'mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' mergerfs 2>/dev/null'; fi"
+      "mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' mergerfs 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1342,7 +1344,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/cloudplow/.af-version 2>/dev/null || /opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py --version 2>/dev/null || git -C /opt/cloudplow rev-parse --short HEAD 2>/dev/null"
+      "/opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py --version 2>/dev/null || git -C /opt/cloudplow rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1374,7 +1376,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/unpackerr/.af-version 2>/dev/null || /usr/local/bin/unpackerr -v 2>/dev/null"
+      "/usr/local/bin/unpackerr -v 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1407,7 +1409,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/autoscan/.af-version 2>/dev/null || /usr/local/bin/autoscan --version 2>/dev/null"
+      "/usr/local/bin/autoscan --version 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1440,7 +1442,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/recyclarr/.af-version 2>/dev/null || /usr/local/bin/recyclarr --version 2>/dev/null"
+      "/usr/local/bin/recyclarr --version 2>/dev/null"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1471,7 +1473,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/audiobookshelf/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' audiobookshelf 2>/dev/null || /usr/bin/audiobookshelf --version 2>/dev/null"
+      "dpkg-query -W -f='${Version}' audiobookshelf 2>/dev/null || /usr/bin/audiobookshelf --version 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1506,7 +1508,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Kavita/.af-version 2>/dev/null || strings /opt/Kavita/Kavita.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "strings /opt/Kavita/Kavita.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1541,7 +1543,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/calibre-web/.af-version 2>/dev/null || PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null || git -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
+      "PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null || git -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1576,7 +1578,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/librespeed/.af-version 2>/dev/null || /opt/librespeed/speedtest-go --version 2>/dev/null"
+      "/opt/librespeed/speedtest-go --version 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1604,7 +1606,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/thelounge/.af-version 2>/dev/null || thelounge -v 2>/dev/null"
+      "thelounge -v 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1632,7 +1634,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/znc/.af-version ]; then cat /var/lib/znc/.af-version; else bash -lc 'znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' znc 2>/dev/null'; fi"
+      "znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' znc 2>/dev/null"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1660,7 +1662,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/scrutiny/.af-version 2>/dev/null || /opt/scrutiny/bin/scrutiny-web-linux-amd64 --version 2>/dev/null"
+      "/opt/scrutiny/bin/scrutiny-web-linux-amd64 --version 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1690,7 +1692,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/paperless/.af-version 2>/dev/null || /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py version 2>/dev/null"
+      "/opt/paperless/.venv/bin/python /opt/paperless/src/manage.py version 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1725,7 +1727,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/n8n/.af-version 2>/dev/null || n8n --version 2>/dev/null || /opt/n8n/node_modules/.bin/n8n --version 2>/dev/null"
+      "n8n --version 2>/dev/null || /opt/n8n/node_modules/.bin/n8n --version 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1754,7 +1756,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/gitea/.af-version ]; then cat /var/lib/gitea/.af-version; else /usr/local/bin/gitea --version; fi"
+      "/usr/local/bin/gitea --version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1784,7 +1786,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/www/organizr/.af-version 2>/dev/null || git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || git -C /var/www/organizr rev-parse --short HEAD 2>/dev/null"
+      "git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || git -C /var/www/organizr rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1811,7 +1813,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/dispatcharr/.af-version 2>/dev/null || git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
+      "git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1850,7 +1852,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /var/lib/duplicati/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' duplicati 2>/dev/null || /usr/bin/duplicati-cli --version 2>/dev/null"
+      "dpkg-query -W -f='${Version}' duplicati 2>/dev/null || /usr/bin/duplicati-cli --version 2>/dev/null"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1883,9 +1885,9 @@
     "require_download_sha256": true,
     "update_repo": "filebot/filebot-node",
     "version_command": [
-      "bash",
-      "-lc",
-      "cat /opt/filebot-node/.af-version 2>/dev/null || /usr/local/bin/filebot -version 2>/dev/null"
+      "python3",
+      "-c",
+      "import json, os, pathlib, sys; root = pathlib.Path((os.environ.get('AETHERFLOW_FS_ROOT') or os.environ.get('AETHERFLOW_INSTALL_ROOT') or '/').strip() or '/'); base = root / 'opt/filebot-node'; sys.exit(1) if not (base / 'server/app.js').is_file() else None; vers = [json.loads(p.read_text(encoding='utf-8')).get('version', '').strip() for p in (base / 'package.json', base / 'server/package.json', base / 'client/package.json') if p.is_file()]; v = next((x for x in vers if x), ''); sys.exit(1) if not v else print(v)"
     ],
     "sandbox_profile": "java",
     "sandbox_rw_paths": [
@@ -1915,14 +1917,14 @@
     ]
   },
   "listenarr": {
-    "update_source": "git_tags",
+    "update_source": "github",
     "require_download_sha256": true,
     "update_repo": "Listenarrs/Listenarr",
     "update_repo_url": "https://github.com/Listenarrs/Listenarr.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/Listenarr/.af-version 2>/dev/null || strings /opt/Listenarr/Listenarr.Api.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+      "strings /opt/Listenarr/Listenarr.Api.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1956,7 +1958,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /etc/notifiarr/.af-version 2>/dev/null || /usr/local/bin/notifiarr -v 2>/dev/null"
+      "/usr/local/bin/notifiarr -v 2>/dev/null"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1986,7 +1988,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /etc/novnc/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' novnc 2>/dev/null"
+      "dpkg-query -W -f='${Version}' novnc 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2011,14 +2013,13 @@
     ]
   },
   "pyload": {
-    "update_source": "git_tags",
+    "update_source": "pypi",
+    "update_package": "pyload-ng",
     "require_download_sha256": true,
-    "update_repo": "pyload/pyload",
-    "update_repo_url": "https://github.com/pyload/pyload.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/pyload/.af-version 2>/dev/null || /opt/pyload/.venv/bin/pyload --version 2>/dev/null"
+      "/opt/pyload/.venv/bin/pyload --version 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2053,7 +2054,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/quassel/.af-version ]; then cat /var/lib/quassel/.af-version; else bash -lc 'quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' quassel-core 2>/dev/null'; fi"
+      "quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' quassel-core 2>/dev/null"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -2082,7 +2083,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/requestrr/.af-version 2>/dev/null || strings /opt/requestrr/Requestrr.WebApi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+      "strings /opt/requestrr/Requestrr.WebApi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -2106,14 +2107,14 @@
     ]
   },
   "seedcross": {
-    "update_source": "git_tags",
+    "update_source": "git",
     "require_download_sha256": true,
     "update_repo": "ccf-2012/seedcross",
     "update_repo_url": "https://github.com/ccf-2012/seedcross.git",
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/seedcross/.af-version 2>/dev/null || git -C /opt/seedcross rev-parse --short HEAD 2>/dev/null"
+      "git -C /opt/seedcross rev-parse HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2147,7 +2148,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "cat /opt/unmanic/.af-version 2>/dev/null || /opt/unmanic/.venv/bin/unmanic --version 2>/dev/null"
+      "/opt/unmanic/.venv/bin/unmanic --version 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2222,7 +2223,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/mcvnc/.af-version ]; then cat /var/lib/mcvnc/.af-version; else /usr/local/bin/mcvnc --version; fi"
+      "/usr/local/bin/mcvnc --version"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -2263,7 +2264,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "if [ -s /var/lib/x2go/.af-version ]; then cat /var/lib/x2go/.af-version; else bash -lc 'x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' x2goserver 2>/dev/null'; fi"
+      "x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' x2goserver 2>/dev/null"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -2288,10 +2289,12 @@
   "piped": {
     "update_source": "git",
     "require_download_sha256": true,
+    "update_repo": "TeamPiped/Piped",
     "update_repo_url": "https://github.com/TeamPiped/Piped.git",
     "version_command": [
-      "cat",
-      "/opt/piped/.af-version"
+      "bash",
+      "-lc",
+      "fe=$(git -C /opt/piped/frontend rev-parse HEAD 2>/dev/null || git -C /opt/piped rev-parse HEAD 2>/dev/null) && be=$(git -C /opt/piped/backend rev-parse HEAD 2>/dev/null || git -C /opt/piped-backend rev-parse HEAD 2>/dev/null) && pr=$(git -C /opt/piped/proxy rev-parse HEAD 2>/dev/null || git -C /opt/piped-proxy rev-parse HEAD 2>/dev/null) && [ -n \"$fe\" ] && [ -n \"$be\" ] && [ -n \"$pr\" ] && printf 'frontend:%s,backend:%s,proxy:%s\\n' \"$fe\" \"$be\" \"$pr\""
     ],
     "sandbox_profile": "java",
     "sandbox_rw_paths": [
@@ -2309,8 +2312,9 @@
     "require_download_sha256": true,
     "update_repo_url": "https://github.com/iv-org/invidious.git",
     "version_command": [
-      "cat",
-      "/opt/invidious/.af-version"
+      "bash",
+      "-lc",
+      "git -C /opt/invidious/source rev-parse HEAD 2>/dev/null || git -C /opt/invidious rev-parse HEAD 2>/dev/null"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
