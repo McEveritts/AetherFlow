@@ -1,6 +1,19 @@
-## Nightly Patch Notes — November 10, 2026 — Marketplace Lifecycle
+## Nightly Patch Notes — November 10, 2026 — SQLite Security, Open Canvas UI & Marketplace Lifecycle
 
 Marketplace lifecycle, installer reliability, update certification, and diagnostic-safety improvements since `2d3715e4` (`v4.0.0-nightly.101.2`). These notes describe source changes; they do not claim successful live installation of every catalog application.
+
+### SQLite Security Follow-up
+
+* Upgrade the bundled SQLite dependency family through `rusqlite` 0.41.1, `r2d2_sqlite` 0.36.0, and `libsqlite3-sys` 0.39.1 to address RUSTSEC-2026-0459 (CVE-2026-119375), a local crafted database/WAL information-disclosure advisory.
+* Require bundled SQLite 3.54.0 or newer in a runtime regression test. Preserve checked unsigned-integer SQL conversions through the driver's `fallible_uint` compatibility feature, with coverage for maximum signed values, ordinary offsets, and rejected negative values.
+* Keep existing database migrations, WAL reader isolation, and all advisory-policy exceptions unchanged. This follow-up does not add new advisory exemptions, deploy to running hosts, or restart services.
+
+### Open Canvas UI Included
+
+* Include the existing open-canvas UI nightly: continuous obsidian surfaces, the unboxed luminous logo, a docked collapsible sidebar, improved keyboard focus, and clearer mobile navigation state.
+* Reflow constrained McBrowser and Audit tables into labeled ledgers, improve overlay/dropdown positioning and settings navigation, preserve background uploads, and dismiss transient file dialogs when leaving their tab.
+* Restore native Settings submission, preserve draft edits, clarify semantic action colors, simplify duplicate controls, and align Services controls and stopped-service counts.
+* Known UI follow-ups remain: a narrow Streaming tooltip can clip by 17 CSS pixels, and File Share copy still confuses its per-file limit with transport chunk size. Visual review used synthetic fixtures rather than live-backend or physical-touch certification.
 
 ### Marketplace Updates & Inventory
 

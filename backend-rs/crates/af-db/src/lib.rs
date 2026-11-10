@@ -1700,6 +1700,31 @@ pub(crate) mod tests {
     pub(crate) static TEST_DB_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
+    fn bundled_sqlite_includes_wal_security_fix() {
+        assert!(
+            rusqlite::version_number() >= 3_054_000,
+            "bundled SQLite must include the RUSTSEC-2026-0459 WAL fix; found {}",
+            rusqlite::version()
+        );
+    }
+
+    #[test]
+    fn sqlite_preserves_checked_unsigned_integer_conversions() {
+        let connection = Connection::open_in_memory().unwrap();
+        let maximum = connection
+            .query_row("SELECT ?1", [i64::MAX], |row| row.get::<_, u64>(0))
+            .unwrap();
+        assert_eq!(maximum, i64::MAX as u64);
+        let offset = connection
+            .query_row("SELECT 42", [], |row| row.get::<_, usize>(0))
+            .unwrap();
+        assert_eq!(offset, 42);
+        assert!(connection
+            .query_row("SELECT -1", [], |row| row.get::<_, u64>(0))
+            .is_err());
+    }
+
+    #[test]
     fn revocation_query_distinguishes_absent_revoked_and_database_errors() {
         let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let conn = Connection::open_in_memory().unwrap();
