@@ -1,3 +1,5 @@
+'use client';
+
 import { Shield, Lock, KeyRound, MonitorSmartphone, Laptop, XCircle, ShieldCheck, ShieldOff, Copy, Check, Loader2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -116,7 +118,7 @@ export default function SecurityTab() {
                 return;
             }
             addToast('Two-factor authentication enabled successfully!', 'success');
-            
+
             if (data.recovery_codes && data.recovery_codes.length > 0) {
                 setRecoveryCodes(data.recovery_codes);
                 setSetupData(null);
@@ -198,333 +200,349 @@ export default function SecurityTab() {
     }, [setupData]);
 
     return (
-        <div className="animate-fade-in relative z-10 w-full">
-            <div className="absolute inset-0 bg-red-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
-                <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8 pb-4 border-b border-white/5 relative z-10">
-                    <Shield size={24} className="text-indigo-400" />
-                    Security & Access Control
-                </h2>
+        <div className="animate-fade-in relative z-10 w-full min-w-0 pb-10">
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-white/[0.07] relative z-10">
+                <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                        <Shield size={20} />
+                    </div>
+                    <div>
+                        <h2 className="text-lg font-bold text-slate-100 tracking-tight">
+                            Security &amp; Access Control
+                        </h2>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                            Manage active authentication sessions, two-factor verification, and programmatic credentials.
+                        </p>
+                    </div>
+                </div>
+            </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
-                    {/* Active Sessions Panel */}
-                    <div className="lg:col-span-2 bg-slate-900/60 border border-white/5 rounded-2xl p-6">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-white/5">
-                            <div>
-                                <h3 className="text-lg font-bold text-slate-200 flex items-center gap-2">
-                                    <MonitorSmartphone size={18} className="text-indigo-400" />
-                                    Active Sessions
-                                </h3>
-                                <p className="text-sm text-slate-400 mt-1">Review and manage devices currently connected to this Nexus.</p>
-                            </div>
-                            <button 
-                                onClick={revokeAllOthers}
-                                disabled={sessions.filter(s => !s.is_current).length === 0}
-                                className="glass-button text-sm px-4 py-2 text-red-300 hover:text-red-200 border-red-500/30 hover:border-red-500/50 hover:bg-red-500/10 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">
-                                Revoke All Others
-                            </button>
-                        </div>
+            <section aria-label="Active Sessions" className="min-w-0 border-b border-white/[0.07]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-4 border-b border-white/[0.07]">
+                    <div>
+                        <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                            <MonitorSmartphone size={16} className="text-indigo-400" />
+                            Active Sessions ({sessions.length})
+                        </h3>
+                        <p className="text-xs text-slate-400 mt-0.5">Review and manage devices currently connected to this Nexus.</p>
+                    </div>
+                    <button
+                        onClick={revokeAllOthers}
+                        disabled={!sessions.some(session => !session.is_current)}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-rose-200 border border-rose-500/20 rounded-xl transition-all self-start sm:self-auto min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        Revoke All Other Sessions
+                    </button>
+                </div>
 
-                        <div className="space-y-4">
-                            {sessions.map(session => (
-                                <div key={session.jti} className={`flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl border ${session.is_current ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-white/[0.02] border-white/5'}`}>
-                                    <div className="flex gap-4">
-                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${session.is_current ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800 text-slate-400'}`}>
-                                            <Laptop size={20} />
-                                        </div>
-                                        <div>
-                                            <div className="flex items-center gap-2">
-                                                <span className="font-semibold text-slate-200">
-                                                    {session.user_agent.length > 30 ? session.user_agent.substring(0, 30) + '...' : session.user_agent || 'Unknown Device'}
-                                                </span>
-                                                {session.is_current && (
-                                                    <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded uppercase tracking-wider font-bold">This Device</span>
-                                                )}
-                                            </div>
-                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
-                                                <span className="text-slate-500" title={session.user_agent}>{session.user_agent.length > 50 ? session.user_agent.substring(0, 50) + '...' : session.user_agent || 'Unknown Browser'}</span>
-                                                <span className="text-slate-500">{session.ip_address}</span>
-                                            </div>
-                                            <div className="text-xs text-slate-500 mt-1">Active: {new Date(session.last_active).toLocaleString()}</div>
-                                        </div>
+                <div className="divide-y divide-white/[0.07]">
+                    {sessions.map((session) => (
+                        <div key={session.jti} className="py-3.5 px-1 hover:bg-white/[0.02] flex items-center justify-between gap-4 transition-colors group min-w-0">
+                            <div className="flex items-center gap-3.5 min-w-0">
+                                <div className="p-2.5 bg-white/[0.04] border border-white/10 rounded-xl text-slate-400 shrink-0">
+                                    <Laptop size={18} />
+                                </div>
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-sm font-semibold text-slate-200">{session.is_current ? 'This device' : 'Other signed-in device'}</span>
+                                        {session.is_current && (
+                                            <span className="text-xs uppercase font-bold tracking-wider px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full">
+                                                Current Device
+                                            </span>
+                                        )}
                                     </div>
-                                    
-                                    {!session.is_current && (
-                                        <button 
-                                            onClick={() => revokeSession(session.jti)}
-                                            className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-500/10 self-end md:self-auto shrink-0"
-                                            title="Revoke Session"
+                                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400 mt-0.5">
+                                        <span className="text-slate-500 truncate max-w-sm" title={session.user_agent}>
+                                            {session.user_agent.length > 50 ? session.user_agent.substring(0, 50) + '...' : session.user_agent || 'Unknown Browser'}
+                                        </span>
+                                        <span className="text-slate-500 font-mono text-xs">{session.ip_address}</span>
+                                    </div>
+                                    <div className="text-xs text-slate-500 mt-0.5">Active: {new Date(session.last_active).toLocaleString()}</div>
+                                </div>
+                            </div>
+
+                            {!session.is_current && (
+                                <button
+                                    onClick={() => revokeSession(session.jti)}
+                                    className="obs-touch-target-standard text-slate-500 hover:text-rose-400 transition-colors p-2 rounded-lg hover:bg-rose-500/10 shrink-0 min-h-[36px] min-w-[36px] flex items-center justify-center"
+                                    title="Revoke Session"
+                                >
+                                    <XCircle size={18} />
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                    {sessions.length === 0 && (
+                        <p className="text-slate-500 text-xs italic text-center py-6">No active sessions mapped.</p>
+                    )}
+                </div>
+            </section>
+
+            <div className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.07]">
+                {/* Two-Factor Authentication Panel */}
+                <div className="p-5 sm:p-6 space-y-4 min-w-0">
+                    <div className="flex items-center gap-2.5 pb-3 border-b border-white/[0.07]">
+                        <Lock className="text-indigo-400" size={18} />
+                        <h3 className="text-sm font-bold text-slate-200">Two-Factor Authentication</h3>
+                    </div>
+
+                    {recoveryCodes.length > 0 && (
+                        <div className="mb-4 p-5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl space-y-3">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <ShieldCheck className="text-emerald-400" size={18} />
+                                    <h4 className="font-bold text-slate-100 text-xs">Your Recovery Codes</h4>
+                                </div>
+                                <button
+                                    onClick={() => window.location.reload()}
+                                    className="obs-touch-target-standard text-xs uppercase tracking-widest font-bold text-slate-500 hover:text-white transition-colors min-h-[32px]"
+                                >
+                                    Close &amp; Finish
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                                Save these codes in a secure place. They will not be shown again.
+                                Each code can only be used once to unlock your account if you lose your device.
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 my-3">
+                                {recoveryCodes.map((code, i) => (
+                                    <div key={i} className="bg-slate-950/80 border border-white/10 rounded-lg py-2 px-3 text-center font-mono text-xs tracking-widest text-indigo-300">
+                                        {code}
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex flex-col gap-2 pt-1">
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(recoveryCodes.join('\n'));
+                                        addToast('All recovery codes copied to clipboard.', 'success');
+                                    }}
+                                    className="obs-touch-target-standard w-full py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 rounded-xl text-xs font-bold text-indigo-200 transition-colors flex items-center justify-center gap-2 min-h-[40px]"
+                                >
+                                    <Copy size={14} /> Copy All Codes
+                                </button>
+                                <button
+                                    onClick={() => window.location.reload()}
+                                    className="obs-touch-target-standard w-full py-2.5 bg-white/5 border border-white/10 hover:bg-emerald-500/20 hover:border-emerald-500/40 rounded-xl text-xs font-bold text-slate-300 hover:text-emerald-300 transition-all uppercase tracking-widest min-h-[40px]"
+                                >
+                                    I have saved my codes
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {is2FAEnabled ? (
+                        /* ── 2FA is ENABLED ── */
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-3 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+                                <ShieldCheck size={22} className="text-emerald-400 shrink-0" />
+                                <div>
+                                    <p className="text-sm font-bold text-emerald-300">Two-Factor Authentication is Active</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">Your account is protected with TOTP-based verification.</p>
+                                </div>
+                            </div>
+
+                            {/* Recovery Codes Regeneration Section */}
+                            <div className="mt-4 pt-4 border-t border-white/[0.07] space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">Backup Recovery Codes</h4>
+                                    {!showRegenConfirm && (
+                                        <button
+                                            onClick={() => setShowRegenConfirm(true)}
+                                            className="obs-touch-target-standard text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors min-h-[32px]"
                                         >
-                                            <XCircle size={20} />
+                                            Regenerate
                                         </button>
                                     )}
                                 </div>
-                            ))}
-                            {sessions.length === 0 && (
-                                <p className="text-slate-500 text-sm italic text-center py-4">No active sessions mapped.</p>
-                            )}
-                        </div>
-                    </div>
 
-                    {/* Two-Factor Authentication Panel */}
-                    <div className="bg-slate-900/60 border border-white/5 rounded-2xl p-6">
-                        <div className="flex items-center gap-3 mb-4">
-                            <Lock className="text-slate-400" size={20} />
-                            <h3 className="text-lg font-bold text-slate-200">Two-Factor Authentication</h3>
-                        </div>
-
-                        {/* Recovery Codes Modal-like Overlay */}
-                        {recoveryCodes.length > 0 && (
-                            <div className="mb-6 p-6 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl animate-in zoom-in-95 duration-300">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-2">
-                                        <ShieldCheck className="text-emerald-400" size={20} />
-                                        <h4 className="font-bold text-slate-100">Your Recovery Codes</h4>
-                                    </div>
-                                    <button 
-                                        onClick={() => window.location.reload()}
-                                        className="text-[10px] uppercase tracking-widest font-bold text-slate-500 hover:text-white transition-colors"
-                                    >
-                                        Close & Finish
-                                    </button>
-                                </div>
-                                <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                                    Save these codes in a secure place. They will not be shown again. 
-                                    Each code can only be used once to unlock your account if you lose your device.
-                                </p>
-                                <div className="grid grid-cols-2 gap-2 mb-6">
-                                    {recoveryCodes.map((code, i) => (
-                                        <div key={i} className="bg-slate-950/80 border border-white/10 rounded-lg py-2 px-3 text-center font-mono text-sm tracking-widest text-indigo-300">
-                                            {code}
-                                        </div>
-                                    ))}
-                                </div>
-                                <div className="flex flex-col gap-3">
-                                    <button 
-                                        onClick={() => {
-                                            navigator.clipboard.writeText(recoveryCodes.join('\n'));
-                                            addToast('All recovery codes copied to clipboard.', 'success');
-                                        }}
-                                        className="w-full py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 rounded-xl text-xs font-bold text-indigo-200 transition-colors flex items-center justify-center gap-2"
-                                    >
-                                        <Copy size={14} /> Copy All Codes
-                                    </button>
-                                    <button 
-                                        onClick={() => window.location.reload()}
-                                        className="w-full py-3 bg-white/5 border border-white/10 hover:bg-emerald-500/20 hover:border-emerald-500/40 rounded-xl text-xs font-bold text-slate-300 hover:text-emerald-300 transition-all uppercase tracking-widest"
-                                    >
-                                        I have saved my codes
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        {is2FAEnabled ? (
-                            /* ── 2FA is ENABLED ── */
-                            <div className="space-y-4">
-                                <div className="flex items-center gap-3 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
-                                    <ShieldCheck size={24} className="text-emerald-400 shrink-0" />
-                                    <div>
-                                        <p className="text-sm font-bold text-emerald-300">Two-Factor Authentication is Active</p>
-                                        <p className="text-xs text-slate-400 mt-1">Your account is protected with TOTP-based verification.</p>
-                                    </div>
-                                </div>
-
-                                {/* Recovery Codes Regeneration Section */}
-                                <div className="mt-6 pt-6 border-t border-white/5 space-y-4">
-                                    <div className="flex items-center justify-between">
-                                        <h4 className="text-sm font-bold text-slate-300">Backup Recovery Codes</h4>
-                                        {!showRegenConfirm && (
-                                            <button 
-                                                onClick={() => setShowRegenConfirm(true)}
-                                                className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
+                                {showRegenConfirm ? (
+                                    <div className="space-y-3 p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-xl">
+                                        <p className="text-xs text-indigo-300 font-semibold">Enter TOTP code to generate new backup codes:</p>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            maxLength={6}
+                                            value={regenCode}
+                                            onChange={e => setRegenCode(e.target.value.replace(/\D/g, ''))}
+                                            placeholder="000000"
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-slate-200 text-center text-xl tracking-[0.3em] font-mono focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[44px]"
+                                            autoFocus
+                                        />
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={regenerateRecoveryCodes}
+                                                disabled={isRegenerating || regenCode.length < 6}
+                                                className="obs-touch-target-standard flex-1 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 rounded-lg text-xs font-bold text-white transition-all flex items-center justify-center gap-2 min-h-[36px]"
                                             >
-                                                Regenerate
+                                                {isRegenerating && <Loader2 size={12} className="animate-spin" />}
+                                                {isRegenerating ? 'Generating...' : 'Confirm'}
                                             </button>
-                                        )}
-                                    </div>
-                                    
-                                    {showRegenConfirm ? (
-                                        <div className="space-y-3 p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-xl">
-                                            <p className="text-xs text-indigo-300 font-semibold">Enter TOTP code to generate new backup codes:</p>
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                maxLength={6}
-                                                value={regenCode}
-                                                onChange={e => setRegenCode(e.target.value.replace(/\D/g, ''))}
-                                                placeholder="000000"
-                                                className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-slate-200 text-center text-xl tracking-[0.3em] font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
-                                                autoFocus
-                                            />
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={regenerateRecoveryCodes}
-                                                    disabled={isRegenerating || regenCode.length < 6}
-                                                    className="flex-1 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 rounded-lg text-xs font-bold text-white transition-all flex items-center justify-center gap-2"
-                                                >
-                                                    {isRegenerating && <Loader2 size={12} className="animate-spin" />}
-                                                    {isRegenerating ? 'Generating...' : 'Confirm'}
-                                                </button>
-                                                <button
-                                                    onClick={() => { setShowRegenConfirm(false); setRegenCode(''); }}
-                                                    className="px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-bold text-slate-300 transition-colors"
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <p className="text-xs text-slate-500 leading-relaxed">
-                                            If you&apos;ve used your recovery codes or believe they&apos;ve been compromised, you can generate a new set. This will invalidate all previous codes.
-                                        </p>
-                                    )}
-                                </div>
-
-                                {showDisableConfirm ? (
-                                    <div className="mt-8 pt-8 border-t border-white/5 space-y-4">
-                                        <p className="text-sm text-red-300 font-semibold flex items-center gap-2">
-                                            <ShieldOff size={16} /> Disable Two-Factor Authentication
-                                        </p>
-                                        <div className="space-y-4 p-4 bg-red-500/5 border border-red-500/20 rounded-xl">
-                                            <p className="text-sm text-red-300 font-semibold">Enter your current authenticator code to confirm:</p>
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                maxLength={6}
-                                                value={disableCode}
-                                                onChange={e => setDisableCode(e.target.value.replace(/\D/g, ''))}
-                                                placeholder="000000"
-                                                className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-red-500/50 transition-colors"
-                                                autoFocus
-                                            />
-                                            <div className="flex gap-3">
-                                                <button
-                                                    onClick={disable2FA}
-                                                    disabled={isDisabling || disableCode.length < 6}
-                                                    className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-500 disabled:bg-red-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all flex items-center justify-center gap-2"
-                                                >
-                                                    {isDisabling && <Loader2 size={16} className="animate-spin" />}
-                                                    {isDisabling ? 'Disabling...' : 'Confirm Disable'}
-                                                </button>
-                                                <button
-                                                    onClick={() => { setShowDisableConfirm(false); setDisableCode(''); }}
-                                                    className="px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-sm font-bold text-slate-300 transition-colors"
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
+                                            <button
+                                                onClick={() => { setShowRegenConfirm(false); setRegenCode(''); }}
+                                                className="obs-touch-target-standard px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-bold text-slate-300 transition-colors min-h-[36px]"
+                                            >
+                                                Cancel
+                                            </button>
                                         </div>
                                     </div>
                                 ) : (
-                                    <button
-                                        onClick={() => setShowDisableConfirm(true)}
-                                        className="w-full text-left px-4 py-3 border border-red-500/20 text-red-300 hover:bg-red-500/10 hover:border-red-500/30 rounded-xl flex items-center gap-2 cursor-pointer transition-colors mt-8"
-                                    >
-                                        <ShieldOff size={16} /> Disable Two-Factor Authentication
-                                    </button>
+                                    <p className="text-xs text-slate-500 leading-relaxed">
+                                        If you&apos;ve used your recovery codes or believe they&apos;ve been compromised, you can generate a new set. This will invalidate all previous codes.
+                                    </p>
                                 )}
                             </div>
-                        ) : setupData ? (
-                            /* ── 2FA SETUP IN PROGRESS ── */
-                            <div className="space-y-5">
-                                <p className="text-sm text-slate-400">
-                                    Scan the QR code below with your authenticator app (e.g. Google Authenticator, Authy, 1Password).
-                                </p>
 
-                                {/* QR Code */}
-                                <div className="flex justify-center">
-                                    <div className="bg-white p-4 rounded-2xl shadow-lg">
-                                        <QRCodeSVG
-                                            value={setupData.otpauth_uri}
-                                            size={200}
-                                            level="M"
-                                            includeMargin={false}
+                            {showDisableConfirm ? (
+                                <div className="mt-6 pt-6 border-t border-white/[0.07] space-y-4">
+                                    <p className="text-sm text-rose-300 font-semibold flex items-center gap-2">
+                                        <ShieldOff size={16} /> Disable Two-Factor Authentication
+                                    </p>
+                                    <div className="space-y-4 p-4 bg-rose-500/5 border border-rose-500/20 rounded-xl">
+                                        <p className="text-xs text-rose-300 font-semibold">Enter your current authenticator code to confirm:</p>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            maxLength={6}
+                                            value={disableCode}
+                                            onChange={e => setDisableCode(e.target.value.replace(/\D/g, ''))}
+                                            placeholder="000000"
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-rose-500/50 transition-colors min-h-[44px]"
+                                            autoFocus
                                         />
+                                        <div className="flex gap-3">
+                                            <button
+                                                onClick={disable2FA}
+                                                disabled={isDisabling || disableCode.length < 6}
+                                                className="obs-touch-target-standard flex-1 px-4 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:bg-rose-600/30 disabled:text-slate-500 rounded-xl text-xs font-bold text-white transition-all flex items-center justify-center gap-2 min-h-[44px]"
+                                            >
+                                                {isDisabling && <Loader2 size={16} className="animate-spin" />}
+                                                {isDisabling ? 'Disabling...' : 'Confirm Disable'}
+                                            </button>
+                                            <button
+                                                onClick={() => { setShowDisableConfirm(false); setDisableCode(''); }}
+                                                className="obs-touch-target-standard px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-xs font-bold text-slate-300 transition-colors min-h-[44px]"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
-
-                                {/* Manual Entry Secret */}
-                                <div className="space-y-2">
-                                    <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Manual Entry Key</p>
-                                    <div className="flex items-center gap-2">
-                                        <code className="flex-1 bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-indigo-300 text-sm font-mono tracking-wider break-all select-all">
-                                            {setupData.secret}
-                                        </code>
-                                        <button
-                                            onClick={copySecret}
-                                            className="shrink-0 p-3 bg-white/5 border border-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
-                                            title="Copy secret"
-                                        >
-                                            {secretCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* Verification Input */}
-                                <div className="space-y-3 pt-2 border-t border-white/5">
-                                    <p className="text-sm text-slate-300 font-semibold">Enter the 6-digit code to verify:</p>
-                                    <input
-                                        type="text"
-                                        inputMode="numeric"
-                                        maxLength={6}
-                                        value={verifyCode}
-                                        onChange={e => setVerifyCode(e.target.value.replace(/\D/g, ''))}
-                                        placeholder="000000"
-                                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
-                                        onKeyDown={e => { if (e.key === 'Enter') confirmSetup(); }}
-                                    />
-                                    <div className="flex gap-3">
-                                        <button
-                                            onClick={confirmSetup}
-                                            disabled={isVerifying || verifyCode.length < 6}
-                                            className="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all flex items-center justify-center gap-2"
-                                        >
-                                            {isVerifying && <Loader2 size={16} className="animate-spin" />}
-                                            {isVerifying ? 'Verifying...' : 'Enable 2FA'}
-                                        </button>
-                                        <button
-                                            onClick={() => { setSetupData(null); setVerifyCode(''); }}
-                                            className="px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-sm font-bold text-slate-300 transition-colors"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        ) : (
-                            /* ── 2FA NOT ENROLLED ── */
-                            <div className="space-y-4">
-                                <p className="text-sm text-slate-400 mb-6">Add an extra layer of security to your account with time-based one-time passwords (TOTP).</p>
+                            ) : (
                                 <button
-                                    onClick={initSetup}
-                                    disabled={isSettingUp}
-                                    className="glass-button-primary w-full px-4 py-3 text-center flex items-center justify-center gap-2"
+                                    onClick={() => setShowDisableConfirm(true)}
+                                    className="obs-touch-target-standard w-full text-left px-4 py-3 border border-rose-500/20 text-rose-300 hover:bg-rose-500/10 hover:border-rose-500/30 rounded-xl flex items-center gap-2 cursor-pointer transition-colors mt-6 text-xs font-semibold min-h-[44px]"
                                 >
-                                    {isSettingUp ? (
-                                        <><Loader2 size={16} className="animate-spin" /> Generating Key...</>
-                                    ) : (
-                                        <><ShieldCheck size={16} /> Enable Two-Factor Authentication</>
-                                    )}
+                                    <ShieldOff size={16} /> Disable Two-Factor Authentication
                                 </button>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Infrastructure API */}
-                    <div className="bg-slate-900/60 border border-white/5 rounded-2xl p-6">
-                        <div className="flex items-center gap-3 mb-4">
-                            <KeyRound className="text-slate-400" size={20} />
-                            <h3 className="text-lg font-bold text-slate-200">Infrastructure Keys</h3>
+                            )}
                         </div>
-                        <p className="text-sm text-slate-400 mb-6">Tokens authorizing unattended script execution and remote daemon management.</p>
+                    ) : setupData ? (
+                        /* ── 2FA SETUP IN PROGRESS ── */
+                        <div className="space-y-4">
+                            <p className="text-xs text-slate-400">
+                                Scan the QR code below with your authenticator app (e.g. Google Authenticator, Authy, 1Password).
+                            </p>
 
-                        <button 
-                            onClick={() => addToast('New service principle token generated.', 'success')}
-                            className="glass-button-primary w-full px-4 py-3 mt-4 text-center">
-                            Generate Service Token
-                        </button>
-                    </div>
+                            {/* QR Code */}
+                            <div className="flex justify-center py-2">
+                                <div className="bg-white p-3.5 rounded-xl shadow-lg">
+                                    <QRCodeSVG
+                                        value={setupData.otpauth_uri}
+                                        size={180}
+                                        level="M"
+                                        includeMargin={false}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Manual Entry Secret */}
+                            <div className="space-y-1.5">
+                                <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Manual Entry Key</p>
+                                <div className="flex items-center gap-2">
+                                    <code className="flex-1 bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-indigo-300 text-xs font-mono tracking-wider break-all select-all">
+                                        {setupData.secret}
+                                    </code>
+                                    <button
+                                        onClick={copySecret}
+                                        className="obs-touch-target-standard shrink-0 p-2.5 bg-white/5 border border-white/10 rounded-xl text-slate-400 hover:text-white transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center"
+                                        title="Copy secret"
+                                    >
+                                        {secretCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Verification Input */}
+                            <div className="space-y-3 pt-3 border-t border-white/[0.07]">
+                                <p className="text-xs text-slate-300 font-semibold">Enter the 6-digit code to verify:</p>
+                                <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    maxLength={6}
+                                    value={verifyCode}
+                                    onChange={e => setVerifyCode(e.target.value.replace(/\D/g, ''))}
+                                    placeholder="000000"
+                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-center text-xl tracking-[0.4em] font-mono focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[44px]"
+                                    onKeyDown={e => { if (e.key === 'Enter') confirmSetup(); }}
+                                />
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={confirmSetup}
+                                        disabled={isVerifying || verifyCode.length < 6}
+                                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-xs font-bold text-white transition-all flex items-center justify-center gap-2 min-h-[44px]"
+                                    >
+                                        {isVerifying && <Loader2 size={16} className="animate-spin" />}
+                                        {isVerifying ? 'Verifying...' : 'Enable 2FA'}
+                                    </button>
+                                    <button
+                                        onClick={() => { setSetupData(null); setVerifyCode(''); }}
+                                        className="obs-touch-target-standard px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-xs font-bold text-slate-300 transition-colors min-h-[44px]"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        /* ── 2FA NOT ENROLLED ── */
+                        <div className="space-y-4">
+                            <p className="text-xs text-slate-400">Add an extra layer of security to your account with time-based one-time passwords (TOTP).</p>
+                            <button
+                                onClick={initSetup}
+                                disabled={isSettingUp}
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all min-h-[44px] shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+                            >
+                                {isSettingUp ? (
+                                    <><Loader2 size={16} className="animate-spin" /> Generating Key...</>
+                                ) : (
+                                    <><ShieldCheck size={16} /> Enable Two-Factor Authentication</>
+                                )}
+                            </button>
+                        </div>
+                    )}
                 </div>
+
+                {/* Infrastructure API */}
+                <div className="p-5 sm:p-6 space-y-4 min-w-0 flex flex-col justify-between">
+                    <div>
+                        <div className="flex items-center gap-2.5 pb-3 border-b border-white/[0.07]">
+                            <KeyRound className="text-indigo-400" size={18} />
+                            <h3 className="text-sm font-bold text-slate-200">Infrastructure Keys</h3>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-3 leading-relaxed">
+                            Tokens authorizing unattended script execution, orchestrator integration, and remote daemon management.
+                        </p>
+                    </div>
+
+                    <button
+                        onClick={() => addToast('New service principle token generated.', 'success')}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-200 hover:text-white rounded-xl text-xs font-bold transition-all min-h-[44px]"
+                    >
+                        Generate Service Token
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }

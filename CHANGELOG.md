@@ -1,3 +1,37 @@
+## Nightly Patch Notes — November 10, 2026 — Open Canvas UI
+
+This UI-focused nightly refresh improves the dashboard's open-canvas presentation, responsive layouts, and operator controls. It does not include the separate Marketplace lifecycle, backend, or package-installer changes under development.
+
+### Interface & Navigation
+
+* Extend the continuous obsidian canvas across operational tabs and sign-in, consent, and shared-file screens, using aligned content and subtle separators instead of floating page-card islands.
+* Preserve the unboxed luminous AetherFlow logo, docked collapsible sidebar, and cyan, indigo, fuchsia, emerald, and amber status accents.
+* Improve sidebar pinning, keyboard-focus expansion, and active-section feedback in the mobile navigation menu.
+* Keep the McBrowser workspace mounted when navigating between tabs so returning to it preserves workspace state.
+* Dismiss transient McBrowser dialogs when navigating away, releasing their focus trap without interrupting background uploads.
+
+### Responsive Controls & Readability
+
+* Reflow McBrowser workspace selections and Audit Trail records into labeled ledgers when available content width is constrained; wrap long identities and paths while keeping actions within reach.
+* Improve viewport-aware dropdown and account-menu positioning, scrollable settings navigation, visible scroll controls, and keyboard access.
+* Restore native Enter-key submission through the single Settings save action, keep focused settings tabs visible, and preserve manual rail scrolling during resize.
+* Clarify approval/rejection button accents, use dark-glass checkboxes, improve modal focus handling, and reduce redundant quota and settings controls.
+* Retain the latest Services Connection-control alignment fix and make stopped-service filter counts consistent with the displayed list.
+
+### Scope & Rollout
+
+* This release changes the frontend and release-note/validation plumbing only. Existing backend code, installer scripts, catalog metadata, and Marketplace lifecycle behavior are not upgraded by this change set.
+* Nightly artifacts retain the existing `v4.0.0-nightly.<run>.<attempt>` naming and prerelease status. Publishing an artifact does not update running hosts or authorize a service restart.
+* Automated publication now includes these patch notes and checks frontend test-file TypeScript in addition to lint, unit tests, and static-export compilation.
+
+### Known Follow-ups
+
+* A pointer-triggered transferred-data tooltip can clip at the right edge of the 390px Streaming view. The recorded narrow-viewport case clips by 17 CSS pixels.
+* File Share still labels its 50MiB per-file limit as “50MB Chunk Streaming” while separately describing 5MiB transport chunks; copy clarification remains pending.
+* The independent visual review used synthetic fixtures. It does not certify live backend integrations, real uploads, physical-touch behavior, or every production service.
+
+---
+
 ## CHANGELOG v4.0.0 - 11-Crate Rust Control Plane, 77-App Bare-Metal Catalog, Native McBrowser & Self-Update Engine
 _Promotes the v4.0.0 Rust control plane architecture and `nightly` / `experimental` advancements to the `master` (`stable`) track (`v3.2.7...v4.0.0`)._
 

@@ -60,6 +60,12 @@ describe('LoginPage OPUS-002 MFA Challenge & Google SSO Integration', () => {
       expect(screen.getByPlaceholderText('Password')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Unlock the Aether/i })).toBeInTheDocument();
     });
+    const usernameInput = screen.getByRole('textbox', { name: 'Username' });
+    const passwordInput = screen.getByLabelText('Password', { selector: 'input' });
+    fireEvent.change(usernameInput, { target: { value: 'operator' } });
+    fireEvent.change(passwordInput, { target: { value: 'example-not-submitted' } });
+    expect(screen.getByLabelText('Username')).toBe(usernameInput);
+    expect(screen.getByLabelText('Password', { selector: 'input' })).toBe(passwordInput);
   });
 
   it('transitions to MFA challenge form when ?mfa=<challenge> is provided and clears query param from URL', async () => {
@@ -214,5 +220,25 @@ describe('LoginPage OPUS-002 MFA Challenge & Google SSO Integration', () => {
       code: '123456',
     });
     expect(mockLoginLocal).not.toHaveBeenCalled();
+  });
+
+  it('renders unboxed header emblem with continuous brand mark styling and readable copy', async () => {
+    render(<LoginPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Unlock the Aether/i })).toBeInTheDocument();
+    });
+
+    const brandLogo = document.querySelector('.obs-brand-logo');
+    expect(brandLogo).toBeInTheDocument();
+    expect(brandLogo).not.toHaveClass('rounded-[1.25rem]');
+    expect(brandLogo).not.toHaveClass('ring-1');
+
+    const brandMark = document.querySelector('.obs-brand-mark');
+    expect(brandMark).toBeInTheDocument();
+    expect(brandMark).toHaveAttribute('src', '/img/aetherflow-mark.svg');
+
+    const externalProvidersTitle = screen.getByText('External Providers');
+    expect(externalProvidersTitle).toHaveClass('text-slate-400');
   });
 });

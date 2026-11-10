@@ -2,6 +2,7 @@
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import {
     AlertTriangle,
     ArrowUp,
@@ -413,11 +414,11 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
     }, [entries, filterQuery]);
 
     const directoryCount = useMemo(
-        () => sortedFilteredEntries.filter((e) => e.kind === 'directory').length,
+        () => sortedFilteredEntries.filter((entry) => entry.kind === 'directory').length,
         [sortedFilteredEntries]
     );
     const fileCount = useMemo(
-        () => sortedFilteredEntries.filter((e) => e.kind === 'file').length,
+        () => sortedFilteredEntries.filter((entry) => entry.kind === 'file').length,
         [sortedFilteredEntries]
     );
 
@@ -429,11 +430,11 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
     return (
         <main
             aria-label="Public shared content"
-            className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center px-4 py-10 sm:px-6 lg:px-8"
+            className="min-h-screen bg-transparent text-slate-100 flex flex-col items-center px-4 py-10 sm:px-6 lg:px-8"
         >
-            <div className="w-full max-w-4xl space-y-6">
+            <div className="w-full max-w-4xl">
                 {/* Brand & Security Banner */}
-                <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+                <header className="obs-canvas-section flex flex-wrap items-center justify-between gap-3 p-5 sm:p-6">
                     <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-400">
                             <FolderOpen className="h-5 w-5" aria-hidden="true" />
@@ -458,7 +459,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                     <section
                         role="alert"
                         aria-labelledby="share-invalid-heading"
-                        className="rounded-2xl border border-amber-500/30 bg-slate-900/90 p-6 sm:p-8 shadow-xl"
+                        className="obs-canvas-section p-6 sm:p-8"
                     >
                         <div className="flex items-start gap-4">
                             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
@@ -475,6 +476,8 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                     {validatedTokenResult.error ||
                                         'A valid share token is required to view this item. Please check that you copied the full /share?token=... address.'}
                                 </p>
+                                <p className="text-sm leading-relaxed text-slate-300">Copy the complete link from the sender, or ask the share owner for a new link. No shared files can be opened from this address.</p>
+                                <Link href="/" className="obs-touch-target-standard inline-flex min-h-[44px] items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-indigo-200 hover:bg-white/[0.08] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400">Open AetherFlow</Link>
                             </div>
                         </div>
                     </section>
@@ -486,7 +489,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                         role="status"
                         aria-live="polite"
                         aria-busy="true"
-                        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 text-center shadow-xl"
+                        className="obs-canvas-section p-8 text-center"
                     >
                         <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-indigo-500/20 border-t-indigo-500" />
                         <p className="text-sm font-medium text-slate-200">
@@ -503,7 +506,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                     <section
                         role="alert"
                         aria-labelledby="share-expired-heading"
-                        className="rounded-2xl border border-rose-500/30 bg-slate-900/90 p-6 sm:p-8 shadow-xl"
+                        className="obs-canvas-section p-6 sm:p-8"
                     >
                         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                             <div className="flex items-start gap-4">
@@ -526,7 +529,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                             <button
                                 type="button"
                                 onClick={() => void initializeShare()}
-                                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[44px] obs-touch-target-standard"
                             >
                                 <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                                 Check Again
@@ -540,7 +543,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                     <section
                         role="alert"
                         aria-labelledby="share-error-heading"
-                        className="rounded-2xl border border-rose-500/30 bg-slate-900/90 p-6 sm:p-8 shadow-xl"
+                        className="obs-canvas-section p-6 sm:p-8"
                     >
                         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                             <div className="flex items-start gap-4">
@@ -565,7 +568,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                             <button
                                 type="button"
                                 onClick={() => void initializeShare()}
-                                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-xs font-medium text-slate-200 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[44px] obs-touch-target-standard"
                             >
                                 <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                                 Retry
@@ -578,7 +581,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                 {metadata && (phase === 'locked' || phase === 'ready') && (
                     <section
                         aria-label="Shared item metadata"
-                        className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 sm:p-6 shadow-xl"
+                        className="obs-canvas-section p-5 sm:p-6"
                     >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                             <div className="flex items-start gap-3.5 min-w-0">
@@ -590,7 +593,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                     )}
                                 </div>
                                 <div className="min-w-0">
-                                    <h2 className="truncate text-lg font-semibold text-slate-100">
+                                    <h2 className="break-words [overflow-wrap:anywhere] text-lg font-semibold text-slate-100">
                                         {metadata.name}
                                     </h2>
                                     <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
@@ -648,7 +651,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                 {metadata && phase === 'locked' && (
                     <section
                         aria-labelledby="share-unlock-heading"
-                        className="rounded-2xl border border-slate-800 bg-slate-900/90 p-6 sm:p-8 shadow-xl"
+                        className="obs-canvas-section p-6 sm:p-8"
                     >
                         <div className="max-w-md space-y-4">
                             <div className="space-y-1">
@@ -679,7 +682,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                             )}
 
                             <form
-                                onSubmit={(e) => void handleUnlockSubmit(e)}
+                                onSubmit={(event) => void handleUnlockSubmit(event)}
                                 aria-label="Unlock password-protected share"
                                 className="space-y-4"
                                 noValidate
@@ -697,7 +700,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             name="password"
                                             type={showPassword ? 'text' : 'password'}
                                             value={password}
-                                            onChange={(e) => setPassword(e.target.value)}
+                                            onChange={(event) => setPassword(event.target.value)}
                                             disabled={isUnlocking}
                                             autoComplete="current-password"
                                             placeholder="Enter share password"
@@ -705,15 +708,15 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             aria-describedby={
                                                 unlockError ? 'share-unlock-error' : undefined
                                             }
-                                            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 pr-10 text-sm text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-60"
+                                            className="w-full min-h-[44px] rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 pr-12 text-sm text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-60"
                                         />
                                         <button
                                             type="button"
-                                            onClick={() => setShowPassword((prev) => !prev)}
+                                            onClick={() => setShowPassword((previous) => !previous)}
                                             aria-label={
                                                 showPassword ? 'Hide password' : 'Show password'
                                             }
-                                            className="absolute right-2.5 rounded-lg p-1 text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                            className="absolute right-1 top-1/2 -translate-y-1/2 min-h-[44px] min-w-[44px] obs-touch-target-standard flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                         >
                                             {showPassword ? (
                                                 <EyeOff className="h-4 w-4" aria-hidden="true" />
@@ -728,7 +731,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                     type="submit"
                                     disabled={isUnlocking}
                                     aria-busy={isUnlocking}
-                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60"
+                                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60 min-h-[44px] obs-touch-target-standard"
                                 >
                                     <Unlock className="h-4 w-4" aria-hidden="true" />
                                     {isUnlocking ? 'Unlocking...' : 'Unlock Share'}
@@ -746,7 +749,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                 ? 'Shared folder browser'
                                 : 'Shared file details'
                         }
-                        className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 sm:p-6 shadow-xl space-y-5"
+                        className="obs-canvas-section p-5 sm:p-6 space-y-5"
                     >
                         {actionError && (
                             <div
@@ -757,7 +760,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                 <button
                                     type="button"
                                     onClick={() => setActionError(null)}
-                                    className="rounded-lg border border-rose-500/30 px-2.5 py-1 text-xs font-medium text-rose-200 hover:bg-rose-500/20"
+                                    className="inline-flex items-center justify-center min-h-[44px] obs-touch-target-standard rounded-lg border border-rose-500/30 px-3 py-1.5 text-xs font-medium text-rose-200 hover:bg-rose-500/20 focus:outline-none focus:ring-2 focus:ring-rose-500"
                                 >
                                     Dismiss
                                 </button>
@@ -775,12 +778,12 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
 
                         {/* Single-File Share View */}
                         {!metadata.is_directory && (
-                            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                            <div className="border-y border-white/[0.07] bg-transparent p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                 <div className="space-y-1 min-w-0">
-                                    <p className="text-sm font-semibold text-slate-100 truncate">
+                                    <p className="text-sm font-semibold text-slate-100 break-words [overflow-wrap:anywhere]">
                                         {singleFileEntry?.name || metadata.name}
                                     </p>
-                                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
                                         <span>
                                             Size:{' '}
                                             <strong className="font-medium text-slate-200">
@@ -813,7 +816,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             aria-label={`Download ${
                                                 singleFileEntry?.name || metadata.name
                                             }`}
-                                            className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60"
+                                            className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60 min-h-[44px] obs-touch-target-standard"
                                         >
                                             <Download className="h-4 w-4" aria-hidden="true" />
                                             {downloadingTarget === '__single_file__'
@@ -825,7 +828,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             type="button"
                                             disabled
                                             aria-disabled="true"
-                                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-medium text-slate-500 cursor-not-allowed"
+                                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-medium text-slate-500 cursor-not-allowed min-h-[44px] obs-touch-target-standard"
                                         >
                                             Downloads Disabled
                                         </button>
@@ -862,7 +865,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                                         }
                                                         disabled={isCurrent || isLoadingEntries}
                                                         aria-current={isCurrent ? 'page' : undefined}
-                                                        className={`rounded-lg px-2.5 py-1 font-medium transition-colors ${
+                                                        className={`inline-flex items-center justify-center min-h-[44px] obs-touch-target-standard rounded-lg px-3 py-2 font-medium transition-colors ${
                                                             isCurrent
                                                                 ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 cursor-default'
                                                                 : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
@@ -875,7 +878,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                         })}
                                     </nav>
 
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
                                         {currentPath !== '' && (
                                             <button
                                                 type="button"
@@ -886,7 +889,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                                 }
                                                 disabled={isLoadingEntries}
                                                 aria-label="Up one folder level"
-                                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-60"
+                                                className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-60 min-h-[44px] obs-touch-target-standard"
                                             >
                                                 <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
                                                 Up
@@ -899,7 +902,7 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             }
                                             disabled={isLoadingEntries}
                                             aria-label="Refresh folder contents"
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-60"
+                                            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-60 min-h-[44px] obs-touch-target-standard"
                                         >
                                             <RefreshCw
                                                 className={`h-3.5 w-3.5 ${
@@ -926,14 +929,14 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                             id="share-folder-filter"
                                             type="search"
                                             value={filterQuery}
-                                            onChange={(e) => setFilterQuery(e.target.value)}
+                                            onChange={(event) => setFilterQuery(event.target.value)}
                                             placeholder="Filter current folder..."
-                                            className="w-full rounded-xl border border-slate-800 bg-slate-950 pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                                            className="w-full min-h-[44px] rounded-xl border border-slate-800 bg-slate-950 pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                                         />
                                     </div>
                                     <p
                                         aria-live="polite"
-                                        className="text-xs text-slate-400"
+                                        className="text-xs text-slate-300"
                                     >
                                         {directoryCount}{' '}
                                         {directoryCount === 1 ? 'folder' : 'folders'}, {fileCount}{' '}
@@ -942,48 +945,48 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                 </div>
 
                                 {/* Entries Table */}
-                                <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/60">
+                                <div className="overflow-x-auto min-w-0 max-w-full border-y border-white/[0.07] bg-transparent">
                                     <table
                                         aria-label="Shared directory contents"
-                                        className="w-full text-left border-collapse text-sm"
+                                        className="w-full text-left border-collapse text-sm block md:table md:table-fixed"
                                     >
-                                        <thead>
-                                            <tr className="border-b border-slate-800/90 text-xs uppercase tracking-wider text-slate-400 bg-slate-900/60">
+                                        <thead className="hidden md:table-header-group">
+                                            <tr className="border-b border-white/[0.08] text-xs uppercase tracking-wider text-slate-400 bg-white/[0.02]">
                                                 <th scope="col" className="py-3 px-4 font-semibold">
                                                     Name
                                                 </th>
-                                                <th scope="col" className="py-3 px-4 font-semibold">
+                                                <th scope="col" className="hidden md:table-cell py-3 px-4 font-semibold w-24 whitespace-nowrap">
                                                     Type
                                                 </th>
-                                                <th scope="col" className="py-3 px-4 font-semibold">
+                                                <th scope="col" className="hidden md:table-cell py-3 px-4 font-semibold w-28 whitespace-nowrap">
                                                     Size
                                                 </th>
-                                                <th scope="col" className="py-3 px-4 font-semibold">
+                                                <th scope="col" className="hidden lg:table-cell py-3 px-4 font-semibold w-36 whitespace-nowrap">
                                                     Modified
                                                 </th>
                                                 <th
                                                     scope="col"
-                                                    className="py-3 px-4 font-semibold text-right"
+                                                    className="py-3 px-4 font-semibold text-right md:w-40 whitespace-nowrap"
                                                 >
                                                     Action
                                                 </th>
                                             </tr>
                                         </thead>
-                                        <tbody className="divide-y divide-slate-800/60">
+                                        <tbody className="divide-y divide-white/[0.06] block md:table-row-group">
                                             {isLoadingEntries && entries.length === 0 ? (
-                                                <tr>
+                                                <tr className="block md:table-row">
                                                     <td
                                                         colSpan={5}
-                                                        className="py-8 px-4 text-center text-xs text-slate-400"
+                                                        className="block md:table-cell py-8 px-4 text-center text-xs text-slate-400"
                                                     >
                                                         Loading folder entries...
                                                     </td>
                                                 </tr>
                                             ) : sortedFilteredEntries.length === 0 ? (
-                                                <tr>
+                                                <tr className="block md:table-row">
                                                     <td
                                                         colSpan={5}
-                                                        className="py-8 px-4 text-center text-xs text-slate-400"
+                                                        className="block md:table-cell py-8 px-4 text-center text-xs text-slate-400"
                                                     >
                                                         {filterQuery.trim()
                                                             ? 'No entries match your filter.'
@@ -999,9 +1002,9 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                                     return (
                                                         <tr
                                                             key={entry.path}
-                                                            className="hover:bg-slate-900/50 transition-colors"
+                                                            className="block md:table-row hover:bg-white/[0.03] transition-colors p-3.5 sm:p-4 md:p-0 border-b border-white/[0.06] md:border-b-0"
                                                         >
-                                                            <td className="py-3 px-4 font-medium text-slate-100">
+                                                            <td className="block md:table-cell py-1 md:py-2 px-0 md:px-4 font-medium text-slate-100 min-w-0">
                                                                 {isDir ? (
                                                                     <button
                                                                         type="button"
@@ -1011,84 +1014,101 @@ function PublicShareView({ initialToken }: PublicShareViewProps) {
                                                                             )
                                                                         }
                                                                         aria-label={`Open folder ${entry.name}`}
-                                                                        className="inline-flex items-center gap-2.5 text-left text-indigo-300 hover:text-indigo-200 focus:outline-none focus:underline"
+                                                                        title={entry.name}
+                                                                        className="inline-flex items-center gap-2.5 text-left text-indigo-300 hover:text-indigo-200 focus:outline-none focus:underline min-h-[44px] obs-touch-target-standard py-1.5 min-w-0 max-w-full w-full"
                                                                     >
                                                                         <Folder
                                                                             className="h-4 w-4 shrink-0 text-indigo-400"
                                                                             aria-hidden="true"
                                                                         />
-                                                                        <span className="break-all">
+                                                                        <span className="min-w-0 break-words [overflow-wrap:anywhere] font-medium" title={entry.name}>
                                                                             {entry.name}
                                                                         </span>
                                                                     </button>
                                                                 ) : (
-                                                                    <div className="inline-flex items-center gap-2.5 text-slate-200">
+                                                                    <div className="inline-flex items-center gap-2.5 text-slate-200 min-h-[44px] py-1.5 min-w-0 max-w-full w-full">
                                                                         <FileText
                                                                             className="h-4 w-4 shrink-0 text-slate-400"
                                                                             aria-hidden="true"
                                                                         />
-                                                                        <span className="break-all">
+                                                                        <span className="min-w-0 break-words [overflow-wrap:anywhere] font-medium" title={entry.name}>
                                                                             {entry.name}
                                                                         </span>
                                                                     </div>
                                                                 )}
+                                                                <div className="md:hidden mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-300">
+                                                                    <span className="text-slate-300">
+                                                                        {isDir ? 'Folder' : `File · ${formatShareBytes(entry.size)}`}
+                                                                    </span>
+                                                                    <span className="text-slate-600 select-none" aria-hidden="true">
+                                                                        ·
+                                                                    </span>
+                                                                    <span className="text-slate-400">
+                                                                        Modified {formatShareTimestamp(entry.modified)}
+                                                                    </span>
+                                                                </div>
+                                                                <p className="hidden md:block lg:hidden text-xs text-slate-400 mt-1">
+                                                                    Modified {formatShareTimestamp(entry.modified)}
+                                                                </p>
                                                             </td>
-                                                            <td className="py-3 px-4 text-xs text-slate-400">
+                                                            <td className="hidden md:table-cell py-2 px-4 text-xs text-slate-300">
                                                                 {isDir ? 'Folder' : 'File'}
                                                             </td>
-                                                            <td className="py-3 px-4 text-xs text-slate-300 whitespace-nowrap">
+                                                            <td className="hidden md:table-cell py-2 px-4 text-xs text-slate-300 whitespace-nowrap">
                                                                 {isDir
                                                                     ? '—'
                                                                     : formatShareBytes(entry.size)}
                                                             </td>
-                                                            <td className="py-3 px-4 text-xs text-slate-400 whitespace-nowrap">
+                                                            <td className="hidden lg:table-cell py-2 px-4 text-xs text-slate-300 break-words">
                                                                 {formatShareTimestamp(
                                                                     entry.modified
                                                                 )}
                                                             </td>
-                                                            <td className="py-3 px-4 text-right whitespace-nowrap">
-                                                                {isDir ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() =>
-                                                                            handleNavigateDirectory(
-                                                                                entry.path
-                                                                            )
-                                                                        }
-                                                                        aria-label={`Browse ${entry.name}`}
-                                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-700"
-                                                                    >
-                                                                        Open
-                                                                    </button>
-                                                                ) : metadata.allow_download ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() =>
-                                                                            void handleDownload(
-                                                                                entry.path,
-                                                                                entry.name
-                                                                            )
-                                                                        }
-                                                                        disabled={
-                                                                            downloadingTarget !== null
-                                                                        }
-                                                                        aria-busy={isDownloadingThis}
-                                                                        aria-label={`Download ${entry.name}`}
-                                                                        className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-60"
-                                                                    >
-                                                                        <Download
-                                                                            className="h-3.5 w-3.5"
-                                                                            aria-hidden="true"
-                                                                        />
-                                                                        {isDownloadingThis
-                                                                            ? 'Downloading...'
-                                                                            : 'Download'}
-                                                                    </button>
-                                                                ) : (
-                                                                    <span className="inline-block rounded-md bg-slate-900 px-2 py-0.5 text-xs text-slate-500 border border-slate-800">
-                                                                        View only
-                                                                    </span>
-                                                                )}
+                                                            <td className="block md:table-cell pt-2 pb-1 md:py-2 px-0 md:px-4 md:text-right whitespace-normal md:whitespace-nowrap">
+                                                                <div className="flex items-center justify-start md:justify-end gap-2 pt-1 md:pt-0">
+                                                                    {isDir ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() =>
+                                                                                handleNavigateDirectory(
+                                                                                    entry.path
+                                                                                )
+                                                                            }
+                                                                            aria-label={`Browse ${entry.name}`}
+                                                                            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 min-h-[44px] obs-touch-target-standard focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                                        >
+                                                                            Open
+                                                                        </button>
+                                                                    ) : metadata.allow_download ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() =>
+                                                                                void handleDownload(
+                                                                                    entry.path,
+                                                                                    entry.name
+                                                                                )
+                                                                            }
+                                                                            disabled={
+                                                                                downloadingTarget !== null
+                                                                            }
+                                                                            aria-busy={isDownloadingThis}
+                                                                            aria-label={`Download ${entry.name}`}
+                                                                            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3.5 py-2 text-xs font-medium text-indigo-200 hover:bg-white/[0.08] disabled:opacity-60 min-h-[44px] obs-touch-target-standard focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                                        >
+                                                                            <Download
+                                                                                className="h-3.5 w-3.5"
+                                                                                aria-hidden="true"
+                                                                            />
+                                                                            {isDownloadingThis
+                                                                                ? 'Downloading...'
+                                                                                : 'Download'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <span className="inline-flex items-center justify-center rounded-md bg-slate-900 px-2.5 py-1 text-xs text-slate-400 border border-slate-800 min-h-[32px]">
+                                                                            View only
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                             </td>
                                                         </tr>
                                                     );
@@ -1112,7 +1132,7 @@ export default function PublicSharePage() {
             fallback={
                 <main
                     aria-label="Public shared content"
-                    className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6"
+                    className="min-h-screen bg-transparent text-slate-100 flex items-center justify-center p-6"
                 >
                     <div
                         role="status"

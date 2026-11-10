@@ -158,7 +158,7 @@ export default function PredictionsCard() {
     };
 
     return (
-        <div className="obs-telemetry-surface p-5 relative overflow-hidden min-w-0 flex flex-col justify-between h-full">
+        <div className="@container obs-telemetry-surface p-5 relative overflow-hidden min-w-0 flex flex-col justify-between h-full">
             <div>
                 <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 mb-4 border-b border-white/[0.06] relative z-10">
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -189,7 +189,7 @@ export default function PredictionsCard() {
                 {report && (
                     <div className="space-y-3.5 relative z-10">
                         {/* Trend Badges */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+                        <div className="grid grid-cols-1 @[640px]:grid-cols-2 gap-x-6">
                             {[
                                 { label: 'CPU', trend: report.cpu_trend, type: 'cpu' as const },
                                 { label: 'Memory', trend: report.memory_trend, type: 'memory' as const },
@@ -197,11 +197,11 @@ export default function PredictionsCard() {
                                 { label: 'Network', trend: report.network_trend, type: 'network' as const },
                             ].map(({ label, trend, type }) => (
                                 <div key={label} className="min-w-0 py-3 border-b border-white/[0.06] flex flex-col gap-2.5">
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
                                         <span className="text-xs font-semibold text-slate-300">{label}</span>
-                                        <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded-md text-xs font-semibold uppercase border inline-flex items-center gap-1 ${trendColor(trend)}`}>
-                                            {trendIcon(trend)}
-                                            {trend}
+                                        <span className={`px-2 py-0.5 rounded-md text-xs font-semibold uppercase border inline-flex items-center gap-1 break-words ${trendColor(trend)}`}>
+                                            <span className="shrink-0">{trendIcon(trend)}</span>
+                                            <span className="break-words">{trend}</span>
                                         </span>
                                     </div>
                                     <div className="h-8">
@@ -220,14 +220,14 @@ export default function PredictionsCard() {
                         </div>
 
                         {/* Bottleneck & Confidence Row */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
-                            <div className="min-w-0 flex flex-wrap items-center justify-between gap-2 py-2.5 sm:pr-4">
+                        <div className="grid grid-cols-1 @[640px]:grid-cols-2 divide-y @[640px]:divide-y-0 @[640px]:divide-x divide-white/[0.06]">
+                            <div className="min-w-0 flex flex-wrap items-center justify-between gap-2 py-2.5 @[640px]:pr-4">
                                 <span className="text-xs font-medium text-slate-400">Bottleneck</span>
                                 <span className={`text-xs font-mono font-bold uppercase ${bottleneckColor(report.predicted_bottleneck)}`}>
                                     {report.predicted_bottleneck}
                                 </span>
                             </div>
-                            <div className="min-w-0 py-2.5 sm:pl-4 flex flex-col justify-center">
+                            <div className="min-w-0 py-2.5 @[640px]:pl-4 flex flex-col justify-center">
                                 <div className="flex items-center justify-between text-xs mb-1">
                                     <span className="text-slate-400">Confidence</span>
                                     <span className="text-purple-400 font-mono font-bold">{(report.confidence_score * 100).toFixed(0)}%</span>

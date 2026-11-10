@@ -941,7 +941,7 @@ export function StreamingHistoryExplorer({
                                 value={searchInput}
                                 onChange={(e) => setSearchInput(e.target.value)}
                                 placeholder="Search title, series, user, client or device"
-                                className="w-full pl-9 pr-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                                className="w-full pl-9 pr-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                             />
                         </div>
                     </div>
@@ -963,7 +963,7 @@ export function StreamingHistoryExplorer({
                                     e.target.value as NonNullable<StreamingHistoryQuery['window']>
                                 )
                             }
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="all">All Time (includes undated)</option>
                             <option value="7d">Last 7 Days (rolling)</option>
@@ -997,7 +997,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.from || ''}
                                 onChange={(e) => updateFilter('from', e.target.value)}
                                 placeholder="2026-10-01T00:00:00Z"
-                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                             />
                         </div>
                         <div>
@@ -1013,7 +1013,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.until || ''}
                                 onChange={(e) => updateFilter('until', e.target.value)}
                                 placeholder="2026-11-01T00:00:00Z"
-                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                                className="w-full px-3 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                             />
                         </div>
                     </div>
@@ -1548,7 +1548,7 @@ export function StreamingHistoryExplorer({
                             value={queryState.timezone ?? 'UTC'}
                             onChange={(e) => updateFilter('timezone', e.target.value)}
                             placeholder="UTC or America/New_York"
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                         />
                         <datalist id="sh-timezone-datalist">
                             {COMMON_TIMEZONES.map((tz) => (
@@ -1574,7 +1574,7 @@ export function StreamingHistoryExplorer({
                                     e.target.value as NonNullable<StreamingHistoryQuery['provenance']>
                                 )
                             }
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="all">All Provenances</option>
                             <option value="observed_session">Observed Session (Confirmed)</option>
@@ -1596,7 +1596,7 @@ export function StreamingHistoryExplorer({
                             id="sh-play-method-select"
                             value={queryState.playMethod || ''}
                             onChange={(e) => updateFilter('playMethod', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="">All Play Methods</option>
                             <option value="DirectPlay">Direct Play</option>
@@ -1618,7 +1618,7 @@ export function StreamingHistoryExplorer({
                             id="sh-media-type-select"
                             value={queryState.mediaType || ''}
                             onChange={(e) => updateFilter('mediaType', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="">All Media Types</option>
                             <option value="Movie">Movie</option>
@@ -1639,7 +1639,7 @@ export function StreamingHistoryExplorer({
                             id="sh-provider-select"
                             value={queryState.provider || ''}
                             onChange={(e) => updateFilter('provider', e.target.value)}
-                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                            className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                         >
                             <option value="">All Providers</option>
                             <option value="jellyfin">Jellyfin</option>
@@ -1670,7 +1670,7 @@ export function StreamingHistoryExplorer({
                                         e.target.value as NonNullable<StreamingHistoryQuery['sort']>
                                     )
                                 }
-                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                             >
                                 <option value="startedDesc">Newest Started First (undated last)</option>
                                 <option value="startedAsc">Oldest Started First (undated last)</option>
@@ -1691,7 +1691,7 @@ export function StreamingHistoryExplorer({
                                 onChange={(e) =>
                                     updateFilter('pageSize', Number(e.target.value) || 50)
                                 }
-                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                                className="px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                             >
                                 <option value={25}>25 / page</option>
                                 <option value={50}>50 / page (default)</option>
@@ -1739,7 +1739,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.serverId || ''}
                                 onChange={(e) => updateFilter('serverId', e.target.value)}
                                 placeholder="e.g. jf-srv-01"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
                             />
                         </div>
                         <div>
@@ -1755,7 +1755,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.userId || ''}
                                 onChange={(e) => updateFilter('userId', e.target.value)}
                                 placeholder="e.g. u-1"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
                             />
                         </div>
                         <div>
@@ -1771,7 +1771,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.client || ''}
                                 onChange={(e) => updateFilter('client', e.target.value)}
                                 placeholder="e.g. Swiftfin iOS"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
                             />
                         </div>
                         <div>
@@ -1787,7 +1787,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.device || ''}
                                 onChange={(e) => updateFilter('device', e.target.value)}
                                 placeholder="e.g. Apple TV"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
                             />
                         </div>
                         <div>
@@ -1803,7 +1803,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.itemId || ''}
                                 onChange={(e) => updateFilter('itemId', e.target.value)}
                                 placeholder="e.g. item-42"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
                             />
                         </div>
                         <div>
@@ -1819,7 +1819,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.libraryId || ''}
                                 onChange={(e) => updateFilter('libraryId', e.target.value)}
                                 placeholder="e.g. lib-movies"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 font-mono"
                             />
                         </div>
                         <div>
@@ -1835,7 +1835,7 @@ export function StreamingHistoryExplorer({
                                 value={queryState.genre || ''}
                                 onChange={(e) => updateFilter('genre', e.target.value)}
                                 placeholder="e.g. Sci-Fi"
-                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[40px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
+                                className="w-full px-2.5 py-1.5 rounded-xl obs-touch-target-standard min-h-[44px] min-w-0 bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100"
                             />
                         </div>
                     </div>

@@ -1,4 +1,4 @@
-import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder } from 'lucide-react';
+import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
     AI_MODELS,
     CLOUD_MODEL_IDS,
@@ -11,7 +11,7 @@ import {
     resolveProviderForModel,
 } from '@/lib/ai-models';
 import type { AIProviderID, LocalAIRuntimeID } from '@/lib/ai-models';
-import { useCallback, useEffect, useRef, useState, FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
 import GlassSelect, { type GlassSelectOption } from '@/components/ui/GlassSelect';
@@ -353,10 +353,67 @@ export default function SettingsTab({
         activeSettingsTab: activeTab,
         setActiveSettingsTab: setActiveTab,
     } = useSystemStore();
-    
+
+    const settingsFormId = useId();
+    const settingsNavigationRef = useRef<HTMLElement>(null);
+    const settingsRailManualNavigationRef = useRef(false);
+    const [canScrollLeft, setCanScrollLeft] = useState(false);
+    const [canScrollRight, setCanScrollRight] = useState(false);
+    const [hasOverflow, setHasOverflow] = useState(false);
+
+    const handleRailManualNavigation = () => {
+        settingsRailManualNavigationRef.current = true;
+    };
+
+    const handleScrollRail = (direction: 'left' | 'right') => {
+        const navigation = settingsNavigationRef.current;
+        if (!navigation) return;
+        settingsRailManualNavigationRef.current = true;
+        const scrollDelta = direction === 'left' ? -200 : 200;
+        navigation.scrollBy({ left: scrollDelta, behavior: 'smooth' });
+    };
+
     const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR<Record<string, string>>(
         '/api/v1/auth/settings'
     );
+    useEffect(() => {
+        const navigation = settingsNavigationRef.current;
+        if (!navigation) return;
+        settingsRailManualNavigationRef.current = false;
+        const updateScrollState = () => {
+            const scrollOverflow = navigation.scrollWidth > navigation.clientWidth + 1;
+            setHasOverflow(scrollOverflow);
+            setCanScrollLeft(navigation.scrollLeft > 1);
+            setCanScrollRight(navigation.scrollLeft + navigation.clientWidth < navigation.scrollWidth - 1);
+        };
+        const updateStateAndAlignment = () => {
+            const focusedElement = navigation.ownerDocument.activeElement;
+            const focusedButton = focusedElement instanceof HTMLButtonElement && navigation.contains(focusedElement) ? focusedElement : null;
+            const alignmentButton = focusedButton ?? navigation.querySelector<HTMLButtonElement>('[aria-current="page"]');
+            const navigationBounds = navigation.getBoundingClientRect();
+            if (alignmentButton && navigationBounds.width > 0 && !settingsRailManualNavigationRef.current) {
+                const alignmentBounds = alignmentButton.getBoundingClientRect();
+                if (alignmentBounds.left < navigationBounds.left) {
+                    navigation.scrollLeft += alignmentBounds.left - navigationBounds.left;
+                } else if (alignmentBounds.right > navigationBounds.right) {
+                    navigation.scrollLeft += alignmentBounds.right - navigationBounds.right;
+                }
+            }
+            updateScrollState();
+        };
+        updateStateAndAlignment();
+        const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateStateAndAlignment);
+        observer?.observe(navigation);
+        navigation.querySelectorAll('button').forEach((buttonElement) => observer?.observe(buttonElement));
+        window.addEventListener('resize', updateStateAndAlignment);
+        navigation.addEventListener('scroll', updateScrollState, { passive: true });
+        return () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', updateStateAndAlignment);
+            navigation.removeEventListener('scroll', updateScrollState);
+        };
+    }, [activeTab, isLoading, language]);
+
     const [settingsDraft, setSettingsDraft] = useState<Partial<typeof SETTINGS_DEFAULTS>>({});
     const savedSettings = readSettingsValues(settingsData);
     const {
@@ -725,8 +782,7 @@ export default function SettingsTab({
     if (isLoading) return <SettingsSkeleton />;
 
     const activeProvider = resolveProviderForModel(model);
-    const activeProviderModels = AI_MODELS[activeProvider] || [];
-    const activeModelDef = Object.values(AI_MODELS).flat().find(m => m.id === model) || {
+    const activeModelDef = Object.values(AI_MODELS).flat().find(candidateModel => candidateModel.id === model) || {
         id: model,
         name: model,
         tier: activeProvider === 'localai' ? ('local' as const) : ('latest' as const),
@@ -754,8 +810,8 @@ export default function SettingsTab({
             ? anthropicEndpoint || 'http://localhost:8080'
             : lmStudioEndpoint || 'http://localhost:1234';
 
-    const handleSave = async (e: FormEvent) => {
-        e.preventDefault();
+    const handleSave = async (event?: FormEvent) => {
+        if (event) event.preventDefault();
         const isLocalActive = activeProvider === 'localai';
         const resolvedModelForSave = isLocalActive ? localModel.trim() : model.trim();
         if (isForbiddenModelAlias(resolvedModelForSave)) {
@@ -906,15 +962,15 @@ export default function SettingsTab({
     return (
         <div className="space-y-6 animate-fade-in relative pb-12 w-full min-w-0">
             {/* Open Top Toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.07] relative z-20 shrink-0">
                 <div className="flex items-center gap-3.5">
-                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
+                    <div className="h-10 w-10 rounded-lg flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0">
                         <Settings size={20} />
                     </div>
                     <div>
                         <div className="flex items-center gap-2.5">
                             <h2 className="text-lg font-bold text-slate-100 tracking-tight">System &amp; Workspace Settings</h2>
-                            <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                            <span className="shrink-0 whitespace-nowrap text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
                                 Global Control
                             </span>
                         </div>
@@ -933,10 +989,10 @@ export default function SettingsTab({
                 <div className="flex flex-wrap items-center gap-2">
                     {['preferences', 'ai', 'system'].includes(activeTab) && (
                         <button
-                            type="button"
-                            onClick={handleSave}
+                            type="submit"
+                            form={settingsFormId}
                             disabled={isSaving}
-                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+                            className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all disabled:opacity-50"
                         >
                             <Save size={13} />
                             <span>{isSaving ? 'Saving...' : 'Save Configuration'}</span>
@@ -945,95 +1001,164 @@ export default function SettingsTab({
                 </div>
             </div>
 
-            {/* Horizontal Navigation Pills (flex-wrap so all 9 tabs fit cleanly without clipping) */}
-            <div className="flex flex-wrap gap-2 border-b border-white/[0.06] pb-4 relative z-10 obs-touch-pills">
+            <div className="sm:hidden border-b border-white/[0.07] pb-3">
+                <label htmlFor="settings-section" className="block text-xs text-slate-400 mb-2">Settings section</label>
+                <select id="settings-section" value={activeTab} onChange={(event) => setActiveTab(event.target.value as typeof activeTab)} className="obs-touch-target-standard w-full min-w-0 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-indigo-400">
+                    <option value="preferences">{t('interfacePreferences')}</option>
+                    <option value="ai">{t('flowAIEngine')}</option>
+                    <option value="system">{t('systemUpdates')}</option>
+                    <option value="backups">Backups</option>
+                    <option value="security">Security</option>
+                    <option value="dashboard">Dashboard</option>
+                    <option value="profile">Profile</option>
+                    <option value="oidc-clients">OIDC Clients</option>
+                    <option value="notifications">Notifications</option>
+                    <option value="mcbrowser">McBrowser</option>
+                </select>
+            </div>
+            <div className="hidden sm:flex min-h-[44px] items-center justify-between gap-2">
+                <p id="settings-nav-hint" className="text-xs text-slate-400">
+                    {hasOverflow ? '10 settings sections · Scroll horizontally for more →' : '10 settings sections'}
+                </p>
+                {hasOverflow && <div className="flex items-center gap-1">
+                    <button
+                        type="button"
+                        aria-label="Previous settings sections"
+                        disabled={!canScrollLeft}
+                        onClick={() => handleScrollRail('left')}
+                        className="obs-touch-target-standard min-h-[40px] min-w-[40px] p-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                    >
+                        <ChevronLeft size={14} />
+                    </button>
+                    <button
+                        type="button"
+                        aria-label="Next settings sections"
+                        disabled={!canScrollRight}
+                        onClick={() => handleScrollRail('right')}
+                        className="obs-touch-target-standard min-h-[40px] min-w-[40px] p-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                    >
+                        <ChevronRight size={14} />
+                    </button>
+                </div>}
+            </div>
+            <div className="hidden sm:block relative w-full min-w-0">
+                {canScrollLeft && (
+                    <div aria-hidden="true" className="pointer-events-none absolute left-0 top-0 bottom-2 w-8 bg-gradient-to-r from-slate-950 to-transparent z-20" />
+                )}
+                {canScrollRight && (
+                    <div aria-hidden="true" className="pointer-events-none absolute right-0 top-0 bottom-2 w-8 bg-gradient-to-l from-slate-950 to-transparent z-20" />
+                )}
+            <nav
+                ref={settingsNavigationRef}
+                aria-label="Settings navigation rail"
+                aria-describedby="settings-nav-hint"
+                onPointerDown={handleRailManualNavigation}
+                onTouchStart={handleRailManualNavigation}
+                onFocusCapture={(event) => {
+                    if (event.target instanceof HTMLButtonElement) settingsRailManualNavigationRef.current = false;
+                }}
+                onWheel={(event) => {
+                    if (event.deltaX !== 0 || event.shiftKey) handleRailManualNavigation();
+                }}
+                className="hidden sm:flex items-center gap-1 border-b border-white/[0.07] overflow-x-auto custom-scrollbar pb-2 relative z-10 w-full min-w-0"
+            >
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('preferences')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'preferences' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'preferences' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'preferences' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <Monitor size={15} /> {t('interfacePreferences')}
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('ai')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'ai' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'ai' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'ai' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <Sparkles size={15} /> {t('flowAIEngine')}
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('system')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'system' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'system' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'system' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <DownloadCloud size={15} /> {t('systemUpdates')}
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('backups')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'backups' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'backups' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'backups' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <HardDriveDownload size={15} /> Backups
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('security')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'security' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'security' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'security' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <Shield size={15} /> Security
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('dashboard')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'dashboard' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'dashboard' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'dashboard' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <LayoutDashboard size={15} /> Dashboard
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('profile')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'profile' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'profile' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'profile' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <UserCircle size={15} /> Profile
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('oidc-clients')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'oidc-clients' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'oidc-clients' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'oidc-clients' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <KeyRound size={15} /> OIDC Clients
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('notifications')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'notifications' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'notifications' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'notifications' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <Bell size={15} /> Notifications
                 </button>
                 <button 
                     type="button" 
                     onClick={() => setActiveTab('mcbrowser')}
-                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'mcbrowser' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                    aria-current={activeTab === 'mcbrowser' ? 'page' : undefined}
+                    className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2.5 text-xs font-semibold whitespace-nowrap border-b-2 -mb-px shrink-0 transition-colors flex items-center gap-2 ${activeTab === 'mcbrowser' ? 'border-indigo-400 text-indigo-300 bg-indigo-500/[0.06]' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-white/20'}`}
                 >
                     <Folder size={15} /> McBrowser
                 </button>
+            </nav>
             </div>
 
             {['preferences', 'ai', 'system'].includes(activeTab) ? (
                 <div className="space-y-8 relative z-10 w-full">
-                    <form onSubmit={handleSave} className="space-y-8 w-full">
+                    <form id={settingsFormId} onSubmit={handleSave} className="space-y-8 w-full">
                         
                         {/* -----------------------------
                             TAB: General Preferences 
                         ------------------------------- */}
                         {activeTab === 'preferences' && (
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in w-full">
-                                {/* LEFT CARD: Navigation & Localization */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col justify-between space-y-6 relative z-20">
+                            <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.07] border-b border-white/[0.07] w-full min-w-0 animate-fade-in">
+                                <div className="obs-canvas-section p-5 sm:p-6 space-y-6 relative z-20">
                                     <div className="space-y-6">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+                                                <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                                                     <LayoutDashboard size={18} />
                                                 </div>
                                                 <div>
@@ -1043,16 +1168,15 @@ export default function SettingsTab({
                                             </div>
                                         </div>
 
-                                        <div className="space-y-5">
-                                            {/* Default Dashboard */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                        <div className="divide-y divide-white/[0.07]">
+                                            <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <LayoutDashboard size={15} className="text-indigo-400" /> Default Dashboard
                                                     </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">Post-Login Route</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-400">Post-Login Route</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">Select the default view presented immediately after authentication.</p>
+                                                <p className="text-xs text-slate-400 leading-relaxed">Select the default view presented immediately after authentication.</p>
                                                 <GlassSelect
                                                     value={defaultDashboard}
                                                     onChange={setDefaultDashboard}
@@ -1061,15 +1185,14 @@ export default function SettingsTab({
                                                 />
                                             </div>
 
-                                            {/* Timezone */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                            <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Clock size={15} className="text-blue-400" /> Timezone
                                                     </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{timezone}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-400">{timezone}</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">Set your local timezone for system telemetry, cron schedules, and audit logs.</p>
+                                                <p className="text-xs text-slate-400 leading-relaxed">Set your local timezone for system telemetry, cron schedules, and audit logs.</p>
                                                 <GlassSelect
                                                     value={timezone}
                                                     onChange={setTimezone}
@@ -1078,15 +1201,14 @@ export default function SettingsTab({
                                                 />
                                             </div>
 
-                                            {/* Language */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                            <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-emerald-400" /> {t('language')}
                                                     </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{language.toUpperCase()}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-400">{language.toUpperCase()}</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">Determine the primary display language of the AetherFlow interface.</p>
+                                                <p className="text-xs text-slate-400 leading-relaxed">Determine the primary display language of the AetherFlow interface.</p>
                                                 <GlassSelect
                                                     value={language}
                                                     onChange={setLanguage}
@@ -1098,12 +1220,11 @@ export default function SettingsTab({
                                     </div>
                                 </div>
 
-                                {/* RIGHT CARD: Connectivity & Telemetry */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col justify-between space-y-6">
+                                <div className="obs-canvas-section p-5 sm:p-6 space-y-6">
                                     <div className="space-y-6">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                                                <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                                                     <Radio size={18} />
                                                 </div>
                                                 <div>
@@ -1113,36 +1234,34 @@ export default function SettingsTab({
                                             </div>
                                         </div>
 
-                                        <div className="space-y-5">
-                                            {/* Server Base Domain */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                        <div className="divide-y divide-white/[0.07]">
+                                            <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-indigo-400" /> Server Base Domain
                                                     </label>
                                                     <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">Apache2 Auto-Route</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">
+                                                <p className="text-xs text-slate-400 leading-relaxed">
                                                     Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Apache2 reverse proxy when installing apps.
                                                 </p>
                                                 <input
                                                     type="text"
                                                     value={baseDomain}
-                                                    onChange={(e) => setBaseDomain(e.target.value)}
+                                                    onChange={(event) => setBaseDomain(event.target.value)}
                                                     placeholder="domain.com"
-                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                                    className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-4 py-2.5 text-slate-200 text-sm font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
                                                 />
                                             </div>
 
-                                            {/* Transport Protocol */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                            <div className="py-4 first:pt-0 last:pb-0 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Radio size={15} className="text-indigo-400" /> Telemetry Transport
                                                     </label>
                                                     <span className="text-xs font-mono uppercase tracking-wider text-emerald-400">WebSocket</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">Full-duplex WebSocket streaming with real-time 1.0s telemetry updates.</p>
+                                                <p className="text-xs text-slate-400 leading-relaxed">Full-duplex WebSocket streaming with real-time 1.0s telemetry updates.</p>
                                             </div>
                                         </div>
                                     </div>
@@ -1154,14 +1273,14 @@ export default function SettingsTab({
                             TAB: Flow AI Engine 
                         ------------------------------- */}
                         {activeTab === 'ai' && (
-                            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in w-full">
+                            <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.07] border-b border-white/[0.07] w-full min-w-0 animate-fade-in">
                                 {/* LEFT/MAIN COLUMN: Active Provider, Model Selector, and Credentials */}
-                                <div className="lg:col-span-7 space-y-6">
+                                <div className="lg:col-span-7 divide-y divide-white/[0.07] min-w-0">
                                     {/* Active Provider & Default Model Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20">
-                                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
+                                    <div className="obs-canvas-section p-5 sm:p-6 space-y-6 relative z-20">
+                                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+                                                <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                                                     <Cpu size={18} />
                                                 </div>
                                                 <div>
@@ -1169,7 +1288,7 @@ export default function SettingsTab({
                                                     <p className="text-xs text-slate-400">Select your primary AI ecosystem and default inference model.</p>
                                                 </div>
                                             </div>
-                                            <span className="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                                            <span className="px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                                                 {activeModelDef.name}
                                             </span>
                                         </div>
@@ -1179,33 +1298,42 @@ export default function SettingsTab({
                                             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-3">
                                                 Inference Provider Ecosystem
                                             </label>
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                                {PROVIDER_CARDS.map((prov) => {
-                                                    const isSelected = activeProvider === prov.id;
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 rounded-xl border border-white/[0.08] overflow-hidden bg-transparent">
+                                                {PROVIDER_CARDS.map((providerItem, providerIndex) => {
+                                                    const isSelected = activeProvider === providerItem.id;
                                                     return (
                                                         <button
-                                                            key={prov.id}
+                                                            key={providerItem.id}
                                                             type="button"
+                                                            aria-pressed={isSelected}
                                                             onClick={() => {
-                                                                if (prov.id === 'localai') {
+                                                                if (providerItem.id === 'localai') {
                                                                     setModel(effectiveLocalModel);
-                                                                } else if (activeProvider !== prov.id && AI_MODELS[prov.id]?.[0]?.id) {
-                                                                    setModel(AI_MODELS[prov.id][0].id);
+                                                                } else if (activeProvider !== providerItem.id && AI_MODELS[providerItem.id]?.[0]?.id) {
+                                                                    setModel(AI_MODELS[providerItem.id][0].id);
                                                                 }
                                                             }}
-                                                            className={`obs-touch-target-standard obs-gpu-120hz-interactive p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 ${
+                                                            className={`obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive p-4 text-left transition-all flex flex-col justify-between gap-2.5 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-indigo-400 ${
+                                                                providerIndex < 3 ? 'border-b 2xl:border-b-0' : ''
+                                                            } ${
+                                                                providerIndex < 2 ? 'sm:border-b 2xl:border-b-0' : 'sm:border-b-0'
+                                                            } ${
+                                                                providerIndex % 2 === 0 ? 'sm:border-r' : 'sm:border-r-0'
+                                                            } ${
+                                                                providerIndex < 3 ? '2xl:border-r' : '2xl:border-r-0'
+                                                            } border-white/[0.07] ${
                                                                 isSelected
-                                                                    ? `${prov.activeBg} ${prov.activeBorder} shadow-lg`
-                                                                    : 'bg-slate-950/50 border-white/[0.06] hover:bg-white/[0.04] hover:border-white/15'
+                                                                    ? `${providerItem.activeBg} shadow-inner`
+                                                                    : 'bg-transparent hover:bg-white/[0.03]'
                                                             }`}
                                                         >
                                                             <div className="flex items-center justify-between">
-                                                                <Sparkles size={15} className={isSelected ? prov.accent : 'text-slate-500'} />
-                                                                <span className={`h-2 w-2 rounded-full ${isSelected ? 'bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]' : 'bg-slate-700'}`} />
+                                                                <Sparkles size={15} className={isSelected ? providerItem.accent : 'text-slate-500'} />
+                                                                <span className={`h-2 w-2 rounded-full ${isSelected ? 'bg-indigo-400 ring-2 ring-indigo-400/30' : 'bg-slate-700'}`} />
                                                             </div>
                                                             <div>
-                                                                <div className="text-xs font-bold text-slate-100 leading-tight">{prov.label}</div>
-                                                                <div className="text-xs text-slate-500 mt-0.5 line-clamp-1">{prov.subtitle}</div>
+                                                                <div className="text-xs font-bold text-slate-100 leading-tight">{providerItem.label}</div>
+                                                                <div className="text-xs text-slate-400 mt-0.5 leading-relaxed break-words">{providerItem.subtitle}</div>
                                                             </div>
                                                         </button>
                                                     );
@@ -1213,39 +1341,17 @@ export default function SettingsTab({
                                             </div>
                                         </div>
 
-                                        {/* Default AI Model Selector */}
-                                        <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
+                                        <div className="pt-6 border-t border-white/[0.07] space-y-3">
                                             <div className="flex flex-wrap items-center justify-between gap-2">
                                                 <div>
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Monitor size={15} className="text-blue-400" /> {t('defaultModel')}
                                                     </label>
-                                                    <p className="text-xs text-slate-500 mt-0.5">Default model loaded when launching FlowAI Assistant. Can be switched per-chat.</p>
+                                                    <p className="text-xs text-slate-400 leading-relaxed mt-0.5">Default model loaded when launching FlowAI Assistant. Can be switched per-chat.</p>
                                                 </div>
                                                 <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                                                     Tier: {activeModelDef.tier}
                                                 </span>
-                                            </div>
-
-                                            {/* Quick Model Pills for Active Provider */}
-                                            <div className="flex flex-wrap gap-2 pt-1">
-                                                {activeProviderModels.map((m) => (
-                                                    <button
-                                                        key={m.id}
-                                                        type="button"
-                                                        onClick={() => setModel(m.id)}
-                                                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border flex items-center gap-2 ${
-                                                            model === m.id
-                                                                ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-200 shadow-sm'
-                                                                : 'bg-slate-900/80 border-white/10 text-slate-400 hover:text-slate-200 hover:bg-white/5'
-                                                        }`}
-                                                    >
-                                                        <span>{m.name}</span>
-                                                        <span className="text-xs uppercase tracking-wider px-1.5 py-0.2 rounded bg-black/30 text-slate-400">
-                                                            {m.tier}
-                                                        </span>
-                                                    </button>
-                                                ))}
                                             </div>
 
                                             <div className="pt-1">
@@ -1254,19 +1360,18 @@ export default function SettingsTab({
                                                     onChange={setModel}
                                                     ariaLabel={t('defaultModel')}
                                                     options={Object.entries(AI_MODELS).flatMap(([providerId, models]) =>
-                                                        models.map((m) => ({
-                                                            value: m.id,
-                                                            label: m.name,
-                                                            badge: m.tier,
-                                                            badgeVariant: m.tier === 'latest' ? 'indigo' : 'slate',
+                                                        models.map((modelItem) => ({
+                                                            value: modelItem.id,
+                                                            label: modelItem.name,
+                                                            badge: modelItem.tier,
+                                                            badgeVariant: modelItem.tier === 'latest' ? 'indigo' : 'slate',
                                                             group: providerId.charAt(0).toUpperCase() + providerId.slice(1),
                                                         }))
                                                     )}
                                                 />
                                             </div>
 
-                                            {/* Installed Local Model ID & Local Runtime Target */}
-                                            <div className="pt-2 border-t border-white/[0.06] space-y-2.5">
+                                            <div className="pt-2 border-t border-white/[0.07] space-y-2.5">
                                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                                     <label
                                                         htmlFor="installed-local-model-input"
@@ -1275,23 +1380,23 @@ export default function SettingsTab({
                                                         <Cpu size={14} className="text-purple-400" /> Installed Local Model ID
                                                     </label>
                                                     <div className="flex flex-wrap gap-1.5">
-                                                        {LOCAL_AI_RUNTIMES.map((rt) => (
+                                                        {LOCAL_AI_RUNTIMES.map((runtimeItem) => (
                                                             <button
-                                                                key={rt.id}
+                                                                key={runtimeItem.id}
                                                                 type="button"
-                                                                onClick={() => setLocalRuntime(rt.id)}
-                                                                className={`px-2 py-1 rounded-md text-xs font-semibold border transition-colors ${
-                                                                    localRuntime === rt.id
+                                                                onClick={() => setLocalRuntime(runtimeItem.id)}
+                                                                className={`obs-touch-target-standard min-h-[32px] px-2 py-1 rounded-md text-xs font-semibold border transition-colors ${
+                                                                    localRuntime === runtimeItem.id
                                                                         ? 'bg-purple-500/20 border-purple-500/40 text-purple-200'
                                                                         : 'bg-slate-900 border-white/10 text-slate-400 hover:text-slate-200'
                                                                 }`}
                                                             >
-                                                                {rt.name}
+                                                                {runtimeItem.name}
                                                             </button>
                                                         ))}
                                                     </div>
                                                 </div>
-                                                <p className="text-xs text-slate-500">
+                                                <p className="text-xs text-slate-400 leading-relaxed">
                                                     Exact model identifier installed in your local runner (used for local chat and connection tests; never a provider alias).
                                                 </p>
                                                 <input
@@ -1299,19 +1404,19 @@ export default function SettingsTab({
                                                     aria-label="Installed Local Model ID"
                                                     type="text"
                                                     value={localModel}
-                                                    onChange={(e) => setLocalModel(e.target.value)}
+                                                    onChange={(event) => setLocalModel(event.target.value)}
                                                     placeholder="llama3.2:latest"
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                    className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                 />
                                             </div>
                                         </div>
                                     </div>
 
                                     {/* Cloud Provider API Keys Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-5">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                    <div className="obs-canvas-section p-5 sm:p-6 space-y-5">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/20">
+                                                <div className="p-2.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
                                                     <Key size={18} />
                                                 </div>
                                                 <div>
@@ -1321,15 +1426,15 @@ export default function SettingsTab({
                                             </div>
                                         </div>
 
-                                        <div className="space-y-4">
+                                        <div className="divide-y divide-white/[0.07]">
                                             {/* Google Gemini API Key */}
-                                            <div className={`p-4 rounded-xl border transition-colors space-y-3 ${activeProvider === 'gemini' ? 'bg-amber-500/[0.04] border-amber-500/25' : 'bg-slate-950/50 border-white/[0.06]'}`}>
+                                            <div className={`py-4 first:pt-0 last:pb-0 space-y-3 transition-colors ${activeProvider === 'gemini' ? 'bg-amber-500/[0.04] -mx-5 sm:-mx-6 px-5 sm:px-6 rounded-lg' : ''}`}>
                                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                                     <div>
                                                         <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                             <Key size={15} className="text-amber-400" /> {t('apiKeyTitle')}
                                                         </label>
-                                                        <p className="text-xs text-slate-500 mt-0.5">
+                                                        <p className="text-xs text-slate-400 leading-relaxed mt-0.5">
                                                             Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">Google AI Studio</a>.
                                                         </p>
                                                     </div>
@@ -1342,13 +1447,15 @@ export default function SettingsTab({
                                                         <input
                                                             type={showApiKey ? 'text' : 'password'}
                                                             value={apiKey}
-                                                            onChange={(e) => setApiKey(e.target.value)}
+                                                            onChange={(event) => setApiKey(event.target.value)}
                                                             placeholder={t('apiKeyPlaceholder')}
-                                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                            className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                         />
                                                         <button
                                                             type="button"
                                                             onClick={() => setShowApiKey(!showApiKey)}
+                                                            aria-label={showApiKey ? 'Hide Gemini API key' : 'Show Gemini API key'}
+                                                            aria-pressed={showApiKey}
                                                             className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                         >
                                                             {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -1358,7 +1465,7 @@ export default function SettingsTab({
                                                         type="button"
                                                         onClick={() => handleTestConnection('gemini')}
                                                         disabled={isTesting || !apiKey}
-                                                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-xl text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
+                                                        className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
                                                     >
                                                         {isTesting ? (
                                                             <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -1370,13 +1477,13 @@ export default function SettingsTab({
                                             </div>
 
                                             {/* OpenAI API Key */}
-                                            <div className={`p-4 rounded-xl border transition-colors space-y-3 ${activeProvider === 'openai' ? 'bg-emerald-500/[0.04] border-emerald-500/25' : 'bg-slate-950/50 border-white/[0.06]'}`}>
+                                            <div className={`py-4 first:pt-0 last:pb-0 space-y-3 transition-colors ${activeProvider === 'openai' ? 'bg-emerald-500/[0.04] -mx-5 sm:-mx-6 px-5 sm:px-6 rounded-lg' : ''}`}>
                                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                                     <div>
                                                         <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                             <Key size={15} className="text-emerald-400" /> OpenAI API Key
                                                         </label>
-                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to OpenAI for GPT-6 and GPT-6.1 model families.</p>
+                                                        <p className="text-xs text-slate-400 leading-relaxed mt-0.5">Connect to OpenAI for GPT-6 and GPT-6.1 model families.</p>
                                                     </div>
                                                     <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${openaiApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {openaiApiKey ? 'Key Configured' : 'Not Configured'}
@@ -1387,13 +1494,15 @@ export default function SettingsTab({
                                                         <input
                                                             type={showOpenaiApiKey ? 'text' : 'password'}
                                                             value={openaiApiKey}
-                                                            onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                                            onChange={(event) => setOpenaiApiKey(event.target.value)}
                                                             placeholder="sk-proj-..."
-                                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                            className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                         />
                                                         <button
                                                             type="button"
                                                             onClick={() => setShowOpenaiApiKey(!showOpenaiApiKey)}
+                                                            aria-label={showOpenaiApiKey ? 'Hide OpenAI API key' : 'Show OpenAI API key'}
+                                                            aria-pressed={showOpenaiApiKey}
                                                             className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                         >
                                                             {showOpenaiApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -1403,7 +1512,7 @@ export default function SettingsTab({
                                                         type="button"
                                                         onClick={() => handleTestConnection('openai')}
                                                         disabled={isTesting || !openaiApiKey}
-                                                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-xl text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
+                                                        className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
                                                     >
                                                         {isTesting ? (
                                                             <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -1415,13 +1524,13 @@ export default function SettingsTab({
                                             </div>
 
                                             {/* Anthropic API Key */}
-                                            <div className={`p-4 rounded-xl border transition-colors space-y-3 ${activeProvider === 'anthropic' ? 'bg-orange-500/[0.04] border-orange-500/25' : 'bg-slate-950/50 border-white/[0.06]'}`}>
+                                            <div className={`py-4 first:pt-0 last:pb-0 space-y-3 transition-colors ${activeProvider === 'anthropic' ? 'bg-orange-500/[0.04] -mx-5 sm:-mx-6 px-5 sm:px-6 rounded-lg' : ''}`}>
                                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                                     <div>
                                                         <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                             <Key size={15} className="text-orange-400" /> Anthropic API Key
                                                         </label>
-                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to Anthropic for Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models.</p>
+                                                        <p className="text-xs text-slate-400 leading-relaxed mt-0.5">Connect to Anthropic for Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models.</p>
                                                     </div>
                                                     <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${anthropicApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {anthropicApiKey ? 'Key Configured' : 'Not Configured'}
@@ -1432,13 +1541,15 @@ export default function SettingsTab({
                                                         <input
                                                             type={showAnthropicApiKey ? 'text' : 'password'}
                                                             value={anthropicApiKey}
-                                                            onChange={(e) => setAnthropicApiKey(e.target.value)}
+                                                            onChange={(event) => setAnthropicApiKey(event.target.value)}
                                                             placeholder="sk-ant-..."
-                                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                            className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-4 py-2.5 pr-11 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                         />
                                                         <button
                                                             type="button"
                                                             onClick={() => setShowAnthropicApiKey(!showAnthropicApiKey)}
+                                                            aria-label={showAnthropicApiKey ? 'Hide Anthropic API key' : 'Show Anthropic API key'}
+                                                            aria-pressed={showAnthropicApiKey}
                                                             className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                         >
                                                             {showAnthropicApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -1448,7 +1559,7 @@ export default function SettingsTab({
                                                         type="button"
                                                         onClick={() => handleTestConnection('anthropic')}
                                                         disabled={isTesting || (!anthropicApiKey && !anthropicEndpoint)}
-                                                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-xl text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
+                                                        className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
                                                     >
                                                         {isTesting ? (
                                                             <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -1462,10 +1573,10 @@ export default function SettingsTab({
                                     </div>
 
                                     {/* Local & Self-Hosted AI Endpoints Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-5">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                    <div className="obs-canvas-section p-5 sm:p-6 space-y-5">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                                                <div className="p-2.5 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20">
                                                     <Radio size={18} />
                                                 </div>
                                                 <div>
@@ -1476,16 +1587,16 @@ export default function SettingsTab({
                                         </div>
 
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                            <div className="p-4 rounded-lg bg-slate-950/40 border border-white/[0.07] space-y-2.5">
                                                 <label className="text-xs font-semibold text-slate-200 flex items-center gap-2">
                                                     <Radio size={14} className="text-purple-400" /> LM-Studio Endpoint
                                                 </label>
                                                 <input
                                                     type="text"
                                                     value={lmStudioEndpoint}
-                                                    onChange={(e) => setLmStudioEndpoint(e.target.value)}
+                                                    onChange={(event) => setLmStudioEndpoint(event.target.value)}
                                                     placeholder="http://localhost:1234"
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                    className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                 />
                                                 <button
                                                     type="button"
@@ -1497,22 +1608,22 @@ export default function SettingsTab({
                                                         })
                                                     }
                                                     disabled={isTesting}
-                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive w-full py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     <Radio size={13} className="text-purple-400" /> Test LM Studio
                                                 </button>
                                             </div>
 
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                            <div className="p-4 rounded-lg bg-slate-950/40 border border-white/[0.07] space-y-2.5">
                                                 <label className="text-xs font-semibold text-slate-200 flex items-center gap-2">
                                                     <Radio size={14} className="text-pink-400" /> Ollama Endpoint
                                                 </label>
                                                 <input
                                                     type="text"
                                                     value={ollamaEndpoint}
-                                                    onChange={(e) => setOllamaEndpoint(e.target.value)}
+                                                    onChange={(event) => setOllamaEndpoint(event.target.value)}
                                                     placeholder="http://localhost:11434"
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                    className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                 />
                                                 <button
                                                     type="button"
@@ -1524,36 +1635,36 @@ export default function SettingsTab({
                                                         })
                                                     }
                                                     disabled={isTesting}
-                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive w-full py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     <Radio size={13} className="text-pink-400" /> Test Ollama
                                                 </button>
                                             </div>
                                         </div>
 
-                                        <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2">
+                                        <div className="pt-4 border-t border-white/[0.07] space-y-2">
                                             <label className="text-xs font-semibold text-slate-200 flex items-center gap-2">
                                                 <Radio size={14} className="text-orange-400" /> Anthropic Custom Endpoint
                                             </label>
-                                            <p className="text-xs text-slate-500">Override the default Anthropic API URL if using an enterprise gateway or local simulator.</p>
+                                            <p className="text-xs text-slate-400 leading-relaxed">Override the default Anthropic API URL if using an enterprise gateway or local simulator.</p>
                                             <input
                                                 type="text"
                                                 value={anthropicEndpoint}
-                                                onChange={(e) => setAnthropicEndpoint(e.target.value)}
+                                                onChange={(event) => setAnthropicEndpoint(event.target.value)}
                                                 placeholder="https://api.anthropic.com/v1/"
-                                                className="w-full bg-slate-900 border border-white/10 rounded-xl px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                className="obs-touch-target-standard min-h-[44px] w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                             />
                                         </div>
                                     </div>
                                 </div>
 
                                 {/* RIGHT COLUMN: FlowAI Engine Architecture & System Prompt Guardrails */}
-                                <div className="lg:col-span-5 space-y-6">
+                                <div className="lg:col-span-5 divide-y divide-white/[0.07] min-w-0">
                                     {/* FlowAI Engine Architecture & Capabilities Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-5">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                    <div className="obs-canvas-section p-5 sm:p-6 space-y-5">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+                                                <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                                                     <Sparkles size={18} />
                                                 </div>
                                                 <div>
@@ -1561,7 +1672,7 @@ export default function SettingsTab({
                                                     <p className="text-xs text-slate-400">Live runtime summary & autonomous capabilities.</p>
                                                 </div>
                                             </div>
-                                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${
+                                            <span className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider border ${
                                                 isActiveProviderConfigured
                                                     ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                                                     : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
@@ -1571,28 +1682,28 @@ export default function SettingsTab({
                                         </div>
 
                                         <div className="grid grid-cols-2 gap-3">
-                                            <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05]">
+                                            <div className="p-3.5 rounded-lg bg-slate-950/50 border border-white/[0.07]">
                                                 <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Selected Provider</span>
                                                 <span className="text-sm font-bold text-slate-100 mt-1 block capitalize">{activeProvider}</span>
                                             </div>
-                                            <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05]">
+                                            <div className="p-3.5 rounded-lg bg-slate-950/50 border border-white/[0.07]">
                                                 <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Default Model</span>
-                                                <span className="text-sm font-bold text-indigo-300 mt-1 block truncate">{activeModelDef.name}</span>
+                                                <span className="text-sm font-bold text-indigo-300 mt-1 block break-words [overflow-wrap:anywhere]">{activeModelDef.name}</span>
                                             </div>
-                                            <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05] col-span-2">
+                                            <div className="p-3.5 rounded-lg bg-slate-950/50 border border-white/[0.07] col-span-2">
                                                 <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Active Endpoint Route</span>
-                                                <span className="text-xs font-mono text-slate-300 mt-1 block truncate">{activeEndpointSummary}</span>
+                                                <span className="text-xs font-mono text-slate-300 mt-1 block break-words [overflow-wrap:anywhere]">{activeEndpointSummary}</span>
                                             </div>
                                         </div>
 
                                         <div className="space-y-2.5 pt-1">
-                                            <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] text-xs">
+                                            <div className="flex items-center justify-between p-3 rounded-lg bg-white/[0.02] border border-white/[0.07] text-xs">
                                                 <span className="text-slate-300 flex items-center gap-2 font-medium">
                                                     <CheckCircle2 size={14} className="text-emerald-400" /> Approval Inbox Action Queueing
                                                 </span>
                                                 <span className="text-xs font-mono uppercase text-emerald-400">Enabled</span>
                                             </div>
-                                            <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] text-xs">
+                                            <div className="flex items-center justify-between p-3 rounded-lg bg-white/[0.02] border border-white/[0.07] text-xs">
                                                 <span className="text-slate-300 flex items-center gap-2 font-medium">
                                                     <Layers size={14} className="text-indigo-400" /> Live Telemetry & Log Context Injection
                                                 </span>
@@ -1603,7 +1714,7 @@ export default function SettingsTab({
                                         <button
                                             type="button"
                                             onClick={() => setActiveMainTab('ai')}
-                                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-3 px-4 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 text-xs font-bold transition-all flex items-center justify-center gap-2"
+                                            className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive w-full py-3 px-4 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 text-xs font-bold transition-all flex items-center justify-center gap-2"
                                         >
                                             <Sparkles size={15} />
                                             <span>Launch FlowAI Assistant</span>
@@ -1612,10 +1723,10 @@ export default function SettingsTab({
                                     </div>
 
                                     {/* System Prompt Guardrails Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-4">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                    <div className="obs-canvas-section p-5 sm:p-6 space-y-4">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                                                <div className="p-2.5 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20">
                                                     <Terminal size={18} />
                                                 </div>
                                                 <div>
@@ -1630,10 +1741,11 @@ export default function SettingsTab({
                                         </p>
 
                                         <textarea
+                                            aria-label="Custom System Prompt"
                                             value={prompt}
-                                            onChange={(e) => setPrompt(e.target.value)}
+                                            onChange={(event) => setPrompt(event.target.value)}
                                             rows={6}
-                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-xs leading-relaxed font-mono focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[140px] resize-y"
+                                            className="w-full bg-slate-900 border border-white/10 rounded-lg px-4 py-3 text-slate-200 text-xs leading-relaxed font-mono focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[140px] resize-y"
                                         />
                                     </div>
                                 </div>
@@ -1644,12 +1756,12 @@ export default function SettingsTab({
                             TAB: System Updates 
                         ------------------------------- */}
                         {activeTab === 'system' && (
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in w-full">
+                            <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.07] border-b border-white/[0.07] w-full min-w-0 animate-fade-in">
                                 {/* LEFT CARD: Release Channel & Update Status */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20 min-w-0 max-w-full">
-                                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
+                                <div className="obs-canvas-section p-5 sm:p-6 space-y-6 relative z-20 min-w-0 max-w-full">
+                                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-4">
                                         <div className="flex items-center gap-3">
-                                            <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+                                            <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                                                 <DownloadCloud size={18} />
                                             </div>
                                             <div>
@@ -1661,27 +1773,27 @@ export default function SettingsTab({
                                             type="button"
                                             onClick={handleCheckForUpdates}
                                             disabled={isCheckingUpdate}
-                                            className="obs-touch-target-standard obs-gpu-120hz-interactive bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/20 rounded-xl px-3.5 py-2 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/20 rounded-lg px-3.5 py-2 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
                                         >
                                             <RefreshCw size={14} className={isCheckingUpdate ? "animate-spin" : ""} />
                                             {isCheckingUpdate ? 'Checking...' : 'Check for Updates'}
                                         </button>
                                     </div>
 
-                                    <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5 relative z-30">
+                                    <div className="py-4 border-b border-white/[0.07] space-y-2.5 relative z-30">
                                         <div className="flex items-center justify-between">
                                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                 <Radio size={15} className="text-indigo-400" /> Update Channel
                                             </label>
                                             <span
-                                                className={`text-[11px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                                                className={`text-xs font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
                                                     UPDATE_CHANNEL_PILL_STYLES[updateChannel] ?? UPDATE_CHANNEL_PILL_STYLES.stable
                                                 }`}
                                             >
                                                 {updateChannel}
                                             </span>
                                         </div>
-                                        <p className="text-xs text-slate-500">Select the release branch. Save configuration to apply channel changes.</p>
+                                        <p className="text-xs text-slate-400 leading-relaxed">Select the release branch. Save configuration to apply channel changes.</p>
                                         <GlassSelect
                                             value={updateChannel}
                                             onChange={setUpdateChannel}
@@ -1691,14 +1803,14 @@ export default function SettingsTab({
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-400">
-                                                <div className="flex flex-col gap-3 p-4 bg-slate-950/60 rounded-xl border border-white/[0.06]">
+                                                <div className="flex flex-col gap-3 p-4 bg-slate-950/50 rounded-lg border border-white/[0.07]">
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-xs font-semibold text-slate-400">Current Version</span>
-                                                        <span className="font-mono text-xs font-bold text-slate-200 px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 break-all">{updateStatus?.currentVersion || updateData?.currentVersion || 'Unknown'}</span>
+                                                        <span className="font-mono text-xs font-bold text-slate-200 px-2.5 py-1 rounded-md bg-white/5 border border-white/5 break-all">{updateStatus?.currentVersion || updateData?.currentVersion || 'Unknown'}</span>
                                                     </div>
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-xs font-semibold text-slate-400">Latest Upstream Version</span>
-                                                        <span className="font-mono text-xs font-bold text-indigo-300 px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/20 break-all">{updateData?.latestVersion || 'Unknown'}</span>
+                                                        <span className="font-mono text-xs font-bold text-indigo-300 px-2.5 py-1 rounded-md bg-indigo-500/10 border border-indigo-500/20 break-all">{updateData?.latestVersion || 'Unknown'}</span>
                                                     </div>
                                                     <div className="flex justify-between items-center gap-3">
                                                         <span className="text-xs font-semibold text-slate-400">Runner Version</span>
@@ -1711,7 +1823,7 @@ export default function SettingsTab({
                                                         </div>
                                                     )}
                                                     {updateStatus?.operationId && (
-                                                        <div className="text-xs text-slate-500 break-all">Operation: {updateStatus.operationId}</div>
+                                                        <div className="text-xs text-slate-400 leading-relaxed break-all">Operation: {updateStatus.operationId}</div>
                                                     )}
                                                     {updateStatus?.phase && (
                                                         <div className="text-xs text-slate-400 break-words">Last phase: {updateStatus.phase}</div>
@@ -1719,7 +1831,7 @@ export default function SettingsTab({
                                                     {updateData?.url && !updateData.latestVersion?.includes('Unknown') && (
                                                         <div className="pt-1 border-t border-white/5 flex justify-end">
                                                             <a href={updateData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline transition-colors">
-                                                                View release details →
+                                                                View release details &rarr;
                                                             </a>
                                                         </div>
                                                     )}
@@ -1728,7 +1840,7 @@ export default function SettingsTab({
                                                 <div
                                                     role={updateView.kind === 'failed' || updateView.kind === 'interrupted' ? 'alert' : 'status'}
                                                     aria-live="polite"
-                                                    className={`flex items-start gap-2 p-4 rounded-xl border text-xs font-semibold break-words ${
+                                                    className={`flex items-start gap-2 p-4 rounded-lg border text-xs font-semibold break-words ${
                                                         updateView.isLatest
                                                             ? 'bg-emerald-500/5 border-emerald-500/15 text-emerald-400'
                                                             : updateView.kind === 'failed' || updateView.kind === 'interrupted'
@@ -1757,7 +1869,7 @@ export default function SettingsTab({
                                                             data-testid="run-system-update-button"
                                                             onClick={() => void handleRunUpdate(Date.now())}
                                                             disabled={!updateView.canLaunch}
-                                                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
+                                                            className="obs-touch-target-standard min-h-[44px] obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors text-center"
                                                         >
                                                             {updateView.isBusy ? 'Updating System...' : `Update to ${updateData?.latestVersion || 'release'}`}
                                                         </button>
@@ -1767,11 +1879,11 @@ export default function SettingsTab({
                                 </div>
 
                                 {/* RIGHT CARD: Update Policy & Build Telemetry Overview */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col justify-between space-y-6">
+                                <div className="obs-canvas-section p-5 sm:p-6 flex flex-col justify-between space-y-6">
                                     <div className="space-y-5">
-                                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
+                                        <div className="flex items-center justify-between border-b border-white/[0.07] pb-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                                                <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                                                     <Shield size={18} />
                                                 </div>
                                                 <div>
@@ -1787,30 +1899,35 @@ export default function SettingsTab({
                                         </div>
 
                                         {updateData?.message ? (
-                                            <div className="space-y-2">
-                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Upstream Release Notes & Diagnostics</span>
-                                                <div className={`${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-300'} bg-slate-950/60 border border-white/[0.06] p-4 rounded-xl overflow-y-auto max-h-64 break-words custom-scrollbar`}>
+                                            <details open={updateView.isLatest || updateView.kind === 'available'} className="space-y-2">
+                                                <summary className="obs-touch-target-standard min-h-[44px] cursor-pointer py-2 text-xs font-bold uppercase tracking-wider text-slate-400 focus-visible:outline-2 focus-visible:outline-indigo-400">
+                                                    {updateView.isLatest || updateView.kind === 'available' ? 'Upstream Release Notes & Diagnostics' : 'Last received upstream response (unverified)'}
+                                                </summary>
+                                                {!updateView.isLatest && updateView.kind !== 'available' && (
+                                                    <p className="text-xs leading-relaxed text-amber-300">Historical diagnostics only, not a current release-status confirmation. Use the update status above and Check for Updates to verify.</p>
+                                                )}
+                                                <div className={`${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-300'} bg-slate-950/50 border border-white/[0.07] p-4 rounded-lg overflow-y-auto max-h-64 break-words custom-scrollbar`}>
                                                     <FlowAiMarkdown
                                                         content={String(updateData.message)
                                                             .replace(/^\uFEFF/, '')
-                                                            .replace(/Release Notes \? /g, 'Release Notes — ')}
+                                                            .replace(/Release Notes \? /g, 'Release Notes \u2014 ')}
                                                         className={updateData.latestVersion?.includes('Unknown') ? 'text-xs text-amber-400' : 'text-xs'}
                                                     />
                                                 </div>
-                                            </div>
+                                            </details>
                                         ) : (
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] text-xs text-slate-400 leading-relaxed">
+                                            <div className="p-4 rounded-lg bg-slate-950/40 border border-white/[0.07] text-xs text-slate-400 leading-relaxed">
                                                 AetherFlow performs atomic binary verification and database schema snapshotting prior to applying any release channel updates.
                                             </div>
                                         )}
 
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                            <div className="p-3.5 rounded-xl bg-slate-950/50 border border-white/[0.06]">
-                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Pre-Update Snapshot</span>
+                                        <div className="rounded-xl border border-white/[0.08] divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07] grid grid-cols-1 sm:grid-cols-2 overflow-hidden bg-transparent">
+                                            <div className="p-3.5 bg-transparent">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">Pre-Update Snapshot</span>
                                                 <span className="text-xs font-semibold text-emerald-400 mt-1 block">Automatic SQLite Backup</span>
                                             </div>
-                                            <div className="p-3.5 rounded-xl bg-slate-950/50 border border-white/[0.06]">
-                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Service Continuity</span>
+                                            <div className="p-3.5 bg-transparent">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">Service Continuity</span>
                                                 <span className="text-xs font-semibold text-slate-200 mt-1 block">Zero-Downtime Container Keepalive</span>
                                             </div>
                                         </div>
@@ -1820,18 +1937,10 @@ export default function SettingsTab({
                         )}
 
                         {/* Action Footer Bar */}
-                        <div className="glass-panel p-4 px-6 rounded-2xl border border-white/[0.06] flex flex-wrap items-center justify-between gap-4">
+                        <div className="obs-canvas-section p-4 px-5 sm:px-6 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-4">
                             <p className="text-xs text-slate-400">
                                 Changes to <span className="text-slate-200 font-semibold">{activeTab === 'preferences' ? 'Interface Preferences' : activeTab === 'ai' ? 'FlowAI Engine' : 'System Updates'}</span> are persisted immediately to the AetherFlow Core database upon saving.
                             </p>
-                            <button
-                                type="submit"
-                                disabled={isSaving}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-500/50 rounded-xl text-xs font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
-                            >
-                                <Save size={15} />
-                                {isSaving ? t('saving') : t('saveConfig')}
-                            </button>
                         </div>
                     </form>
                 </div>

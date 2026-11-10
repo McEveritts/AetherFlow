@@ -357,9 +357,9 @@ export function McBrowserActions({
     <section
       aria-label="McBrowser Native Actions"
       data-testid="mcbrowser-actions-panel"
-      className={`rounded-xl border border-slate-800 bg-slate-900/90 p-4 text-slate-100 shadow-lg ${className}`}
+      className={`obs-canvas-section py-4 text-slate-100 ${className}`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-3">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
             <Archive className="h-4 w-4" aria-hidden="true" />
@@ -462,7 +462,7 @@ export function McBrowserActions({
 
       <form onSubmit={handleSubmit} className="mt-4 space-y-4" noValidate>
         {initialTargets.length > 0 && (
-          <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs text-slate-300">
+          <div className="flex items-center justify-between border-y border-white/[0.07] py-2 text-xs text-slate-300">
             <span>
               Workspace selection available ({initialTargets.length}{' '}
               {initialTargets.length === 1 ? 'item' : 'items'})
@@ -715,7 +715,7 @@ export function McBrowserActions({
               <button
                 type="button"
                 onClick={onRefresh}
-                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700"
+                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
               >
                 <RefreshCw className="h-3 w-3" aria-hidden="true" />
                 Refresh Directory
@@ -828,7 +828,7 @@ export function McBrowserActions({
                     {lastResponse.subtitles.map((track) => (
                       <li
                         key={track.path}
-                        className="rounded border border-slate-800 bg-slate-950/60 px-2 py-1 font-mono text-[11px]"
+                        className="rounded border border-slate-800 bg-slate-950/60 px-2 py-1 font-mono text-xs"
                       >
                         {track.label} ({track.format}) — {track.path}
                       </li>

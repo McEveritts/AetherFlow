@@ -1,7 +1,7 @@
 import React from 'react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { act, render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent, within } from '@testing-library/react';
 import OverviewTab from '@/components/tabs/OverviewTab';
 import Header from '@/components/layout/Header';
 import { SystemMetrics, MetricsHistory, HardwareReport } from '@/types/dashboard';
@@ -82,6 +82,30 @@ const mockHardware: HardwareReport = {
 };
 
 describe('OverviewTab', () => {
+    it('keeps all history window controls touch-sized without crowding the mobile row', () => {
+        render(<OverviewTab metrics={createMockMetrics()} hardware={mockHardware} history={mockHistory} />);
+        const historyControls = screen.getAllByRole('group', { name: 'Telemetry History Window' })[0];
+        expect(historyControls).toHaveClass('flex-wrap', 'max-w-full');
+        for (const control of within(historyControls).getAllByRole('button')) {
+            expect(control).toHaveClass('min-h-[44px]', 'min-w-[44px]');
+        }
+    });
+
+    it('provides a compact mobile scan summary before detailed telemetry and keeps it reactive', () => {
+        const metrics = createMockMetrics({ sonarr: { status: 'running', health: 'healthy' } });
+        const view = render(<OverviewTab metrics={metrics} hardware={mockHardware} history={mockHistory} />);
+        const summary = screen.getByLabelText('Mobile system summary');
+        expect(summary).toHaveClass('md:hidden', 'grid-cols-2');
+        expect(summary).toHaveTextContent('Processor load');
+        expect(summary).toHaveTextContent('Memory used');
+        expect(summary).toHaveTextContent('1 of 1');
+        view.rerender(<OverviewTab metrics={{ ...metrics, cpu_usage: 92, memory: { total: 0, used: 0 }, services: { sonarr: { status: 'error' } } }} hardware={mockHardware} history={mockHistory} />);
+        expect(summary).toHaveTextContent('92.0%');
+        expect(summary).toHaveTextContent('Unavailable');
+        expect(summary).toHaveTextContent('0 of 1');
+        expect(summary).toHaveTextContent('Needs attention1');
+    });
+
     beforeEach(() => {
         useConnectionStore.setState({
             connectionState: 'CONNECTED',
@@ -462,7 +486,7 @@ describe('OverviewTab', () => {
         expect(gridContainer?.parentElement).toBe(cockpit);
         const ribbon = screen.getByText('Uptime').parentElement?.parentElement?.parentElement;
         expect(ribbon?.parentElement).toBe(cockpit);
-        expect(ribbon).toHaveClass('border-b', 'bg-white/[0.01]', 'divide-y', 'sm:divide-y-0', 'sm:divide-x', 'divide-white/[0.07]');
+        expect(ribbon).toHaveClass('obs-metric-strip', 'bg-white/[0.01]');
     });
 
     it('embeds every lower panel in contiguous, responsive divided bands', () => {

@@ -100,12 +100,10 @@ export default function OIDCClientsTab() {
     // Loading
     if (isLoading && !data) {
         return (
-            <div className="space-y-4">
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-8">
-                    <div className="flex items-center justify-center gap-3 text-slate-400">
-                        <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
-                        <span className="text-sm">Loading clients...</span>
-                    </div>
+            <div className="min-w-0 border-b border-white/[0.07] p-12 text-center">
+                <div className="flex items-center justify-center gap-3 text-slate-400">
+                    <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+                    <span className="text-sm">Loading clients...</span>
                 </div>
             </div>
         );
@@ -114,59 +112,60 @@ export default function OIDCClientsTab() {
     // Error
     if (error) {
         return (
-            <div className="space-y-4">
-                <div className="rounded-2xl border border-red-500/20 bg-red-500/5 backdrop-blur-xl p-8 text-center">
-                    <Shield className="w-10 h-10 text-red-400 mx-auto mb-3" />
-                    <p className="text-red-400 font-medium">Failed to load OIDC clients</p>
-                </div>
+            <div role="status" className="border-b border-rose-500/25 bg-rose-500/[0.06] p-8 text-center min-w-0">
+                <Shield className="w-10 h-10 text-rose-400 mx-auto mb-3" />
+                <p className="text-rose-300 font-medium">Failed to load OIDC clients</p>
+                <p className="text-xs text-slate-400 mt-1">Please verify administrative credentials and backend status.</p>
             </div>
         );
     }
 
     return (
-        <div className="space-y-6">
-            {/* Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-white/[0.06]">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 pb-10">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.07]">
                 <div>
-                    <h3 className="text-base font-semibold text-slate-100">Client Applications</h3>
+                    <h3 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                        <Key size={18} className="text-indigo-400" />
+                        Client Applications
+                    </h3>
                     <p className="text-xs text-slate-400 mt-0.5">
                         Manage OAuth2/OIDC client applications registered with AetherFlow as an identity provider.
                     </p>
                 </div>
                 <button
                     onClick={() => setShowCreate(true)}
-                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 self-start sm:self-auto"
+                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 self-start sm:self-auto min-h-[40px]"
                 >
                     <Plus size={15} />
                     New Client
                 </button>
             </div>
 
-            {/* Client List */}
             {clients.length === 0 ? (
-                <div className="p-12 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl text-center">
+                <div className="py-16 text-center border-b border-white/[0.07]">
                     <Key className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-                    <p className="text-sm text-slate-400">No OIDC clients registered.</p>
+                    <p className="text-sm text-slate-300 font-medium">No OIDC clients registered.</p>
                     <p className="text-xs text-slate-500 mt-1">Create one to enable third-party auth integration.</p>
                 </div>
             ) : (
-                <div className="grid gap-4">
+                <div className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] divide-y divide-white/[0.07]">
                     {clients.map((client) => {
                         const uris = parseRedirectURIs(client.redirect_uris);
                         return (
-                            <div key={client.id} className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 hover:border-white/10 transition-all group">
-                                <div className="flex items-start justify-between">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+                            <div key={client.id} className="p-5 hover:bg-white/[0.02] transition-colors group min-w-0">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
                                             <Key size={18} className="text-indigo-400" />
                                         </div>
-                                        <div>
-                                            <h3 className="text-base font-semibold text-slate-100">{client.name}</h3>
+                                        <div className="min-w-0">
+                                            <h3 className="text-base font-semibold text-slate-100 break-words [overflow-wrap:anywhere]" title={client.name}>{client.name}</h3>
                                             <div className="flex items-center gap-2 mt-0.5">
-                                                <code className="text-xs text-slate-400 font-mono bg-white/[0.03] px-1.5 py-0.5 rounded">{client.id}</code>
+                                                <code title={client.id} className="min-w-0 text-xs text-slate-400 font-mono bg-white/[0.03] px-1.5 py-0.5 rounded break-all">{client.id}</code>
                                                 <button
                                                     onClick={() => handleCopy(client.id, `id-${client.id}`)}
-                                                    className="p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                                                    className="obs-touch-target-standard p-1 text-slate-500 hover:text-slate-300 transition-colors min-h-[32px] min-w-[32px] flex items-center justify-center"
+                                                    title="Copy Client ID"
                                                 >
                                                     {copiedField === `id-${client.id}` ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                                                 </button>
@@ -175,7 +174,7 @@ export default function OIDCClientsTab() {
                                     </div>
                                     <button
                                         onClick={() => setDeleteTarget(client)}
-                                        className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 p-2.5 rounded-lg hover:bg-red-500/10 text-slate-500 hover:text-red-400 transition-all flex items-center justify-center"
+                                        className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 p-2.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all flex items-center justify-center shrink-0 min-h-[40px] min-w-[40px]"
                                         title="Delete Client"
                                     >
                                         <Trash2 size={16} />
@@ -184,11 +183,11 @@ export default function OIDCClientsTab() {
 
                                 {/* Redirect URIs */}
                                 {uris.length > 0 && (
-                                    <div className="mt-3 pt-3 border-t border-white/[0.04]">
+                                    <div className="mt-3 pt-3 border-t border-white/[0.06]">
                                         <p className="text-xs text-slate-500 font-semibold uppercase tracking-wider mb-1.5">Redirect URIs</p>
                                         <div className="flex flex-wrap gap-1.5">
                                             {uris.map((uri, i) => (
-                                                <span key={i} className="text-xs font-mono text-slate-400 bg-white/[0.03] px-2 py-1 rounded-lg border border-white/[0.06]">
+                                                <span key={i} className="text-xs font-mono text-slate-300 bg-white/[0.03] px-2 py-1 rounded-lg border border-white/[0.06] break-all">
                                                     {uri}
                                                 </span>
                                             ))}
@@ -216,7 +215,7 @@ export default function OIDCClientsTab() {
                                 value={newName}
                                 onChange={(e) => setNewName(e.target.value)}
                                 placeholder="My Application"
-                                className="w-full px-4 py-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all"
+                                className="w-full px-4 py-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all min-h-[44px]"
                                 autoFocus
                             />
                         </div>
@@ -234,14 +233,14 @@ export default function OIDCClientsTab() {
                         <div className="flex justify-end gap-3 pt-2">
                             <button
                                 onClick={() => setShowCreate(false)}
-                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors min-h-[44px]"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleCreate}
                                 disabled={!newName.trim() || isSubmitting}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-all min-h-[44px]"
                             >
                                 {isSubmitting ? 'Creating...' : 'Create Client'}
                             </button>
@@ -267,7 +266,7 @@ export default function OIDCClientsTab() {
                                 <code className="flex-1 text-sm font-mono text-slate-200 bg-white/[0.03] px-3 py-2 rounded-lg border border-white/[0.08] break-all">
                                     {showSecret.client_id}
                                 </code>
-                                <button onClick={() => handleCopy(showSecret.client_id, 'new-id')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center">
+                                <button onClick={() => handleCopy(showSecret.client_id, 'new-id')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center min-h-[44px] min-w-[44px]">
                                     {copiedField === 'new-id' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} className="text-slate-400" />}
                                 </button>
                             </div>
@@ -279,7 +278,7 @@ export default function OIDCClientsTab() {
                                 <code className="flex-1 text-sm font-mono text-emerald-300 bg-emerald-500/5 px-3 py-2 rounded-lg border border-emerald-500/20 break-all">
                                     {showSecret.client_secret}
                                 </code>
-                                <button onClick={() => handleCopy(showSecret.client_secret, 'new-secret')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center">
+                                <button onClick={() => handleCopy(showSecret.client_secret, 'new-secret')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center min-h-[44px] min-w-[44px]">
                                     {copiedField === 'new-secret' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} className="text-slate-400" />}
                                 </button>
                             </div>
@@ -287,7 +286,7 @@ export default function OIDCClientsTab() {
 
                         <button
                             onClick={() => setShowSecret(null)}
-                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-all"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-all min-h-[44px]"
                         >
                             Done
                         </button>
@@ -306,14 +305,14 @@ export default function OIDCClientsTab() {
                         <div className="flex justify-end gap-3">
                             <button
                                 onClick={() => setDeleteTarget(null)}
-                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors min-h-[44px]"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleDelete}
                                 disabled={isSubmitting}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-all min-h-[44px]"
                             >
                                 {isSubmitting ? 'Deleting...' : 'Delete Client'}
                             </button>

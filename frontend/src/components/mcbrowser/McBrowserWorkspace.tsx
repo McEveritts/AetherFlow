@@ -84,6 +84,7 @@ import {
     searchMcBrowserEntries,
     updateMcBrowserPreferences,
 } from '@/lib/mcbrowser-workspace';
+import styles from './McBrowserWorkspace.module.css';
 
 export interface McBrowserWorkspaceProps {
     currentPath: string;
@@ -685,7 +686,7 @@ export default function McBrowserWorkspace({
                 disabled={!permissions.read}
                 aria-label={`Edit ${entry.name}`}
                 title="UTF-8 Editor — confined file target"
-                className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40"
+                className="obs-touch-target-standard min-h-[44px] px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40 inline-flex items-center justify-center transition-colors"
             >
                 Edit UTF-8
             </button>
@@ -1136,7 +1137,7 @@ export default function McBrowserWorkspace({
                 disabled={!permissions.share}
                 aria-label={`Share ${entry.name}`}
                 title="Share Link"
-                className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-indigo-300 disabled:opacity-40"
+                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl bg-white/[0.05] hover:bg-white/10 text-indigo-300 disabled:opacity-40 transition-colors"
             >
                 <Share2 size={13} />
             </button>
@@ -1264,7 +1265,7 @@ export default function McBrowserWorkspace({
             aria-describedby="mcbrowser-workspace-shortcuts"
             tabIndex={0}
             onKeyDown={handleWorkspaceKeyDown}
-            className="space-y-4 rounded-2xl border border-indigo-500/20 bg-slate-900/50 backdrop-blur-xl p-5"
+            className="obs-canvas-section py-5 space-y-4"
         >
             {/* Header & Policy/Usage Summary */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-white/[0.08]">
@@ -1274,13 +1275,13 @@ export default function McBrowserWorkspace({
                         <h3 className="text-sm font-bold text-slate-100 tracking-tight">
                             Advanced File Actions &amp; Parity Workspace
                         </h3>
-                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                             Scope: {policy.scope || 'My files'}
                         </span>
                         {usage && (
                             <span
                                 aria-label="Storage quota usage"
-                                className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 flex items-center gap-1.5"
+                                className="text-xs font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 flex items-center gap-1.5"
                             >
                                 <HardDrive size={12} />
                                 {formatBytes(usage.used_bytes)}
@@ -1300,7 +1301,7 @@ export default function McBrowserWorkspace({
                         type="button"
                         aria-expanded={actionsOpen}
                         onClick={() => setActionsOpen((open) => !open)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/30"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/30 transition-colors"
                     >
                         <Shield size={14} />
                         <span>Safe Built-In Actions</span>
@@ -1309,7 +1310,7 @@ export default function McBrowserWorkspace({
                         type="button"
                         onClick={openNewFileDialog}
                         disabled={!permissions.create}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                         <FilePlus size={14} />
                         <span>New File</span>
@@ -1319,7 +1320,7 @@ export default function McBrowserWorkspace({
                         type="button"
                         onClick={() => openSharesDialog()}
                         disabled={!permissions.share}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.05] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.05] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                         <Share2 size={14} className="text-indigo-400" />
                         <span>Share Links</span>
@@ -1336,7 +1337,7 @@ export default function McBrowserWorkspace({
                             onClick={() => handleUpdatePreferences({ view: 'list' })}
                             aria-pressed={normalizedView === 'list'}
                             aria-label="List view"
-                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 normalizedView === 'list'
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1350,7 +1351,7 @@ export default function McBrowserWorkspace({
                             onClick={() => handleUpdatePreferences({ view: 'grid' })}
                             aria-pressed={normalizedView === 'grid'}
                             aria-label="Grid view"
-                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 normalizedView === 'grid'
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1364,7 +1365,7 @@ export default function McBrowserWorkspace({
                             onClick={() => handleUpdatePreferences({ view: 'gallery' })}
                             aria-pressed={normalizedView === 'gallery'}
                             aria-label="Gallery view"
-                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 normalizedView === 'gallery'
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1380,7 +1381,7 @@ export default function McBrowserWorkspace({
                             }
                             aria-pressed={preferences.show_hidden}
                             aria-label="Toggle hidden files"
-                            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 preferences.show_hidden
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1396,7 +1397,7 @@ export default function McBrowserWorkspace({
                             }
                             aria-pressed={preferences.single_click}
                             aria-label="Toggle single click open"
-                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 preferences.single_click
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1413,7 +1414,7 @@ export default function McBrowserWorkspace({
                             }
                             aria-pressed={preferences.natural_sort !== false}
                             aria-label="Toggle natural sort"
-                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 preferences.natural_sort !== false
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1430,7 +1431,7 @@ export default function McBrowserWorkspace({
                             }
                             aria-pressed={Boolean(preferences.redirect_after_copy_move)}
                             aria-label="Toggle redirect after copy or move"
-                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 preferences.redirect_after_copy_move
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1445,7 +1446,7 @@ export default function McBrowserWorkspace({
                             }
                             aria-pressed={Boolean(preferences.date_format)}
                             aria-label="Toggle exact date format"
-                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                                 preferences.date_format
                                     ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                     : 'text-slate-400 hover:text-slate-200'
@@ -1459,7 +1460,7 @@ export default function McBrowserWorkspace({
                             onChange={(e) =>
                                 void handleUpdatePreferences({ locale: e.target.value })
                             }
-                            className="px-2 py-1 rounded-lg bg-black/50 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                            className="obs-touch-target-standard min-h-[44px] h-11 px-3 py-1.5 rounded-lg bg-black/50 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                         >
                             {LOCALE_OPTIONS.map((loc) => (
                                 <option key={loc} value={loc} className="bg-slate-900">
@@ -1479,7 +1480,7 @@ export default function McBrowserWorkspace({
             </div>
 
             {/* Policy Permission Badges & Metadata Notice */}
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
                 <div className="flex flex-wrap items-center gap-1.5" aria-label="Active policy permissions">
                     <Shield size={13} className="text-indigo-400" />
                     <span>Policy permissions:</span>
@@ -1509,7 +1510,7 @@ export default function McBrowserWorkspace({
             <form
                 onSubmit={handleSearchSubmit}
                 aria-label="Recursive server search"
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-black/30 p-3 rounded-xl border border-white/[0.06]"
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 border-y border-white/[0.07] py-3"
             >
                 <div className="relative flex-1">
                     {searchAiMode ? (
@@ -1542,7 +1543,7 @@ export default function McBrowserWorkspace({
                         }
                         aria-label="Recursive search query"
                         ref={searchInputRef}
-                        className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-black/50 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                        className="obs-touch-target-standard min-h-[44px] h-11 w-full pl-8 pr-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                     />
                 </div>
 
@@ -1553,7 +1554,7 @@ export default function McBrowserWorkspace({
                         aria-pressed={searchAiMode}
                         aria-label="Toggle FlowAI natural language search"
                         title="Pair file search with FlowAI for natural language queries"
-                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                        className={`obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
                             searchAiMode
                                 ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40'
                                 : 'bg-black/40 text-slate-400 border-white/10 hover:text-slate-200'
@@ -1572,7 +1573,7 @@ export default function McBrowserWorkspace({
                         value={searchType}
                         onChange={(e) => setSearchType(e.target.value as McBrowserSearchType)}
                         disabled={!permissions.read}
-                        className="px-2.5 py-1.5 rounded-xl bg-black/50 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                        className="obs-touch-target-standard min-h-[44px] h-11 px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                     >
                         <option value="all">All types</option>
                         <option value="file">Files only</option>
@@ -1582,7 +1583,7 @@ export default function McBrowserWorkspace({
                     <button
                         type="submit"
                         disabled={!permissions.read || searchLoading}
-                        className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 transition-colors"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 transition-colors"
                     >
                         {searchLoading ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
                         <span>Search Server</span>
@@ -1592,7 +1593,7 @@ export default function McBrowserWorkspace({
                         <button
                             type="button"
                             onClick={handleClearSearch}
-                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 text-slate-200 hover:bg-white/15 transition-colors"
+                            className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white/10 text-slate-200 hover:bg-white/15 transition-colors"
                         >
                             <X size={13} />
                             <span>Clear Search</span>
@@ -1635,7 +1636,7 @@ export default function McBrowserWorkspace({
                             {searchType}).
                         </span>
                         {searchAiInterpretation && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-500/20 border border-indigo-400/30 text-[11px] text-indigo-100">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-500/20 border border-indigo-400/30 text-xs text-indigo-100">
                                 <Sparkles size={11} className="text-indigo-300" />
                                 <span>{searchAiInterpretation}</span>
                             </span>
@@ -1671,14 +1672,14 @@ export default function McBrowserWorkspace({
             <div
                 role="region"
                 aria-label="Multi-select batch actions"
-                className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-black/30 border border-white/[0.06]"
+                className="flex flex-wrap items-center justify-between gap-3 py-3 border-b border-white/[0.07]"
             >
                 <div className="flex flex-wrap items-center gap-2.5">
                     <button
                         type="button"
                         onClick={toggleSelectAllVisible}
                         disabled={selectableVisibleEntries.length === 0}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 transition-colors"
                     >
                         {selectableVisibleEntries.length > 0 &&
                         selectableVisibleEntries.every((e) => selectedPaths.includes(e.path)) ? (
@@ -1693,15 +1694,15 @@ export default function McBrowserWorkspace({
                         <button
                             type="button"
                             onClick={() => setSelectedPaths([])}
-                            className="px-2 py-1 rounded-lg text-xs text-slate-400 hover:text-white"
+                            className="obs-touch-target-standard min-h-[44px] flex items-center px-3 py-2 rounded-xl text-xs text-slate-400 hover:text-white transition-colors"
                         >
                             Clear ({selectedPaths.length} selected)
                         </button>
                     )}
 
                     {/* Sort controls synced with preferences */}
-                    <div className="flex items-center gap-1 ml-1">
-                        <span className="text-[11px] text-slate-500">Sort:</span>
+                    <div className="flex flex-wrap items-center gap-1 ml-1">
+                        <span className="text-xs text-slate-500">Sort:</span>
                         {(['name', 'size', 'modified'] as McBrowserSortField[]).map((field) => {
                             const isCurrent = preferences.sort === field;
                             return (
@@ -1714,7 +1715,7 @@ export default function McBrowserWorkspace({
                                         void handleUpdatePreferences({ sort: field, direction: nextDir });
                                     }}
                                     aria-label={`Workspace sort by ${field}`}
-                                    className={`px-2 py-0.5 rounded-md text-[11px] font-semibold capitalize ${
+                                    className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center px-3 py-1.5 rounded-xl text-xs font-semibold capitalize transition-colors ${
                                         isCurrent
                                             ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                             : 'text-slate-400 hover:text-slate-200'
@@ -1733,7 +1734,7 @@ export default function McBrowserWorkspace({
                         type="button"
                         onClick={() => openBatchDialog('move')}
                         disabled={selectedPaths.length === 0 || !permissions.rename}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                         <Move size={13} className="text-indigo-400" />
                         <span>Batch Move</span>
@@ -1748,7 +1749,7 @@ export default function McBrowserWorkspace({
                                 ? 'Broken aliases and special files cannot be copied; use Batch Move or Batch Delete for leaf symlinks.'
                                 : undefined
                         }
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] border border-white/10 text-slate-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                         <Copy size={13} className="text-emerald-400" />
                         <span>Batch Copy</span>
@@ -1758,14 +1759,14 @@ export default function McBrowserWorkspace({
                         type="button"
                         onClick={() => openBatchDialog('delete')}
                         disabled={selectedPaths.length === 0 || !permissions.delete}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-500/15 border border-rose-500/30 text-rose-300 hover:bg-rose-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-500/15 border border-rose-500/30 text-rose-300 hover:bg-rose-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                         <Trash2 size={13} />
                         <span>Batch Delete</span>
                     </button>
 
                     {/* Archive Download Selector */}
-                    <div className="flex items-center gap-1 bg-black/40 border border-white/10 rounded-lg px-2 py-0.5">
+                    <div className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 bg-black/40 border border-white/10 rounded-xl px-3 py-1">
                         <label htmlFor="mcbrowser-archive-format" className="sr-only">
                             Archive format
                         </label>
@@ -1775,7 +1776,7 @@ export default function McBrowserWorkspace({
                             value={archiveFormat}
                             onChange={(e) => setArchiveFormat(e.target.value as McBrowserArchiveFormat)}
                             disabled={!permissions.download || archiveDownloading || hasUnsupportedArchiveEntries}
-                            className="bg-transparent text-xs text-slate-200 focus:outline-none"
+                            className="min-h-[44px] h-11 bg-transparent text-xs text-slate-200 focus:outline-none"
                         >
                             <option value="zip" className="bg-slate-900">
                                 ZIP
@@ -1807,7 +1808,7 @@ export default function McBrowserWorkspace({
                                     ? 'Broken aliases and special files cannot be archived.'
                                     : undefined
                             }
-                            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                             {archiveDownloading ? (
                                 <Loader2 size={13} className="animate-spin" />
@@ -1849,7 +1850,7 @@ export default function McBrowserWorkspace({
                 <div
                     role="list"
                     aria-label="Workspace gallery entries"
-                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
+                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.07] border border-white/[0.07]"
                 >
                     {visibleEntries.map((entry) => {
                         const isSelected = selectedPaths.includes(entry.path);
@@ -1868,13 +1869,13 @@ export default function McBrowserWorkspace({
                                         handleEntryPrimaryClick(entry);
                                     }
                                 }}
-                                className={`rounded-2xl border p-4 flex flex-col justify-between gap-4 transition-colors ${
+                                className={`p-4 flex flex-col justify-between gap-4 transition-colors ${
                                     isSelected
-                                        ? 'border-indigo-500/60 bg-indigo-500/15'
-                                        : 'border-white/[0.08] bg-black/30 hover:bg-white/[0.04]'
+                                        ? 'bg-indigo-950/60 ring-1 ring-inset ring-indigo-500/50'
+                                        : 'bg-slate-950/90 hover:bg-slate-900/90'
                                 }`}
                             >
-                                <div className="h-24 rounded-xl bg-gradient-to-br from-indigo-500/10 via-slate-900/60 to-emerald-500/10 border border-white/[0.05] flex items-center justify-center">
+                                <div className="h-24 bg-gradient-to-br from-indigo-500/10 via-slate-900/60 to-emerald-500/10 border-b border-white/[0.06] flex items-center justify-center">
                                     {targetKind === 'directory' ? (
                                         <Folder size={32} className="text-indigo-400" />
                                     ) : entry.kind === 'file' ? (
@@ -1891,8 +1892,8 @@ export default function McBrowserWorkspace({
                                             disabled={isUnsupported}
                                             aria-label={`Select ${entry.name}`}
                                             onChange={(event) => toggleSelectPath(entry.path, 'shiftKey' in event.nativeEvent && event.nativeEvent.shiftKey === true)}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500"
+                                            onClick={(event) => event.stopPropagation()}
+                                            className={`obs-checkbox ${styles.checkbox} rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500`}
                                         />
                                         <div className="min-w-0">
                                             {!canPrimaryOpen ? (
@@ -1913,17 +1914,17 @@ export default function McBrowserWorkspace({
                                                         : entry.name}
                                                 </button>
                                             )}
-                                            <span className="text-[11px] font-mono text-slate-500 block truncate">
+                                            <span className="text-xs font-mono text-slate-500 block truncate">
                                                 {formatWorkspaceDate(entry.modified)}
                                             </span>
                                         </div>
                                     </div>
-                                    <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-white/[0.06] text-slate-400 shrink-0">
+                                    <span className="text-xs font-mono uppercase px-1.5 py-0.5 rounded bg-white/[0.06] text-slate-400 shrink-0">
                                         {isNavigableSymlinkDir ? 'symlink → dir' : entry.kind}
                                     </span>
                                 </div>
 
-                                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-white/[0.05]">
+                                <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-white/[0.05]">
                                     <span>
                                         {targetKind === 'directory' ? '—' : formatBytes(entry.size)}
                                     </span>
@@ -1939,7 +1940,7 @@ export default function McBrowserWorkspace({
                                                     disabled={!permissions.read}
                                                     aria-label={`Edit ${entry.name}`}
                                                     title="UTF-8 Editor"
-                                                    className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40"
+                                                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40 transition-colors"
                                                 >
                                                     <Edit3 size={13} />
                                                 </button>
@@ -1950,7 +1951,7 @@ export default function McBrowserWorkspace({
                                                 disabled={!permissions.read}
                                                 aria-label={`Info for ${entry.name}`}
                                                 title="File Info & Checksums"
-                                                className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-emerald-300 disabled:opacity-40"
+                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-emerald-300 disabled:opacity-40 transition-colors"
                                             >
                                                 <Info size={13} />
                                             </button>
@@ -1960,7 +1961,7 @@ export default function McBrowserWorkspace({
                                                 disabled={!permissions.share}
                                                 aria-label={`Share ${entry.name}`}
                                                 title="Share Link"
-                                                className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40"
+                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40 transition-colors"
                                             >
                                                 <Share2 size={13} />
                                             </button>
@@ -1974,13 +1975,13 @@ export default function McBrowserWorkspace({
                                             onClick={(event) => { event.stopPropagation(); fetchEntryInfo(entry, 'sha256'); }}
                                             disabled={!permissions.read}
                                             aria-label={`Info for ${entry.name}`}
-                                            className="p-1 rounded hover:bg-white/10 text-emerald-300 disabled:opacity-40"
+                                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-emerald-300 disabled:opacity-40 transition-colors"
                                         >
                                             <Info size={13} />
                                         </button>
                                     )}
                                     {isSymlink && targetKind !== 'file' && targetKind !== 'directory' && (
-                                        <span className="text-[10px] font-mono text-amber-300/80">
+                                        <span className="text-xs font-mono text-amber-300/80">
                                             Editor / copy / archive / share pending
                                         </span>
                                     )}
@@ -1993,7 +1994,7 @@ export default function McBrowserWorkspace({
                 <div
                     role="list"
                     aria-label="Workspace grid entries"
-                    className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"
+                    className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-px bg-white/[0.07] border border-white/[0.07]"
                 >
                     {visibleEntries.map((entry) => {
                         const isSelected = selectedPaths.includes(entry.path);
@@ -2012,10 +2013,10 @@ export default function McBrowserWorkspace({
                                         handleEntryPrimaryClick(entry);
                                     }
                                 }}
-                                className={`rounded-xl border p-3.5 flex flex-col justify-between gap-3 transition-colors ${
+                                className={`p-3.5 flex flex-col justify-between gap-3 transition-colors ${
                                     isSelected
-                                        ? 'border-indigo-500/50 bg-indigo-500/15'
-                                        : 'border-white/[0.06] bg-black/25 hover:bg-white/[0.04]'
+                                        ? 'bg-indigo-950/60 ring-1 ring-inset ring-indigo-500/50'
+                                        : 'bg-slate-950/90 hover:bg-slate-900/90'
                                 }`}
                             >
                                 <div className="flex items-start justify-between gap-2">
@@ -2026,8 +2027,8 @@ export default function McBrowserWorkspace({
                                             disabled={isUnsupported}
                                             aria-label={`Select ${entry.name}`}
                                             onChange={(event) => toggleSelectPath(entry.path, 'shiftKey' in event.nativeEvent && event.nativeEvent.shiftKey === true)}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500"
+                                            onClick={(event) => event.stopPropagation()}
+                                            className={`obs-checkbox ${styles.checkbox} rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500`}
                                         />
                                         <div className="min-w-0">
                                             {!canPrimaryOpen ? (
@@ -2048,17 +2049,17 @@ export default function McBrowserWorkspace({
                                                         : entry.name}
                                                 </button>
                                             )}
-                                            <span className="text-[11px] font-mono text-slate-500 block truncate">
+                                            <span className="text-xs font-mono text-slate-500 block truncate">
                                                 {entry.path}
                                             </span>
                                         </div>
                                     </div>
-                                    <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-white/[0.06] text-slate-400 shrink-0">
+                                    <span className="text-xs font-mono uppercase px-1.5 py-0.5 rounded bg-white/[0.06] text-slate-400 shrink-0">
                                         {isNavigableSymlinkDir ? 'symlink → dir' : entry.kind}
                                     </span>
                                 </div>
 
-                                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-white/[0.05]">
+                                <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-white/[0.05]">
                                     <span>
                                         {targetKind === 'directory' ? '—' : formatBytes(entry.size)}
                                     </span>
@@ -2074,7 +2075,7 @@ export default function McBrowserWorkspace({
                                                     disabled={!permissions.read}
                                                     aria-label={`Edit ${entry.name}`}
                                                     title="UTF-8 Editor"
-                                                    className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40"
+                                                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40 transition-colors"
                                                 >
                                                     <Edit3 size={13} />
                                                 </button>
@@ -2085,7 +2086,7 @@ export default function McBrowserWorkspace({
                                                 disabled={!permissions.read}
                                                 aria-label={`Info for ${entry.name}`}
                                                 title="File Info & Checksums"
-                                                className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-emerald-300 disabled:opacity-40"
+                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-emerald-300 disabled:opacity-40 transition-colors"
                                             >
                                                 <Info size={13} />
                                             </button>
@@ -2095,7 +2096,7 @@ export default function McBrowserWorkspace({
                                                 disabled={!permissions.share}
                                                 aria-label={`Share ${entry.name}`}
                                                 title="Share Link"
-                                                className="p-1 rounded hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40"
+                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-slate-300 hover:text-indigo-300 disabled:opacity-40 transition-colors"
                                             >
                                                 <Share2 size={13} />
                                             </button>
@@ -2109,13 +2110,13 @@ export default function McBrowserWorkspace({
                                             onClick={(event) => { event.stopPropagation(); fetchEntryInfo(entry, 'sha256'); }}
                                             disabled={!permissions.read}
                                             aria-label={`Info for ${entry.name}`}
-                                            className="p-1 rounded hover:bg-white/10 text-emerald-300 disabled:opacity-40"
+                                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl hover:bg-white/10 text-emerald-300 disabled:opacity-40 transition-colors"
                                         >
                                             <Info size={13} />
                                         </button>
                                     )}
                                     {isSymlink && targetKind !== 'file' && targetKind !== 'directory' && (
-                                        <span className="text-[10px] font-mono text-amber-300/80">
+                                        <span className="text-xs font-mono text-amber-300/80">
                                             Editor / copy / archive / share pending
                                         </span>
                                     )}
@@ -2125,22 +2126,23 @@ export default function McBrowserWorkspace({
                     })}
                 </div>
             ) : (
-                <div className="overflow-x-auto min-w-0 max-w-full">
+                <div className={`overflow-x-auto min-w-0 max-w-full ${styles.tableContainer}`}>
                     <table
+                        role="table"
                         aria-label="Workspace selection table"
-                        className="w-full text-left border-collapse text-xs"
+                        className={`obs-mobile-ledger w-full text-left border-collapse text-xs min-w-0 ${styles.workspaceTable}`}
                     >
-                        <thead>
-                            <tr className="border-b border-white/[0.08] text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                                <th className="py-2 px-2.5 w-8">Select</th>
-                                <th className="py-2 px-2.5">Entry / Relative Path</th>
-                                <th className="py-2 px-2.5 hidden sm:table-cell">Kind</th>
-                                <th className="py-2 px-2.5">Size</th>
-                                <th className="py-2 px-2.5 hidden md:table-cell">Modified</th>
-                                <th className="py-2 px-2.5 text-right">Workspace Actions</th>
+                        <thead role="rowgroup">
+                            <tr role="row" className="border-b border-white/[0.08] text-xs font-bold uppercase tracking-wider text-slate-400">
+                                <th role="columnheader" scope="col" className="py-2 px-2.5 w-8">Select</th>
+                                <th role="columnheader" scope="col" className="py-2 px-2.5">Entry / Relative Path</th>
+                                <th role="columnheader" scope="col" className="py-2 px-2.5 hidden sm:table-cell">Kind</th>
+                                <th role="columnheader" scope="col" className="py-2 px-2.5">Size</th>
+                                <th role="columnheader" scope="col" className="py-2 px-2.5 hidden md:table-cell">Modified</th>
+                                <th role="columnheader" scope="col" className="py-2 px-2.5 text-right">Workspace Actions</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-white/[0.04]">
+                        <tbody role="rowgroup" className="divide-y divide-white/[0.04]">
                             {visibleEntries.map((entry) => {
                                 const isSelected = selectedPaths.includes(entry.path);
                                 const isUnsupported = entry.kind === 'other';
@@ -2151,6 +2153,7 @@ export default function McBrowserWorkspace({
 
                                 return (
                                     <tr
+                                        role="row"
                                         key={entry.path}
                                         aria-selected={isSelected}
                                         onClick={() => {
@@ -2163,8 +2166,10 @@ export default function McBrowserWorkspace({
                                         }`}
                                     >
                                         <td
-                                            className="py-2 px-2.5"
-                                            onClick={(e) => e.stopPropagation()}
+                                            role="cell"
+                                            data-label="Select"
+                                            className="py-2 px-2.5 min-w-0"
+                                            onClick={(event) => event.stopPropagation()}
                                         >
                                             <input
                                                 type="checkbox"
@@ -2172,10 +2177,10 @@ export default function McBrowserWorkspace({
                                                 disabled={isUnsupported}
                                                 aria-label={`Select ${entry.name}`}
                                                 onChange={(event) => toggleSelectPath(entry.path, 'shiftKey' in event.nativeEvent && event.nativeEvent.shiftKey === true)}
-                                                className="rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500"
+                                                className={`obs-checkbox ${styles.checkbox} rounded border-white/20 bg-black/50 text-indigo-500 focus:ring-indigo-500`}
                                             />
                                         </td>
-                                        <td className="py-2 px-2.5">
+                                        <td role="cell" data-primary data-label="Entry / Relative Path" className="py-2 px-2.5 min-w-0">
                                             <div className="flex items-center gap-2.5 min-w-0">
                                                 {targetKind === 'directory' ? (
                                                     <Folder size={15} className="text-indigo-400 shrink-0" />
@@ -2184,23 +2189,23 @@ export default function McBrowserWorkspace({
                                                 ) : (
                                                     <FileQuestion size={15} className="text-amber-400 shrink-0" />
                                                 )}
-                                                <div className="min-w-0">
+                                                <div className="min-w-0 flex-1">
                                                     {isUnsupported ? (
-                                                        <span className="font-medium text-slate-400">
+                                                        <span className="font-medium text-slate-400 break-words [overflow-wrap:anywhere] block min-w-0">
                                                             {entry.name} (Unsupported {entry.kind})
                                                         </span>
                                                     ) : isSymlink && targetKind !== 'file' && !isNavigableSymlinkDir ? (
-                                                        <span className="font-medium text-slate-300">
+                                                        <span className="font-medium text-slate-300 break-words [overflow-wrap:anywhere] block min-w-0">
                                                             {`${entry.name} (Symlink — move/delete link only; editor/copy/archive/share pending)`}
                                                         </span>
                                                     ) : (
                                                         <button
                                                             type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
                                                                 handleEntryPrimaryClick(entry);
                                                             }}
-                                                            className="font-medium text-slate-100 hover:text-indigo-300 text-left truncate block"
+                                                            className="font-medium text-slate-100 hover:text-indigo-300 text-left break-words [overflow-wrap:anywhere] block min-w-0 max-w-full"
                                                         >
                                                             {isNavigableSymlinkDir
                                                                 ? `${entry.name} (Directory alias)`
@@ -2208,35 +2213,38 @@ export default function McBrowserWorkspace({
                                                         </button>
                                                     )}
                                                     {searchResults !== null && (
-                                                        <span className="text-[11px] font-mono text-slate-500 block">
+                                                        <span className="text-xs font-mono text-slate-500 block break-words [overflow-wrap:anywhere] min-w-0">
                                                             {entry.path}
                                                         </span>
                                                     )}
                                                 </div>
                                             </div>
                                         </td>
-                                        <td className="py-2 px-2.5 hidden sm:table-cell font-mono text-slate-400 capitalize">
+                                        <td role="cell" data-label="Kind" className="py-2 px-2.5 hidden sm:table-cell font-mono text-slate-400 capitalize min-w-0">
                                             {isNavigableSymlinkDir ? 'symlink (dir)' : entry.kind}
                                         </td>
-                                        <td className="py-2 px-2.5 font-mono text-slate-300 whitespace-nowrap">
+                                        <td role="cell" data-label="Size" className="py-2 px-2.5 font-mono text-slate-300 whitespace-nowrap min-w-0">
                                             {targetKind === 'directory' ? '—' : formatBytes(entry.size)}
                                         </td>
-                                        <td className="py-2 px-2.5 hidden md:table-cell text-slate-400 whitespace-nowrap">
+                                        <td role="cell" data-label="Modified" className="py-2 px-2.5 hidden md:table-cell text-slate-400 whitespace-nowrap min-w-0">
                                             {formatWorkspaceDate(entry.modified)}
                                         </td>
                                         <td
-                                            className="py-2 px-2.5 text-right whitespace-nowrap"
-                                            onClick={(e) => e.stopPropagation()}
+                                            role="cell"
+                                            data-actions
+                                            data-label="Workspace Actions"
+                                            className="py-2 px-2.5 md:text-right min-w-0"
+                                            onClick={(event) => event.stopPropagation()}
                                         >
                                             {!isUnsupported && !isSymlink && (
-                                                <div className="inline-flex items-center gap-1">
+                                                <div className="inline-flex flex-wrap items-center gap-1.5 md:justify-end min-w-0">
                                                     {entry.kind === 'file' && (
                                                         <button
                                                             type="button"
                                                             onClick={() => loadFileIntoEditor(entry)}
                                                             disabled={!permissions.read}
                                                             aria-label={`Edit ${entry.name}`}
-                                                            className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40"
+                                                            className="obs-touch-target-standard min-h-[44px] px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40 inline-flex items-center justify-center transition-colors"
                                                         >
                                                             Edit UTF-8
                                                         </button>
@@ -2246,7 +2254,7 @@ export default function McBrowserWorkspace({
                                                         onClick={() => fetchEntryInfo(entry, 'sha256')}
                                                         disabled={!permissions.read}
                                                         aria-label={`Info for ${entry.name}`}
-                                                        className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40"
+                                                        className="obs-touch-target-standard min-h-[44px] px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-200 disabled:opacity-40 inline-flex items-center justify-center transition-colors"
                                                     >
                                                         Info / Hash
                                                     </button>
@@ -2255,7 +2263,7 @@ export default function McBrowserWorkspace({
                                                         onClick={() => openSharesDialog(entry.path)}
                                                         disabled={!permissions.share}
                                                         aria-label={`Share ${entry.name}`}
-                                                        className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-indigo-300 disabled:opacity-40"
+                                                        className="obs-touch-target-standard min-h-[44px] px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-indigo-300 disabled:opacity-40 inline-flex items-center justify-center transition-colors"
                                                     >
                                                         Share
                                                     </button>
@@ -2269,13 +2277,13 @@ export default function McBrowserWorkspace({
                                                     onClick={() => fetchEntryInfo(entry, 'sha256')}
                                                     disabled={!permissions.read}
                                                     aria-label={`Info for ${entry.name}`}
-                                                    className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-emerald-300 disabled:opacity-40"
+                                                    className="obs-touch-target-standard min-h-[44px] px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-emerald-300 disabled:opacity-40 inline-flex items-center justify-center transition-colors"
                                                 >
                                                     Info / Hash
                                                 </button>
                                             )}
                                             {isSymlink && targetKind !== 'file' && targetKind !== 'directory' && (
-                                                <span className="text-[11px] font-mono text-amber-300/80">
+                                                <span className="text-xs font-mono text-amber-300/80">
                                                     Editor / copy / archive / share pending
                                                 </span>
                                             )}
@@ -2340,7 +2348,7 @@ export default function McBrowserWorkspace({
                                     disabled={newFileBusy}
                                     className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-sm text-slate-100"
                                 />
-                                <p className="text-[11px] text-slate-400 mt-1">
+                                <p className="text-xs text-slate-400 mt-1">
                                     Target directory:{' '}
                                     <span className="font-mono text-slate-200">
                                         {currentPath ? `My files/${currentPath}` : 'My files'}
@@ -2662,10 +2670,10 @@ export default function McBrowserWorkspace({
                                         </span>
                                         {Object.entries(infoData.checksums || {}).map(([alg, digest]) => (
                                             <div key={alg} className="space-y-0.5">
-                                                <span className="text-[10px] font-mono uppercase text-indigo-300">
+                                                <span className="text-xs font-mono uppercase text-indigo-300">
                                                     {alg}:
                                                 </span>
-                                                <code className="block p-2 rounded bg-black/60 font-mono text-[11px] text-emerald-300 break-all">
+                                                <code className="block p-2 rounded bg-black/60 font-mono text-xs text-emerald-300 break-all">
                                                     {digest}
                                                 </code>
                                             </div>
@@ -2786,7 +2794,7 @@ export default function McBrowserWorkspace({
                                     </div>
 
                                     {!permissions.modify && (
-                                        <p className="text-[11px] text-amber-300/90">
+                                        <p className="text-xs text-amber-300/90">
                                             Overwrite is disabled because your account does not have{' '}
                                             <code>modify</code> permission.
                                         </p>
@@ -2815,9 +2823,9 @@ export default function McBrowserWorkspace({
                                     <input
                                         type="checkbox"
                                         checked={batchRecursiveDelete}
-                                        onChange={(e) => setBatchRecursiveDelete(e.target.checked)}
+                                        onChange={(event) => setBatchRecursiveDelete(event.target.checked)}
                                         disabled={batchRunning}
-                                        className="rounded border-white/20 bg-black/50 text-rose-500"
+                                        className={`obs-checkbox ${styles.checkbox} rounded border-white/20 bg-black/50 text-rose-500`}
                                     />
                                     <span>
                                         Use recursive delete (<code>POST /delete-recursive</code>) for selected directories
@@ -2840,7 +2848,7 @@ export default function McBrowserWorkspace({
                                     aria-label="Batch operation outcomes"
                                     className="space-y-1.5 max-h-52 overflow-y-auto p-3 rounded-xl bg-black/40 border border-white/10"
                                 >
-                                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                    <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
                                         Per-Item Batch Outcomes
                                     </p>
                                     {batchOutcomes.map((outcome) => (
@@ -2867,7 +2875,7 @@ export default function McBrowserWorkspace({
                                                 </span>
                                             </div>
                                             <span
-                                                className={`text-[11px] font-medium shrink-0 ${
+                                                className={`text-xs font-medium shrink-0 ${
                                                     outcome.status === 'success'
                                                         ? 'text-emerald-300'
                                                         : outcome.status === 'conflict'
@@ -3017,9 +3025,9 @@ export default function McBrowserWorkspace({
                                     <input
                                         type="checkbox"
                                         checked={shareAllowDownload}
-                                        onChange={(e) => setShareAllowDownload(e.target.checked)}
+                                        onChange={(event) => setShareAllowDownload(event.target.checked)}
                                         disabled={shareSubmitting}
-                                        className="rounded border-white/20 bg-black/50 text-indigo-500"
+                                        className={`obs-checkbox ${styles.checkbox} rounded border-white/20 bg-black/50 text-indigo-500`}
                                     />
                                     <span>Allow recipients to download</span>
                                 </label>
@@ -3076,14 +3084,14 @@ export default function McBrowserWorkspace({
                                                     <span className="font-mono font-semibold text-slate-100">
                                                         {share.path}
                                                     </span>
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
+                                                    <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
                                                         {share.allow_download ? 'Downloadable' : 'View-only'}
                                                     </span>
                                                 </div>
-                                                <div className="text-[11px] font-mono text-emerald-300 break-all">
+                                                <div className="text-xs font-mono text-emerald-300 break-all">
                                                     {share.url}
                                                 </div>
-                                                <div className="text-[10px] text-slate-500">
+                                                <div className="text-xs text-slate-500">
                                                     Expires: {share.expires_at ? formatWorkspaceDate(share.expires_at) : 'Never'}
                                                 </div>
                                             </div>

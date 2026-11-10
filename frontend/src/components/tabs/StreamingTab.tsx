@@ -967,7 +967,7 @@ export default function StreamingTab() {
     return (
         <div className="animate-fade-in relative z-10 w-full min-w-0 max-w-full">
             <div className="flex flex-col gap-2.5 sm:gap-4 pb-4 border-b border-white/[0.07] relative z-30">
-                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-3.5 w-full min-w-0">
+                <div className="flex flex-wrap xl:flex-nowrap items-center justify-between gap-2 sm:gap-3.5 w-full min-w-0">
                     <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
                         <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0 mt-0.5 sm:mt-0">
                             <Tv size={18} className="sm:hidden" />
@@ -2590,8 +2590,8 @@ export default function StreamingTab() {
                                                     {userStat.userName.slice(0, 2)}
                                                 </div>
                                                 <div className="min-w-0">
-                                                    <p className="text-sm font-bold text-slate-100 truncate">{userStat.userName}</p>
-                                                    <p className="text-[13px] text-slate-300 truncate">
+                                                    <p className="text-sm font-bold text-slate-100 break-words" title={userStat.userName}>{userStat.userName}</p>
+                                                    <p className="text-[13px] text-slate-300 break-words [overflow-wrap:anywhere]">
                                                         {userStat.uniqueItems} unique titles &middot; {userStat.lastDevice || 'Jellyfin Client'}
                                                     </p>
                                                 </div>

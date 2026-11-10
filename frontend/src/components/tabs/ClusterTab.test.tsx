@@ -1,5 +1,6 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import ClusterTab from './ClusterTab';
 import { apiFetch } from '@/lib/fetcher';
 
@@ -28,6 +29,16 @@ async function inspect(metrics: Record<string, unknown>) {
 
 beforeEach(() => jest.clearAllMocks());
 
+it('keeps node identity bounded while preserving the full hostname and address', () => {
+    render(<ClusterTab />);
+    const heading = screen.getByRole('heading', { name: mockNode.hostname });
+    expect(heading).toHaveClass('truncate');
+    expect(heading).toHaveAttribute('title', mockNode.hostname);
+    expect(heading.parentElement).toHaveClass('min-w-0');
+    expect(screen.getByText(mockNode.address)).toHaveClass('truncate');
+    expect(screen.getByText(mockNode.address)).toHaveAttribute('title', mockNode.address);
+});
+
 it('does not describe unknown service inventory as an empty inventory', async () => {
     await inspect({ status: 'online', services: null, services_status: 'unknown', services_observed_at: null });
     expect(await screen.findByText(/Service inventory is unavailable/)).toBeInTheDocument();
@@ -55,4 +66,67 @@ it('accepts a legacy successful service array without freshness metadata', async
     await inspect({ services: [{ name: 'legacy-fixture-app', status: 'running', managed_by: 'systemd', uptime: '1h' }] });
     expect(await screen.findByText('legacy-fixture-app')).toBeInTheDocument();
     expect(screen.queryByText(/Service inventory is unavailable/)).not.toBeInTheDocument();
+});
+
+it('contains inspector focus, dismisses neutrally and restores the telemetry opener', async () => {
+    const user = userEvent.setup();
+    mockedApiFetch.mockResolvedValue({ ok: true, json: async () => ({ services: [] }) } as Response);
+    render(<ClusterTab />);
+    const opener = screen.getByRole('button', { name: 'Telemetry & Services' });
+    await user.click(opener);
+    const dialog = screen.getByRole('dialog', { name: 'Node Telemetry Inspector' });
+    const close = within(dialog).getByRole('button', { name: 'Close Node Telemetry Inspector' });
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(within(dialog).getByRole('button', { name: 'Decommission Node' })).toHaveFocus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+});
+
+it('does not reopen a dismissed inspector when its metrics response arrives late', async () => {
+    const user = userEvent.setup();
+    let resolveMetrics!: (response: Response) => void;
+    mockedApiFetch.mockImplementation(() => new Promise<Response>((resolve) => { resolveMetrics = resolve; }));
+    render(<ClusterTab />);
+    await user.click(screen.getByRole('button', { name: 'Telemetry & Services' }));
+    await user.keyboard('{Escape}');
+    await act(async () => {
+        resolveMetrics({ ok: true, json: async () => ({ id: mockNode.id, services: [] }) } as Response);
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it('keeps full operating-system and network values readable inside the inspector', async () => {
+    await inspect({
+        system_info: { os: 'Debian GNU/Linux 13 Enterprise Worker', arch: 'aarch64', cpu_cores: 32 },
+        metrics: { net_rx_speed: '1234.56 MiB/s', net_tx_speed: '9876.54 MiB/s', uptime: '124 days 18 hours' },
+    });
+    const os = await screen.findByText('Debian GNU/Linux 13 Enterprise Worker (aarch64)');
+    expect(os).toHaveClass('break-words');
+    expect(os).not.toHaveClass('truncate');
+    expect(screen.getByText('↓ 1234.56 MiB/s')).toHaveClass('block');
+    expect(screen.getByText('↑ 9876.54 MiB/s')).toHaveClass('block');
+    expect(screen.getByText('124 days 18 hours')).not.toHaveClass('truncate');
+});
+
+it('contains enrollment focus and preserves the Done refresh and return-focus behavior', async () => {
+    const user = userEvent.setup();
+    mockedApiFetch.mockResolvedValue({ ok: true, json: async () => ({ enrollment_token: 'fixture-enrollment-token' }) } as Response);
+    render(<ClusterTab />);
+    const opener = screen.getByRole('button', { name: /Enroll Worker/ });
+    await user.click(opener);
+    const dialog = await screen.findByRole('dialog', { name: 'Enroll Remote Worker Node' });
+    const close = within(dialog).getByRole('button', { name: 'Close Enroll Remote Worker Node' });
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    const done = within(dialog).getByRole('button', { name: 'Done' });
+    expect(done).toHaveFocus();
+    await user.click(done);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    expect(mockMutate).toHaveBeenCalledTimes(1);
 });

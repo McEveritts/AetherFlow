@@ -10,7 +10,7 @@ export default function GlobalBanners() {
     if (banners.length === 0) return null;
 
     return (
-        <div className="flex flex-col gap-2 mb-4 px-4 sm:px-6 w-full z-40 relative">
+        <div className="flex flex-col mb-4 w-full min-w-0 z-40 relative">
             <AnimatePresence>
                 {banners.map((banner) => {
                     let Icon, bgColor, borderColor, textColor;
@@ -44,7 +44,7 @@ export default function GlobalBanners() {
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.95 }}
                             transition={{ duration: 0.2 }}
-                            className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border backdrop-blur-md shadow-lg ${bgColor} ${borderColor}`}
+                            className={`flex min-w-0 flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 border-b border-l-2 ${bgColor} ${borderColor}`}
                         >
                             <div className="flex items-start sm:items-center gap-3">
                                 <Icon size={20} className={`shrink-0 ${textColor}`} />
@@ -60,7 +60,7 @@ export default function GlobalBanners() {
                                             banner.onAction?.();
                                             if (banner.dismissible !== false) removeBanner(banner.id);
                                         }}
-                                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors border ${
+                                        className={`min-h-[44px] px-3 py-1.5 text-xs font-bold rounded-lg transition-colors border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${
                                             banner.type === 'critical' ? 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border-red-500/30' :
                                             banner.type === 'warning' ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/30' :
                                             'bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border-indigo-500/30'
@@ -72,7 +72,7 @@ export default function GlobalBanners() {
                                 {banner.dismissible !== false && (
                                     <button 
                                         onClick={() => removeBanner(banner.id)}
-                                        className="p-1.5 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
+                                        className="min-h-[44px] min-w-[44px] p-1.5 flex items-center justify-center text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                                         aria-label="Dismiss banner"
                                     >
                                         <X size={16} />

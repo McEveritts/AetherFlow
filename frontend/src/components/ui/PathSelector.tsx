@@ -144,7 +144,7 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
           onChange={handleInputChange}
           onFocus={handleInputFocus}
           placeholder={placeholder}
-          className="w-full min-h-[44px] bg-black/60 border border-white/10 text-slate-100 placeholder-slate-500 rounded-xl py-2.5 pl-11 pr-9 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-xs"
+          className="w-full min-h-[44px] bg-black/60 border border-white/10 text-slate-100 placeholder-slate-500 rounded-xl py-2.5 pl-11 pr-12 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-xs"
         />
 
         <button
@@ -152,7 +152,7 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
           onClick={handleToggle}
           tabIndex={-1}
           aria-label="Toggle Directory Dropdown"
-          className="absolute right-0 px-2.5 h-full text-slate-400 hover:text-indigo-400 focus:outline-none transition-colors z-10 flex items-center justify-center"
+          className="obs-touch-target-standard min-w-[44px] min-h-[44px] absolute right-0 px-2.5 h-full text-slate-400 hover:text-indigo-400 focus:outline-none transition-colors z-10 flex items-center justify-center"
         >
           <ChevronDown size={15} className={`transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : 'text-slate-400'}`} />
         </button>

@@ -198,11 +198,8 @@ export default function BackupTab() {
     };
 
     return (
-        <div className="animate-fade-in relative z-10 w-full min-w-0">
-            {/* Background glow */}
-            <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
-
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 pb-3 border-b border-white/[0.06] relative z-10">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 pb-10">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-white/[0.07] relative z-10">
                 <div>
                     <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
                         <HardDriveDownload size={18} className="text-emerald-400" />
@@ -216,10 +213,10 @@ export default function BackupTab() {
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative z-10">
+            <div className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07]">
 
                 {/* Manual Backup Trigger */}
-                <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col justify-between">
+                <div className="p-5 sm:p-6 flex flex-col justify-between min-w-0 space-y-6">
                     <div>
                         <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center text-emerald-400 mb-4 border border-emerald-500/20">
                             <Database size={24} />
@@ -230,148 +227,154 @@ export default function BackupTab() {
                         </p>
                     </div>
 
-                        <button
-                            onClick={handleRunBackup}
-                            disabled={backupState.status === 'running'}
-                            className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${backupState.status === 'running'
-                                ? 'bg-emerald-600/50 cursor-not-allowed'
-                                : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20'
-                                }`}
-                        >
-                            {backupState.status === 'running' ? (
-                                <>
-                                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                                    Snapshotting...
-                                </>
-                            ) : (
-                                <>
-                                    <Archive size={20} />
-                                    Generate New Archive
-                                </>
-                            )}
-                        </button>
-                    </div>
+                    <button
+                        onClick={handleRunBackup}
+                        disabled={backupState.status === 'running'}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-3.5 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 min-h-[44px] ${backupState.status === 'running'
+                            ? 'bg-emerald-600/50 cursor-not-allowed'
+                            : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20'
+                            }`}
+                    >
+                        {backupState.status === 'running' ? (
+                            <>
+                                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                Snapshotting...
+                            </>
+                        ) : (
+                            <>
+                                <Archive size={18} />
+                                Generate New Archive
+                            </>
+                        )}
+                    </button>
+                </div>
 
-                    {/* Smart Schedule Card */}
-                    <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col justify-between">
-                        <div>
-                            <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center text-purple-400 mb-4 border border-purple-500/20">
+                <div className="p-5 sm:p-6 flex flex-col justify-between min-w-0 space-y-6">
+                    <div>
+                        <div className="flex justify-between items-start mb-4">
+                            <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center text-purple-400 border border-purple-500/20">
                                 <BrainCircuit size={24} />
                             </div>
-                            <h4 className="text-base font-bold text-slate-100 mb-1">Smart Schedule</h4>
-                            <p className="text-slate-400 text-xs leading-relaxed mb-4">
-                                AI analyzes 30-day I/O patterns to find the optimal low-traffic backup window automatically.
-                            </p>
-
-                            {schedule?.optimal_window && (
-                                <div className="space-y-3 mb-4">
-                                    <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4">
-                                        <div className="flex items-center justify-between mb-2">
-                                            <span className="text-[10px] uppercase tracking-wider text-purple-400 font-bold">Optimal Window</span>
-                                            <span className="text-xs text-purple-300 font-bold">{(schedule.optimal_window.confidence * 100).toFixed(0)}% confidence</span>
-                                        </div>
-                                        <p className="text-2xl font-bold text-slate-200">
-                                            {formatHour(schedule.optimal_window.optimal_hour)} – {formatHour(schedule.optimal_window.optimal_hour + Math.ceil(schedule.optimal_window.duration_mins / 60))} {schedule.optimal_window.timezone}
-                                        </p>
-                                        <p className="text-xs text-slate-400 mt-2 leading-relaxed">{schedule.optimal_window.reasoning}</p>
-                                    </div>
-
-                                    {schedule.mode === 'smart' && schedule.next_backup_at && (
-                                        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
-                                            <div className="flex items-center justify-between mb-2">
-                                                <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Next Scheduled Smart Backup</span>
-                                                <Clock size={12} className="text-slate-500" />
-                                            </div>
-                                            <p className="text-sm font-medium text-slate-300">
-                                                Next scheduled smart backup: {new Date(schedule.next_backup_at).toLocaleString()}
-                                            </p>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                            <span className="text-xs font-mono uppercase bg-purple-500/10 text-purple-400 border border-purple-500/20 px-2.5 py-1 rounded-full">
+                                FlowAI Scheduling
+                            </span>
                         </div>
+                        <h4 className="text-base font-bold text-slate-100 mb-1">Smart Scheduling Engine</h4>
+                        <p className="text-slate-400 text-xs leading-relaxed mb-4">
+                            Dynamically schedules snapshots during observed telemetry lulls to guarantee zero I/O contention.
+                        </p>
 
-                        <button
-                            onClick={toggleSmartSchedule}
-                            disabled={isTogglingSchedule}
-                            className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${schedule?.mode === 'smart'
-                                ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-500/20'
-                                : 'bg-slate-700 hover:bg-slate-600 shadow-none'
-                                }`}
-                        >
-                            {isTogglingSchedule ? (
-                                <Loader2 size={20} className="animate-spin" />
-                            ) : schedule?.mode === 'smart' ? (
-                                <><ToggleRight size={20} /> Smart Scheduling ON</>
-                            ) : (
-                                <><ToggleLeft size={20} /> Enable Smart Scheduling</>
-                            )}
-                        </button>
-                    </div>
-
-                    {/* Status Console & Previous Backups */}
-                    <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col h-[500px]">
-                        <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-6 flex justify-between items-center">
-                            <span className="flex items-center gap-2"><Clock size={16} /> Archive Snapshots</span>
-                            <span className="text-xs bg-slate-800 px-2 py-1 rounded-md">{backups.length} Total</span>
-                        </h3>
-
-                        {/* Recent Status (if acting) */}
-                        {backupState.status !== 'idle' && (
-                            <div className={`mb-6 p-4 rounded-xl border ${backupState.status === 'success' ? 'bg-emerald-500/10 border-emerald-500/20' : backupState.status === 'error' ? 'bg-red-500/10 border-red-500/20' : 'bg-slate-800/50 border-white/10'} flex items-center gap-4`}>
-                                {backupState.status === 'running' && <div className="w-6 h-6 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin"></div>}
-                                {backupState.status === 'success' && <CheckCircle2 size={24} className="text-emerald-400" />}
-                                {backupState.status === 'error' && <div className="text-red-400 font-bold text-xl">!</div>}
-
-                                <div>
-                                    <h4 className={`font-bold text-sm ${backupState.status === 'error' ? 'text-red-400' : 'text-slate-200'}`}>
-                                        {backupState.status === 'running' ? 'Snapshotting...' : backupState.status === 'error' ? 'Operation Failed' : 'Backup Successful'}
-                                    </h4>
-                                    <p className="text-xs text-slate-400">{backupState.message}</p>
+                        {schedule?.optimal_window && (
+                            <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-2">
+                                <div className="flex items-center justify-between text-xs">
+                                    <span className="text-slate-400">Optimal Backup Window:</span>
+                                    <span className="text-purple-300 font-mono font-bold">
+                                        {formatHour(schedule.optimal_window.optimal_hour)} - {formatHour(schedule.optimal_window.optimal_hour + Math.ceil(schedule.optimal_window.duration_mins / 60))}
+                                    </span>
                                 </div>
+                                <div className="flex items-center justify-between text-xs">
+                                    <span className="text-slate-400">AI Confidence Score:</span>
+                                    <span className="text-emerald-400 font-mono font-bold">
+                                        {Math.round(schedule.optimal_window.confidence * 100)}%
+                                    </span>
+                                </div>
+                                <p className="text-xs text-slate-400 italic pt-1 border-t border-white/[0.06]">
+                                    &ldquo;{schedule.optimal_window.reasoning}&rdquo;
+                                </p>
+                                {schedule.next_backup_at && (
+                                    <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-xs">
+                                        <span className="text-slate-400">Next Scheduled Run:</span>
+                                        <span className="text-slate-200 font-mono text-xs">
+                                            {new Date(schedule.next_backup_at).toLocaleString()}
+                                        </span>
+                                    </div>
+                                )}
                             </div>
                         )}
+                    </div>
 
-                        <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-                            {isLoadingBackups ? (
-                                <div className="text-center text-slate-500 py-10">
-                                    <div className="w-8 h-8 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin mx-auto mb-4"></div>
-                                    <p>Loading archives...</p>
-                                </div>
-                            ) : backups.length === 0 ? (
-                                <div className="text-center text-slate-500 py-10">
-                                    <Archive size={48} className="mx-auto mb-4 opacity-50 text-slate-600" />
-                                    <p>No snapshots found.</p>
-                                </div>
-                            ) : (
-                                backups.map((bk) => (
-                                    <div key={bk.filename} className="bg-slate-800/50 hover:bg-slate-800 border border-white/5 hover:border-white/10 rounded-xl p-4 flex items-center justify-between transition-colors group">
-                                        <div className="flex items-center gap-4 min-w-0">
-                                            <div className="w-10 h-10 bg-slate-900 rounded-lg flex items-center justify-center text-slate-400 border border-white/5 shrink-0">
-                                                <Database size={18} />
-                                            </div>
-                                            <div className="min-w-0">
-                                                <h4 className="text-slate-200 font-mono text-xs mb-1 truncate">{bk.filename}</h4>
-                                                <div className="flex gap-3 text-xs text-slate-500">
-                                                    <span>{formatBytes(bk.size)}</span>
-                                                    <span>&bull;</span>
-                                                    <span className="truncate">{new Date(bk.timestamp).toLocaleString()}</span>
-                                                </div>
+                    <button
+                        onClick={toggleSmartSchedule}
+                        disabled={isTogglingSchedule}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-3.5 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 min-h-[44px] ${schedule?.mode === 'smart'
+                            ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-500/20'
+                            : 'bg-slate-700 hover:bg-slate-600 shadow-none'
+                            }`}
+                    >
+                        {isTogglingSchedule ? (
+                            <Loader2 size={18} className="animate-spin" />
+                        ) : schedule?.mode === 'smart' ? (
+                            <><ToggleRight size={18} /> Smart Scheduling ON</>
+                        ) : (
+                            <><ToggleLeft size={18} /> Enable Smart Scheduling</>
+                        )}
+                    </button>
+                </div>
+
+                {/* Status Console & Previous Backups */}
+                <div className="p-5 sm:p-6 flex flex-col min-w-0 h-[560px] md:col-span-2 xl:col-span-1">
+                    <div className="text-sm font-bold text-slate-400 uppercase tracking-wider pb-3 border-b border-white/[0.07] mb-4 flex justify-between items-center">
+                        <span className="flex items-center gap-2"><Clock size={16} /> Archive Snapshots</span>
+                        <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md border border-white/5">{backups.length} Total</span>
+                    </div>
+
+                    {/* Recent Status (if acting) */}
+                    {backupState.status !== 'idle' && (
+                        <div className={`mb-4 p-3.5 rounded-xl border ${backupState.status === 'success' ? 'bg-emerald-500/10 border-emerald-500/20' : backupState.status === 'error' ? 'bg-rose-500/10 border-rose-500/20' : 'bg-slate-800/50 border-white/10'} flex items-center gap-3 shrink-0`}>
+                            {backupState.status === 'running' && <div className="w-5 h-5 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin shrink-0"></div>}
+                            {backupState.status === 'success' && <CheckCircle2 size={20} className="text-emerald-400 shrink-0" />}
+                            {backupState.status === 'error' && <div className="text-rose-400 font-bold text-lg shrink-0">!</div>}
+
+                            <div className="min-w-0">
+                                <h4 className={`font-bold text-xs ${backupState.status === 'error' ? 'text-rose-400' : 'text-slate-200'}`}>
+                                    {backupState.status === 'running' ? 'Snapshotting...' : backupState.status === 'error' ? 'Operation Failed' : 'Backup Successful'}
+                                </h4>
+                                <p className="text-xs text-slate-400 break-words">{backupState.message}</p>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex-1 overflow-y-auto divide-y divide-white/[0.07] border-y border-white/[0.07] custom-scrollbar">
+                        {isLoadingBackups ? (
+                            <div className="text-center text-slate-500 py-10">
+                                <div className="w-8 h-8 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin mx-auto mb-4"></div>
+                                <p className="text-xs">Loading archives...</p>
+                            </div>
+                        ) : backups.length === 0 ? (
+                            <div className="text-center text-slate-500 py-10">
+                                <Archive size={40} className="mx-auto mb-3 opacity-50 text-slate-600" />
+                                <p className="text-xs">No snapshots found.</p>
+                            </div>
+                        ) : (
+                            backups.map((bk) => (
+                                <div key={bk.filename} className="py-3 px-1 hover:bg-white/[0.02] flex items-start gap-3 justify-between transition-colors group">
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className="w-9 h-9 bg-white/[0.04] rounded-lg flex items-center justify-center text-slate-400 border border-white/5 shrink-0">
+                                            <Database size={16} />
+                                        </div>
+                                        <div className="min-w-0">
+                                            <h4 className="text-slate-200 font-mono text-xs mb-0.5 break-words [overflow-wrap:anywhere]" title={bk.filename}>{bk.filename}</h4>
+                                            <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-400">
+                                                <span>{formatBytes(bk.size)}</span>
+                                                <span>&bull;</span>
+                                                <time dateTime={bk.timestamp} className="break-words">{new Date(bk.timestamp).toLocaleString()}</time>
                                             </div>
                                         </div>
-                                        <button
-                                            onClick={() => handleDownloadBackup(bk.filename)}
-                                            className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-all shrink-0"
-                                            title="Download SQLite Archive"
-                                        >
-                                            <Download size={16} />
-                                        </button>
                                     </div>
-                                ))
-                            )}
-                        </div>
+                                    <button
+                                        onClick={() => handleDownloadBackup(bk.filename)}
+                                        className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 w-9 h-9 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-all shrink-0 min-h-[36px] min-w-[36px]"
+                                        title="Download SQLite Archive"
+                                    >
+                                        <Download size={15} />
+                                    </button>
+                                </div>
+                            ))
+                        )}
                     </div>
                 </div>
+            </div>
+
             <Modal isOpen={downloadFilename !== null} title="Download backup" role="dialog" aria-modal="true" aria-label="Download backup"
                 onClose={() => { if (!isPreparingDownload) { setDownloadFilename(null); setDownloadPassword(''); setDownloadError(''); } }}>
                 <form onSubmit={confirmDownload} className="space-y-4">

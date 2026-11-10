@@ -100,12 +100,14 @@ export default function Sidebar() {
     const touchStartXRef = useRef<number | null>(null);
     const drawerRef = useRef<HTMLElement | null>(null);
     const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+    const brandButtonRef = useRef<HTMLButtonElement | null>(null);
     const previouslyFocusedElementRef = useRef<HTMLElement | null>(null);
     const savedPin = useSyncExternalStore(subscribeSidebarPin, readSidebarPin, () => false);
     const [pinOverride, setPinOverride] = useState<boolean | null>(null);
     const isPinned = pinOverride ?? savedPin;
     const [isFocusWithin, setIsFocusWithin] = useState(false);
     const isExpanded = isSidebarHovered || isPinned || isFocusWithin;
+    const isSecondaryTab = !MOBILE_DOCK_ITEMS.some((dockItem) => dockItem.id === activeTab);
 
     useEffect(() => {
         if (!isMobileMenuOpen) return;
@@ -182,6 +184,7 @@ export default function Sidebar() {
     const handleToggleCollapse = () => {
         triggerHaptic(6, hapticFeedback);
         const nextPinned = !isPinned;
+        if (!nextPinned) brandButtonRef.current?.focus();
         setPinOverride(nextPinned);
         setIsSidebarHovered(nextPinned);
         setIsFocusWithin(false);
@@ -196,7 +199,7 @@ export default function Sidebar() {
         <>
             <nav 
                 aria-label="Mobile Bottom Navigation"
-                className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 glass-panel border-t border-white/10 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center justify-around"
+                className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-[var(--obs-shell-bottom-dock-height,4rem)] glass-panel border-t border-white/10 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center justify-around"
             >
                 <div className="absolute inset-x-0 top-0 h-px bg-indigo-500/20" />
 
@@ -211,6 +214,7 @@ export default function Sidebar() {
                                 setActiveTab(item.id);
                                 setIsMobileMenuOpen(false);
                             }}
+                            aria-current={isActive ? 'page' : undefined}
                             className={`flex flex-col items-center justify-center flex-1 h-full obs-touch-target-standard obs-gpu-120hz-interactive relative ${
                                 isActive ? 'text-indigo-400 font-semibold' : 'text-slate-400 hover:text-slate-200'
                             }`}
@@ -236,10 +240,14 @@ export default function Sidebar() {
                     aria-expanded={isMobileMenuOpen}
                     aria-controls="mobile-navigation-drawer"
                     aria-haspopup="dialog"
+                    aria-current={isSecondaryTab ? 'page' : undefined}
                     className={`flex flex-col items-center justify-center flex-1 h-full obs-touch-target-standard obs-gpu-120hz-interactive relative ${
-                        isMobileMenuOpen ? 'text-indigo-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                        (isSecondaryTab || isMobileMenuOpen) ? 'text-indigo-400 font-semibold' : 'text-slate-400 hover:text-slate-200'
                     }`}
                 >
+                    {(isSecondaryTab || isMobileMenuOpen) && (
+                        <span className="absolute top-1 w-8 h-1 bg-indigo-500 rounded-full" />
+                    )}
                     <div className="p-1">
                         <Menu size={20} />
                     </div>
@@ -259,7 +267,7 @@ export default function Sidebar() {
                         aria-modal="true"
                         aria-label="Navigation Menu"
                         tabIndex={-1}
-                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] obs-sidebar-surface p-5 flex flex-col z-50 overflow-y-auto no-scrollbar outline-none"
+                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] obs-sidebar-surface p-5 pb-8 flex flex-col z-50 overflow-y-auto no-scrollbar outline-none"
                         onClick={(clickEvent) => clickEvent.stopPropagation()}
                         onTouchStart={handleDrawerTouchStart}
                         onTouchEnd={handleDrawerTouchEnd}
@@ -302,6 +310,7 @@ export default function Sidebar() {
                                             setActiveTab(item.id);
                                             setIsMobileMenuOpen(false);
                                         }}
+                                        aria-current={isActive ? 'page' : undefined}
                                         className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
                                                 ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.25)]'
@@ -342,6 +351,7 @@ export default function Sidebar() {
                                             if (isLogout) logout();
                                             else setActiveTab(item.id);
                                         }}
+                                        aria-current={isActive ? 'page' : undefined}
                                         className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
                                                 ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.25)]'
@@ -391,8 +401,10 @@ export default function Sidebar() {
                                 <button
                                     type="button"
                                     onClick={handleToggleCollapse}
+                                    ref={brandButtonRef}
                                     aria-label={isPinned ? 'Collapse Sidebar' : isExpanded ? 'Pin Sidebar' : 'Expand Sidebar'}
                                     aria-expanded={isExpanded}
+                                    aria-pressed={isPinned}
                                     aria-controls="desktop-sidebar-navigation"
                                     title={isPinned ? 'Collapse Sidebar' : 'Pin Sidebar'}
                                     className="obs-brand-logo w-10 h-10 min-h-[40px] min-w-[40px] shrink-0 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
@@ -418,10 +430,11 @@ export default function Sidebar() {
                                     type="button"
                                     onClick={handleToggleCollapse}
                                     aria-label={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
+                                    aria-pressed={isPinned}
                                     title={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
                                     className="obs-touch-target-standard shrink-0 flex items-center justify-center rounded-lg text-slate-400 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                                 >
-                                    {isPinned ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+                                    {isExpanded ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
                                 </button>
                             )}
                         </div>

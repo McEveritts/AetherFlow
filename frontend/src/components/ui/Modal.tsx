@@ -14,11 +14,13 @@ export interface ModalProps extends React.HTMLAttributes<HTMLDivElement> {
   title?: string;
   initialFocusRef?: RefObject<HTMLElement | null>;
   returnFocusRef?: RefObject<HTMLElement | null>;
+  variant?: 'default' | 'drawer';
 }
 
-export function Modal({ isOpen, onClose, title, children, className, initialFocusRef, returnFocusRef, ...props }: ModalProps) {
+export function Modal({ isOpen, onClose, title, children, className, initialFocusRef, returnFocusRef, variant = 'default', ...props }: ModalProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
+  const boundaryRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   useEffect(() => { closeRef.current = onClose; }, [onClose]);
 
@@ -26,6 +28,7 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
     if (!isOpen) return;
     const panel = panelRef.current;
     if (!panel) return;
+    const boundary = boundaryRef.current ?? panel;
     const invoker = returnFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     if (modalStack.length === 0) {
       originalBodyOverflow = document.body.style.overflow;
@@ -33,9 +36,9 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
     }
     modalStack.push(panel);
     const isTopModal = () => modalStack[modalStack.length - 1] === panel;
-    const getFocusable = () => Array.from(panel.querySelectorAll<HTMLElement>(
+    const getFocusable = () => Array.from(boundary.querySelectorAll<HTMLElement>(
       'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]'
-    )).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+    )).filter(element => element.tabIndex >= 0 && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
     const preferredFocus = initialFocusRef?.current;
     (preferredFocus && panel.contains(preferredFocus) ? preferredFocus : getFocusable()[0] || panel).focus();
 
@@ -60,7 +63,7 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
       }
     };
     const containFocus = (event: FocusEvent) => {
-      if (!isTopModal() || !(event.target instanceof Node) || panel.contains(event.target)) return;
+      if (!isTopModal() || !(event.target instanceof Node) || boundary.contains(event.target)) return;
       (getFocusable()[0] || panel).focus();
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -80,11 +83,16 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
 
   if (!isOpen || typeof document === 'undefined') return null;
 
+  const isDrawer = variant === 'drawer';
+
   return createPortal(
-    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+    <div ref={boundaryRef} data-overlay-boundary className={cn("fixed inset-0 z-[90] flex", isDrawer ? "justify-end" : "items-center justify-center p-4")}>
       {/* Obsidian Backdrop */}
       <div 
-        className="fixed inset-0 bg-slate-950/60 backdrop-blur-md transition-opacity"
+        className={cn(
+          "fixed inset-0 transition-opacity",
+          isDrawer ? "bg-slate-950/60 backdrop-blur-sm" : "bg-slate-950/60 backdrop-blur-md"
+        )}
         onClick={onClose}
       />
       
@@ -93,8 +101,9 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
         {...props}
         ref={panelRef}
         className={cn(
-          "relative w-full max-w-lg obs-telemetry-surface glass-panel rounded-2xl p-6 shadow-[0_24px_60px_rgba(0,0,0,0.6)] border border-indigo-500/30",
-          "max-h-[calc(100dvh-2rem)] overflow-y-auto no-scrollbar",
+          isDrawer
+            ? "relative h-full w-80 md:w-96 max-w-[90vw] bg-slate-950/95 border-l border-white/10 z-50 shadow-2xl backdrop-blur-3xl obs-gpu-120hz-rail flex flex-col"
+            : "relative w-full max-w-lg obs-telemetry-surface glass-panel rounded-2xl p-6 shadow-[0_24px_60px_rgba(0,0,0,0.6)] border border-indigo-500/30 max-h-[calc(100dvh-2rem)] overflow-y-auto no-scrollbar",
           className
         )}
         role="dialog"
@@ -104,22 +113,24 @@ export function Modal({ isOpen, onClose, title, children, className, initialFocu
         tabIndex={-1}
       >
         {/* Chromatic Top Edge Highlight */}
-        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50 rounded-t-2xl pointer-events-none" />
+        {!isDrawer && (
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50 rounded-t-2xl pointer-events-none" />
+        )}
 
         {title && (
-          <div className="flex items-center justify-between border-b border-white/10 pb-4 mb-4">
-            <h3 id={titleId} className="text-xl font-bold tracking-tight text-white">{title}</h3>
+          <div className="flex items-start justify-between gap-4 border-b border-white/10 pb-4 mb-4">
+            <h3 id={titleId} className="text-xl font-bold tracking-tight text-white min-w-0 break-words">{title}</h3>
             <button 
               type="button"
               onClick={onClose}
-              className="obs-touch-target-standard p-2 rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center"
+              className="obs-touch-target-standard p-2 rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center shrink-0"
               aria-label={`Close ${title}`}
             >
               <X size={20} />
             </button>
           </div>
         )}
-        <div className="text-slate-200 min-w-0 max-w-full">
+        <div className={cn("text-slate-200 min-w-0 max-w-full", isDrawer && "flex-1 flex flex-col overflow-hidden min-h-0")}>
           {children}
         </div>
       </div>

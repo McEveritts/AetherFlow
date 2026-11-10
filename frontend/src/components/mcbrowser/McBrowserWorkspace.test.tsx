@@ -1461,4 +1461,90 @@ describe('McBrowserWorkspace Parity Component', () => {
         ).not.toBeInTheDocument();
         expect(mockOnRefresh).toHaveBeenCalledTimes(2);
     });
+
+    it('reflows workspace selection table to usable labeled cards with wrapping long names, visible actions, and dark glass obs-checkbox', async () => {
+        const testEntries: McBrowserEntry[] = [
+            {
+                name: 'a_very_long_configuration_filename_that_should_wrap_cleanly_on_small_screens.properties',
+                path: 'configs/a_very_long_configuration_filename_that_should_wrap_cleanly_on_small_screens.properties',
+                kind: 'file',
+                size: 2048,
+                modified: '2026-11-08T12:00:00Z',
+            },
+            {
+                name: 'nested-folder',
+                path: 'configs/nested-folder',
+                kind: 'directory',
+                size: 0,
+                modified: '2026-11-08T12:00:00Z',
+            },
+            {
+                name: 'device.raw',
+                path: 'configs/device.raw',
+                kind: 'other',
+                size: 0,
+                modified: null,
+            },
+        ];
+
+        render(
+            <McBrowserWorkspace
+                currentPath="configs"
+                entries={testEntries}
+                onRefresh={mockOnRefresh}
+                onNavigate={mockOnNavigate}
+            />
+        );
+
+        await waitFor(() => expect(screen.getByRole('button', { name: 'New File' })).toBeEnabled());
+
+        const workspaceTable = screen.getByRole('table', { name: 'Workspace selection table' });
+        expect(workspaceTable).toHaveAttribute('role', 'table');
+        workspaceTable.querySelectorAll('thead, tbody').forEach((rowGroup) => expect(rowGroup).toHaveAttribute('role', 'rowgroup'));
+        workspaceTable.querySelectorAll('tr').forEach((row) => expect(row).toHaveAttribute('role', 'row'));
+        workspaceTable.querySelectorAll('th').forEach((header) => expect(header).toHaveAttribute('role', 'columnheader'));
+        workspaceTable.querySelectorAll('td').forEach((cell) => expect(cell).toHaveAttribute('role', 'cell'));
+        expect(workspaceTable).toHaveClass('obs-mobile-ledger', 'w-full', 'min-w-0');
+        expect(workspaceTable.parentElement).toHaveClass('overflow-x-auto', 'min-w-0', 'max-w-full');
+
+        const checkbox = screen.getByRole('checkbox', {
+            name: 'Select a_very_long_configuration_filename_that_should_wrap_cleanly_on_small_screens.properties',
+        });
+        expect(checkbox).toHaveClass('obs-checkbox');
+        expect(checkbox).not.toBeChecked();
+        expect(checkbox).toBeEnabled();
+
+        const disabledCheckbox = screen.getByRole('checkbox', {
+            name: 'Select device.raw',
+        });
+        expect(disabledCheckbox).toHaveClass('obs-checkbox');
+        expect(disabledCheckbox).toBeDisabled();
+
+        const fileButton = screen.getByRole('button', {
+            name: 'a_very_long_configuration_filename_that_should_wrap_cleanly_on_small_screens.properties',
+        });
+        const fileCell = fileButton.closest('td');
+        expect(fileCell).toHaveAttribute('data-primary');
+        expect(fileCell).toHaveAttribute('data-label', 'Entry / Relative Path');
+        expect(fileCell).toHaveClass('min-w-0');
+        expect(fileButton).toHaveClass('break-words', '[overflow-wrap:anywhere]', 'min-w-0');
+
+        const selectCell = checkbox.closest('td');
+        expect(selectCell).toHaveAttribute('data-label', 'Select');
+        expect(selectCell).toHaveClass('min-w-0');
+
+        const sizeCell = screen.getByRole('cell', { name: '2 KiB' });
+        expect(sizeCell).toHaveAttribute('data-label', 'Size');
+        expect(sizeCell).toHaveClass('min-w-0');
+
+        const actionsCell = screen.getByRole('button', {
+            name: 'Edit a_very_long_configuration_filename_that_should_wrap_cleanly_on_small_screens.properties',
+        }).closest('td');
+        expect(actionsCell).toHaveAttribute('data-actions');
+        expect(actionsCell).toHaveAttribute('data-label', 'Workspace Actions');
+        expect(actionsCell).toHaveClass('min-w-0');
+
+        fireEvent.click(checkbox);
+        expect(checkbox).toBeChecked();
+    });
 });

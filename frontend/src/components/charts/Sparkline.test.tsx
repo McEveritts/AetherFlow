@@ -183,7 +183,7 @@ describe("Forecast cards and mini sparkline integration", () => {
       expect(plot).toHaveStyle({ height: "32px" });
       expect(plot?.parentElement?.children).toHaveLength(1);
     });
-    expect(screen.getByText("CPU").closest(".grid")).toHaveClass("grid-cols-1", "sm:grid-cols-2");
+    expect(screen.getByText("CPU").closest(".grid")).toHaveClass("grid-cols-1", "@[640px]:grid-cols-2");
     expect(screen.queryByText(/Sample 1|3 samples/)).not.toBeInTheDocument();
     const disclosure = screen.getByRole("button", { name: "Show Forecast Details" });
     expect(disclosure).toHaveClass("min-h-[40px]", "obs-touch-target-standard");

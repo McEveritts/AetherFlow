@@ -1979,6 +1979,8 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         render(<StreamingTab />);
         const dashboardTitle = screen.getByRole('heading', { level: 2, name: 'Streaming Dashboard' });
         expect(dashboardTitle).toBeInTheDocument();
+        expect(dashboardTitle.parentElement?.parentElement?.parentElement).toHaveClass('flex-wrap', 'xl:flex-nowrap');
+        expect(dashboardTitle.parentElement?.parentElement?.parentElement).not.toHaveClass('sm:flex-nowrap');
 
         const serverActionsSummary = screen.getByLabelText('Server & Provider Actions');
         expect(serverActionsSummary).toBeInTheDocument();

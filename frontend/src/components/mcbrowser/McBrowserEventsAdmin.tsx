@@ -371,9 +371,9 @@ export function McBrowserEventsAdmin({
     <section
       aria-label="McBrowser Events & Audit Administration"
       data-testid="mcbrowser-events-admin"
-      className={`rounded-xl border border-slate-800 bg-slate-900/95 p-4 text-slate-100 shadow-lg ${className}`}
+      className={`obs-canvas-section py-4 text-slate-100 ${className}`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-3">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
             <Activity className="h-4 w-4" aria-hidden="true" />
@@ -395,7 +395,7 @@ export function McBrowserEventsAdmin({
             onClick={() => void loadAll()}
             disabled={loading || sessionExpired}
             data-testid="mcbrowser-events-refresh"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+            className="obs-touch-target-standard inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[var(--obs-slate-800)] px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/10 disabled:opacity-50"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}
@@ -408,7 +408,7 @@ export function McBrowserEventsAdmin({
               type="button"
               onClick={onClose}
               aria-label="Close events administration panel"
-              className="rounded-lg border border-slate-700 bg-slate-800 p-1.5 text-slate-300 hover:bg-slate-700 hover:text-white"
+              className="obs-touch-target-standard rounded-lg border border-white/10 bg-[var(--obs-slate-800)] p-1.5 text-slate-300 hover:bg-white/10 hover:text-white"
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>
@@ -418,7 +418,7 @@ export function McBrowserEventsAdmin({
 
       <div
         data-testid="mcbrowser-events-settings-card"
-        className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/70 p-3"
+        className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] py-3"
       >
         <div className="flex items-start gap-2.5">
           <Settings className="mt-0.5 h-4 w-4 text-indigo-400" aria-hidden="true" />
@@ -440,7 +440,7 @@ export function McBrowserEventsAdmin({
             className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
               settings.queue_enabled
                 ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                : 'border border-slate-700 bg-slate-800 text-slate-300'
+                : 'border border-white/10 bg-[var(--obs-slate-800)] text-slate-300'
             }`}
           >
             {settings.queue_enabled ? 'Queue Enabled' : 'Queue Disabled'}
@@ -494,7 +494,7 @@ export function McBrowserEventsAdmin({
       <div
         role="tablist"
         aria-label="Event administration views"
-        className="mt-4 flex gap-2 border-b border-slate-800 pb-2"
+        className="mt-4 flex gap-2 border-b border-white/[0.07] pb-2"
       >
         <button
           type="button"
@@ -505,7 +505,7 @@ export function McBrowserEventsAdmin({
           className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold ${
             activeTab === 'audit'
               ? 'bg-indigo-600 text-white'
-              : 'bg-slate-800/70 text-slate-300 hover:bg-slate-800'
+              : 'bg-[var(--obs-slate-800)]/70 text-slate-300 hover:bg-[var(--obs-slate-800)]'
           }`}
         >
           <Activity className="h-3.5 w-3.5" aria-hidden="true" />
@@ -521,7 +521,7 @@ export function McBrowserEventsAdmin({
           className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold ${
             activeTab === 'queue'
               ? 'bg-indigo-600 text-white'
-              : 'bg-slate-800/70 text-slate-300 hover:bg-slate-800'
+              : 'bg-[var(--obs-slate-800)]/70 text-slate-300 hover:bg-[var(--obs-slate-800)]'
           }`}
         >
           <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
@@ -533,13 +533,13 @@ export function McBrowserEventsAdmin({
         <div className="mt-4 space-y-3" data-testid="mcbrowser-events-audit-panel">
           <form
             onSubmit={handleApplyAuditFilters}
-            className="grid grid-cols-1 gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 sm:grid-cols-5"
+            className="grid grid-cols-1 gap-3 border-b border-white/[0.07] pb-3 sm:grid-cols-5"
             noValidate
           >
             <div>
               <label
                 htmlFor={`${baseId}-audit-status`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 Audit Status
               </label>
@@ -548,7 +548,7 @@ export function McBrowserEventsAdmin({
                 value={auditStatusFilter}
                 onChange={(e) => setAuditStatusFilter(e.target.value)}
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100"
               >
                 <option value="">All Statuses</option>
                 {MCBROWSER_AUDIT_EVENT_STATUSES.map((status) => (
@@ -562,7 +562,7 @@ export function McBrowserEventsAdmin({
             <div>
               <label
                 htmlFor={`${baseId}-audit-trigger`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 Event Trigger
               </label>
@@ -571,7 +571,7 @@ export function McBrowserEventsAdmin({
                 value={auditTriggerFilter}
                 onChange={(e) => setAuditTriggerFilter(e.target.value)}
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100"
               >
                 <option value="">All Triggers</option>
                 {MCBROWSER_EVENT_TRIGGERS.map((trigger) => (
@@ -585,7 +585,7 @@ export function McBrowserEventsAdmin({
             <div>
               <label
                 htmlFor={`${baseId}-audit-user-id`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 User ID
               </label>
@@ -597,14 +597,14 @@ export function McBrowserEventsAdmin({
                 onChange={(e) => setAuditUserIdInput(e.target.value)}
                 placeholder="Any user ID"
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
               />
             </div>
 
             <div>
               <label
                 htmlFor={`${baseId}-audit-limit`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 Bounded Limit (1–{MAX_MCBROWSER_AUDIT_LIST_LIMIT})
               </label>
@@ -616,7 +616,7 @@ export function McBrowserEventsAdmin({
                 value={auditLimitInput}
                 onChange={(e) => setAuditLimitInput(e.target.value)}
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100"
               />
             </div>
 
@@ -625,7 +625,7 @@ export function McBrowserEventsAdmin({
                 type="submit"
                 disabled={loading || sessionExpired}
                 data-testid="mcbrowser-audit-apply-filters"
-                className="inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                className="obs-touch-target-standard inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
               >
                 <Filter className="h-3.5 w-3.5" aria-hidden="true" />
                 Apply Filters
@@ -635,7 +635,7 @@ export function McBrowserEventsAdmin({
                 onClick={() => void handleResetAuditFilters()}
                 disabled={loading || sessionExpired}
                 data-testid="mcbrowser-audit-reset-filters"
-                className="rounded border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-50"
+                className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-slate-800)] px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-50"
               >
                 Reset
               </button>
@@ -660,14 +660,14 @@ export function McBrowserEventsAdmin({
           ) : auditEvents.length === 0 ? (
             <div
               data-testid="mcbrowser-audit-empty"
-              className="rounded-lg border border-slate-800 bg-slate-950/40 py-8 text-center text-xs text-slate-400"
+              className="py-8 text-center text-xs text-slate-400"
             >
               No audit events match the active filters.
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-slate-800">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] uppercase text-slate-400">
+            <div className="overflow-x-auto min-w-0">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="border-b border-white/[0.07] text-xs uppercase text-slate-400">
                   <tr>
                     <th className="px-3 py-2">Timestamp</th>
                     <th className="px-3 py-2">Trigger</th>
@@ -677,13 +677,13 @@ export function McBrowserEventsAdmin({
                     <th className="px-3 py-2">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/80 bg-slate-900/60">
+                <tbody className="divide-y divide-white/[0.05]">
                   {auditEvents.map((ev) => (
                     <tr
                       key={ev.event_id}
                       data-testid={`mcbrowser-audit-row-${ev.event_id}`}
                     >
-                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-300">
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-300">
                         {ev.timestamp}
                       </td>
                       <td className="px-3 py-2 font-medium text-slate-200">
@@ -692,18 +692,18 @@ export function McBrowserEventsAdmin({
                       <td className="px-3 py-2 text-slate-300">
                         {ev.username} <span className="text-slate-500">(#{ev.user_id})</span>
                       </td>
-                      <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
+                      <td className="px-3 py-2 font-mono text-xs text-slate-200">
                         <div>{ev.relative_path}</div>
                         {ev.destination_path && (
                           <div className="text-slate-400">→ {ev.destination_path}</div>
                         )}
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-300">
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-300">
                         {formatByteDelta(ev.byte_delta)}
                       </td>
                       <td className="px-3 py-2">
                         <span
-                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
                             ev.status === 'completed'
                               ? 'bg-emerald-500/15 text-emerald-300'
                               : ev.status === 'failed'
@@ -727,13 +727,13 @@ export function McBrowserEventsAdmin({
         <div className="mt-4 space-y-3" data-testid="mcbrowser-events-queue-panel">
           <form
             onSubmit={handleApplyQueueFilters}
-            className="grid grid-cols-1 gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 sm:grid-cols-3"
+            className="grid grid-cols-1 gap-3 border-b border-white/[0.07] pb-3 sm:grid-cols-3"
             noValidate
           >
             <div>
               <label
                 htmlFor={`${baseId}-queue-status`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 Queue Task Status
               </label>
@@ -742,7 +742,7 @@ export function McBrowserEventsAdmin({
                 value={queueStatusFilter}
                 onChange={(e) => setQueueStatusFilter(e.target.value)}
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100"
               >
                 <option value="">All Queue Statuses</option>
                 {MCBROWSER_EVENT_QUEUE_STATUSES.map((st) => (
@@ -756,7 +756,7 @@ export function McBrowserEventsAdmin({
             <div>
               <label
                 htmlFor={`${baseId}-queue-limit`}
-                className="block text-[11px] font-medium text-slate-400"
+                className="obs-touch-target-standard block text-xs font-medium text-slate-400"
               >
                 Queue Limit (1–{MAX_MCBROWSER_QUEUE_LIST_LIMIT})
               </label>
@@ -768,7 +768,7 @@ export function McBrowserEventsAdmin({
                 value={queueLimitInput}
                 onChange={(e) => setQueueLimitInput(e.target.value)}
                 disabled={loading || sessionExpired}
-                className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100"
+                className="obs-touch-target-standard mt-1 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1.5 text-xs text-slate-100"
               />
             </div>
 
@@ -777,7 +777,7 @@ export function McBrowserEventsAdmin({
                 type="submit"
                 disabled={loading || sessionExpired}
                 data-testid="mcbrowser-queue-apply-filters"
-                className="inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                className="obs-touch-target-standard inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
               >
                 <Filter className="h-3.5 w-3.5" aria-hidden="true" />
                 Apply Queue Filters
@@ -803,14 +803,14 @@ export function McBrowserEventsAdmin({
           ) : queueTasks.length === 0 ? (
             <div
               data-testid="mcbrowser-queue-empty"
-              className="rounded-lg border border-slate-800 bg-slate-950/40 py-8 text-center text-xs text-slate-400"
+              className="py-8 text-center text-xs text-slate-400"
             >
               No queued event tasks match the active filters.
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-slate-800">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] uppercase text-slate-400">
+            <div className="overflow-x-auto min-w-0">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="border-b border-white/[0.07] text-xs uppercase text-slate-400">
                   <tr>
                     <th className="px-3 py-2">Queue ID</th>
                     <th className="px-3 py-2">Event ID</th>
@@ -820,7 +820,7 @@ export function McBrowserEventsAdmin({
                     <th className="px-3 py-2 text-right">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/80 bg-slate-900/60">
+                <tbody className="divide-y divide-white/[0.05]">
                   {queueTasks.map((task) => {
                     const isAcked = task.status === 'acknowledged';
                     const isAcking = Boolean(acknowledgingIds[task.event_id]);
@@ -832,23 +832,23 @@ export function McBrowserEventsAdmin({
                         <td className="px-3 py-2 font-mono text-slate-300">
                           #{task.queue_id}
                         </td>
-                        <td className="px-3 py-2 font-mono text-[11px] text-slate-300">
+                        <td className="px-3 py-2 font-mono text-xs text-slate-300">
                           {task.event_id}
                         </td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-slate-200">
                             {TRIGGER_LABELS[task.event.trigger] ?? task.event.trigger}
                           </div>
-                          <div className="font-mono text-[11px] text-slate-400">
+                          <div className="font-mono text-xs text-slate-400">
                             {task.event.relative_path}
                           </div>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-300">
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-300">
                           {task.enqueued_at}
                         </td>
                         <td className="px-3 py-2">
                           <span
-                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
                               isAcked
                                 ? 'bg-emerald-500/15 text-emerald-300'
                                 : 'bg-amber-500/15 text-amber-300'
@@ -868,7 +868,7 @@ export function McBrowserEventsAdmin({
                             data-testid={`mcbrowser-queue-ack-${task.event_id}`}
                             disabled={isAcked || isAcking || sessionExpired}
                             onClick={() => void handleAcknowledgeTask(task.event_id)}
-                            className="rounded border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="obs-touch-target-standard rounded border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {isAcking
                               ? 'Acknowledging...'

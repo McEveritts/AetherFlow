@@ -1,13 +1,15 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import useSWR from 'swr';
 import { Search, Filter, ChevronLeft, ChevronRight, Clock, User, Activity, FileText, RefreshCw, Shield, Zap, CheckCircle2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { apiFetch } from '@/lib/fetcher';
 import { ActionDetailModal } from '@/components/tabs/ActionDetailModal';
 import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
+import { Modal } from '@/components/ui/Modal';
 import type { PendingAction } from '@/types/api';
+import styles from './AuditTab.module.css';
 
 interface AuditEntry {
     id: number;
@@ -47,7 +49,7 @@ const ACTION_BADGE_MAP: Record<string, { label: string; color: string }> = {
 function ActionBadge({ action }: { action: string }) {
     const badge = ACTION_BADGE_MAP[action] || { label: action.replace(/_/g, ' '), color: 'bg-slate-500/20 text-slate-300 border-slate-500/30' };
     return (
-        <span className={`inline-flex items-center px-2 py-0.5 text-xs font-semibold rounded-md border ${badge.color}`}>
+        <span className={`inline-flex items-center px-2 py-0.5 text-xs font-semibold rounded-md border max-w-full whitespace-normal break-words text-center ${badge.color}`}>
             {badge.label}
         </span>
     );
@@ -74,7 +76,9 @@ export default function AuditTab() {
 
     const [selectedAction, setSelectedAction] = useState<PendingAction | null>(null);
     const [selectedService, setSelectedService] = useState<string | null>(null);
+    const [selectedRecord, setSelectedRecord] = useState<AuditEntry | null>(null);
     const [isFetchingDetail, setIsFetchingDetail] = useState(false);
+    const detailReturnFocusRef = useRef<HTMLButtonElement | null>(null);
 
     const buildKey = useCallback(() => {
         const params = new URLSearchParams();
@@ -99,7 +103,10 @@ export default function AuditTab() {
         setPage(0);
     };
 
-    const handleRowClick = async (entry: AuditEntry) => {
+    const handleRowClick = async (entry: AuditEntry, invoker: HTMLButtonElement | null) => {
+        if (isFetchingDetail || !invoker) return;
+        detailReturnFocusRef.current = invoker;
+        invoker.focus();
         if (entry.target_type === 'pending_action') {
             const id = parseInt(entry.target_id, 10);
             if (isNaN(id)) return;
@@ -130,9 +137,8 @@ export default function AuditTab() {
     const systemActionsCount = entries.filter(e => e.action.includes('service_') || e.action.includes('system') || e.action.includes('user_')).length;
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
-            {/* Open Top Toolbar with Inline Controls */}
-            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 pb-10">
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-white/[0.07] relative z-30 shrink-0">
                 <div className="flex items-center gap-3.5">
                     <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
                         <FileText size={20} />
@@ -140,7 +146,7 @@ export default function AuditTab() {
                     <div>
                         <div className="flex items-center gap-2.5">
                             <h2 className="text-lg font-bold text-slate-100 tracking-tight">Audit Trail &amp; Compliance</h2>
-                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                            <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
                                 Immutable Spine
                             </span>
                         </div>
@@ -166,7 +172,7 @@ export default function AuditTab() {
                             onChange={(e) => setSearchInput(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                             placeholder="Filter by actor..."
-                            className="pl-8 pr-3 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 w-40 sm:w-48 transition-all"
+                            className="pl-8 pr-3 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 w-40 sm:w-48 transition-all min-h-[44px]"
                         />
                     </div>
 
@@ -174,9 +180,10 @@ export default function AuditTab() {
                     <div className="relative">
                         <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500 pointer-events-none" />
                         <select
+                            aria-label="Filter audit actions"
                             value={actionFilter}
                             onChange={(e) => { setActionFilter(e.target.value); setPage(0); }}
-                            className="pl-8 pr-7 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
+                            className="pl-8 pr-7 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer min-h-[44px]"
                         >
                             <option value="" className="bg-slate-900 text-slate-200">All Actions</option>
                             {availableActions.map(a => (
@@ -187,14 +194,14 @@ export default function AuditTab() {
 
                     <button
                         onClick={handleSearch}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-500/20 transition-all"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-500/20 transition-all min-h-[44px]"
                     >
                         Filter
                     </button>
 
                     <button
                         onClick={() => mutate()}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all min-h-[44px]"
                         title="Refresh Logs"
                     >
                         <RefreshCw size={13} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
@@ -203,48 +210,47 @@ export default function AuditTab() {
                 </div>
             </div>
 
-            {/* Open 4-Card Summary Strip */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+            <div className="obs-metric-strip">
+                <div className="p-4 sm:p-5 flex items-center justify-between min-w-0">
                     <div>
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Total Events</p>
                         <p className="text-2xl font-bold text-slate-100 mt-1">{total}</p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">Recorded in SQLite spine</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Recorded in SQLite spine</p>
                     </div>
-                    <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                    <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                         <FileText size={20} />
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 sm:p-5 flex items-center justify-between min-w-0">
                     <div>
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Operator Approvals</p>
                         <p className="text-2xl font-bold text-emerald-400 mt-1">{operatorActionsCount}</p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">Resolved in active page</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Manual operator authorizations</p>
                     </div>
-                    <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                    <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
                         <CheckCircle2 size={20} />
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 sm:p-5 flex items-center justify-between min-w-0">
                     <div>
-                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">AI Operations</p>
-                        <p className="text-2xl font-bold text-purple-400 mt-1">{aiActionsCount}</p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">FlowAI proposals</p>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">AI Proposed</p>
+                        <p className="text-2xl font-bold text-indigo-400 mt-1">{aiActionsCount}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Autonomous proposals</p>
                     </div>
-                    <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                    <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                         <Zap size={20} />
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 sm:p-5 flex items-center justify-between min-w-0">
                     <div>
-                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">System &amp; Roles</p>
-                        <p className="text-2xl font-bold text-cyan-400 mt-1">{systemActionsCount}</p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">Service &amp; privilege events</p>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">System &amp; Auth</p>
+                        <p className="text-2xl font-bold text-purple-400 mt-1">{systemActionsCount}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Automated policy execution</p>
                     </div>
-                    <div className="h-10 w-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+                    <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0">
                         <Shield size={20} />
                     </div>
                 </div>
@@ -252,15 +258,14 @@ export default function AuditTab() {
 
             {/* Error banner */}
             {error && (
-                <div className="rounded-2xl border border-red-500/20 bg-red-950/20 p-4 text-center">
-                    <Activity className="w-6 h-6 text-red-400 mx-auto mb-1" />
-                    <p className="text-red-300 font-medium text-xs">Failed to load audit log</p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">Check admin access and backend connectivity.</p>
+                <div role="status" className="border-b border-rose-500/25 bg-rose-500/[0.06] p-4 text-center">
+                    <Activity className="w-5 h-5 text-rose-400 mx-auto mb-1" />
+                    <p className="text-rose-300 font-medium text-xs">Failed to load audit log</p>
+                    <p className="text-xs text-slate-500 mt-0.5">Check admin access and backend connectivity.</p>
                 </div>
             )}
 
-            {/* Audit Log Table */}
-            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden">
+            <div className={`min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] overflow-hidden ${styles.container}`}>
                 {isLoading && !data ? (
                     <div className="p-12 text-center text-slate-500 text-xs flex items-center justify-center gap-2">
                         <RefreshCw size={16} className="animate-spin text-indigo-400" />
@@ -273,49 +278,79 @@ export default function AuditTab() {
                         <p className="text-xs text-slate-500 mt-1">Try adjusting your filters or actor search.</p>
                     </div>
                 ) : (
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-xs text-left border-collapse">
-                            <thead>
-                                <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-[11px]">
-                                    <th className="py-2.5 px-3.5 font-semibold">
+                    <div className="overflow-x-auto min-w-0 max-w-full">
+                        <table role="table" aria-label="Audit records" className={`obs-mobile-ledger lg:table-fixed w-full text-xs text-left border-collapse min-w-0 ${styles.auditTable}`}>
+                            <thead role="rowgroup">
+                                <tr role="row" className="border-b border-white/[0.07] text-slate-400 uppercase tracking-wider text-xs">
+                                    <th role="columnheader" scope="col" className="py-3 px-3.5 font-semibold lg:w-[160px]">
                                         <div className="flex items-center gap-1.5"><Clock size={12} /> Time</div>
                                     </th>
-                                    <th className="py-2.5 px-3.5 font-semibold">
+                                    <th role="columnheader" scope="col" className="py-3 px-3.5 font-semibold lg:w-[120px]">
                                         <div className="flex items-center gap-1.5"><User size={12} /> Actor</div>
                                     </th>
-                                    <th className="py-2.5 px-3.5 font-semibold">Action</th>
-                                    <th className="py-2.5 px-3.5 font-semibold">Target</th>
-                                    <th className="py-2.5 px-3.5 font-semibold">Detail</th>
-                                    <th className="py-2.5 px-3.5 font-semibold">IP</th>
+                                    <th role="columnheader" scope="col" className="py-3 px-3.5 font-semibold lg:w-[110px]">Action</th>
+                                    <th role="columnheader" scope="col" className="py-3 px-3.5 font-semibold lg:w-[180px]">Target</th>
+                                    <th role="columnheader" scope="col" className={`py-3 px-3.5 font-semibold ${styles.detailHeader}`}>Detail</th>
+                                    <th role="columnheader" scope="col" className="py-3 px-3.5 font-semibold lg:w-[140px]">IP</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-white/[0.04]">
+                            <tbody role="rowgroup" className="divide-y divide-white/[0.05]">
                                 {entries.map((entry) => (
                                     <tr 
+                                        role="row"
                                         key={entry.id} 
                                         className={`transition-colors ${entry.target_type === 'pending_action' || entry.target_type === 'service' ? 'hover:bg-white/[0.04] cursor-pointer' : 'hover:bg-white/[0.02]'}`}
-                                        onClick={() => handleRowClick(entry)}
+                                        onClick={(event) => {
+                                            void handleRowClick(entry, event.currentTarget.querySelector<HTMLButtonElement>('[data-audit-target]'));
+                                        }}
                                     >
-                                        <td className="py-3 px-3.5 text-slate-400 whitespace-nowrap font-mono text-[11px]">
+                                        <td role="cell" data-label="Time" className="py-3 px-3.5 text-slate-400 whitespace-nowrap font-mono text-xs">
                                             {formatTimestamp(entry.created_at)}
                                         </td>
-                                        <td className="py-3 px-3.5">
-                                            <span className="text-slate-200 font-semibold">{entry.username}</span>
+                                        <td role="cell" data-label="Actor" className="py-3 px-3.5 min-w-0">
+                                            <span className="text-slate-200 font-semibold break-words [overflow-wrap:anywhere]">{entry.username}</span>
                                         </td>
-                                        <td className="py-3 px-3.5">
+                                        <td role="cell" data-label="Action" className="py-3 px-3.5 min-w-0">
                                             <ActionBadge action={entry.action} />
                                         </td>
-                                        <td className="py-3 px-3.5">
-                                            <span className="text-slate-300 text-[11px] font-mono">
-                                                {entry.target_type}/{entry.target_id}
-                                            </span>
+                                        <td role="cell" data-primary data-label="Target" className="py-3 px-3.5 min-w-0">
+                                            {entry.target_type === 'pending_action' || entry.target_type === 'service' ? (
+                                                <button
+                                                    type="button"
+                                                    aria-label={`View ${entry.target_type === 'service' ? 'logs' : 'action details'} for ${entry.target_id}`}
+                                                    data-audit-target
+                                                    aria-disabled={isFetchingDetail}
+                                                    aria-busy={isFetchingDetail}
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        void handleRowClick(entry, event.currentTarget);
+                                                    }}
+                                                    className="obs-touch-target-standard min-h-[44px] min-w-0 max-w-full inline-flex items-center gap-2 break-words [overflow-wrap:anywhere] text-left text-indigo-300 text-xs font-mono underline underline-offset-4 hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:opacity-50"
+                                                >
+                                                    <FileText size={14} className="shrink-0" />
+                                                    {entry.target_type}/{entry.target_id}
+                                                </button>
+                                            ) : (
+                                                <span className="block break-words [overflow-wrap:anywhere] text-slate-300 text-xs font-mono">
+                                                    {entry.target_type}/{entry.target_id}
+                                                </span>
+                                            )}
                                         </td>
-                                        <td className="py-3 px-3.5">
-                                            <span className="text-slate-400 text-xs max-w-[220px] truncate block" title={entry.detail}>
-                                                {entry.detail || '—'}
-                                            </span>
+                                        <td role="cell" data-actions data-label="Detail" className={`py-3 px-3.5 min-w-0 ${styles.detailCell}`}>
+                                            <button
+                                                type="button"
+                                                aria-label={`View full audit record ${entry.id}`}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    setSelectedRecord(entry);
+                                                }}
+                                                className="obs-touch-target-standard min-h-[44px] w-full min-w-0 max-w-[220px] text-left text-xs text-slate-300 focus-visible:outline-2 focus-visible:outline-indigo-400"
+                                            >
+                                                <span className="truncate block" title={entry.detail}>{entry.detail || '—'}</span>
+                                                <span className="mt-1 block text-indigo-300 underline underline-offset-2">View record</span>
+                                            </button>
                                         </td>
-                                        <td className="py-3 px-3.5 text-slate-500 text-[11px] font-mono">{entry.ip_address}</td>
+                                        <td role="cell" data-label="IP" className="py-3 px-3.5 text-slate-400 text-xs font-mono break-words [overflow-wrap:anywhere] min-w-0">{entry.ip_address}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -325,15 +360,16 @@ export default function AuditTab() {
 
                 {/* Pagination */}
                 {totalPages > 1 && (
-                    <div className="flex items-center justify-between px-4 py-3 border-t border-white/[0.06] text-xs">
+                    <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-t border-white/[0.07] text-xs">
                         <span className="text-slate-500">
                             Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
                         </span>
                         <div className="flex items-center gap-2">
                             <button
-                                onClick={() => setPage(p => Math.max(0, p - 1))}
+                                aria-label="Previous audit page"
+                                onClick={() => setPage(currentPage => Math.max(0, currentPage - 1))}
                                 disabled={page === 0}
-                                className="p-1.5 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                                className="obs-touch-target-standard p-2 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
                             >
                                 <ChevronLeft size={14} className="text-slate-400" />
                             </button>
@@ -341,9 +377,10 @@ export default function AuditTab() {
                                 {page + 1} / {totalPages}
                             </span>
                             <button
-                                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                                aria-label="Next audit page"
+                                onClick={() => setPage(currentPage => Math.min(totalPages - 1, currentPage + 1))}
                                 disabled={page >= totalPages - 1}
-                                className="p-1.5 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                                className="obs-touch-target-standard p-2 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
                             >
                                 <ChevronRight size={14} className="text-slate-400" />
                             </button>
@@ -355,6 +392,7 @@ export default function AuditTab() {
             {/* Context Modals */}
             <ActionDetailModal
                 action={selectedAction}
+                returnFocusRef={detailReturnFocusRef}
                 isOpen={!!selectedAction}
                 onClose={() => setSelectedAction(null)}
                 onApprove={async (id) => {
@@ -385,6 +423,33 @@ export default function AuditTab() {
                 }}
                 isProcessing={isFetchingDetail}
             />
+
+            {selectedRecord && (
+                <Modal
+                    isOpen
+                    onClose={() => setSelectedRecord(null)}
+                    title={`Audit Record #${selectedRecord.id}`}
+                    className="max-w-2xl"
+                >
+                    <dl className="divide-y divide-white/[0.07]">
+                        {[
+                            ['Actor', selectedRecord.username],
+                            ['Actor ID', String(selectedRecord.user_id)],
+                            ['Action', selectedRecord.action],
+                            ['Target', `${selectedRecord.target_type}/${selectedRecord.target_id}`],
+                            ['Detail', selectedRecord.detail],
+                            ['IP Address', selectedRecord.ip_address],
+                            ['User Agent', selectedRecord.user_agent],
+                            ['Timestamp', selectedRecord.created_at],
+                        ].map(([label, value]) => (
+                            <div key={label} className="grid min-w-0 gap-1 py-3 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-4">
+                                <dt className="text-xs font-semibold text-slate-400">{label}</dt>
+                                <dd className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm text-slate-200">{value || '—'}</dd>
+                            </div>
+                        ))}
+                    </dl>
+                </Modal>
+            )}
 
             {selectedService && (
                 <ServiceLogsModal

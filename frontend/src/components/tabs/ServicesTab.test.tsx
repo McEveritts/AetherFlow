@@ -194,6 +194,7 @@ describe('ServicesTab Loopback, Protocol, Update, Component & Control Contracts'
         expect(accessButton).toBeInTheDocument();
         fireEvent.click(accessButton);
 
+        expect(screen.getByRole('menu', { name: `Connection details for ${label}` })).toHaveClass('bg-slate-900/95', 'backdrop-blur-xl');
         const ingressButton = screen.getByRole('menuitem', { name: `Ingress and deployment for ${label}` });
         const settingsButton = screen.getByRole('menuitem', { name: `Settings for ${label}` });
 
@@ -856,7 +857,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
         expect(screen.getByText('4 Total')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Running (2)' })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Stopped (1)' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Stopped (2)' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Needs Attention \(1\)/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Updates \(1\)/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Check Updates & Sync' })).toBeInTheDocument();
@@ -896,6 +897,11 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(screen.getByRole('article', { name: 'AetherFlow API service' })).toBeInTheDocument();
         expect(screen.getByRole('article', { name: 'Sonarr service' })).toBeInTheDocument();
         expect(screen.queryByRole('article', { name: 'Radarr service' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Stopped (2)' }));
+        expect(screen.getByText('Showing 2 of 4 services')).toBeInTheDocument();
+        expect(screen.getByRole('article', { name: 'Radarr service' })).toBeInTheDocument();
+        expect(screen.getByRole('article', { name: 'Calibre-Web service' })).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole('button', { name: /Needs Attention \(1\)/i }));
         expect(screen.getByText('Showing 1 of 4 services')).toBeInTheDocument();
@@ -1256,6 +1262,7 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(manageTrigger).toHaveAttribute('aria-expanded', 'true');
         const menuElement = within(jellyfinArticle).getByRole('menu', { name: 'Jellyfin service actions' });
         expect(menuElement).toBeInTheDocument();
+        expect(menuElement).toHaveClass('bg-slate-900/95', 'backdrop-blur-xl');
 
         const restartItem = within(menuElement).getByRole('menuitem', { name: 'Restart Jellyfin service' });
         const stopItem = within(menuElement).getByRole('menuitem', { name: 'Stop Jellyfin service' });
@@ -1764,6 +1771,8 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(listModeButton).toHaveClass('min-h-[44px]');
         expect(cardModeButton).toHaveClass('min-w-[44px]');
         expect(cardModeButton).toHaveClass('min-h-[44px]');
+        expect(within(listModeButton).getByText('List')).not.toHaveClass('hidden');
+        expect(within(cardModeButton).getByText('Cards')).not.toHaveClass('hidden');
         expect(listModeButton).toHaveAttribute('aria-pressed', 'true');
         expect(cardModeButton).toHaveAttribute('aria-pressed', 'false');
         fireEvent.click(cardModeButton);
@@ -2797,5 +2806,203 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
         expect(attention).toHaveClass('border-y', 'border-amber-500/25', 'from-amber-500/[0.08]', 'via-rose-500/[0.05]', 'to-transparent');
         expect(attention).not.toHaveClass('rounded-xl', 'border', 'obs-telemetry-surface');
         expect(container.querySelector('.obs-telemetry-surface')).not.toBeInTheDocument();
+    });
+
+    it('migrates Connection menu to bounded ViewportMenu geometry and respects viewport and dock bounds', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'running',
+                version: '4.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+        const getBoundingClientRectSpy = jest.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+            if (this.tagName === 'HEADER') return { top: 0, bottom: 64, left: 0, right: 1024, width: 1024, height: 64, x: 0, y: 0, toJSON: () => ({}) };
+            if (this.tagName === 'NAV') return { top: 780, bottom: 844, left: 0, right: 1024, width: 1024, height: 64, x: 0, y: 780, toJSON: () => ({}) };
+            if (this.dataset.accessMenu === 'Sonarr') return { top: 650, bottom: 690, left: 100, right: 300, width: 200, height: 40, x: 100, y: 650, toJSON: () => ({}) };
+            return { top: 695, bottom: 820, left: 100, right: 300, width: 200, height: 125, x: 100, y: 695, toJSON: () => ({}) };
+        });
+        jest.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(120);
+
+        render(
+            <>
+                <header />
+                <nav aria-label="Mobile Bottom Navigation" />
+                <ServicesTab />
+            </>
+        );
+
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        const trigger = within(article).getByRole('button', { name: 'Connection details for Sonarr' });
+        fireEvent.click(trigger);
+
+        const connectionMenu = screen.getByRole('menu', { name: 'Connection details for Sonarr' });
+        expect(connectionMenu).toBeInTheDocument();
+        expect(connectionMenu).toHaveClass('bottom-full', 'left-0');
+        expect(connectionMenu).toHaveStyle({ maxHeight: '578px' });
+
+        screen.getByRole('navigation').getBoundingClientRect = () => ({
+            top: 920,
+            bottom: 980,
+            left: 0,
+            right: 1024,
+            width: 1024,
+            height: 60,
+            x: 0,
+            y: 920,
+            toJSON: () => ({}),
+        });
+        jest.replaceProperty(window, 'innerHeight', 980);
+        fireEvent(window, new Event('resize'));
+        expect(connectionMenu).toHaveClass('top-full', 'left-0');
+        expect(connectionMenu).toHaveStyle({ maxHeight: '222px' });
+        getBoundingClientRectSpy.mockRestore();
+    });
+
+    it('supports neutral initial focus, safe Enter, arrow navigation, and Escape focus return on Connection menu', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'running',
+                version: '4.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+
+        render(<ServicesTab />);
+
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        const trigger = within(article).getByRole('button', { name: 'Connection details for Sonarr' });
+        trigger.focus();
+        expect(trigger).toHaveFocus();
+
+        fireEvent.click(trigger);
+        const connectionMenu = screen.getByRole('menu', { name: 'Connection details for Sonarr' });
+        expect(connectionMenu).toBeInTheDocument();
+        expect(connectionMenu).toHaveFocus();
+
+        fireEvent.keyDown(connectionMenu, { key: 'Enter' });
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(connectionMenu).toBeInTheDocument();
+
+        const ingressItem = within(connectionMenu).getByRole('menuitem', { name: 'Ingress and deployment for Sonarr' });
+        const settingsItem = within(connectionMenu).getByRole('menuitem', { name: 'Settings for Sonarr' });
+
+        fireEvent.keyDown(connectionMenu, { key: 'ArrowDown' });
+        expect(ingressItem).toHaveFocus();
+
+        fireEvent.keyDown(ingressItem, { key: 'ArrowDown' });
+        expect(settingsItem).toHaveFocus();
+
+        fireEvent.keyDown(settingsItem, { key: 'ArrowUp' });
+        expect(ingressItem).toHaveFocus();
+
+        fireEvent.keyDown(ingressItem, { key: 'Escape' });
+        expect(screen.queryByRole('menu', { name: 'Connection details for Sonarr' })).not.toBeInTheDocument();
+        expect(trigger).toHaveFocus();
+    });
+
+    it('ensures Manage menu opens with neutral initial focus and does not dispatch restart on Enter', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'running',
+                version: '4.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+
+        render(<ServicesTab />);
+
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        const manageTrigger = within(article).getByRole('button', { name: 'Manage Sonarr service actions' });
+        manageTrigger.focus();
+        expect(manageTrigger).toHaveFocus();
+
+        fireEvent.click(manageTrigger);
+        const manageMenu = screen.getByRole('menu', { name: 'Sonarr service actions' });
+        expect(manageMenu).toBeInTheDocument();
+        expect(manageMenu).toHaveFocus();
+
+        fireEvent.keyDown(manageMenu, { key: 'Enter' });
+        expect(mockedApiFetch).not.toHaveBeenCalled();
+        expect(manageMenu).toBeInTheDocument();
+
+        const restartItem = within(manageMenu).getByRole('menuitem', { name: 'Restart Sonarr service' });
+        const stopItem = within(manageMenu).getByRole('menuitem', { name: 'Stop Sonarr service' });
+
+        fireEvent.keyDown(manageMenu, { key: 'ArrowDown' });
+        expect(restartItem).toHaveFocus();
+
+        fireEvent.keyDown(restartItem, { key: 'ArrowDown' });
+        expect(stopItem).toHaveFocus();
+
+        fireEvent.keyDown(stopItem, { key: 'Escape' });
+        expect(screen.queryByRole('menu', { name: 'Sonarr service actions' })).not.toBeInTheDocument();
+        expect(manageTrigger).toHaveFocus();
+    });
+
+    it('preserves permission and busy guards on Connection menu items', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'running',
+                version: '4.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+
+        const { rerender } = render(<ServicesTab browserOrigin={{ protocol: 'https:', hostname: 'remote.example.com' }} />);
+
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        const trigger = within(article).getByRole('button', { name: 'Connection details for Sonarr' });
+        fireEvent.click(trigger);
+
+        const connectionMenu = screen.getByRole('menu', { name: 'Connection details for Sonarr' });
+        const ingressItem = within(connectionMenu).getByRole('menuitem', { name: 'Ingress and deployment for Sonarr' });
+        const settingsItem = within(connectionMenu).getByRole('menuitem', { name: 'Settings for Sonarr' });
+
+        expect(ingressItem).not.toBeDisabled();
+        expect(settingsItem).not.toBeDisabled();
+
+        fireEvent.click(trigger);
+        expect(screen.queryByRole('menu', { name: 'Connection details for Sonarr' })).not.toBeInTheDocument();
+
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'updating',
+                version: '4.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+        rerender(<ServicesTab browserOrigin={{ protocol: 'https:', hostname: 'remote.example.com' }} />);
+
+        const updatingArticle = screen.getByRole('article', { name: 'Sonarr service' });
+        const updatingTrigger = within(updatingArticle).getByRole('button', { name: 'Connection details for Sonarr' });
+        fireEvent.click(updatingTrigger);
+
+        const updatingMenu = screen.getByRole('menu', { name: 'Connection details for Sonarr' });
+        const updatingIngress = within(updatingMenu).getByRole('menuitem', { name: 'Ingress and deployment for Sonarr' });
+        const updatingSettings = within(updatingMenu).getByRole('menuitem', { name: 'Settings for Sonarr' });
+
+        expect(updatingIngress).toBeDisabled();
+        expect(updatingSettings).toBeDisabled();
     });
 });

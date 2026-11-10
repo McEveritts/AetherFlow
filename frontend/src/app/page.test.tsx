@@ -184,4 +184,28 @@ describe("Dashboard telemetry decoupling and tab loading gates", () => {
     rerender(<Dashboard />);
     expect(screen.getByTestId("overview-tab")).toBeInTheDocument();
   });
+
+  it("reserves mobile dock height on mobile and retains desktop h-screen scroller without obsolete excessive spacer", () => {
+    mockUseMetrics.mockReturnValue({
+      metrics: null,
+      hardware: null,
+      history: emptyHistory,
+      isLoading: false,
+      isError: false,
+      connectionState: "CONNECTED",
+    });
+
+    const { container } = render(<Dashboard />);
+    const mainScroller = container.querySelector('main[data-dashboard-main="true"][data-scroller="main"]');
+    expect(mainScroller).toBeInTheDocument();
+    expect(mainScroller).toHaveClass("h-[calc(100dvh-var(--obs-shell-bottom-dock-height,4rem))]");
+    expect(mainScroller).toHaveClass("md:h-screen");
+    expect(mainScroller).toHaveClass("overflow-y-auto");
+
+    const contentWrapper = mainScroller?.querySelector(".min-h-\\[calc\\(100vh-8rem\\)\\]");
+    expect(contentWrapper).toBeInTheDocument();
+    expect(contentWrapper).toHaveClass("pb-6");
+    expect(contentWrapper).toHaveClass("md:pb-10");
+    expect(contentWrapper).not.toHaveClass("pb-24");
+  });
 });

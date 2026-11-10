@@ -4,6 +4,16 @@ import SecurityTab from './SecurityTab';
 
 const mockAddToast = jest.fn();
 
+const currentSession = {
+    jti: 'current-session',
+    ip_address: '127.0.0.1',
+    user_agent: 'Test Browser',
+    expires_at: '2026-11-09T12:00:00Z',
+    last_active: '2026-11-08T12:00:00Z',
+    is_current: true,
+};
+const mockSessions: Array<typeof currentSession> = [];
+
 jest.mock('@/contexts/ToastContext', () => ({
     useToast: () => ({
         addToast: mockAddToast,
@@ -23,7 +33,7 @@ jest.mock('@/contexts/AuthContext', () => ({
 }));
 
 jest.mock('swr', () => () => ({
-    data: { sessions: [] },
+    data: { sessions: mockSessions },
     mutate: jest.fn(),
     isLoading: false,
 }));
@@ -31,12 +41,42 @@ jest.mock('swr', () => () => ({
 describe('SecurityTab OPUS-005 2FA 403 Error Handling & Session Preservation', () => {
     beforeEach(() => {
         jest.clearAllMocks();
+        mockSessions.length = 0;
         document.cookie = 'csrf_token=test-csrf-token; path=/';
         window.localStorage.setItem('af_logout_sync', 'sync-initial');
     });
 
     afterEach(() => {
         jest.restoreAllMocks();
+    });
+
+    it('identifies devices without presenting opaque session identifiers as their names', () => {
+        mockSessions.push(currentSession, { ...currentSession, jti: 'opaque-remote-session', is_current: false });
+        render(<SecurityTab />);
+
+        expect(screen.getByText('This device')).toBeInTheDocument();
+        expect(screen.getByText('Other signed-in device')).toBeInTheDocument();
+        expect(screen.queryByText('current-...')).not.toBeInTheDocument();
+        expect(screen.queryByText('opaque-r...')).not.toBeInTheDocument();
+    });
+
+    it('only enables bulk revocation while another session is active', () => {
+        const { rerender } = render(<SecurityTab />);
+        const revokeButton = screen.getByRole('button', { name: /Revoke All Other Sessions/i });
+
+        expect(revokeButton).toBeDisabled();
+
+        mockSessions.push(currentSession);
+        rerender(<SecurityTab />);
+        expect(revokeButton).toBeDisabled();
+
+        mockSessions.push({ ...currentSession, jti: 'other-session', is_current: false });
+        rerender(<SecurityTab />);
+        expect(revokeButton).toBeEnabled();
+
+        mockSessions.pop();
+        rerender(<SecurityTab />);
+        expect(revokeButton).toBeDisabled();
     });
 
     it('preserves 2FA disable input and session when backend returns 403 INVALID_2FA_CODE', async () => {

@@ -65,6 +65,9 @@ describe('McBrowserPolicyAdmin component', () => {
 
         const onPolicySaved = jest.fn();
         render(<McBrowserPolicyAdmin onPolicySaved={onPolicySaved} />);
+        expect(screen.getByText(/Configure per-user workspace scope/)).toHaveTextContent('8 file operation flags');
+        expect(screen.getByText('Operation Permissions (8 Flags)')).toBeInTheDocument();
+        expect(screen.queryByText(/7 file operation flags/)).not.toBeInTheDocument();
 
         expect(screen.getByTestId('policy-admin-never-execute-badge')).toBeInTheDocument();
         expect(screen.getByTestId('policy-admin-never-execute-badge')).toHaveTextContent('Host shell execution permanently disabled');

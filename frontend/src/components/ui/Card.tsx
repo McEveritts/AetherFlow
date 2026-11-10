@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import React from "react";
 
 export interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: "default" | "panel" | "hero";
+  variant?: "default" | "panel" | "hero" | "embedded";
 }
 
 export function Card({ className, variant = "default", ...props }: CardProps) {
@@ -12,6 +12,7 @@ export function Card({ className, variant = "default", ...props }: CardProps) {
         variant === "default" && "glass-card",
         variant === "panel" && "glass-panel rounded-2xl",
         variant === "hero" && "glass-hero",
+        variant === "embedded" && "obs-canvas-section",
         "relative min-w-0 max-w-full",
         className
       )}

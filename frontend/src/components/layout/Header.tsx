@@ -45,13 +45,14 @@ export default function Header() {
     );
     const tasks = useTaskStore((state) => state.tasks);
     const { user, logout } = useAuth();
-    const { toasts, toggleDrawer } = useToast();
+    const { toasts, isDrawerOpen, toggleDrawer } = useToast();
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const [tasksOpen, setTasksOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const tasksRef = useRef<HTMLDivElement>(null);
     const dropdownTriggerRef = useRef<HTMLButtonElement>(null);
     const tasksTriggerRef = useRef<HTMLButtonElement>(null);
+    const focusTargetOnOpenRef = useRef<'menu' | 'first' | 'last'>('menu');
 
     useEffect(() => {
         const handleClickOutside = (event: PointerEvent | MouseEvent) => {
@@ -82,6 +83,78 @@ export default function Header() {
         document.addEventListener('keydown', handleEscape);
         return () => document.removeEventListener('keydown', handleEscape);
     }, [dropdownOpen, tasksOpen]);
+
+    useEffect(() => {
+        if (!dropdownOpen) return;
+        const menuElement = dropdownRef.current?.querySelector<HTMLElement>('[role="menu"]');
+        if (!menuElement) return;
+        const menuItems = Array.from(menuElement.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+        if (menuItems.length === 0) return;
+        if (focusTargetOnOpenRef.current === 'menu') {
+            menuElement.focus();
+        } else if (focusTargetOnOpenRef.current === 'last') {
+            menuItems[menuItems.length - 1].focus();
+        } else {
+            menuItems[0].focus();
+        }
+    }, [dropdownOpen]);
+
+    const handleTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            focusTargetOnOpenRef.current = 'first';
+            setTasksOpen(false);
+            if (!dropdownOpen) {
+                setDropdownOpen(true);
+            } else {
+                const menuElement = dropdownRef.current?.querySelector<HTMLElement>('[role="menu"]');
+                const firstItem = menuElement?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)');
+                firstItem?.focus();
+            }
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            focusTargetOnOpenRef.current = 'last';
+            setTasksOpen(false);
+            if (!dropdownOpen) {
+                setDropdownOpen(true);
+            } else {
+                const menuElement = dropdownRef.current?.querySelector<HTMLElement>('[role="menu"]');
+                const menuItems = Array.from(menuElement?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') || []);
+                menuItems[menuItems.length - 1]?.focus();
+            }
+        }
+    };
+
+    const handleMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        const menuElement = dropdownRef.current?.querySelector<HTMLElement>('[role="menu"]');
+        if (!menuElement) return;
+        const menuItems = Array.from(menuElement.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+        if (menuItems.length === 0) return;
+        const currentIndex = menuItems.indexOf(document.activeElement as HTMLElement);
+
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % menuItems.length : 0;
+            menuItems[nextIndex]?.focus();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            const previousIndex = currentIndex > 0 ? currentIndex - 1 : menuItems.length - 1;
+            menuItems[previousIndex]?.focus();
+        } else if (event.key === 'Home') {
+            event.preventDefault();
+            menuItems[0]?.focus();
+        } else if (event.key === 'End') {
+            event.preventDefault();
+            menuItems[menuItems.length - 1]?.focus();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            setDropdownOpen(false);
+            dropdownTriggerRef.current?.focus();
+        } else if (event.key === 'Tab') {
+            dropdownTriggerRef.current?.focus();
+            setDropdownOpen(false);
+        }
+    };
 
     const getTabLabel = () => {
         return (
@@ -221,6 +294,8 @@ export default function Header() {
                     }}
                     className="obs-touch-target-standard min-h-[44px] min-w-[44px] obs-gpu-120hz-interactive relative p-2.5 text-slate-300 hover:text-white hover:bg-white/[0.08] border border-transparent hover:border-white/10 rounded-xl flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                     aria-label="Notifications"
+                    aria-expanded={isDrawerOpen}
+                    aria-controls="notification-drawer"
                 >
                     <Bell size={18} />
                     {toasts.length > 0 && (
@@ -244,7 +319,7 @@ export default function Header() {
                         </button>
 
                         {tasksOpen && (
-                            <div id="header-background-tasks" className="absolute right-0 mt-2 w-72 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
+                            <div id="header-background-tasks" className="absolute right-0 mt-2 w-72 glass-panel obs-header-menu border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
                                 <div className="p-3 border-b border-white/5 bg-white/[0.02]">
                                     <p className="text-xs uppercase font-bold text-slate-400 tracking-wider">Active Background Processes</p>
                                 </div>
@@ -280,9 +355,15 @@ export default function Header() {
                     <button 
                         type="button"
                         ref={dropdownTriggerRef}
-                        onClick={() => { setTasksOpen(false); setDropdownOpen(!dropdownOpen); }}
+                        onClick={() => {
+                            focusTargetOnOpenRef.current = 'menu';
+                            setTasksOpen(false);
+                            setDropdownOpen(!dropdownOpen);
+                        }}
+                        onKeyDown={handleTriggerKeyDown}
                         className="obs-touch-target-standard min-h-[44px] min-w-[44px] flex items-center gap-2.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 hover:border-indigo-500/40 pl-1 pr-3 md:pr-4 py-1 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                         aria-label="User Menu"
+                        aria-haspopup="menu"
                         aria-expanded={dropdownOpen}
                         aria-controls="header-user-menu"
                     >
@@ -301,16 +382,24 @@ export default function Header() {
                     </button>
 
                     {dropdownOpen && (
-                        <div id="header-user-menu" className="absolute right-0 mt-2 w-56 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
+                        <div
+                            id="header-user-menu"
+                            tabIndex={-1}
+                            role="menu"
+                            aria-label="User Menu"
+                            onKeyDown={handleMenuKeyDown}
+                            className="absolute right-0 mt-2 w-56 glass-panel obs-header-menu border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50"
+                        >
                             <div className="p-4 border-b border-white/5 bg-white/[0.02]">
                                 <p className="text-sm font-bold text-slate-200">{user?.username || 'Admin'}</p>
                                 <p className="text-xs text-slate-400 truncate">{user?.email || 'admin@aetherflow.local'}</p>
                             </div>
-                            <div className="p-2">
+                            <div className="p-2" role="none">
                                 <button
                                     type="button"
+                                    role="menuitem"
                                     onClick={logout}
-                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 transition-colors min-h-[40px]"
+                                    className="obs-touch-target-standard w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 transition-colors min-h-[44px] focus:outline-none focus:bg-rose-500/10 focus-visible:ring-1 focus-visible:ring-rose-400"
                                 >
                                     <LogOut size={16} />
                                     Sign Out

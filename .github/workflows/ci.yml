@@ -128,6 +128,9 @@ jobs:
       - name: Lint Frontend
         run: npm run lint
 
+      - name: Typecheck Frontend and Tests
+        run: ../node_modules/.bin/tsc --noEmit --incremental false
+
       - name: Unit Tests
         run: npm run test:ci
 

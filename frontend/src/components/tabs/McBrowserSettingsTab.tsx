@@ -6,6 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import McBrowserPolicyAdmin from '@/components/mcbrowser/McBrowserPolicyAdmin';
 import McBrowserEventsAdmin from '@/components/mcbrowser/McBrowserEventsAdmin';
+import { MCBROWSER_PERMISSION_KEYS } from '@/lib/mcbrowser-policy-admin';
 
 export default function McBrowserSettingsTab() {
     const { user, isAuthenticated } = useAuth();
@@ -15,23 +16,23 @@ export default function McBrowserSettingsTab() {
     const isAdmin = Boolean(isAuthenticated && user?.role === 'admin');
 
     return (
-        <div className="space-y-6 animate-fade-in w-full">
-            <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-6 animate-fade-in w-full min-w-0 max-w-full">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.07] relative z-30 shrink-0">
                 <div className="flex items-start gap-3.5">
-                    <div className="h-11 w-11 rounded-2xl flex items-center justify-center border bg-indigo-500/15 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.2)] text-indigo-400 shrink-0">
-                        <Folder size={22} />
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0">
+                        <Folder size={20} />
                     </div>
                     <div>
                         <div className="flex items-center gap-2.5 flex-wrap">
                             <h3 className="text-base font-bold text-slate-100">
                                 McBrowser Administration &amp; File Policies
                             </h3>
-                            <span className="text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                            <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
                                 FlowAI Paired Search
                             </span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1">
-                            Manage per-user workspace confinement, 8-flag operation permissions, prefix/regex access rules, and audit event queues for McBrowser.
+                            Manage per-user workspace confinement, {MCBROWSER_PERMISSION_KEYS.length}-flag operation permissions, prefix/regex access rules, and audit event queues for McBrowser.
                         </p>
                     </div>
                 </div>
@@ -42,7 +43,7 @@ export default function McBrowserSettingsTab() {
                             type="button"
                             aria-expanded={eventsAdminOpen}
                             onClick={() => setEventsAdminOpen((open) => !open)}
-                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3.5 py-2 rounded-xl border border-indigo-500/30 text-xs font-semibold text-indigo-200 bg-indigo-500/10 hover:bg-indigo-500/20 transition-all"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] flex items-center gap-2 px-3.5 py-2 rounded-lg border border-indigo-500/30 text-xs font-semibold text-indigo-200 bg-indigo-500/10 hover:bg-indigo-500/20 transition-all"
                         >
                             <Activity size={14} className="text-indigo-400" />
                             <span>Audit Events &amp; Internal Queue</span>
@@ -50,8 +51,8 @@ export default function McBrowserSettingsTab() {
                     )}
                     <button
                         type="button"
-                        onClick={() => setActiveTab('fileshare')}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-xs font-semibold text-slate-200 transition-all"
+                        onClick={() => setActiveTab('mcbrowser')}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-xs font-semibold text-slate-200 transition-all"
                     >
                         <span>Open McBrowser</span>
                         <ArrowUpRight size={14} className="text-indigo-400" />
@@ -62,7 +63,7 @@ export default function McBrowserSettingsTab() {
             {isAdmin ? (
                 <>
                     {eventsAdminOpen && (
-                        <section aria-label="McBrowser audit administration" className="space-y-3">
+                        <section aria-label="McBrowser audit administration" className="obs-canvas-section min-w-0 max-w-full">
                             <McBrowserEventsAdmin
                                 onClose={() => setEventsAdminOpen(false)}
                             />
@@ -74,7 +75,7 @@ export default function McBrowserSettingsTab() {
                     />
                 </>
             ) : (
-                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex items-center gap-3 text-xs text-slate-300">
+                <div className="obs-canvas-section p-5 border-y border-white/[0.07] flex items-center gap-3 text-xs text-slate-300">
                     <Shield size={18} className="text-amber-400 shrink-0" />
                     <span>
                         Administrator privileges are required to edit per-user McBrowser file policies and inspect the system-wide audit event queue. Your personal view preferences (List/Grid/Gallery, sort order, hidden files, and FlowAI natural language search) can be toggled directly inside the McBrowser workspace toolbar.

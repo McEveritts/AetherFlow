@@ -105,7 +105,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
   };
 
   return (
-    <div className="glass-card rounded-2xl p-6 shadow-2xl relative overflow-hidden mt-6">
+    <div className="obs-canvas-section py-5 relative overflow-hidden mt-4">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-lg font-semibold text-white">External Access</h3>

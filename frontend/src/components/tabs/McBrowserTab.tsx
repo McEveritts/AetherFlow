@@ -34,6 +34,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import McBrowserWorkspace from '@/components/mcbrowser/McBrowserWorkspace';
 import McBrowserMediaPreview from '@/components/mcbrowser/McBrowserMediaPreview';
+import { Modal } from '@/components/ui/Modal';
 import { classifyMcBrowserMediaCategory } from '@/lib/mcbrowser-media';
 import { McBrowserPolicyResponse, McBrowserPolicyPermissions } from '@/lib/mcbrowser-workspace';
 import {
@@ -130,6 +131,15 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
     const [previewLoading, setPreviewLoading] = useState<boolean>(false);
     const [previewError, setPreviewError] = useState<string | null>(null);
 
+    const mkdirInputRef = useRef<HTMLInputElement | null>(null);
+    const mkdirOpenerRef = useRef<HTMLElement | null>(null);
+    const renameInputRef = useRef<HTMLInputElement | null>(null);
+    const renameOpenerRef = useRef<HTMLElement | null>(null);
+    const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+    const deleteOpenerRef = useRef<HTMLElement | null>(null);
+    const previewDownloadRef = useRef<HTMLButtonElement | null>(null);
+    const previewOpenerRef = useRef<HTMLElement | null>(null);
+
     const requestSeqRef = useRef<number>(0);
     const activeAbortRef = useRef<AbortController | null>(null);
     const previewSeqRef = useRef<number>(0);
@@ -156,6 +166,12 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
 
     useEffect(() => {
         isActiveRef.current = Boolean(isActive);
+        if (!isActive) {
+            setMkdirOpen(false);
+            setRenameTarget(null);
+            setDeleteTarget(null);
+            setPreviewTarget(null);
+        }
     }, [isActive]);
 
     const fetchDirectory = useCallback(
@@ -422,14 +438,17 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         }
     };
 
-    const openMkdirDialog = () => {
+    const openMkdirDialog = (openerElement?: HTMLElement | null) => {
+        mkdirOpenerRef.current =
+            openerElement ??
+            (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         setMkdirName('');
         setMkdirError(null);
         setMkdirOpen(true);
     };
 
-    const handleCreateDirectory = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleCreateDirectory = async (event: React.FormEvent) => {
+        event.preventDefault();
         if (!permissions.create) return;
         const validationErr = validateEntryName(mkdirName);
         if (validationErr) {
@@ -462,7 +481,13 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         }
     };
 
-    const openRenameDialog = (entry: McBrowserEntry) => {
+    const openRenameDialog = (
+        entry: McBrowserEntry,
+        openerElement?: HTMLElement | null
+    ) => {
+        renameOpenerRef.current =
+            openerElement ??
+            (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         if (!permissions.rename) return;
         if (entry.kind === 'other') {
             addToast(`Cannot rename unsupported entry type (${entry.kind}).`, 'info');
@@ -473,8 +498,8 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         setRenameError(null);
     };
 
-    const handleRenameSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleRenameSubmit = async (event: React.FormEvent) => {
+        event.preventDefault();
         if (!permissions.rename) return;
         if (!renameTarget) return;
 
@@ -520,7 +545,13 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         }
     };
 
-    const openDeleteDialog = (entry: McBrowserEntry) => {
+    const openDeleteDialog = (
+        entry: McBrowserEntry,
+        openerElement?: HTMLElement | null
+    ) => {
+        deleteOpenerRef.current =
+            openerElement ??
+            (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         if (!permissions.delete) return;
         if (entry.kind === 'other') {
             addToast(`Deleting ${entry.kind} entries is not supported.`, 'info');
@@ -605,7 +636,13 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         }
     };
 
-    const handleOpenPreview = async (entry: McBrowserEntry) => {
+    const handleOpenPreview = async (
+        entry: McBrowserEntry,
+        openerElement?: HTMLElement | null
+    ) => {
+        previewOpenerRef.current =
+            openerElement ??
+            (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         if (!permissions.read) return;
         if (getMcBrowserEntryTargetKind(entry) !== 'file') {
             addToast('Only regular files can be previewed.', 'info');
@@ -737,7 +774,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             <h2 className="text-lg font-bold text-slate-100 tracking-tight">
                                 McBrowser
                             </h2>
-                            <span className="text-[11px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                            <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
                                 Scoped Workspace
                             </span>
                         </div>
@@ -750,7 +787,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                 <div className="flex flex-wrap items-center gap-2">
                     <button
                         type="button"
-                        onClick={openMkdirDialog}
+                        onClick={(event) => openMkdirDialog(event.currentTarget)}
                         disabled={!permissions.create || anyBusy || isLoading}
                         className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-200 hover:bg-white/[0.08] hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
@@ -776,10 +813,10 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                         type="button"
                         onClick={() => folderInputRef.current?.click()}
                         disabled={!permissions.create || isMutating || isLoading}
-                        className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border border-indigo-500/40 text-indigo-200 disabled:opacity-50"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.04] hover:bg-white/[0.08] hover:text-white border border-indigo-500/40 text-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
-                        <Folder size={15} />
-                        Upload Folder
+                        <Folder size={15} className="text-indigo-300" />
+                        <span>Upload Folder</span>
                     </button>
 
                     <button
@@ -810,14 +847,19 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     </button>
                 </div>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
-                    <div>
+            <details className="obs-canvas-section group">
+                <summary className="obs-touch-target-standard min-h-[44px] cursor-pointer px-1 py-3 text-sm font-semibold text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400">
+                    Workspace scope &amp; safety
+                    <span className="ml-3 text-xs font-normal text-slate-400">{dirCount} folders · {fileCount} files</span>
+                </summary>
+            <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07] border-t border-white/[0.07]">
+                <div className="p-4 flex items-center justify-between min-w-0">
+                    <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Current Scope</p>
                         <p className="text-sm font-bold text-slate-100 mt-1 truncate max-w-[240px]" title={currentPath ? `My files/${currentPath}` : 'My files'}>
                             {currentPath ? `My files / ${currentPath}` : 'My files'}
                         </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
+                        <p className="text-xs text-slate-500 mt-0.5">
                             {dirCount} folder{dirCount === 1 ? '' : 's'} · {fileCount} file{fileCount === 1 ? '' : 's'}
                             {unsupportedCount > 0 ? ` · ${unsupportedCount} unsupported` : ''}
                         </p>
@@ -827,13 +869,13 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
-                    <div>
+                <div className="p-4 flex items-center justify-between min-w-0">
+                    <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Upload Guardrails</p>
                         <p className="text-sm font-bold text-slate-100 mt-1">
                             Max {formatBytes(maxUploadBytes)} / file
                         </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
+                        <p className="text-xs text-slate-500 mt-0.5">
                             Resumable TUS · Existing files require an explicit conflict choice
                         </p>
                     </div>
@@ -842,13 +884,13 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
-                    <div>
+                <div className="p-4 flex items-center justify-between min-w-0">
+                    <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Safety Rules</p>
                         <p className="text-sm font-bold text-slate-100 mt-1">
                             Scoped Paths &amp; UTF-8 Preview
                         </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
+                        <p className="text-xs text-slate-500 mt-0.5">
                             Recursive deletion requires confirmation · Text preview up to {formatBytes(MAX_PREVIEW_BYTES, 0)}
                         </p>
                     </div>
@@ -857,11 +899,12 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     </div>
                 </div>
             </div>
+            </details>
             {uploadQueue.length > 0 && (
                 <div
                     role="region"
                     aria-label="Upload progress"
-                    className="rounded-2xl border border-indigo-500/30 bg-slate-900/70 backdrop-blur-xl p-4 space-y-3"
+                    className="obs-canvas-section py-4 space-y-3"
                 >
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -947,11 +990,11 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             Interrupted requests may have completed on the server. Refresh and check the destination before selecting those files again; uncertain uploads are not retried automatically.
                         </p>
                     )}
-                    <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                    <div className="divide-y divide-white/[0.06] border-t border-white/[0.06] max-h-44 overflow-y-auto pr-1">
                         {uploadQueue.map((item) => (
                             <div
                                 key={item.id}
-                                className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-black/30 border border-white/[0.05] text-xs"
+                                className="flex items-center justify-between gap-3 px-2 py-2 text-xs"
                             >
                                 <div className="flex items-center gap-2.5 min-w-0">
                                     {item.status === 'pending' && (
@@ -1073,14 +1116,14 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                 </div>
             )}
             <div
-                className={`rounded-2xl border transition-colors bg-slate-900/40 backdrop-blur-xl p-5 flex flex-col space-y-4 ${
-                    isDragging ? 'border-indigo-400 bg-indigo-500/[0.07]' : 'border-white/[0.06]'
+                className={`obs-canvas-section py-5 flex flex-col space-y-4 transition-colors ${
+                    isDragging ? 'bg-indigo-500/[0.07] ring-1 ring-indigo-400/50' : ''
                 }`}
             >
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-white/[0.06]">
                     <nav
                         aria-label="Breadcrumb"
-                        className="flex items-center gap-1.5 overflow-x-auto py-1 max-w-full"
+                        className="flex items-center gap-1.5 overflow-x-auto py-1 max-w-full min-w-0"
                     >
                         <button
                             type="button"
@@ -1088,7 +1131,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             disabled={!currentPath || isLoading || anyBusy}
                             aria-label="Navigate to parent folder"
                             title="Up one level"
-                            className="p-1.5 rounded-lg bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 mr-1"
+                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 mr-1"
                         >
                             <ArrowUp size={14} />
                         </button>
@@ -1105,7 +1148,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                         onClick={() => navigateTo(crumb.path)}
                                         disabled={isLoading || anyBusy}
                                         aria-current={isLast ? 'page' : undefined}
-                                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                                        className={`obs-touch-target-standard min-h-[44px] inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                                             isLast
                                                 ? 'bg-indigo-500/20 text-indigo-200 border border-indigo-500/30'
                                                 : 'text-slate-300 hover:text-white hover:bg-white/[0.06]'
@@ -1117,8 +1160,8 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             );
                         })}
                     </nav>
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        <div className="relative flex-1 sm:flex-initial sm:w-60">
+                    <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto shrink-0">
+                        <div className="relative w-full sm:w-60 min-w-0">
                             <Search
                                 size={14}
                                 className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
@@ -1126,24 +1169,24 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             <input
                                 type="search"
                                 value={filterQuery}
-                                onChange={(e) => setFilterQuery(e.target.value)}
+                                onChange={(changeEvent) => setFilterQuery(changeEvent.target.value)}
                                 placeholder="Filter by filename..."
                                 aria-label="Filter files by name"
-                                className="w-full pl-8 pr-7 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50"
+                                className="obs-search-input obs-touch-target-standard min-h-[44px] h-11 w-full pl-8 pr-10 py-2 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50"
                             />
                             {filterQuery && (
                                 <button
                                     type="button"
                                     onClick={() => setFilterQuery('')}
                                     aria-label="Clear filename filter"
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center absolute right-0 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white rounded-xl"
                                 >
                                     <X size={13} />
                                 </button>
                             )}
                         </div>
 
-                        <div className="flex items-center gap-1 bg-black/30 border border-white/10 rounded-xl p-1">
+                        <div className="flex flex-wrap items-center gap-1 bg-black/30 border border-white/10 rounded-xl p-1 shrink-0">
                             {(['name', 'size', 'modified'] as SortField[]).map((field) => {
                                 const active = sortField === field;
                                 return (
@@ -1152,7 +1195,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                         type="button"
                                         onClick={() => toggleSort(field)}
                                         aria-label={`Sort by ${field}`}
-                                        className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold capitalize transition-colors ${
+                                        className={`obs-touch-target-standard min-h-[44px] flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-colors ${
                                             active
                                                 ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/30'
                                                 : 'text-slate-400 hover:text-slate-200'
@@ -1160,7 +1203,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                     >
                                         <span>{field}</span>
                                         {active && (
-                                            <span className="text-[10px] font-mono">
+                                            <span className="text-xs font-mono">
                                                 {sortDirection === 'asc' ? '↑' : '↓'}
                                             </span>
                                         )}
@@ -1180,7 +1223,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             <span className="text-xs font-bold text-indigo-200 truncate">
                                 Selected: {selectedEntry.name}
                             </span>
-                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/10 text-slate-300 uppercase font-mono">
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-slate-300 uppercase font-mono">
                                 {selectedEntry.kind}
                             </span>
                             {selectedEntry.kind === 'symlink' || selectedEntry.kind === 'other' ? (
@@ -1197,7 +1240,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                     type="button"
                                     onClick={() => navigateTo(selectedEntry.path)}
                                     disabled={anyBusy}
-                                    className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors"
+                                    className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors inline-flex items-center"
                                 >
                                     Open Folder
                                 </button>
@@ -1206,9 +1249,9 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                 <>
                                     <button
                                         type="button"
-                                        onClick={() => handleOpenPreview(selectedEntry)}
+                                        onClick={(event) => void handleOpenPreview(selectedEntry, event.currentTarget)}
                                         disabled={!permissions.read || anyBusy}
-                                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
+                                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
                                     >
                                         <Eye size={13} />
                                         <span>Preview</span>
@@ -1217,7 +1260,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                         type="button"
                                         onClick={() => handleDownload(selectedEntry)}
                                         disabled={!permissions.download || anyBusy || downloadingPath === selectedEntry.path}
-                                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
+                                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
                                     >
                                         <Download size={13} />
                                         <span>Download</span>
@@ -1228,18 +1271,18 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                 <>
                                     <button
                                         type="button"
-                                        onClick={() => openRenameDialog(selectedEntry)}
+                                        onClick={(event) => openRenameDialog(selectedEntry, event.currentTarget)}
                                         disabled={!permissions.rename || anyBusy}
-                                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
+                                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] text-slate-200 hover:bg-white/10 border border-white/10 transition-colors"
                                     >
                                         <Edit3 size={13} />
                                         <span>Rename</span>
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={() => openDeleteDialog(selectedEntry)}
+                                        onClick={(event) => openDeleteDialog(selectedEntry, event.currentTarget)}
                                         disabled={!permissions.delete || anyBusy}
-                                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 border border-rose-500/30 transition-colors"
+                                        className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 border border-rose-500/30 transition-colors"
                                     >
                                         <Trash2 size={13} />
                                         <span>Delete</span>
@@ -1316,49 +1359,53 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     <div className="overflow-x-auto min-w-0 max-w-full">
                         <table
                             aria-label="Directory entries"
-                            className="w-full text-left border-collapse"
+                            className="w-full text-left border-collapse block xl:table xl:table-fixed min-w-0"
                         >
-                            <thead>
-                                <tr className="border-b border-white/[0.08] text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                                    <th className="py-2.5 px-3">
+                            <thead className="sr-only xl:not-sr-only xl:table-header-group">
+                                <tr className="border-b border-white/[0.08] text-xs font-bold uppercase tracking-wider text-slate-400">
+                                    <th id="header-name" scope="col" aria-label="Name" aria-sort={sortField === 'name' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'} className="py-2.5 px-3 xl:w-[38%]">
                                         <button
                                             type="button"
-                                            onClick={() => toggleSort('name')}
-                                            className="flex items-center gap-1 hover:text-white transition-colors"
+                                            onClick={() => toggleSort("name")}
+                                            className="obs-touch-target-standard min-h-[44px] hidden xl:inline-flex items-center gap-1 hover:text-white transition-colors"
                                         >
                                             <span>Name</span>
                                             <ArrowUpDown size={12} />
                                         </button>
                                     </th>
-                                    <th className="py-2.5 px-3 hidden sm:table-cell">Kind</th>
-                                    <th className="py-2.5 px-3">
+                                    <th id="header-kind" scope="col" className="py-2.5 px-3 xl:w-[10%]">
+                                        Kind
+                                    </th>
+                                    <th id="header-size" scope="col" aria-label="Size" aria-sort={sortField === 'size' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'} className="py-2.5 px-3 xl:w-[10%]">
                                         <button
                                             type="button"
-                                            onClick={() => toggleSort('size')}
-                                            className="flex items-center gap-1 hover:text-white transition-colors"
+                                            onClick={() => toggleSort("size")}
+                                            className="obs-touch-target-standard min-h-[44px] hidden xl:inline-flex items-center gap-1 hover:text-white transition-colors"
                                         >
                                             <span>Size</span>
                                             <ArrowUpDown size={12} />
                                         </button>
                                     </th>
-                                    <th className="py-2.5 px-3 hidden md:table-cell">
+                                    <th id="header-modified" scope="col" aria-label="Modified" aria-sort={sortField === 'modified' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'} className="py-2.5 px-3 xl:w-[18%]">
                                         <button
                                             type="button"
-                                            onClick={() => toggleSort('modified')}
-                                            className="flex items-center gap-1 hover:text-white transition-colors"
+                                            onClick={() => toggleSort("modified")}
+                                            className="obs-touch-target-standard min-h-[44px] hidden xl:inline-flex items-center gap-1 hover:text-white transition-colors"
                                         >
                                             <span>Modified</span>
                                             <ArrowUpDown size={12} />
                                         </button>
                                     </th>
-                                    <th className="py-2.5 px-3 text-right">Actions</th>
+                                    <th id="header-actions" scope="col" className="py-2.5 px-3 text-right xl:w-[24%]">
+                                        Actions
+                                    </th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-white/[0.04] text-sm">
+                            <tbody className="divide-y divide-white/[0.04] block xl:table-row-group text-sm">
                                 {filteredAndSortedEntries.map((entry) => {
                                     const isSelected = selectedPath === entry.path;
                                     const isUnsupported =
-                                        entry.kind === 'other';
+                                        entry.kind === "other";
                                     const isDownloading = downloadingPath === entry.path;
 
                                     return (
@@ -1366,28 +1413,28 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                             key={entry.path}
                                             aria-selected={isSelected}
                                             onClick={() => setSelectedPath(entry.path)}
-                                            className={`group transition-colors ${
+                                            className={`group transition-colors block xl:table-row p-3.5 sm:p-4 xl:p-0 border-b border-white/[0.06] xl:border-b-0 ${
                                                 isSelected
-                                                    ? 'bg-indigo-500/15'
-                                                    : 'hover:bg-white/[0.04]'
+                                                    ? "bg-indigo-500/15"
+                                                    : "hover:bg-white/[0.04]"
                                             }`}
                                         >
-                                            <td className="py-2.5 px-3">
-                                                <div className="flex items-center gap-3 min-w-0">
+                                            <td headers="header-name" className="block xl:table-cell py-0 xl:py-2.5 px-0 xl:px-3 min-w-0">
+                                                <div className="flex items-start sm:items-center gap-3 min-w-0">
                                                     <div
-                                                        className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
-                                                            entry.kind === 'directory'
-                                                                ? 'bg-indigo-500/15 border-indigo-500/30 text-indigo-400'
-                                                                : entry.kind === 'file'
-                                                                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                                                                : 'bg-amber-500/15 border-amber-500/30 text-amber-400'
+                                                        className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border mt-1 sm:mt-0 ${
+                                                            entry.kind === "directory"
+                                                                ? "bg-indigo-500/15 border-indigo-500/30 text-indigo-400"
+                                                                : entry.kind === "file"
+                                                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                                                                : "bg-amber-500/15 border-amber-500/30 text-amber-400"
                                                         }`}
                                                     >
-                                                        {entry.kind === 'directory' ? (
+                                                        {entry.kind === "directory" ? (
                                                             <Folder size={16} />
-                                                        ) : entry.kind === 'file' ? (
+                                                        ) : entry.kind === "file" ? (
                                                             <FileText size={16} />
-                                                        ) : entry.kind === 'symlink' ? (
+                                                        ) : entry.kind === "symlink" ? (
                                                             <Link2Off size={16} />
                                                         ) : (
                                                             <FileQuestion size={16} />
@@ -1395,32 +1442,32 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                                     </div>
 
                                                     {isUnsupported ? (
-                                                        <div className="min-w-0">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="font-medium text-slate-300 truncate">
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                <span className="font-medium text-slate-300 break-words [overflow-wrap:anywhere]">
                                                                     {entry.name}
                                                                 </span>
-                                                                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 shrink-0">
-                                                                    {entry.kind === 'symlink'
-                                                                        ? 'Symlink (Unsupported)'
-                                                                        : 'Unsupported Type'}
+                                                                <span className="text-xs font-bold uppercase px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 shrink-0">
+                                                                    {entry.kind === "symlink"
+                                                                        ? "Symlink (Unsupported)"
+                                                                        : "Unsupported Type"}
                                                                 </span>
                                                             </div>
-                                                            <p className="text-[11px] text-amber-300/80">
+                                                            <p className="text-xs text-amber-300/80 mt-0.5">
                                                                 Special files cannot be opened or modified.
                                                             </p>
                                                         </div>
                                                     ) : (
                                                         <button
                                                             type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
                                                                 setSelectedPath(entry.path);
                                                                 handleEntryActivate(entry);
                                                             }}
-                                                            disabled={anyBusy || getMcBrowserEntryTargetKind(entry) === 'symlink'}
-                                                            title={entry.kind === 'symlink' ? 'Internal links can be opened; rename and delete affect the link only' : undefined}
-                                                            className="text-left font-medium text-slate-100 hover:text-indigo-300 focus:outline-none focus-visible:underline truncate"
+                                                            disabled={anyBusy || getMcBrowserEntryTargetKind(entry) === "symlink"}
+                                                            title={entry.kind === "symlink" ? "Internal links can be opened; rename and delete affect the link only" : undefined}
+                                                            className="obs-touch-target-standard min-h-[44px] min-w-0 flex-1 text-left font-medium text-slate-100 hover:text-indigo-300 focus:outline-none focus-visible:underline break-words [overflow-wrap:anywhere] block py-2"
                                                         >
                                                             {entry.name}
                                                         </button>
@@ -1428,54 +1475,58 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                                 </div>
                                             </td>
 
-                                            <td className="py-2.5 px-3 hidden sm:table-cell">
-                                                <span className="text-xs font-mono text-slate-400 capitalize">
+                                            <td headers="header-kind" className="inline-block xl:table-cell py-0 xl:py-2.5 px-0 xl:px-3 text-xs mt-2 xl:mt-0 mr-4 xl:mr-0">
+                                                <span className="xl:hidden text-slate-400 font-sans mr-1.5 uppercase font-medium text-xs">Kind:</span>
+                                                <span className="font-mono text-slate-400 capitalize">
                                                     {entry.kind}
                                                 </span>
                                             </td>
 
-                                            <td className="py-2.5 px-3 text-xs font-mono text-slate-300 whitespace-nowrap">
-                                                {getMcBrowserEntryTargetKind(entry) === 'directory'
-                                                    ? '—'
+                                            <td headers="header-size" className="inline-block xl:table-cell py-0 xl:py-2.5 px-0 xl:px-3 text-xs font-mono text-slate-300 whitespace-nowrap mt-2 xl:mt-0 mr-4 xl:mr-0">
+                                                <span className="xl:hidden text-slate-400 font-sans mr-1.5 uppercase font-medium text-xs">Size:</span>
+                                                {getMcBrowserEntryTargetKind(entry) === "directory"
+                                                    ? "—"
                                                     : formatBytes(entry.size)}
                                             </td>
 
-                                            <td className="py-2.5 px-3 hidden md:table-cell text-xs text-slate-400 whitespace-nowrap">
+                                            <td headers="header-modified" className="inline-block xl:table-cell py-0 xl:py-2.5 px-0 xl:px-3 text-xs text-slate-400 whitespace-nowrap mt-2 xl:mt-0">
+                                                <span className="xl:hidden text-slate-400 font-sans mr-1.5 uppercase font-medium text-xs">Modified:</span>
                                                 {formatModifiedDate(entry.modified)}
                                             </td>
 
                                             <td
-                                                className="py-2.5 px-3 text-right whitespace-nowrap"
-                                                onClick={(e) => e.stopPropagation()}
+                                                headers="header-actions"
+                                                className="block xl:table-cell py-0 xl:py-2.5 px-0 xl:px-3 text-left xl:text-right mt-3 xl:mt-0 pt-2.5 xl:pt-0 border-t border-white/[0.06] xl:border-t-0"
+                                                onClick={(event) => event.stopPropagation()}
                                             >
                                                 {isUnsupported ? (
                                                     <span className="text-xs text-amber-400/80 italic px-2">
                                                         Unsupported
                                                     </span>
                                                 ) : (
-                                                    <div className="inline-flex items-center justify-end gap-1">
-                                                        {getMcBrowserEntryTargetKind(entry) === 'directory' && (
+                                                    <div className="flex flex-wrap xl:flex-nowrap items-center justify-start xl:justify-end gap-1">
+                                                        {getMcBrowserEntryTargetKind(entry) === "directory" && (
                                                             <button
                                                                 type="button"
                                                                 onClick={() => navigateTo(entry.path)}
                                                                 disabled={anyBusy}
                                                                 aria-label={`Open folder ${entry.name}`}
                                                                 title="Open folder"
-                                                                className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-indigo-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
                                                             >
                                                                 <ChevronRight size={15} />
                                                             </button>
                                                         )}
 
-                                                        {getMcBrowserEntryTargetKind(entry) === 'file' && (
+                                                        {getMcBrowserEntryTargetKind(entry) === "file" && (
                                                             <>
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => handleOpenPreview(entry)}
+                                                                    onClick={(event) => void handleOpenPreview(entry, event.currentTarget)}
                                                                     disabled={!permissions.read || anyBusy}
                                                                     aria-label={`Preview ${entry.name}`}
                                                                     title="Preview text"
-                                                                    className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                                                                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-indigo-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
                                                                 >
                                                                     <Eye size={15} />
                                                                 </button>
@@ -1486,7 +1537,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                                                     disabled={!permissions.download || anyBusy || isDownloading}
                                                                     aria-label={`Download ${entry.name}`}
                                                                     title="Download file"
-                                                                    className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                                                                    className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-emerald-300 hover:bg-white/10 disabled:opacity-40 transition-colors"
                                                                 >
                                                                     {isDownloading ? (
                                                                         <Loader2
@@ -1502,22 +1553,22 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
 
                                                         <button
                                                             type="button"
-                                                            onClick={() => openRenameDialog(entry)}
+                                                            onClick={(event) => openRenameDialog(entry, event.currentTarget)}
                                                             disabled={!permissions.rename || anyBusy}
                                                             aria-label={`Rename ${entry.name}`}
                                                             title="Rename"
-                                                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                                                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-slate-100 hover:bg-white/10 disabled:opacity-40 transition-colors"
                                                         >
                                                             <Edit3 size={15} />
                                                         </button>
 
                                                         <button
                                                             type="button"
-                                                            onClick={() => openDeleteDialog(entry)}
+                                                            onClick={(event) => openDeleteDialog(entry, event.currentTarget)}
                                                             disabled={!permissions.delete || anyBusy}
                                                             aria-label={`Delete ${entry.name}`}
                                                             title="Delete"
-                                                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/15 disabled:opacity-40 transition-colors"
+                                                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/15 disabled:opacity-40 transition-colors"
                                                         >
                                                             <Trash2 size={15} />
                                                         </button>
@@ -1533,15 +1584,22 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                 )}
             </div>
             {hasActivated && (
-                <McBrowserWorkspace
-                    key={`mcbrowser-workspace-${sessionIdentity}-${sessionEpoch}`}
-                    currentPath={currentPath}
-                    entries={entries}
-                    onRefresh={handleWorkspaceRefresh}
-                    onNavigate={navigateTo}
-                    onPolicyChange={handlePolicyChange}
-                    onRename={openRenameDialog}
-                />
+                <details className="obs-canvas-section group">
+                    <summary className="obs-touch-target-standard min-h-[44px] cursor-pointer px-1 py-3 text-sm font-semibold text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400">
+                        Advanced workspace &mdash; batch operations, editor &amp; share links
+                    </summary>
+                    <div className="pt-2">
+                        <McBrowserWorkspace
+                            key={`mcbrowser-workspace-${sessionIdentity}-${sessionEpoch}`}
+                            currentPath={currentPath}
+                            entries={entries}
+                            onRefresh={handleWorkspaceRefresh}
+                            onNavigate={navigateTo}
+                            onPolicyChange={handlePolicyChange}
+                            onRename={openRenameDialog}
+                        />
+                    </div>
+                </details>
             )}
             {mediaTarget && (
                 <McBrowserMediaPreview
@@ -1562,216 +1620,151 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                 />
             )}
             {mkdirOpen && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
-                    onClick={() => !isMutating && setMkdirOpen(false)}
+                <Modal
+                    isOpen={mkdirOpen}
+                    onClose={() => {
+                        if (!isMutating) setMkdirOpen(false);
+                    }}
+                    title="Create New Folder"
+                    initialFocusRef={mkdirInputRef}
+                    returnFocusRef={mkdirOpenerRef}
                 >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="mcbrowser-mkdir-title"
-                        className="w-full max-w-md rounded-2xl border border-indigo-500/30 bg-slate-900 p-6 shadow-2xl space-y-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between">
-                            <h3
-                                id="mcbrowser-mkdir-title"
-                                className="text-base font-bold text-slate-100 flex items-center gap-2"
+                    <form onSubmit={handleCreateDirectory} className="space-y-4">
+                        <div>
+                            <label
+                                htmlFor="mcbrowser-mkdir-input"
+                                className="block text-xs font-semibold text-slate-300 mb-1.5"
                             >
-                                <FolderPlus size={18} className="text-indigo-400" />
-                                <span>Create New Folder</span>
-                            </h3>
+                                Folder Name
+                            </label>
+                            <input
+                                ref={mkdirInputRef}
+                                id="mcbrowser-mkdir-input"
+                                type="text"
+                                value={mkdirName}
+                                onChange={(event) => {
+                                    setMkdirName(event.target.value);
+                                    if (mkdirError) setMkdirError(null);
+                                }}
+                                placeholder="e.g. configs"
+                                disabled={isMutating}
+                                className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/15 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                            />
+                            <p className="text-xs text-slate-400 mt-1.5">
+                                Will be created inside{' '}
+                                <span className="font-mono text-slate-200">
+                                    {currentPath ? `My files/${currentPath}` : 'My files'}
+                                </span>
+                            </p>
+                        </div>
+
+                        {mkdirError && (
+                            <div
+                                role="alert"
+                                className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300"
+                            >
+                                {mkdirError}
+                            </div>
+                        )}
+
+                        <div className="flex items-center justify-end gap-2 pt-2">
                             <button
                                 type="button"
                                 onClick={() => setMkdirOpen(false)}
                                 disabled={isMutating}
-                                aria-label="Close new folder dialog"
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
+                                className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 disabled:opacity-50 transition-colors"
                             >
-                                <X size={16} />
+                                Cancel
+                            </button>
+                            <button
+                                type="submit"
+                                disabled={isMutating}
+                                className="obs-touch-target-standard min-h-[44px] flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
+                            >
+                                {isMutating && <Loader2 size={14} className="animate-spin" />}
+                                <span>Create Folder</span>
                             </button>
                         </div>
-
-                        <form onSubmit={handleCreateDirectory} className="space-y-4">
-                            <div>
-                                <label
-                                    htmlFor="mcbrowser-mkdir-input"
-                                    className="block text-xs font-semibold text-slate-300 mb-1.5"
-                                >
-                                    Folder Name
-                                </label>
-                                <input
-                                    id="mcbrowser-mkdir-input"
-                                    type="text"
-                                    autoFocus
-                                    value={mkdirName}
-                                    onChange={(e) => {
-                                        setMkdirName(e.target.value);
-                                        if (mkdirError) setMkdirError(null);
-                                    }}
-                                    placeholder="e.g. configs"
-                                    disabled={isMutating}
-                                    className="w-full px-3.5 py-2 rounded-xl bg-black/50 border border-white/15 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-                                />
-                                <p className="text-[11px] text-slate-400 mt-1.5">
-                                    Will be created inside{' '}
-                                    <span className="font-mono text-slate-200">
-                                        {currentPath ? `My files/${currentPath}` : 'My files'}
-                                    </span>
-                                </p>
-                            </div>
-
-                            {mkdirError && (
-                                <div
-                                    role="alert"
-                                    className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300"
-                                >
-                                    {mkdirError}
-                                </div>
-                            )}
-
-                            <div className="flex items-center justify-end gap-2 pt-2">
-                                <button
-                                    type="button"
-                                    onClick={() => setMkdirOpen(false)}
-                                    disabled={isMutating}
-                                    className="px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    disabled={isMutating}
-                                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
-                                >
-                                    {isMutating && <Loader2 size={14} className="animate-spin" />}
-                                    <span>Create Folder</span>
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
+                    </form>
+                </Modal>
             )}
             {renameTarget && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
-                    onClick={() => !isMutating && setRenameTarget(null)}
+                <Modal
+                    isOpen={Boolean(renameTarget)}
+                    onClose={() => {
+                        if (!isMutating) setRenameTarget(null);
+                    }}
+                    title={`Rename ${renameTarget.kind === 'symlink' ? 'Link' : renameTarget.kind === 'directory' ? 'Folder' : 'File'}`}
+                    initialFocusRef={renameInputRef}
+                    returnFocusRef={renameOpenerRef}
                 >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="mcbrowser-rename-title"
-                        className="w-full max-w-md rounded-2xl border border-indigo-500/30 bg-slate-900 p-6 shadow-2xl space-y-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between">
-                            <h3
-                                id="mcbrowser-rename-title"
-                                className="text-base font-bold text-slate-100 flex items-center gap-2"
+                    <form onSubmit={handleRenameSubmit} className="space-y-4">
+                        <div>
+                            <label
+                                htmlFor="mcbrowser-rename-input"
+                                className="block min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-xs font-semibold text-slate-300 mb-1.5"
                             >
-                                <Edit3 size={18} className="text-indigo-400" />
-                                <span>Rename {renameTarget.kind === 'symlink' ? 'Link' : renameTarget.kind === 'directory' ? 'Folder' : 'File'}</span>
-                            </h3>
+                                New Name for &ldquo;{renameTarget.name}&rdquo;
+                            </label>
+                            <input
+                                ref={renameInputRef}
+                                id="mcbrowser-rename-input"
+                                type="text"
+                                value={renameValue}
+                                onChange={(event) => {
+                                    setRenameValue(event.target.value);
+                                    if (renameError) setRenameError(null);
+                                }}
+                                disabled={isMutating}
+                                className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/15 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                            />
+                            <p className="text-xs text-slate-400 mt-1.5">
+                                Existing files or folders are never overwritten during rename.
+                            </p>
+                        </div>
+
+                        {renameError && (
+                            <div
+                                role="alert"
+                                className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300"
+                            >
+                                {renameError}
+                            </div>
+                        )}
+
+                        <div className="flex items-center justify-end gap-2 pt-2">
                             <button
                                 type="button"
                                 onClick={() => setRenameTarget(null)}
                                 disabled={isMutating}
-                                aria-label="Close rename dialog"
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
+                                className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 disabled:opacity-50 transition-colors"
                             >
-                                <X size={16} />
+                                Cancel
+                            </button>
+                            <button
+                                type="submit"
+                                disabled={isMutating}
+                                className="obs-touch-target-standard min-h-[44px] flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
+                            >
+                                {isMutating && <Loader2 size={14} className="animate-spin" />}
+                                <span>Confirm Rename</span>
                             </button>
                         </div>
-
-                        <form onSubmit={handleRenameSubmit} className="space-y-4">
-                            <div>
-                                <label
-                                    htmlFor="mcbrowser-rename-input"
-                                    className="block text-xs font-semibold text-slate-300 mb-1.5"
-                                >
-                                    New Name for &ldquo;{renameTarget.name}&rdquo;
-                                </label>
-                                <input
-                                    id="mcbrowser-rename-input"
-                                    type="text"
-                                    autoFocus
-                                    value={renameValue}
-                                    onChange={(e) => {
-                                        setRenameValue(e.target.value);
-                                        if (renameError) setRenameError(null);
-                                    }}
-                                    disabled={isMutating}
-                                    className="w-full px-3.5 py-2 rounded-xl bg-black/50 border border-white/15 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-                                />
-                                <p className="text-[11px] text-slate-400 mt-1.5">
-                                    Existing files or folders are never overwritten during rename.
-                                </p>
-                            </div>
-
-                            {renameError && (
-                                <div
-                                    role="alert"
-                                    className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300"
-                                >
-                                    {renameError}
-                                </div>
-                            )}
-
-                            <div className="flex items-center justify-end gap-2 pt-2">
-                                <button
-                                    type="button"
-                                    onClick={() => setRenameTarget(null)}
-                                    disabled={isMutating}
-                                    className="px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    disabled={isMutating}
-                                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
-                                >
-                                    {isMutating && <Loader2 size={14} className="animate-spin" />}
-                                    <span>Confirm Rename</span>
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
+                    </form>
+                </Modal>
             )}
             {deleteTarget && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
-                    onClick={() => !isMutating && setDeleteTarget(null)}
+                <Modal
+                    isOpen={Boolean(deleteTarget)}
+                    onClose={() => {
+                        if (!isMutating) setDeleteTarget(null);
+                    }}
+                    title={`Delete ${deleteTarget.kind === 'symlink' ? 'Link' : deleteTarget.kind === 'directory' ? 'Folder' : 'File'}`}
+                    className="border-rose-500/30"
+                    initialFocusRef={deleteCancelRef}
+                    returnFocusRef={deleteOpenerRef}
                 >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="mcbrowser-delete-title"
-                        className="w-full max-w-md rounded-2xl border border-rose-500/30 bg-slate-900 p-6 shadow-2xl space-y-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between">
-                            <h3
-                                id="mcbrowser-delete-title"
-                                className="text-base font-bold text-slate-100 flex items-center gap-2"
-                            >
-                                <Trash2 size={18} className="text-rose-400" />
-                                <span>
-                                    Delete {deleteTarget.kind === 'symlink' ? 'Link' : deleteTarget.kind === 'directory' ? 'Folder' : 'File'}
-                                </span>
-                            </h3>
-                            <button
-                                type="button"
-                                onClick={() => setDeleteTarget(null)}
-                                disabled={isMutating}
-                                aria-label="Close delete dialog"
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
-                            >
-                                <X size={16} />
-                            </button>
-                        </div>
-
+                    <div className="space-y-4">
                         <div className="space-y-2 text-xs text-slate-300">
                             <p>
                                 Are you sure you want to permanently delete{' '}
@@ -1802,10 +1795,11 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
 
                         <div className="flex items-center justify-end gap-2 pt-2">
                             <button
+                                ref={deleteCancelRef}
                                 type="button"
                                 onClick={() => setDeleteTarget(null)}
                                 disabled={isMutating}
-                                className="px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 transition-colors"
+                                className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-xl text-xs font-semibold bg-white/5 text-slate-300 hover:bg-white/10 disabled:opacity-50 transition-colors"
                             >
                                 Cancel
                             </button>
@@ -1813,60 +1807,39 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                                 type="button"
                                 onClick={handleDeleteConfirm}
                                 disabled={isMutating}
-                                className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50 transition-colors"
+                                className="obs-touch-target-standard min-h-[44px] flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50 transition-colors"
                             >
                                 {isMutating && <Loader2 size={14} className="animate-spin" />}
                                 <span>Confirm Delete</span>
                             </button>
                         </div>
                     </div>
-                </div>
+                </Modal>
             )}
             {previewTarget && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-                    onClick={closePreviewDialog}
+                <Modal
+                    isOpen={Boolean(previewTarget)}
+                    onClose={closePreviewDialog}
+                    title={`Preview: ${previewTarget.name}`}
+                    className="max-w-3xl"
+                    initialFocusRef={previewDownloadRef}
+                    returnFocusRef={previewOpenerRef}
                 >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="mcbrowser-preview-title"
-                        className="w-full max-w-3xl max-h-[85vh] rounded-2xl border border-indigo-500/30 bg-slate-900 p-6 shadow-2xl flex flex-col space-y-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between gap-3 border-b border-white/10 pb-3">
-                            <div className="min-w-0">
-                                <h3
-                                    id="mcbrowser-preview-title"
-                                    className="text-base font-bold text-slate-100 flex items-center gap-2 truncate"
-                                >
-                                    <FileText size={18} className="text-indigo-400 shrink-0" />
-                                    <span className="truncate">Preview: {previewTarget.name}</span>
-                                </h3>
-                                <p className="text-[11px] text-slate-400 font-mono truncate mt-0.5">
-                                    My files/{previewTarget.path} ({formatBytes(previewTarget.size)})
-                                </p>
-                            </div>
-
-                            <div className="flex items-center gap-2 shrink-0">
-                                <button
-                                    type="button"
-                                    onClick={() => handleDownload(previewTarget)}
-                                    disabled={!permissions.download || downloadingPath === previewTarget.path}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 transition-colors"
-                                >
-                                    <Download size={14} />
-                                    <span>Download</span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={closePreviewDialog}
-                                    aria-label="Close preview dialog"
-                                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
-                                >
-                                    <X size={18} />
-                                </button>
-                            </div>
+                    <div className="flex flex-col space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3 -mt-2 pb-3 border-b border-white/10">
+                            <p className="text-xs text-slate-400 font-mono truncate">
+                                My files/{previewTarget.path} ({formatBytes(previewTarget.size)})
+                            </p>
+                            <button
+                                ref={previewDownloadRef}
+                                type="button"
+                                onClick={() => handleDownload(previewTarget)}
+                                disabled={!permissions.download || downloadingPath === previewTarget.path}
+                                className="obs-touch-target-standard min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <Download size={14} />
+                                <span>Download</span>
+                            </button>
                         </div>
 
                         {previewData?.truncated && (
@@ -1881,7 +1854,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             </div>
                         )}
 
-                        <div className="flex-1 min-h-[220px] overflow-auto rounded-xl bg-black/60 border border-white/10 p-4">
+                        <div className="min-h-[220px] max-h-[55vh] overflow-auto rounded-xl bg-black/60 border border-white/10 p-4">
                             {previewLoading ? (
                                 <div className="h-48 flex flex-col items-center justify-center text-slate-400 gap-2">
                                     <Loader2 size={24} className="animate-spin text-indigo-400" />
@@ -1902,7 +1875,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             )}
                         </div>
                     </div>
-                </div>
+                </Modal>
             )}
         </div>
     );

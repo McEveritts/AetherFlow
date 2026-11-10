@@ -44,7 +44,7 @@ function OverviewTelemetrySection() {
 
     return (
       <div className="flex items-center justify-center h-full min-h-[50vh]">
-        <div className={`${isReconnecting ? 'bg-amber-500/10 border-amber-500/20' : isFallback ? 'bg-blue-500/10 border-blue-500/20' : 'bg-red-500/10 border-red-500/20'} border p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md`}>
+        <div className="obs-canvas-section p-8 flex flex-col items-center gap-4 text-center w-full max-w-md">
           <div className={`w-12 h-12 ${isReconnecting ? 'bg-amber-500/20' : isFallback ? 'bg-blue-500/20' : 'bg-red-500/20'} rounded-full flex items-center justify-center text-2xl font-bold ${isReconnecting ? 'text-amber-400' : isFallback ? 'text-blue-400' : 'text-red-400'}`}>
             {isReconnecting ? '⟳' : isFallback ? '◌' : '!'}
           </div>
@@ -138,15 +138,14 @@ export default function Dashboard() {
 
       <Sidebar />
 
-      <main ref={mainRef} className="flex-1 min-w-0 max-w-full relative z-10 h-screen overflow-y-auto no-scrollbar">
+      <main ref={mainRef} data-dashboard-main="true" data-scroller="main" className="flex-1 min-w-0 max-w-full relative z-10 h-[calc(100dvh-var(--obs-shell-bottom-dock-height,4rem))] md:h-screen overflow-y-auto no-scrollbar">
         <Header />
 
         <div className={activeTab === 'overview' ? undefined : 'mt-4'}>
           <GlobalBanners />
         </div>
 
-        {/* Scrollable Content with mobile dock bottom clearance (pb-24) */}
-        <div className={`pb-24 md:pb-10 min-h-[calc(100vh-8rem)] min-w-0 max-w-full ${activeTab === 'overview' ? 'w-full' : 'px-4 md:px-10 max-w-[1600px] mx-auto'}`}>
+        <div className={`pb-6 md:pb-10 min-h-[calc(100vh-8rem)] min-w-0 max-w-full ${activeTab === 'overview' ? 'w-full' : 'px-4 md:px-10 max-w-[1600px] mx-auto'}`}>
           <div hidden={activeTab !== 'mcbrowser'}>
             {user && <ErrorBoundary key={`mcbrowser-${user.id}`}>
               <McBrowserTab isActive={activeTab === 'mcbrowser'} />

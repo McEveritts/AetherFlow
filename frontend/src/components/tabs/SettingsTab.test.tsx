@@ -6,7 +6,9 @@ import { apiFetch } from '@/lib/fetcher';
 import type { SystemUpdateCheck, SystemUpdateStatus } from '@/lib/system-update';
 
 const mockAddToast = jest.fn();
+const mockSetSettingsTab = jest.fn();
 let mockActiveTab = 'system';
+let mockLanguage = 'en';
 
 jest.mock('@/lib/fetcher', () => ({ apiFetch: jest.fn() }));
 jest.mock('@/contexts/ToastContext', () => ({ useToast: () => ({ addToast: mockAddToast }) }));
@@ -24,8 +26,8 @@ jest.mock('@/components/ui/GlassSelect', () => function MockSelect({
 });
 jest.mock('@/store/useSystemStore', () => ({
     useSystemStore: () => ({
-        theme: 'dark', language: 'en', ambientColor1: '#111111', ambientColor2: '#222222',
-        activeSettingsTab: mockActiveTab, setActiveTab: jest.fn(), setActiveSettingsTab: jest.fn(), setLanguage: jest.fn(),
+        theme: 'dark', language: mockLanguage, ambientColor1: '#111111', ambientColor2: '#222222',
+        activeSettingsTab: mockActiveTab, setActiveTab: jest.fn(), setActiveSettingsTab: mockSetSettingsTab, setLanguage: jest.fn(),
     }),
 }));
 
@@ -48,8 +50,7 @@ function RefreshSettings() {
 
 async function renderSettings(props: React.ComponentProps<typeof SettingsTab> = {}) {
     const cache = new Map();
-    await act(async () => {
-        render(
+    const renderContent = () => (
             <SWRConfig value={{
                 provider: () => cache,
                 fetcher: async (url: string) => (await apiFetch(url)).json(),
@@ -59,8 +60,12 @@ async function renderSettings(props: React.ComponentProps<typeof SettingsTab> = 
                 <SettingsTab {...props} />
                 <RefreshSettings />
             </SWRConfig>
-        );
+    );
+    let settingsView!: ReturnType<typeof render>;
+    await act(async () => {
+        settingsView = render(renderContent());
     });
+    return { ...settingsView, rerenderSettings: () => settingsView.rerender(renderContent()) };
 }
 
 async function click(element: HTMLElement) {
@@ -94,6 +99,7 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         jest.useFakeTimers();
         jest.spyOn(Math, 'random').mockReturnValue(0.5);
         mockActiveTab = 'system';
+        mockLanguage = 'en';
         window.sessionStorage.clear();
         mockAddToast.mockReset();
         status = {
@@ -128,6 +134,73 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         jest.clearAllTimers();
         jest.useRealTimers();
         jest.restoreAllMocks();
+    });
+
+    it('exposes all ten sections through a mobile selector and a discoverable desktop navigation rail', async () => {
+        await renderSettings();
+        const selector = screen.getByLabelText('Settings section');
+        expect(selector.querySelectorAll('option')).toHaveLength(10);
+        expect(selector).toHaveValue('system');
+        fireEvent.change(selector, { target: { value: 'notifications' } });
+        expect(mockSetSettingsTab).toHaveBeenCalledWith('notifications');
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        expect(rail).toHaveAttribute('aria-describedby', 'settings-nav-hint');
+        expect(rail).not.toHaveClass('no-scrollbar');
+        const settingsHeading = screen.getByRole('heading', { name: 'System & Workspace Settings' });
+        expect(settingsHeading.closest('.relative')).toHaveClass('z-20');
+        expect(settingsHeading.closest('.relative')).not.toHaveClass('z-30');
+    });
+
+    it('keeps the active section inside the rail after resizing without scrolling the page', async () => {
+        mockActiveTab = 'mcbrowser';
+        const originalResizeObserver = globalThis.ResizeObserver;
+        const observer = { observe: jest.fn(), unobserve: jest.fn(), disconnect: jest.fn() };
+        let notifyResize: () => void = () => undefined;
+        globalThis.ResizeObserver = jest.fn((callback: ResizeObserverCallback) => {
+            notifyResize = () => callback([], observer as ResizeObserver);
+            return observer;
+        }) as unknown as typeof ResizeObserver;
+        try {
+            await renderSettings();
+            const navigation = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+            const activeButton = screen.getByRole('button', { name: 'McBrowser' });
+            expect(activeButton).toHaveAttribute('aria-current', 'page');
+            let railWidth = 600;
+            let activeBounds = { left: 700, right: 840, width: 140 } as DOMRect;
+            jest.spyOn(navigation, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, right: railWidth, width: railWidth } as DOMRect));
+            jest.spyOn(activeButton, 'getBoundingClientRect').mockImplementation(() => activeBounds);
+            fireEvent(window, new Event('resize'));
+            expect(navigation.scrollLeft).toBe(240);
+            railWidth = 480;
+            activeBounds = { left: 460, right: 600, width: 140 } as DOMRect;
+            act(() => notifyResize());
+            expect(navigation.scrollLeft).toBe(360);
+            activeBounds = { left: -20, right: 120, width: 140 } as DOMRect;
+            fireEvent(window, new Event('resize'));
+            expect(navigation.scrollLeft).toBe(340);
+            expect(observer.observe).toHaveBeenCalledWith(navigation);
+            navigation.querySelectorAll('button').forEach((buttonElement) => {
+                expect(observer.observe).toHaveBeenCalledWith(buttonElement);
+            });
+            cleanup();
+            expect(observer.disconnect).toHaveBeenCalled();
+        } finally {
+            globalThis.ResizeObserver = originalResizeObserver;
+        }
+    });
+
+    it('keeps an unverified up-to-date message in explicitly historical collapsed diagnostics', async () => {
+        statusFailures = 10;
+        check = { ...check, updateAvailable: false, latestVersion: check.currentVersion, message: 'System is up to date' };
+        await renderSettings();
+        const message = screen.getByText('System is up to date');
+        const diagnostics = message.closest('details');
+        expect(diagnostics).not.toHaveAttribute('open');
+        expect(message).not.toBeVisible();
+        expect(screen.getByText('Last received upstream response (unverified)')).toBeVisible();
+        expect(diagnostics).toHaveTextContent('Historical diagnostics only, not a current release-status confirmation.');
+        fireEvent.click(screen.getByText('Last received upstream response (unverified)'));
+        expect(screen.getByRole('button', { name: 'Check for Updates' })).toBeEnabled();
     });
 
     it('never infers latest from an unsuccessful GitHub check returning updateAvailable=false', async () => {
@@ -569,5 +642,188 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         expect(savePayload.aiModel).toBe('deepseek-r1:14b');
         expect(savePayload.localModel).toBe('deepseek-r1:14b');
         expect(savePayload.localProvider).toBe('ollama');
+    });
+
+    it('renders informational rows as transparent hairline bands with readable helper copy', async () => {
+        mockActiveTab = 'preferences';
+        await renderSettings();
+
+        const transportHelper = screen.getByText(/Full-duplex WebSocket streaming/i);
+        expect(transportHelper).toHaveClass('text-slate-400');
+        expect(transportHelper.closest('.bg-slate-950\\/40')).toBeNull();
+
+        const dashboardHelper = screen.getByText(/Select the default view presented immediately after authentication/i);
+        expect(dashboardHelper).toHaveClass('text-slate-400');
+        expect(dashboardHelper.closest('.bg-slate-950\\/40')).toBeNull();
+    });
+
+    it('renders provider ecosystem with responsive 1/2/4 grid, wrapping subtitles, and rich selected states without nested card wells', async () => {
+        mockActiveTab = 'ai';
+        await renderSettings();
+
+        const geminiButton = screen.getByRole('button', { name: /Google Gemini/i });
+        const providerContainer = geminiButton.closest('.grid');
+        expect(providerContainer).toHaveClass('grid-cols-1', 'sm:grid-cols-2', '2xl:grid-cols-4');
+        expect(providerContainer).not.toHaveClass('sm:grid-cols-4');
+
+        const claudeSubtitle = screen.getByText('Claude Fable 5.1 & 5.5 Series');
+        expect(claudeSubtitle).not.toHaveClass('line-clamp-1');
+        expect(claudeSubtitle).toHaveClass('break-words');
+
+        const providerButtons = screen.getAllByRole('button', { name: /(Google Gemini|OpenAI|Anthropic Claude|Local Ollama)/i });
+        providerButtons.forEach((buttonElement) => {
+            expect(buttonElement.closest('.bg-slate-950\\/40')).toBeNull();
+        });
+
+        expect(geminiButton).toHaveAttribute('aria-pressed', 'true');
+        expect(geminiButton).toHaveClass('shadow-inner');
+    });
+
+    it('embeds cloud API keys and update continuity blocks in hairline structures without nested cards', async () => {
+        mockActiveTab = 'ai';
+        await renderSettings();
+
+        const geminiKeyLabel = screen.getByText('apiKeyTitle');
+        const apiKeyRow = geminiKeyLabel.closest('.space-y-3');
+        expect(apiKeyRow?.parentElement).toHaveClass('divide-y', 'divide-white/[0.07]');
+        expect(geminiKeyLabel.closest('.bg-slate-950\\/40')).toBeNull();
+
+        mockActiveTab = 'system';
+        await renderSettings();
+
+        const snapshotLabel = screen.getByText('Pre-Update Snapshot');
+        const continuityLabel = screen.getByText('Service Continuity');
+        expect(snapshotLabel.closest('.bg-slate-950\\/40')).toBeNull();
+        expect(continuityLabel.closest('.bg-slate-950\\/40')).toBeNull();
+    });
+
+    it.each(['preferences', 'ai', 'system'])('preserves one native form submit action on %s', async (settingsSection) => {
+        mockActiveTab = settingsSection;
+        await renderSettings();
+
+        const saveButtons = screen.getAllByRole('button', { name: /(Save Configuration|saveConfig)/i });
+        expect(saveButtons.length).toBe(1);
+        expect(saveButtons[0]).toBeEnabled();
+        const saveButton = saveButtons[0] as HTMLButtonElement;
+        expect(saveButton.type).toBe('submit');
+        expect(saveButton.form).toBeInstanceOf(HTMLFormElement);
+        expect(saveButton.form).toHaveAttribute('id', saveButton.getAttribute('form'));
+        expect(saveButton.form).not.toContainElement(saveButton);
+    });
+
+    it('submits the multi-input AI form through its native associated header button', async () => {
+        mockActiveTab = 'ai';
+        await renderSettings();
+        const apiKeyInput = screen.getByPlaceholderText('apiKeyPlaceholder') as HTMLInputElement;
+        const saveButton = screen.getByRole('button', { name: 'Save Configuration' });
+        expect(Array.from(apiKeyInput.form?.elements || [])).toContain(saveButton);
+        await click(saveButton);
+        expect(saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('displays truthful horizontal rail hint and navigation controls', async () => {
+        await renderSettings();
+
+        expect(screen.queryByRole('button', { name: 'Previous settings sections' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Next settings sections' })).not.toBeInTheDocument();
+        expect(screen.getByText(/10 settings sections/i)).toBeInTheDocument();
+        expect(screen.getByText(/10 settings sections/i).parentElement).toHaveClass('min-h-[44px]');
+        expect(screen.queryByText(/Scroll horizontally for more/)).not.toBeInTheDocument();
+    });
+
+    it('updates rail overflow hints and edge controls through resize and manual scrolling', async () => {
+        await renderSettings();
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        let contentWidth = 1200;
+        jest.spyOn(rail, 'scrollWidth', 'get').mockImplementation(() => contentWidth);
+        jest.spyOn(rail, 'clientWidth', 'get').mockReturnValue(600);
+        rail.scrollBy = jest.fn();
+        fireEvent(window, new Event('resize'));
+
+        expect(screen.getByText(/Scroll horizontally for more/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Previous settings sections' })).toBeDisabled();
+        fireEvent.click(screen.getByRole('button', { name: 'Next settings sections' }));
+        expect(rail.scrollBy).toHaveBeenCalledWith({ left: 200, behavior: 'smooth' });
+
+        rail.scrollLeft = 600;
+        fireEvent.scroll(rail);
+        expect(screen.getByRole('button', { name: 'Next settings sections' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Previous settings sections' })).toBeEnabled();
+
+        contentWidth = 600;
+        rail.scrollLeft = 0;
+        fireEvent(window, new Event('resize'));
+        expect(screen.queryByText(/Scroll horizontally for more/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Next settings sections' })).not.toBeInTheDocument();
+    });
+
+    it('displays Gemini default model metadata without redundant duplicate model buttons', async () => {
+        mockActiveTab = 'ai';
+        await renderSettings();
+
+        expect(screen.getByRole('combobox', { name: /defaultModel/i })).toBeInTheDocument();
+        expect(screen.queryByText('Active in FlowAI reasoning pipeline')).not.toBeInTheDocument();
+        const geminiModelPills = screen.queryAllByRole('button', { name: /gemini-2\.5-pro/i });
+        expect(geminiModelPills.length).toBe(0);
+    });
+    it('preserves explicit rail browsing while the surrounding shell resizes', async () => {
+        await renderSettings();
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        const activeButton = screen.getByRole('button', { name: 'systemUpdates' });
+        jest.spyOn(rail, 'scrollWidth', 'get').mockReturnValue(1200);
+        jest.spyOn(rail, 'clientWidth', 'get').mockReturnValue(600);
+        jest.spyOn(rail, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 600, width: 600 } as DOMRect);
+        jest.spyOn(activeButton, 'getBoundingClientRect').mockReturnValue({ left: 20, right: 140, width: 120 } as DOMRect);
+        rail.scrollBy = jest.fn(() => { rail.scrollLeft = 200; });
+        fireEvent(window, new Event('resize'));
+        fireEvent.click(screen.getByRole('button', { name: 'Next settings sections' }));
+        jest.spyOn(activeButton, 'getBoundingClientRect').mockReturnValue({ left: -180, right: -60, width: 120 } as DOMRect);
+        fireEvent(window, new Event('resize'));
+        expect(rail.scrollLeft).toBe(200);
+    });
+
+    it.each(['wheel', 'pointerDown', 'touchStart'] as const)('preserves native %s rail browsing across resize', async (interaction) => {
+        await renderSettings();
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        const activeButton = screen.getByRole('button', { name: 'systemUpdates' });
+        jest.spyOn(rail, 'scrollWidth', 'get').mockReturnValue(1200);
+        jest.spyOn(rail, 'clientWidth', 'get').mockReturnValue(600);
+        jest.spyOn(rail, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 600, width: 600 } as DOMRect);
+        jest.spyOn(activeButton, 'getBoundingClientRect').mockReturnValue({ left: -180, right: -60, width: 120 } as DOMRect);
+        activeButton.focus();
+        fireEvent[interaction](rail, { deltaX: 200 });
+        rail.scrollLeft = 200;
+        fireEvent.scroll(rail);
+        fireEvent(window, new Event('resize'));
+        expect(rail.scrollLeft).toBe(200);
+    });
+
+    it('aligns a focused inactive rail button instead of snapping back to the active section', async () => {
+        await renderSettings();
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        const activeButton = screen.getByRole('button', { name: 'systemUpdates' });
+        const focusedButton = screen.getByRole('button', { name: 'Notifications' });
+        jest.spyOn(rail, 'scrollWidth', 'get').mockReturnValue(1200);
+        jest.spyOn(rail, 'clientWidth', 'get').mockReturnValue(600);
+        jest.spyOn(rail, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 600, width: 600 } as DOMRect);
+        jest.spyOn(activeButton, 'getBoundingClientRect').mockReturnValue({ left: 20, right: 140, width: 120 } as DOMRect);
+        jest.spyOn(focusedButton, 'getBoundingClientRect').mockReturnValue({ left: 800, right: 940, width: 140 } as DOMRect);
+        fireEvent.wheel(rail, { deltaX: 200 });
+        focusedButton.focus();
+        fireEvent(window, new Event('resize'));
+        expect(rail.scrollLeft).toBe(340);
+        expect(focusedButton).toHaveFocus();
+        expect(activeButton).toHaveAttribute('aria-current', 'page');
+    });
+
+    it('remeasures intrinsic rail overflow when the display language changes', async () => {
+        const { rerenderSettings } = await renderSettings();
+        const rail = screen.getByRole('navigation', { name: 'Settings navigation rail' });
+        jest.spyOn(rail, 'scrollWidth', 'get').mockReturnValue(1200);
+        jest.spyOn(rail, 'clientWidth', 'get').mockReturnValue(600);
+        mockLanguage = 'de';
+        await act(async () => { rerenderSettings(); });
+        expect(screen.getByText(/Scroll horizontally for more/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Next settings sections' })).toBeEnabled();
     });
 });

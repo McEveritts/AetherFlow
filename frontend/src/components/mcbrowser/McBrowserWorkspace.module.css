@@ -1,0 +1,119 @@
+.tableContainer {
+  container-type: inline-size;
+}
+
+.workspaceTable {
+  min-width: 100%;
+}
+
+.checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 0.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background-color: rgba(10, 14, 24, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: all 150ms ease;
+  vertical-align: middle;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.checkbox:hover:not(:disabled) {
+  border-color: rgba(129, 140, 248, 0.6);
+  background-color: rgba(20, 26, 46, 0.85);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.25);
+}
+
+.checkbox:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.8);
+  outline-offset: 2px;
+}
+
+.checkbox:checked {
+  background-color: #6366f1;
+  border-color: #818cf8;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
+  background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e");
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.checkbox:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  border-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(15, 20, 32, 0.4);
+}
+
+@container (max-width: 767px) {
+  .workspaceTable,
+  .workspaceTable > thead,
+  .workspaceTable > tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .workspaceTable > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .workspaceTable > thead > tr {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .workspaceTable > thead > tr > th {
+    display: block;
+    flex: 1 1 auto;
+    width: auto;
+    padding: 0.25rem 0.5rem;
+  }
+
+  .workspaceTable > tbody > tr:not([data-grid-spacer]) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    padding: 0.75rem 0;
+  }
+
+  .workspaceTable > tbody > tr > td {
+    display: block;
+    min-width: 0;
+    width: auto;
+    padding: 0.25rem 0.75rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .workspaceTable > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--obs-slate-400);
+    font: 600 0.75rem var(--obs-font-sans);
+  }
+
+  .workspaceTable > tbody > tr > td:is([data-primary], [data-actions], [colspan]) {
+    grid-column: 1 / -1;
+  }
+
+  .workspaceTable [data-grid-spacer] > td {
+    padding: 0;
+  }
+}

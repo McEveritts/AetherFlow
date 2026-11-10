@@ -19,6 +19,21 @@ async function openDownload() {
     render(<BackupTab />); fireEvent.click(await screen.findByTitle('Download SQLite Archive'));
     fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'fixture-password' } });
 }
+test('keeps snapshot names and timestamps readable in a tablet-width archive band', async () => {
+    const filename = 'snapshot-2026-11-08-production-complete-database-with-all-managed-service-records.sqlite';
+    jest.mocked(apiFetch).mockImplementation(async (url) => ({ ok: true, json: async () => url === '/api/v1/admin/backup/list' ? [{ filename, size: 1024, timestamp: '2026-11-08T04:00:00Z' }] : {} } as Response));
+    render(<BackupTab />);
+    const identity = await screen.findByText(filename);
+    expect(identity).toHaveClass('break-words', '[overflow-wrap:anywhere]');
+    expect(identity).not.toHaveClass('truncate');
+    expect(identity).toHaveAttribute('title', filename);
+    const timestamp = identity.parentElement?.querySelector('time');
+    expect(timestamp).toHaveAttribute('dateTime', '2026-11-08T04:00:00Z');
+    expect(timestamp).not.toHaveClass('truncate');
+    const archiveBand = screen.getByText('Archive Snapshots').closest('.md\\:col-span-2');
+    expect(archiveBand).toHaveClass('xl:col-span-1');
+});
+
 test('obtains a cookie proof before handing off the native streaming download', async () => {
     await openDownload(); expect(navigateBrowser).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Authorize download' }));

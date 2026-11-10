@@ -184,6 +184,7 @@ jobs:
           npm ci
           cd frontend
           npm run lint
+          ../node_modules/.bin/tsc --noEmit --incremental false
           npm run test:ci
           npm run build
 
@@ -254,10 +255,28 @@ jobs:
         run: |
           RELEASE_FLAGS=(--generate-notes)
           if [[ "${RELEASE_TAG}" == *-* ]]; then
+            RELEASE_NOTES_FILE="$(mktemp)"
+            trap 'rm -f "${RELEASE_NOTES_FILE}"' EXIT
+            python3 - "${RELEASE_TAG}" "${GITHUB_SHA}" "${RELEASE_NOTES_FILE}" <<'PY'
+          from pathlib import Path
+          import sys
+
+          release_tag, commit_sha, notes_file = sys.argv[1:]
+          changelog = Path("CHANGELOG.md")
+          if not changelog.is_file():
+              raise SystemExit("A prerelease requires current patch notes in CHANGELOG.md.")
+          notes = changelog.read_text(encoding="utf-8").split("\n---\n", 1)[0].strip()
+          if not notes.startswith("## Nightly Patch Notes") or "\n" not in notes:
+              raise SystemExit("The latest changelog section must contain nightly patch notes.")
+          Path(notes_file).write_text(
+              f"{notes}\n\nBuilt from commit `{commit_sha}` as `{release_tag}`.\n",
+              encoding="utf-8",
+          )
+          PY
             RELEASE_FLAGS=(
               --prerelease
               --latest=false
-              --notes "Automated ${RELEASE_TAG} pre-release built from commit ${GITHUB_SHA}."
+              --notes-file "${RELEASE_NOTES_FILE}"
             )
           fi
           gh release create "${RELEASE_TAG}" \

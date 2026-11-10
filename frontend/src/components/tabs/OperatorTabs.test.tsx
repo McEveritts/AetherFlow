@@ -4,6 +4,7 @@ import NetworkTab from '@/components/tabs/NetworkTab';
 import NotificationsSettingsTab from '@/components/tabs/NotificationsSettingsTab';
 import QuotasTab from '@/components/tabs/QuotasTab';
 import ClusterTab from '@/components/tabs/ClusterTab';
+import AuditTab from '@/components/tabs/AuditTab';
 
 // Mock ToastContext
 jest.mock('@/contexts/ToastContext', () => ({
@@ -132,6 +133,30 @@ jest.mock('swr', () => {
                 mutate: jest.fn(),
             };
         }
+        if (key.includes('/admin/audit-log')) {
+            return {
+                data: {
+                    entries: [
+                        {
+                            id: 1,
+                            user_id: 1,
+                            username: 'operator',
+                            action: 'system_update',
+                            target_type: 'service',
+                            target_id: 'aetherflow-core',
+                            detail: 'Applied core security and networking update',
+                            ip_address: '2001:0db8:85a3:0000:0000:8a2e:0370:7334',
+                            user_agent: 'AetherFlow-Console/4.0',
+                            created_at: '2026-11-09T08:00:00Z',
+                        },
+                    ],
+                    total: 1,
+                    limit: 25,
+                    offset: 0,
+                },
+                mutate: jest.fn(),
+            };
+        }
         return { data: null, mutate: jest.fn() };
     });
 });
@@ -181,12 +206,13 @@ describe('Operator Management Panels (M3 Features F24-F27)', () => {
             expect(screen.getByRole('button', { name: /Edit Quota/i })).toBeInTheDocument();
         });
 
-        it('opens Edit Disk Quota modal with exact byte allocation', () => {
+        it('opens Edit Disk Quota with readable allocation and exact byte context', () => {
             render(<QuotasTab />);
             const editBtn = screen.getByRole('button', { name: /Edit Quota/i });
             fireEvent.click(editBtn);
             expect(screen.getByText(/Update Disk Quota/i)).toBeInTheDocument();
-            expect(screen.getByDisplayValue('107374182400B')).toBeInTheDocument();
+            expect(screen.getByRole('textbox', { name: 'Allocated Disk Space' })).toHaveValue('100GB');
+            expect(screen.getByText('107,374,182,400 bytes exactly')).toBeInTheDocument();
         });
     });
 
@@ -199,6 +225,26 @@ describe('Operator Management Panels (M3 Features F24-F27)', () => {
             expect(screen.getByText(/10.0.0.15:50051/i)).toBeInTheDocument();
             expect(screen.getByText(/18.5%/i)).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /Telemetry & Services/i })).toBeInTheDocument();
+        });
+    });
+
+    describe('AuditTab (Compliance)', () => {
+        it('renders scoped table constraints and wraps long IP addresses without clipping', () => {
+            render(<AuditTab />);
+            const auditTable = screen.getByRole('table', { name: /Audit records/i });
+            expect(auditTable).toHaveClass('obs-mobile-ledger', 'lg:table-fixed', 'w-full', 'min-w-0');
+            expect(auditTable.parentElement).toHaveClass('overflow-x-auto', 'min-w-0', 'max-w-full');
+
+            const ipHeader = screen.getByRole('columnheader', { name: 'IP' });
+            expect(ipHeader).toHaveClass('lg:w-[140px]');
+
+            const ipCell = screen.getByRole('cell', { name: '2001:0db8:85a3:0000:0000:8a2e:0370:7334' });
+            expect(ipCell).toHaveAttribute('data-label', 'IP');
+            expect(ipCell).toHaveClass('break-words', '[overflow-wrap:anywhere]', 'min-w-0');
+            expect(ipCell).not.toHaveClass('truncate', 'overflow-hidden');
+            for (const recordAction of screen.getAllByRole('button', { name: /View full audit record/i })) {
+                expect(recordAction).toHaveClass('w-full', 'min-w-0', 'max-w-[220px]');
+            }
         });
     });
 });

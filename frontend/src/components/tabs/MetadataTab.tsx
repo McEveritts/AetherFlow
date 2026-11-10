@@ -134,12 +134,11 @@ export default function MetadataTab() {
     };
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
-            {/* Scan Controls Card */}
-            <div className="relative z-20 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 max-w-full divide-y divide-white/[0.07] border-b border-white/[0.07]">
+            <section aria-label="Media metadata scanner" className="obs-canvas-section min-w-0 max-w-full">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-5 py-4 bg-white/[0.015] border-b border-white/[0.06]">
                     <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 bg-violet-500/20 rounded-xl flex items-center justify-center border border-violet-500/30 text-violet-400 shrink-0">
+                        <div className="h-10 w-10 bg-violet-500/10 rounded-xl flex items-center justify-center border border-violet-500/20 text-violet-400 shrink-0">
                             <Sparkles size={20} />
                         </div>
                         <div>
@@ -149,7 +148,7 @@ export default function MetadataTab() {
                     </div>
                 </div>
 
-                <div className="flex flex-col md:flex-row gap-2.5 items-stretch md:items-center">
+                <div className="p-5 flex flex-col md:flex-row gap-2.5 items-stretch md:items-center">
                     <PathSelector
                         value={scanPath}
                         onChange={setScanPath}
@@ -159,7 +158,7 @@ export default function MetadataTab() {
                     <button
                         onClick={startScan}
                         disabled={!scanPath.trim() || status?.scanning}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:bg-violet-600/40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-violet-500/20 shrink-0"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:bg-violet-600/40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-2 shrink-0"
                     >
                         {status?.scanning ? (
                             <><Loader2 size={15} className="animate-spin" /> Scanning...</>
@@ -171,7 +170,7 @@ export default function MetadataTab() {
 
                 {/* Progress Bar */}
                 {status?.scanning && (
-                    <div className="mt-4 pt-3 border-t border-white/[0.06]">
+                    <div className="px-5 pb-4 pt-1 border-t border-white/[0.06]">
                         <div className="flex justify-between text-xs text-slate-400 mb-1.5">
                             <span className="flex items-center gap-1.5">
                                 <Loader2 size={13} className="animate-spin text-violet-400" />
@@ -190,7 +189,7 @@ export default function MetadataTab() {
 
                 {/* Error Display */}
                 {status?.error && !status.scanning && (
-                    <div className="mt-3.5 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2 text-xs text-red-300">
+                    <div className="mx-5 mb-5 p-3 bg-red-500/10 border border-red-500/20 rounded-lg flex items-center gap-2 text-xs text-red-300">
                         <AlertCircle size={15} className="text-red-400 shrink-0" />
                         <span>{status.error}</span>
                     </div>
@@ -198,16 +197,15 @@ export default function MetadataTab() {
 
                 {/* Success Display */}
                 {status && !status.scanning && !status.error && status.done > 0 && (
-                    <div className="mt-3.5 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center gap-2 text-xs text-emerald-300">
+                    <div className="mx-5 mb-5 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex items-center gap-2 text-xs text-emerald-300">
                         <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
                         <span>Enrichment complete &mdash; {status.done} files processed by Gemini 4 Argon</span>
                     </div>
                 )}
-            </div>
+            </section>
 
-            {/* Results Table */}
-            <div className="relative z-10 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
-                <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
+            <section aria-label="Enriched media library" className="obs-canvas-section min-w-0 max-w-full">
+                <div className="flex items-center justify-between px-5 py-3.5 bg-white/[0.015] border-b border-white/[0.06]">
                     <div className="flex items-center gap-2">
                         <Film size={16} className="text-violet-400" />
                         <h3 className="text-sm font-bold text-slate-200">Enriched Media Library</h3>
@@ -215,7 +213,7 @@ export default function MetadataTab() {
                     </div>
                     <button
                         onClick={fetchResults}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive text-xs text-violet-300 hover:text-white bg-violet-500/10 hover:bg-violet-500/20 px-3 py-1.5 rounded-xl border border-violet-500/20 transition-all flex items-center gap-1.5"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[40px] text-xs text-violet-300 hover:text-white bg-violet-500/10 hover:bg-violet-500/20 px-3.5 py-1.5 rounded-lg border border-violet-500/20 transition-all flex items-center gap-1.5"
                     >
                         <RefreshCw size={13} className={isLoadingResults ? 'animate-spin' : ''} />
                         <span>Refresh</span>
@@ -237,13 +235,13 @@ export default function MetadataTab() {
                     <div className="overflow-x-auto">
                         <table className="w-full text-xs text-left border-collapse">
                             <thead>
-                                <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-[11px]">
-                                    <th className="py-2.5 px-3 font-semibold">File</th>
-                                    <th className="py-2.5 px-3 font-semibold">Title</th>
-                                    <th className="py-2.5 px-3 font-semibold">Year</th>
-                                    <th className="py-2.5 px-3 font-semibold">Language</th>
-                                    <th className="py-2.5 px-3 font-semibold">Quality</th>
-                                    <th className="py-2.5 px-3 font-semibold">Subtitles</th>
+                                <tr className="border-b border-white/[0.07] text-slate-400 uppercase tracking-wider text-xs">
+                                    <th className="py-2.5 px-4 font-semibold">File</th>
+                                    <th className="py-2.5 px-4 font-semibold">Title</th>
+                                    <th className="py-2.5 px-4 font-semibold">Year</th>
+                                    <th className="py-2.5 px-4 font-semibold">Language</th>
+                                    <th className="py-2.5 px-4 font-semibold">Quality</th>
+                                    <th className="py-2.5 px-4 font-semibold">Subtitles</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-white/[0.04]">
@@ -252,7 +250,7 @@ export default function MetadataTab() {
                                     try { subtitles = JSON.parse(item.subtitles_json || '[]'); } catch { /* ignore */ }
                                     return (
                                         <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
-                                            <td className="py-3 px-3">
+                                            <td className="py-3 px-4">
                                                 <div className="flex items-center gap-2">
                                                     {getFileIcon(item.filename)}
                                                     <span className="text-slate-300 font-mono text-xs truncate max-w-[220px]" title={item.filename}>
@@ -260,22 +258,22 @@ export default function MetadataTab() {
                                                     </span>
                                                 </div>
                                             </td>
-                                            <td className="py-3 px-3 text-slate-200 font-medium">{item.title || '—'}</td>
-                                            <td className="py-3 px-3 text-slate-400">{item.year || '—'}</td>
-                                            <td className="py-3 px-3">
-                                                <span className="px-2 py-0.5 bg-blue-500/10 text-blue-400 rounded-md text-[11px] border border-blue-500/20 font-medium">
+                                            <td className="py-3 px-4 text-slate-200 font-medium">{item.title || '—'}</td>
+                                            <td className="py-3 px-4 text-slate-400">{item.year || '—'}</td>
+                                            <td className="py-3 px-4">
+                                                <span className="px-2 py-0.5 bg-blue-500/10 text-blue-400 rounded-md text-xs border border-blue-500/20 font-medium">
                                                     {item.language || 'unknown'}
                                                 </span>
                                             </td>
-                                            <td className="py-3 px-3">
-                                                <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-md text-[11px] border border-emerald-500/20 font-medium">
+                                            <td className="py-3 px-4">
+                                                <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 rounded-md text-xs border border-emerald-500/20 font-medium">
                                                     {item.quality || 'unknown'}
                                                 </span>
                                             </td>
-                                            <td className="py-3 px-3">
+                                            <td className="py-3 px-4">
                                                 <div className="flex gap-1 flex-wrap">
                                                     {subtitles.length > 0 ? subtitles.map((sub, i) => (
-                                                        <span key={i} className="px-1.5 py-0.5 bg-cyan-500/10 text-cyan-400 rounded text-[10px] border border-cyan-500/20">
+                                                        <span key={i} className="px-1.5 py-0.5 bg-cyan-500/10 text-cyan-400 rounded text-xs border border-cyan-500/20">
                                                             {sub}
                                                         </span>
                                                     )) : <span className="text-slate-600">—</span>}
@@ -288,7 +286,7 @@ export default function MetadataTab() {
                         </table>
                     </div>
                 )}
-            </div>
+            </section>
         </div>
     );
 }

@@ -85,7 +85,7 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
                         <button
                             type="button"
                             onClick={() => setActiveTab('services')}
-                            className="font-semibold text-emerald-300 hover:text-emerald-200 truncate block max-w-[180px] text-left hover:underline cursor-pointer transition-colors py-1 text-[13px] focus-visible:ring-2 focus-visible:ring-emerald-500 rounded"
+                            className="obs-touch-target-standard min-h-[44px] font-semibold text-emerald-300 hover:text-emerald-200 truncate block max-w-[180px] text-left hover:underline cursor-pointer transition-colors py-1 text-[13px] focus-visible:ring-2 focus-visible:ring-emerald-500 rounded"
                             title={`Inspect Service: ${processName}`}
                         >
                             {processName}

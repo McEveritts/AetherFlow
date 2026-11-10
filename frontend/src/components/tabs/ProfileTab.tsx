@@ -1,11 +1,12 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
-import { Mail, AlertCircle, Save, HardDrive, KeyRound, Lock, X, Loader2 } from 'lucide-react';
+import { Mail, AlertCircle, Save, HardDrive, KeyRound, Loader2, User } from 'lucide-react';
 import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
 import { apiFetch } from '@/lib/fetcher';
+import { Modal } from '@/components/ui/Modal';
 
 export default function ProfileTab() {
     const { user, refreshSession } = useAuth();
@@ -20,6 +21,8 @@ export default function ProfileTab() {
 
     // Password modal state
     const [showPasswordModal, setShowPasswordModal] = useState(false);
+    const passwordOpenerRef = useRef<HTMLButtonElement>(null);
+    const currentPasswordInputRef = useRef<HTMLInputElement>(null);
     const [currentPassword, setCurrentPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
@@ -170,12 +173,12 @@ export default function ProfileTab() {
     }
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full mb-8">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full relative z-10">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 pb-10">
+            <div className="min-w-0 rounded-none shadow-none bg-transparent border-b border-white/[0.07] grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-white/[0.07]">
                 {/* LEFT COLUMN: Account Overview & Email Preferences */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 flex flex-col justify-between space-y-8">
+                <div className="p-6 flex flex-col justify-between space-y-8 min-w-0">
                     {/* Avatar & Basics */}
-                    <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 pb-6 border-b border-white/[0.06]">
+                    <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 pb-6 border-b border-white/[0.07]">
                         <div className="flex flex-col items-center gap-3 shrink-0">
                             <input
                                 type="file"
@@ -184,36 +187,55 @@ export default function ProfileTab() {
                                 onChange={handleAvatarChange}
                                 className="hidden"
                             />
-                            <div 
-                                className="relative group cursor-pointer"
+                            <button
+                                type="button"
+                                aria-label="Change profile avatar"
+                                disabled={isAvatarUpdating}
+                                className="relative group cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
                                 onClick={() => avatarInputRef.current?.click()}
                             >
-                                <Image
-                                    src={user.avatar_url || 'https://via.placeholder.com/150'}
-                                    alt="Profile Avatar"
-                                    width={96}
-                                    height={96}
-                                    className="rounded-2xl shadow-lg border border-white/10 object-cover"
-                                />
+                                {user.avatar_url ? (
+                                    <Image
+                                        src={user.avatar_url}
+                                        alt="Profile Avatar"
+                                        width={96}
+                                        height={96}
+                                        className="h-24 w-24 rounded-2xl shadow-lg border border-white/10 object-cover"
+                                    />
+                                ) : (
+                                    <div
+                                        role="img"
+                                        aria-label="Profile Avatar"
+                                        className="h-24 w-24 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-white/10 shadow-lg flex items-center justify-center text-slate-300 group-hover:border-indigo-500/40 transition-colors"
+                                    >
+                                        {user.username ? (
+                                            <span className="text-2xl font-bold uppercase tracking-wider text-indigo-300 font-mono select-none">
+                                                {user.username.trim().charAt(0).toUpperCase()}
+                                            </span>
+                                        ) : (
+                                            <User size={36} className="text-slate-400" />
+                                        )}
+                                    </div>
+                                )}
                                 <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl flex items-center justify-center backdrop-blur-sm">
                                     <span className="text-xs font-bold text-white uppercase tracking-wider">
                                         {isAvatarUpdating ? 'Saving...' : 'Change'}
                                     </span>
                                 </div>
-                            </div>
+                            </button>
                             <button 
                                 type="button" 
                                 onClick={handleRemoveAvatar}
                                 disabled={isAvatarUpdating || !user.avatar_url}
-                                className="text-xs text-slate-400 hover:text-red-400 disabled:opacity-40 transition-colors"
+                                className="obs-touch-target-standard text-xs text-slate-400 hover:text-rose-400 disabled:opacity-40 transition-colors min-h-[32px]"
                             >
                                 Remove Avatar
                             </button>
                         </div>
                         
-                        <div className="text-center sm:text-left flex-1">
+                        <div className="text-center sm:text-left flex-1 min-w-0">
                             <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Account Identity</span>
-                            <h3 className="text-2xl font-bold text-slate-100 tracking-tight mt-0.5">{user.username}</h3>
+                            <h3 className="text-2xl font-bold text-slate-100 tracking-tight mt-0.5 break-words [overflow-wrap:anywhere]">{user.username}</h3>
                             <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-3">
                                 <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-indigo-500/20">
                                     {user.role}
@@ -237,21 +259,22 @@ export default function ProfileTab() {
                             <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Email Preferences</h4>
                             <span className="text-xs font-mono uppercase text-slate-500">System Alerts</span>
                         </div>
-                        <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
-                            <label className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                        <div className="pt-4 border-t border-white/[0.07] space-y-3">
+                            <label htmlFor="profile-notification-email" className="text-sm font-semibold text-slate-300 flex items-center gap-2">
                                 <Mail size={15} className="text-indigo-400" /> Notification Email
                             </label>
                             <div className="flex flex-col sm:flex-row gap-3">
                                 <input
+                                    id="profile-notification-email"
                                     type="email"
                                     value={email}
                                     onChange={(event) => setEmailDraft(event.target.value)}
-                                    className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                    className="flex-1 min-w-0 bg-white/[0.03] border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[44px]"
                                 />
                                 <button
                                     type="submit"
                                     disabled={isSaving || email === user.email}
-                                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-xs font-bold text-white transition-all whitespace-nowrap"
+                                    className="obs-touch-target-standard shrink-0 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-xs font-bold text-white transition-all whitespace-nowrap min-h-[44px]"
                                 >
                                     {isSaving ? 'Saving...' : 'Update Email'}
                                 </button>
@@ -262,30 +285,31 @@ export default function ProfileTab() {
                 </div>
 
                 {/* RIGHT COLUMN: Authentication & Security + Storage Quota */}
-                <div className="space-y-6">
+                <div className="divide-y divide-white/[0.07] min-w-0">
                     {/* Security Section */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 space-y-4">
-                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                    <div className="p-6 space-y-4 min-w-0">
+                        <div className="flex items-center justify-between pb-3 border-b border-white/[0.07]">
                             <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                                <KeyRound size={16} className="text-indigo-400" /> Authentication & Security
+                                <KeyRound size={16} className="text-indigo-400" /> Authentication &amp; Security
                             </h4>
                         </div>
-                        <div className="rounded-xl bg-slate-950/50 border border-white/[0.06] divide-y divide-white/[0.06] overflow-hidden">
-                            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                                <div>
+                        <div className="divide-y divide-white/[0.07] overflow-hidden">
+                            <div className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 min-w-0">
+                                <div className="min-w-0 flex-1">
                                     <h5 className="text-sm font-semibold text-slate-200">Account Password</h5>
                                     <p className="text-xs text-slate-500 mt-0.5">Change the password used to access your local account.</p>
                                 </div>
                                 <button 
                                     type="button" 
+                                    ref={passwordOpenerRef}
                                     onClick={() => setShowPasswordModal(true)}
-                                    className="px-4 py-2 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-200 text-xs font-bold rounded-xl transition-colors whitespace-nowrap"
+                                    className="obs-touch-target-standard shrink-0 px-4 py-2 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-200 text-xs font-bold rounded-xl transition-colors whitespace-nowrap min-h-[44px]"
                                 >
                                     Change Password
                                 </button>
                             </div>
                             
-                            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                            <div className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                 <div>
                                     <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                         Two-Factor Authentication
@@ -301,7 +325,7 @@ export default function ProfileTab() {
                                             : 'Add an extra layer of security via the Security tab.'}
                                     </p>
                                 </div>
-                                <span className={`px-4 py-2 text-xs font-bold rounded-xl transition-colors whitespace-nowrap ${
+                                <span className={`px-4 py-2 text-xs font-bold rounded-xl transition-colors whitespace-nowrap self-start sm:self-auto ${
                                     user.totp_enabled
                                         ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
                                         : 'bg-white/5 border border-white/10 text-slate-400'
@@ -313,7 +337,7 @@ export default function ProfileTab() {
                     </div>
 
                     {/* Account Storage Quota */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 space-y-4">
+                    <div className="p-6 space-y-4 min-w-0">
                         <div className="flex items-center gap-3">
                             <div className="p-2.5 bg-emerald-500/15 border border-emerald-500/20 text-emerald-400 rounded-xl">
                                 <HardDrive size={18} />
@@ -325,12 +349,12 @@ export default function ProfileTab() {
                         </div>
 
                         {isQuotaLoading ? (
-                            <div className="space-y-3">
+                            <div className="space-y-3 pt-2">
                                 <SkeletonBox className="h-4 w-full" />
                                 <SkeletonBox className="h-8 w-full" />
                             </div>
                         ) : quota ? (
-                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
+                            <div className="pt-4 border-t border-white/[0.07] space-y-3">
                                 <div className="flex items-end justify-between text-sm">
                                     <span className="text-xs font-semibold text-slate-400">Space Used</span>
                                     <div className="text-right">
@@ -356,7 +380,7 @@ export default function ProfileTab() {
                                 )}
                             </div>
                         ) : (
-                            <div className="p-4 border border-red-500/20 bg-red-500/10 text-red-400 rounded-xl text-xs">
+                            <div className="p-4 border border-rose-500/20 bg-rose-500/10 text-rose-300 rounded-xl text-xs">
                                 Quota telemetry unavailable.
                             </div>
                         )}
@@ -366,20 +390,14 @@ export default function ProfileTab() {
 
             {/* Change Password Modal */}
             {showPasswordModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-                    <div className="w-full max-w-md rounded-2xl p-6 border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative">
-                        <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-6">
-                            <div className="flex items-center gap-2">
-                                <Lock className="text-indigo-400" size={20} />
-                                <h3 className="text-lg font-bold text-white">Change Password</h3>
-                            </div>
-                            <button
-                                onClick={() => setShowPasswordModal(false)}
-                                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
-                            >
-                                <X size={18} />
-                            </button>
-                        </div>
+                <Modal
+                    isOpen={showPasswordModal}
+                    onClose={() => setShowPasswordModal(false)}
+                    title="Change Password"
+                    className="max-w-md"
+                    initialFocusRef={currentPasswordInputRef}
+                    returnFocusRef={passwordOpenerRef}
+                >
 
                         {passwordError && (
                             <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center gap-2">
@@ -390,39 +408,46 @@ export default function ProfileTab() {
 
                         <form onSubmit={handlePasswordSubmit} className="space-y-4">
                             <div>
-                                <label className="block text-xs font-semibold text-slate-300 mb-1.5">Current Password</label>
+                                <label htmlFor="profile-current-password" className="block text-xs font-semibold text-slate-300 mb-1.5">Current Password</label>
                                 <input
+                                    id="profile-current-password"
+                                    ref={currentPasswordInputRef}
                                     type="password"
+                                    autoComplete="current-password"
                                     value={currentPassword}
                                     onChange={(e) => setCurrentPassword(e.target.value)}
                                     placeholder="Enter current password"
                                     required
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50"
+                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50 min-h-[44px]"
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-semibold text-slate-300 mb-1.5">New Password (min 8 chars)</label>
+                                <label htmlFor="profile-new-password" className="block text-xs font-semibold text-slate-300 mb-1.5">New Password (min 8 chars)</label>
                                 <input
+                                    id="profile-new-password"
                                     type="password"
+                                    autoComplete="new-password"
                                     value={newPassword}
                                     onChange={(e) => setNewPassword(e.target.value)}
                                     placeholder="Enter new secure password"
                                     required
                                     minLength={8}
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50"
+                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50 min-h-[44px]"
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-semibold text-slate-300 mb-1.5">Confirm New Password</label>
+                                <label htmlFor="profile-confirm-password" className="block text-xs font-semibold text-slate-300 mb-1.5">Confirm New Password</label>
                                 <input
+                                    id="profile-confirm-password"
                                     type="password"
+                                    autoComplete="new-password"
                                     value={confirmPassword}
                                     onChange={(e) => setConfirmPassword(e.target.value)}
                                     placeholder="Confirm new password"
                                     required
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50"
+                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs focus:outline-none focus:border-indigo-500/50 min-h-[44px]"
                                 />
                             </div>
 
@@ -430,22 +455,21 @@ export default function ProfileTab() {
                                 <button
                                     type="button"
                                     onClick={() => setShowPasswordModal(false)}
-                                    className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white rounded-xl transition-colors"
+                                    className="obs-touch-target-standard px-4 py-2 text-xs font-bold text-slate-400 hover:text-white rounded-xl transition-colors min-h-[40px]"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     type="submit"
                                     disabled={isChangingPassword}
-                                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white rounded-xl transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white rounded-xl transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2 min-h-[40px]"
                                 >
                                     {isChangingPassword ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                                     {isChangingPassword ? 'Updating...' : 'Save Password'}
                                 </button>
                             </div>
                         </form>
-                    </div>
-                </div>
+                </Modal>
             )}
         </div>
     );

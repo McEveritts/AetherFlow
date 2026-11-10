@@ -41,35 +41,35 @@ export default function DashboardSettingsTab() {
 
     // Atmosphere preferences are automatically persisted in localStorage via useSystemStore theme settings
     return (
-        <div className="space-y-8 animate-fade-in">
+        <div className="animate-fade-in relative z-10 w-full min-w-0 max-w-full divide-y divide-white/[0.07] border-b border-white/[0.07]">
             {/* CATEGORY: 120Hz ProMotion & Touchscreen Engine */}
-            <div>
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3 px-2">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+            <section className="obs-canvas-section min-w-0 max-w-full">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 bg-white/[0.015] border-b border-white/[0.06]">
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
                         <Zap size={14} className="text-cyan-400" />
-                        120Hz High-Refresh & Touchscreen Engine
+                        120Hz High-Refresh &amp; Touchscreen Engine
                     </h4>
                     <div className="flex items-center gap-2">
                         <span className={`px-2.5 py-0.5 rounded-full text-xs font-mono font-bold uppercase tracking-wider border ${
                             is120HzActive
-                                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30 shadow-[0_0_10px_rgba(34,211,238,0.2)]'
-                                : 'bg-slate-800/80 text-slate-300 border-white/10'
+                                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                                : 'bg-white/[0.04] text-slate-300 border-white/10'
                         }`}>
                             Display: {detectedRefreshRate}Hz {is120HzActive ? 'ProMotion' : 'Standard'}
                         </span>
                         <span className={`px-2.5 py-0.5 rounded-full text-xs font-mono font-bold uppercase tracking-wider border ${
                             isTouchActive
                                 ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
-                                : 'bg-slate-800/80 text-slate-300 border-white/10'
+                                : 'bg-white/[0.04] text-slate-300 border-white/10'
                         }`}>
                             Input: {isTouchActive ? 'Touch Optimized (≥44px)' : 'Fine Pointer'}
                         </span>
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
+                <div className="divide-y divide-white/[0.04]">
                     {/* 120Hz High-Refresh Motion Cadence */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Zap size={16} className="text-cyan-400" /> 120Hz Frame-Paced Motion Physics
@@ -78,7 +78,7 @@ export default function DashboardSettingsTab() {
                                 Tunes GPU spring curves (8.33ms frame budget, 110ms interactive / 150ms surface transitions) for high-refresh displays.
                             </p>
                         </div>
-                        <div className="flex bg-black/60 p-1 rounded-xl border border-white/10 w-full md:w-80">
+                        <div className="flex bg-white/[0.03] p-1 rounded-lg border border-white/10 w-full md:w-80">
                             {([
                                 { id: 'auto', label: `Auto (${detectedRefreshRate}Hz)` },
                                 { id: '120hz', label: '120Hz Pro' },
@@ -91,9 +91,9 @@ export default function DashboardSettingsTab() {
                                         triggerHaptic(6, hapticFeedback);
                                         setHighRefreshMode(opt.id);
                                     }}
-                                    className={`flex-1 py-2 px-2 rounded-lg text-xs font-bold obs-gpu-120hz-interactive obs-touch-target-standard ${
+                                    className={`flex-1 min-h-[44px] py-2 px-2 rounded-md text-xs font-bold obs-gpu-120hz-interactive obs-touch-target-standard transition-all ${
                                         highRefreshMode === opt.id
-                                            ? 'bg-indigo-500 text-white shadow-lg'
+                                            ? 'bg-indigo-600 text-white shadow-sm'
                                             : 'text-slate-400 hover:text-slate-200'
                                     }`}
                                 >
@@ -104,16 +104,16 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Touchscreen Ergonomics Mode */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                <Smartphone size={16} className="text-indigo-400" /> Touchscreen Ergonomics & Hit Targets
+                                <Smartphone size={16} className="text-indigo-400" /> Touchscreen Ergonomics &amp; Hit Targets
                             </label>
                             <p className="text-xs text-slate-400 mt-1">
                                 Enforces WCAG 2.2 AAA ≥ 44px touch targets, swipe gestures, and reveals hover-gated controls on touchscreens.
                             </p>
                         </div>
-                        <div className="flex bg-black/60 p-1 rounded-xl border border-white/10 w-full md:w-80">
+                        <div className="flex bg-white/[0.03] p-1 rounded-lg border border-white/10 w-full md:w-80">
                             {([
                                 { id: 'auto', label: `Auto (${detectedTouchDevice ? 'Touch' : 'Mouse'})` },
                                 { id: 'enabled', label: 'Touch On' },
@@ -126,9 +126,9 @@ export default function DashboardSettingsTab() {
                                         triggerHaptic(6, hapticFeedback);
                                         setTouchMode(opt.id);
                                     }}
-                                    className={`flex-1 py-2 px-2 rounded-lg text-xs font-bold obs-gpu-120hz-interactive obs-touch-target-standard ${
+                                    className={`flex-1 min-h-[44px] py-2 px-2 rounded-md text-xs font-bold obs-gpu-120hz-interactive obs-touch-target-standard transition-all ${
                                         touchMode === opt.id
-                                            ? 'bg-indigo-500 text-white shadow-lg'
+                                            ? 'bg-indigo-600 text-white shadow-sm'
                                             : 'text-slate-400 hover:text-slate-200'
                                     }`}
                                 >
@@ -139,7 +139,7 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Tactile Haptic Feedback Toggle */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Vibrate size={16} className="text-emerald-400" /> Tactile Haptic Micro-Pulses
@@ -169,21 +169,22 @@ export default function DashboardSettingsTab() {
                         </div>
                     </div>
                 </div>
-            </div>
+            </section>
 
             {/* CATEGORY: Obsidian V2 Atmosphere Engine */}
-            <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2 flex items-center gap-2">
-                    <Sparkles size={14} className="text-indigo-400" />
-                    Obsidian V2 Atmosphere & Visual Tuning
-                </h4>
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
-                    
+            <section className="obs-canvas-section min-w-0 max-w-full">
+                <div className="flex items-center justify-between px-5 py-3.5 bg-white/[0.015] border-b border-white/[0.06]">
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                        <Sparkles size={14} className="text-indigo-400" />
+                        Obsidian V2 Atmosphere &amp; Visual Tuning
+                    </h4>
+                </div>
+                <div className="divide-y divide-white/[0.04]">
                     {/* Aurora Intensity / Opacity Slider */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                <Sliders size={16} className="text-indigo-400" /> Aurora Intensity & Opacity
+                                <Sliders size={16} className="text-indigo-400" /> Aurora Intensity &amp; Opacity
                             </label>
                             <p className="text-xs text-slate-400 mt-1">
                                 Controls the luminance of the 3-orb radial cosmic aurora on the pure black canvas.
@@ -192,12 +193,14 @@ export default function DashboardSettingsTab() {
                         <div className="flex items-center gap-4 w-full md:w-80">
                             <input
                                 type="range"
+                                aria-label="Aurora luminance"
+                                aria-valuetext={`${Math.round(auroraOpacity * 100)}%`}
                                 min="0"
                                 max="1"
                                 step="0.05"
                                 value={auroraOpacity}
                                 onChange={(e) => setAuroraOpacity(parseFloat(e.target.value))}
-                                className="w-full accent-indigo-500 h-2 bg-slate-900 rounded-lg appearance-none cursor-pointer"
+                                className="obs-touch-target-standard w-full accent-indigo-500 h-11 cursor-pointer"
                             />
                             <span className="text-xs font-mono font-bold text-indigo-300 w-12 text-right">
                                 {Math.round(auroraOpacity * 100)}%
@@ -206,7 +209,7 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Static vs Animated 3D Aurora Oscillation */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Activity size={16} className="text-fuchsia-400" /> 120Hz Aurora Animation
@@ -234,10 +237,10 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Tactile Micro-Grain Toggle */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                <Eye size={16} className="text-cyan-400" /> SVG Fractal Micro-Grain & Vignette
+                                <Eye size={16} className="text-cyan-400" /> SVG Fractal Micro-Grain &amp; Vignette
                             </label>
                             <p className="text-xs text-slate-400 mt-1">
                                 Renders high-frequency noise texture and spatial edge vignette for analog physical depth.
@@ -260,13 +263,13 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Spring Hover Lift Physics */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Maximize2 size={16} className="text-emerald-400" /> Card Hover Spring Lift
                             </label>
                             <p className="text-xs text-slate-400 mt-1">
-                                Elevates glass cards along the Z-axis with 120Hz cubic-bezier spring physics on pointer hover.
+                                Elevates cards along the Z-axis with 120Hz cubic-bezier spring physics on pointer hover.
                             </p>
                         </div>
                         <div className="flex items-center gap-3">
@@ -284,36 +287,39 @@ export default function DashboardSettingsTab() {
                             </button>
                         </div>
                     </div>
-
                 </div>
-            </div>
+            </section>
 
             {/* CATEGORY: Layout & Density */}
-            <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Visualization Density</h4>
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
-                    
+            <section className="obs-canvas-section min-w-0 max-w-full">
+                <div className="flex items-center justify-between px-5 py-3.5 bg-white/[0.015] border-b border-white/[0.06]">
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                        <Layers size={14} className="text-blue-400" />
+                        Visualization Density &amp; Widgets
+                    </h4>
+                </div>
+                <div className="divide-y divide-white/[0.04]">
                     {/* Density Picker */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Layers size={16} className="text-blue-400" /> Display Density
                             </label>
                             <p className="text-xs text-slate-400 mt-1">Choose between information-dense or visually immersive layouts.</p>
                         </div>
-                        <div className="flex bg-black/60 p-1 rounded-xl border border-white/10 w-full md:w-80">
+                        <div className="flex bg-white/[0.03] p-1 rounded-lg border border-white/10 w-full md:w-80">
                             <button
                                 onClick={() => setDashboardDensity('compact')}
-                                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all obs-touch-target-standard ${
-                                    dashboardDensity === 'compact' ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'
+                                className={`flex-1 min-h-[44px] py-2 rounded-md text-xs font-bold transition-all obs-touch-target-standard ${
+                                    dashboardDensity === 'compact' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
                                 }`}
                             >
                                 Compact
                             </button>
                             <button
                                 onClick={() => setDashboardDensity('immersive')}
-                                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all obs-touch-target-standard ${
-                                    dashboardDensity === 'immersive' ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'
+                                className={`flex-1 min-h-[44px] py-2 rounded-md text-xs font-bold transition-all obs-touch-target-standard ${
+                                    dashboardDensity === 'immersive' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
                                 }`}
                             >
                                 Immersive
@@ -322,7 +328,7 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* GPU Visibility */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Monitor size={16} className="text-purple-400" /> GPU Visualization
@@ -346,7 +352,7 @@ export default function DashboardSettingsTab() {
                     </div>
 
                     {/* Data Usage History Visibility */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                    <div className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Layers size={16} className="text-emerald-400" /> 90-Day Data Usage History
@@ -368,14 +374,13 @@ export default function DashboardSettingsTab() {
                             </button>
                         </div>
                     </div>
-
                 </div>
-            </div>
+            </section>
 
-            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 flex items-start gap-4">
-                <Maximize2 size={20} className="text-indigo-400 shrink-0 mt-0.5" />
+            <div className="obs-canvas-section px-5 py-4 flex items-start gap-3.5 bg-white/[0.01]">
+                <Maximize2 size={18} className="text-indigo-400 shrink-0 mt-0.5" />
                 <div>
-                    <h5 className="text-sm font-bold text-indigo-200">Obsidian V2 Architecture</h5>
+                    <h5 className="text-xs font-bold text-indigo-200 uppercase tracking-wider">Obsidian V2 Architecture</h5>
                     <p className="text-xs text-slate-400 mt-1 leading-relaxed">
                         The visual system operates on pure #000000 obsidian black with hardware-cached GPU radial auroras, tactile micro-grain, and 120Hz high-refresh spring physics. Modifying these settings updates CSS custom properties in real time across all glass surfaces.
                     </p>

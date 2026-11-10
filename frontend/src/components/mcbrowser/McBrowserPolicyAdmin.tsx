@@ -527,9 +527,9 @@ export function McBrowserPolicyAdmin({
             aria-label="McBrowser User Policy Administration"
             aria-busy={isBusy}
             data-testid="mcbrowser-policy-admin"
-            className="rounded-xl border border-slate-800 bg-slate-950/90 p-5 text-slate-100 shadow-xl"
+            className="obs-canvas-section py-5 text-slate-100"
         >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-4">
                 <div className="flex items-center gap-2.5">
                     <Shield className="h-5 w-5 text-emerald-400" aria-hidden="true" />
                     <div>
@@ -537,7 +537,7 @@ export function McBrowserPolicyAdmin({
                             McBrowser User File Policy Editor
                         </h2>
                         <p className="text-xs text-slate-400">
-                            Configure per-user workspace scope, 7 file operation flags, and ordered
+                            Configure per-user workspace scope, {MCBROWSER_PERMISSION_KEYS.length} file operation flags, and ordered
                             prefix/regex access rules.
                         </p>
                     </div>
@@ -555,7 +555,7 @@ export function McBrowserPolicyAdmin({
                             onClick={onClose}
                             data-testid="policy-admin-close-button"
                             aria-label="Close policy editor"
-                            className="rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:bg-slate-800 hover:text-white"
+                            className="obs-touch-target-standard rounded-lg border border-white/10 bg-[var(--obs-bg-primary)] p-1.5 text-slate-300 hover:bg-[var(--obs-slate-800)] hover:text-white"
                         >
                             <X className="h-4 w-4" aria-hidden="true" />
                         </button>
@@ -614,12 +614,12 @@ export function McBrowserPolicyAdmin({
 
             <form
                 onSubmit={handleLoadFormSubmit}
-                className="mt-4 flex flex-wrap items-end gap-3 rounded-lg border border-slate-800/80 bg-slate-900/60 p-3.5"
+                className="flex flex-wrap items-end gap-3 border-b border-white/[0.07] py-4"
             >
                 <div className="min-w-[200px] flex-1">
                     <label
                         htmlFor="mcbrowser-policy-target-user-id"
-                        className="block text-xs font-medium text-slate-300"
+                        className="obs-touch-target-standard block text-xs font-medium text-slate-300"
                     >
                         Target User ID (numeric)
                     </label>
@@ -636,7 +636,7 @@ export function McBrowserPolicyAdmin({
                         }}
                         placeholder="e.g. 2"
                         aria-invalid={targetUserIdValidationError !== null}
-                        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                        className="obs-touch-target-standard mt-1 w-full rounded-lg border border-white/10 bg-[var(--obs-bg-base)] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
                     />
                     {targetUserIdValidationError && (
                         <p
@@ -658,7 +658,8 @@ export function McBrowserPolicyAdmin({
                             targetUserIdInput.trim().length === 0 ||
                             targetUserIdValidationError !== null
                         }
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                        data-tone="success"
+                        className="glass-button obs-touch-target-standard inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         {isLoadingPolicy ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -673,7 +674,7 @@ export function McBrowserPolicyAdmin({
                             type="button"
                             onClick={handleCancelInFlightRequest}
                             data-testid="policy-admin-cancel-request"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                            className="obs-touch-target-standard inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[var(--obs-slate-800)] px-3 py-2 text-xs font-medium text-slate-200 hover:bg-white/10"
                         >
                             Cancel
                         </button>
@@ -691,7 +692,7 @@ export function McBrowserPolicyAdmin({
                     ) : (
                         <span
                             data-testid="policy-admin-unloaded-badge"
-                            className="rounded-md border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-400"
+                            className="rounded-md border border-white/10 bg-[var(--obs-slate-800)]/80 px-2.5 py-1 text-xs text-slate-400"
                         >
                             No target user loaded
                         </span>
@@ -710,13 +711,13 @@ export function McBrowserPolicyAdmin({
                 </div>
             )}
 
-            <div className="mt-5 grid gap-5 lg:grid-cols-2">
+            <div className="grid divide-y divide-white/[0.07] lg:grid-cols-2 lg:divide-y-0 lg:divide-x">
                 <fieldset
                     disabled={isEditorDisabled}
-                    className="rounded-lg border border-slate-800 bg-slate-900/40 p-4 disabled:opacity-60"
+                    className="py-4 lg:pr-5 disabled:opacity-60"
                 >
-                    <legend className="px-1 text-xs font-semibold uppercase tracking-wider text-slate-300">
-                        Operation Permissions (8 Flags)
+                    <legend className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                        Operation Permissions ({MCBROWSER_PERMISSION_KEYS.length} Flags)
                     </legend>
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                         <span className="text-xs text-slate-400">
@@ -727,7 +728,7 @@ export function McBrowserPolicyAdmin({
                                 type="button"
                                 onClick={handleAllowAllPermissions}
                                 data-testid="policy-perm-allow-all"
-                                className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                                className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-slate-800)] px-2 py-1 text-xs font-medium text-slate-200 hover:bg-white/10"
                             >
                                 Standard File Operations
                             </button>
@@ -735,14 +736,14 @@ export function McBrowserPolicyAdmin({
                                 type="button"
                                 onClick={handleReadAndDownloadOnlyPermissions}
                                 data-testid="policy-perm-read-only"
-                                className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                                className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-slate-800)] px-2 py-1 text-xs font-medium text-slate-200 hover:bg-white/10"
                             >
                                 Read &amp; Download Only
                             </button>
                         </div>
                     </div>
 
-                    <div className="space-y-2">
+                    <div className="divide-y divide-white/[0.06] border-t border-white/[0.06]">
                         {PERMISSION_METADATA_LIST.map((item) => {
                             const checkboxId = `mcbrowser-policy-perm-${item.key}`;
                             const isChecked = Boolean(permissions[item.key]);
@@ -750,7 +751,7 @@ export function McBrowserPolicyAdmin({
                                 <label
                                     key={item.key}
                                     htmlFor={checkboxId}
-                                    className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-800/80 bg-slate-950/60 p-2.5 hover:border-slate-700"
+                                    className="obs-touch-target-standard flex cursor-pointer items-start gap-2.5 py-2.5 px-1 hover:bg-white/[0.02]"
                                 >
                                     <input
                                         id={checkboxId}
@@ -758,16 +759,16 @@ export function McBrowserPolicyAdmin({
                                         type="checkbox"
                                         checked={isChecked}
                                         onChange={() => handleTogglePermission(item.key)}
-                                        className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
+                                        className="obs-checkbox mt-0.5"
                                     />
                                     <span className="flex-1">
                                         <span className="block text-xs font-medium text-slate-100">
                                             {item.label}{' '}
-                                            <code className="text-[11px] text-slate-400">
+                                            <code className="text-xs text-slate-400">
                                                 ({item.key})
                                             </code>
                                         </span>
-                                        <span className="block text-[11px] text-slate-400">
+                                        <span className="block text-xs text-slate-400">
                                             {item.description}
                                         </span>
                                     </span>
@@ -777,12 +778,12 @@ export function McBrowserPolicyAdmin({
                     </div>
                 </fieldset>
 
-                <div className="flex flex-col gap-5">
+                <div className="flex flex-col divide-y divide-white/[0.07] lg:pl-5">
                     <fieldset
                         disabled={isEditorDisabled}
-                        className="rounded-lg border border-slate-800 bg-slate-900/40 p-4 disabled:opacity-60"
+                        className="py-4 disabled:opacity-60"
                     >
-                        <legend className="px-1 text-xs font-semibold uppercase tracking-wider text-slate-300">
+                        <legend className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
                             Relative Scope Subdirectory
                         </legend>
                         <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -798,7 +799,7 @@ export function McBrowserPolicyAdmin({
                         <div className="mt-3">
                             <label
                                 htmlFor="mcbrowser-policy-scope-input"
-                                className="block text-xs font-medium text-slate-300"
+                                className="obs-touch-target-standard block text-xs font-medium text-slate-300"
                             >
                                 Relative Scope Path
                             </label>
@@ -813,7 +814,7 @@ export function McBrowserPolicyAdmin({
                                 }}
                                 placeholder="e.g. projects/alpha (or empty for root)"
                                 aria-invalid={scopeValidationError !== null}
-                                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                                className="obs-touch-target-standard mt-1 w-full rounded-lg border border-white/10 bg-[var(--obs-bg-base)] px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
                             />
                             {scopeValidationError && (
                                 <p
@@ -829,9 +830,9 @@ export function McBrowserPolicyAdmin({
 
                     <fieldset
                         disabled={isEditorDisabled}
-                        className="flex-1 rounded-lg border border-slate-800 bg-slate-900/40 p-4 disabled:opacity-60"
+                        className="flex-1 py-4 disabled:opacity-60"
                     >
-                        <legend className="px-1 text-xs font-semibold uppercase tracking-wider text-slate-300">
+                        <legend className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
                             Ordered Path &amp; Regex Rules ({rules.length}/{MAX_ADMIN_POLICY_RULES})
                         </legend>
                         <p className="text-xs text-slate-400">
@@ -846,7 +847,7 @@ export function McBrowserPolicyAdmin({
                                 onClick={() => handleAddRule(false)}
                                 data-testid="policy-admin-add-rule"
                                 disabled={rules.length >= MAX_ADMIN_POLICY_RULES}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-700 disabled:opacity-50"
+                                className="obs-touch-target-standard inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[var(--obs-slate-800)] px-2.5 py-1.5 text-xs font-medium text-slate-100 hover:bg-white/10 disabled:opacity-50"
                             >
                                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                                 <span>Add Prefix Rule</span>
@@ -856,7 +857,7 @@ export function McBrowserPolicyAdmin({
                                 onClick={() => handleAddRule(true)}
                                 data-testid="policy-admin-add-regex-rule"
                                 disabled={rules.length >= MAX_ADMIN_POLICY_RULES}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-700 disabled:opacity-50"
+                                className="obs-touch-target-standard inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[var(--obs-slate-800)] px-2.5 py-1.5 text-xs font-medium text-slate-100 hover:bg-white/10 disabled:opacity-50"
                             >
                                 <Regex className="h-3.5 w-3.5" aria-hidden="true" />
                                 <span>Add Regex Rule</span>
@@ -866,29 +867,29 @@ export function McBrowserPolicyAdmin({
                         {rules.length === 0 ? (
                             <p
                                 data-testid="policy-admin-empty-rules"
-                                className="mt-4 rounded-lg border border-dashed border-slate-800 p-4 text-center text-xs text-slate-400"
+                                className="mt-4 border-t border-white/[0.06] py-4 text-center text-xs text-slate-400"
                             >
                                 No path or regex rules configured. All paths within the user scope
                                 are permitted by default.
                             </p>
                         ) : (
-                            <div className="mt-3 space-y-2.5">
+                            <div className="mt-3 divide-y divide-white/[0.07] border-t border-white/[0.07]">
                                 {rules.map((ruleItem, ruleIndex) => {
                                     const validationError = ruleValidationErrors[ruleIndex];
                                     return (
                                         <div
                                             key={ruleItem.ruleId}
                                             data-testid={`policy-rule-row-${ruleIndex}`}
-                                            className="rounded-lg border border-slate-800 bg-slate-950/80 p-3"
+                                            className="py-3"
                                         >
                                             <div className="flex flex-wrap items-center gap-2">
-                                                <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[11px] font-mono text-slate-300">
+                                                <span className="rounded bg-[var(--obs-slate-800)] px-1.5 py-0.5 text-xs font-mono text-slate-300">
                                                     #{ruleIndex + 1}
                                                 </span>
 
                                                 <label
                                                     htmlFor={`policy-rule-allow-${ruleIndex}`}
-                                                    className="sr-only"
+                                                    className="obs-touch-target-standard sr-only"
                                                 >
                                                     Rule {ruleIndex + 1} Effect
                                                 </label>
@@ -901,7 +902,7 @@ export function McBrowserPolicyAdmin({
                                                             allow: event.target.value === 'allow',
                                                         })
                                                     }
-                                                    className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white"
+                                                    className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2 py-1 text-xs text-white"
                                                 >
                                                     <option value="deny">Deny</option>
                                                     <option value="allow">Allow</option>
@@ -909,7 +910,7 @@ export function McBrowserPolicyAdmin({
 
                                                 <label
                                                     htmlFor={`policy-rule-regex-${ruleIndex}`}
-                                                    className="inline-flex items-center gap-1.5 text-xs text-slate-300"
+                                                    className="obs-touch-target-standard inline-flex items-center gap-1.5 text-xs text-slate-300"
                                                 >
                                                     <input
                                                         id={`policy-rule-regex-${ruleIndex}`}
@@ -921,7 +922,7 @@ export function McBrowserPolicyAdmin({
                                                                 regex: event.target.checked,
                                                             })
                                                         }
-                                                        className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 text-emerald-500"
+                                                        className="obs-checkbox"
                                                     />
                                                     <span>Regex</span>
                                                 </label>
@@ -938,7 +939,7 @@ export function McBrowserPolicyAdmin({
                                                         disabled={ruleIndex === 0}
                                                         data-testid={`policy-rule-move-up-${ruleIndex}`}
                                                         aria-label={`Move rule ${ruleIndex + 1} up`}
-                                                        className="rounded border border-slate-700 bg-slate-900 p-1 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                                                        className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-bg-primary)] p-1 text-slate-300 hover:bg-[var(--obs-slate-800)] disabled:opacity-40"
                                                     >
                                                         <ArrowUp
                                                             className="h-3.5 w-3.5"
@@ -956,7 +957,7 @@ export function McBrowserPolicyAdmin({
                                                         disabled={ruleIndex === rules.length - 1}
                                                         data-testid={`policy-rule-move-down-${ruleIndex}`}
                                                         aria-label={`Move rule ${ruleIndex + 1} down`}
-                                                        className="rounded border border-slate-700 bg-slate-900 p-1 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                                                        className="obs-touch-target-standard rounded border border-white/10 bg-[var(--obs-bg-primary)] p-1 text-slate-300 hover:bg-[var(--obs-slate-800)] disabled:opacity-40"
                                                     >
                                                         <ArrowDown
                                                             className="h-3.5 w-3.5"
@@ -968,7 +969,7 @@ export function McBrowserPolicyAdmin({
                                                         onClick={() => handleRemoveRule(ruleIndex)}
                                                         data-testid={`policy-rule-remove-${ruleIndex}`}
                                                         aria-label={`Remove rule ${ruleIndex + 1}`}
-                                                        className="rounded border border-red-900/60 bg-red-950/40 p-1 text-red-300 hover:bg-red-900/50"
+                                                        className="obs-touch-target-standard rounded border border-red-900/60 bg-red-950/40 p-1 text-red-300 hover:bg-red-900/50"
                                                     >
                                                         <Trash2
                                                             className="h-3.5 w-3.5"
@@ -986,7 +987,7 @@ export function McBrowserPolicyAdmin({
                                                 >
                                                     <label
                                                         htmlFor={`policy-rule-path-${ruleIndex}`}
-                                                        className="block text-[11px] text-slate-400"
+                                                        className="obs-touch-target-standard block text-xs text-slate-400"
                                                     >
                                                         {ruleItem.regex
                                                             ? 'Rule Label / Path Identifier'
@@ -1007,7 +1008,7 @@ export function McBrowserPolicyAdmin({
                                                                 ? 'e.g. public-logs'
                                                                 : 'e.g. private/vault'
                                                         }
-                                                        className="mt-0.5 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-white"
+                                                        className="obs-touch-target-standard mt-0.5 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1 text-xs text-white"
                                                     />
                                                 </div>
 
@@ -1015,7 +1016,7 @@ export function McBrowserPolicyAdmin({
                                                     <div>
                                                         <label
                                                             htmlFor={`policy-rule-expression-${ruleIndex}`}
-                                                            className="block text-[11px] text-slate-400"
+                                                            className="obs-touch-target-standard block text-xs text-slate-400"
                                                         >
                                                             Regex Expression (1..2048 bytes)
                                                         </label>
@@ -1030,7 +1031,7 @@ export function McBrowserPolicyAdmin({
                                                                 })
                                                             }
                                                             placeholder="e.g. ^/logs/public-.*\.log$"
-                                                            className="mt-0.5 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-xs text-white"
+                                                            className="obs-touch-target-standard mt-0.5 w-full rounded border border-white/10 bg-[var(--obs-bg-primary)] px-2.5 py-1 font-mono text-xs text-white"
                                                         />
                                                     </div>
                                                 )}
@@ -1060,7 +1061,7 @@ export function McBrowserPolicyAdmin({
                     onClick={handleResetChanges}
                     data-testid="policy-admin-reset-button"
                     disabled={isEditorDisabled || lastLoadedSnapshot === null}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="obs-touch-target-standard inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[var(--obs-bg-primary)] px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-[var(--obs-slate-800)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                     <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Reset to Loaded Policy</span>
@@ -1071,7 +1072,7 @@ export function McBrowserPolicyAdmin({
                     onClick={() => void handleSavePolicy()}
                     data-testid="policy-admin-save-button"
                     disabled={!canSavePolicy}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="obs-touch-target-standard inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                     {isSavingPolicy ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />

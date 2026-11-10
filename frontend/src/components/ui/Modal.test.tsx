@@ -26,6 +26,24 @@ describe('Modal', () => {
         document.body.style.overflow = '';
     });
 
+    it('excludes roving and hidden controls from the modal tab sequence', () => {
+        render(
+            <Modal isOpen onClose={jest.fn()} title="Preferences">
+                <button type="button" tabIndex={-1}>Roving option</button>
+                <button type="button">Last control</button>
+                <div hidden><button type="button">Hidden control</button></div>
+                <button type="button" tabIndex={-1}>Another roving option</button>
+            </Modal>
+        );
+        const first = screen.getByRole('button', { name: 'Close Preferences' });
+        const last = screen.getByRole('button', { name: 'Last control' });
+        last.focus();
+        fireEvent.keyDown(last, { key: 'Tab' });
+        expect(first).toHaveFocus();
+        fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+        expect(last).toHaveFocus();
+    });
+
     it('announces its title, traps keyboard focus, and restores focus after Escape', () => {
         function ModalHarness() {
             const [isOpen, setIsOpen] = useState(false);
@@ -105,5 +123,31 @@ describe('Modal', () => {
         expect(screen.queryByRole('dialog', { name: 'Service logs' })).not.toBeInTheDocument();
         expect(document.activeElement).toBe(logsTrigger);
         expect(document.body.style.overflow).toBe('');
+    });
+
+    it('wraps long titles safely without colliding with the close control', () => {
+        const longTitle = 'Apply bandwidth throttle to client 198.51.100.82';
+        render(
+            <Modal isOpen title={longTitle} onClose={jest.fn()}>
+                <p>Modal content</p>
+            </Modal>
+        );
+
+        const headingElement = screen.getByRole('heading', { name: longTitle });
+        expect(headingElement).toHaveClass('min-w-0', 'break-words');
+        const closeButtonElement = screen.getByRole('button', { name: `Close ${longTitle}` });
+        expect(closeButtonElement).toHaveClass('shrink-0');
+    });
+
+    it('renders right-docked drawer presentation variant', () => {
+        render(
+            <Modal isOpen variant="drawer" aria-label="Drawer dialog" onClose={jest.fn()}>
+                <div>Drawer content</div>
+            </Modal>
+        );
+
+        const drawerDialog = screen.getByRole('dialog', { name: 'Drawer dialog' });
+        expect(drawerDialog.parentElement).toHaveClass('justify-end');
+        expect(drawerDialog).toHaveClass('border-l');
     });
 });

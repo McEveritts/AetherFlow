@@ -322,18 +322,18 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             )}
                             <div className="flex flex-wrap items-center gap-2 pt-1">
                                 <div
-                                    className="flex items-center gap-1 p-1 bg-white/[0.03] border border-white/[0.08] backdrop-blur-md rounded-xl"
+                                    className="flex flex-wrap max-w-full items-center gap-1 p-1 bg-white/[0.03] border border-white/[0.08] backdrop-blur-md rounded-xl"
                                     role="group"
                                     aria-label="Telemetry History Window"
                                 >
-                                    <Clock size={13} className="text-indigo-400 ml-2 mr-1 shrink-0" />
+                                    <Clock size={13} className="hidden sm:block text-indigo-400 ml-2 mr-1 shrink-0" />
                                     {TIME_WINDOW_OPTIONS.map((timeOption) => (
                                         <button
                                             key={timeOption.id}
                                             type="button"
                                             onClick={() => setTimeWindow(timeOption.id)}
                                             aria-label={`Select ${timeOption.label} history window`}
-                                            className={`min-h-[36px] px-2.5 py-1 rounded-lg text-xs font-mono font-semibold transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                                            className={`obs-touch-target-standard min-h-[44px] min-w-[44px] px-2.5 py-1 rounded-lg text-xs font-mono font-semibold transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                                 timeWindow === timeOption.id
                                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                                     : 'text-slate-400 hover:text-white'
@@ -389,7 +389,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                 data-testid={`history-window-${timeOption.id}`}
                                 onClick={() => setTimeWindow(timeOption.id)}
                                 aria-label={`Select ${timeOption.label} history window`}
-                                className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                                className={`min-h-[44px] px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                     timeWindow === timeOption.id
                                         ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                         : 'text-slate-400 hover:text-white'
@@ -405,7 +405,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             type="button"
                             onClick={() => setDashboardDensity('compact')}
                             aria-label="Set standard dashboard density"
-                            className={`min-h-[40px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                            className={`min-h-[44px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                 dashboardDensity === 'compact'
                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                     : 'text-slate-400 hover:text-white'
@@ -418,7 +418,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             type="button"
                             onClick={() => setDashboardDensity('immersive')}
                             aria-label="Set expanded dashboard density"
-                            className={`min-h-[40px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                            className={`min-h-[44px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                 dashboardDensity === 'immersive'
                                     ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
                                     : 'text-slate-400 hover:text-white'
@@ -434,7 +434,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             type="button"
                             onClick={() => setActiveTab('services')}
                             aria-label={`Inspect ${serviceEntries.length} managed ${serviceEntries.length === 1 ? 'service' : 'services'} (${runningServicesCount} running)`}
-                            className={`min-h-[40px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                            className={`min-h-[44px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                 failedServices.length > 0
                                     ? 'bg-rose-950/40 border-rose-800/80 text-rose-200 hover:bg-rose-900/50'
                                     : 'bg-white/[0.03] border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white'
@@ -453,7 +453,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             setActiveSettingsTab('dashboard');
                         }}
                         aria-label="Configure Display and Telemetry Preferences"
-                        className="min-h-[40px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.03] border border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+                        className="min-h-[44px] flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.03] border border-white/[0.08] backdrop-blur-md text-slate-300 hover:bg-white/[0.06] hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
                         title="Configure Display & Telemetry Preferences"
                     >
                         <Settings2 size={15} className="text-indigo-400" />
@@ -518,6 +518,24 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             )}
 
             <section aria-label="System telemetry cockpit" className="min-w-0">
+                <dl aria-label="Mobile system summary" className="md:hidden grid grid-cols-2 border-b border-white/[0.07] min-w-0">
+                    <div className="p-4 min-w-0 border-r border-white/[0.07]">
+                        <dt className="text-xs font-semibold text-slate-400">Processor load</dt>
+                        <dd className="mt-1 text-lg font-bold tabular-nums text-cyan-300">{metrics.cpu_usage.toFixed(1)}%</dd>
+                    </div>
+                    <div className="p-4 min-w-0">
+                        <dt className="text-xs font-semibold text-slate-400">Memory used</dt>
+                        <dd className="mt-1 text-lg font-bold tabular-nums text-indigo-300">{metrics.memory.total > 0 ? `${(metrics.memory.used / metrics.memory.total * 100).toFixed(1)}%` : 'Unavailable'}</dd>
+                    </div>
+                    <div className="p-4 min-w-0 border-t border-r border-white/[0.07]">
+                        <dt className="text-xs font-semibold text-slate-400">Running daemons</dt>
+                        <dd className="mt-1 text-lg font-bold tabular-nums text-emerald-300">{runningServicesCount} of {serviceEntries.length}</dd>
+                    </div>
+                    <div className="p-4 min-w-0 border-t border-white/[0.07]">
+                        <dt className="text-xs font-semibold text-slate-400">Needs attention</dt>
+                        <dd className={`mt-1 text-lg font-bold tabular-nums ${failedServices.length ? 'text-amber-300' : 'text-emerald-300'}`}>{failedServices.length}</dd>
+                    </div>
+                </dl>
                 <div className={`obs-vitals-grid grid items-stretch border-b border-white/[0.07] ${
                 dashboardDensity === 'immersive'
                         ? 'obs-vitals-grid--immersive grid-cols-1 xl:grid-cols-2'
@@ -556,7 +574,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-4 border-b border-white/[0.07] bg-white/[0.01] divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07]">
+                <div className="obs-metric-strip bg-white/[0.01]">
                     <TelemetryCell
                         icon={<Clock size={16} />}
                         iconColor="text-blue-400"
@@ -663,9 +681,9 @@ function TelemetryCell({
     return (
         <div className="px-5 py-4 flex items-center justify-between gap-2 sm:gap-3 hover:bg-white/[0.02] transition-colors min-w-0">
             <div className="min-w-0 flex-1">
-                <p className="text-xs text-slate-400 uppercase font-semibold tracking-wider truncate">{label}</p>
-                <p className="text-sm sm:text-base font-extrabold text-slate-100 truncate mt-0.5 tabular-nums">{value}</p>
-                <p className="text-[13px] text-slate-300 truncate mt-0.5 font-medium">{sublabel}</p>
+                <p className="text-xs text-slate-400 uppercase font-semibold tracking-wider break-words">{label}</p>
+                <p className="text-sm sm:text-base font-extrabold text-slate-100 break-words mt-0.5 tabular-nums">{value}</p>
+                <p className="text-[13px] text-slate-300 break-words mt-0.5 font-medium">{sublabel}</p>
             </div>
             <div className={`hidden sm:flex h-9 w-9 rounded-xl border ${iconBg} ${iconColor} items-center justify-center shrink-0`}>
                 {icon}

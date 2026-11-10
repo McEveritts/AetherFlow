@@ -229,14 +229,17 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
 
     expect(logoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
     expect(logoButton).toHaveClass("focus-visible:ring-2");
+    expect(logoButton).toHaveAttribute("aria-pressed", "false");
     await user.click(logoButton);
     expect(logoButton).toHaveAttribute("aria-expanded", "true");
+    expect(logoButton).toHaveAttribute("aria-pressed", "true");
     expect(desktopAside.parentElement).toHaveClass("md:w-64");
     fireEvent.mouseLeave(desktopAside);
     expect(desktopAside).toHaveClass("md:w-64");
 
     await user.click(logoButton);
     expect(logoButton).toHaveAttribute("aria-expanded", "false");
+    expect(logoButton).toHaveAttribute("aria-pressed", "false");
     expect(desktopAside).toHaveClass("md:w-[4.5rem]");
     expect(desktopAside.parentElement).toHaveClass("md:w-[4.5rem]");
     expect(useSystemStore.getState().isSidebarHovered).toBe(false);
@@ -279,6 +282,7 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     await user.click(within(desktopAside).getByRole("button", { name: "Unpin and collapse sidebar" }));
     expect(desktopAside).toHaveClass("md:w-[4.5rem]");
     expect(localStorage.getItem("aetherflow-sidebar-pinned")).toBe("false");
+    expect(within(desktopAside).getByRole("button", { name: "Expand Sidebar" })).toHaveFocus();
   });
 
   it("restores a saved pin without expanding fresh visits by default", () => {
@@ -330,7 +334,9 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     fireEvent.mouseEnter(desktopAside);
     const pinButton = within(desktopAside).getByRole("button", { name: "Pin sidebar open" });
     expect(pinButton).toHaveClass("obs-touch-target-standard");
+    expect(pinButton).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(pinButton);
+    expect(within(desktopAside).getByRole("button", { name: "Unpin and collapse sidebar" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.mouseLeave(desktopAside);
     expect(desktopAside.parentElement).toHaveClass("md:w-64");
   });
@@ -562,5 +568,72 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
       const desktopBeacon = desktopContainer?.querySelector(`.${testCase.beaconClass}`);
       expect(desktopBeacon).toBeInTheDocument();
     }
+  });
+
+  it("maintains honest aria-pressed state alongside aria-expanded on primary logo toggle", async () => {
+    const user = userEvent.setup({ skipHover: true });
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const logoButton = within(desktopAside).getByRole("button", { name: "Expand Sidebar" });
+
+    expect(logoButton).toHaveAttribute("aria-expanded", "false");
+    expect(logoButton).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(logoButton);
+    expect(logoButton).toHaveAttribute("aria-expanded", "true");
+    expect(logoButton).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(logoButton);
+    expect(logoButton).toHaveAttribute("aria-expanded", "false");
+    expect(logoButton).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("applies shared dock height variable to mobile navigation dock", () => {
+    render(<Sidebar />);
+    const mobileNav = screen.getByRole("navigation", { name: "Mobile Bottom Navigation" });
+    expect(mobileNav).toHaveClass("h-[var(--obs-shell-bottom-dock-height,4rem)]");
+  });
+
+  it("conveys current location on secondary tabs through mobile Menu dock slot and keeps drawer aria-current honest", () => {
+    useSystemStore.setState({ activeTab: "settings" });
+    render(<Sidebar />);
+
+    const mobileNavigation = screen.getByRole("navigation", { name: "Mobile Bottom Navigation" });
+    const menuButton = within(mobileNavigation).getByRole("button", { name: "Toggle Navigation Drawer" });
+    expect(menuButton).toHaveAttribute("aria-current", "page");
+    expect(menuButton).toHaveClass("text-indigo-400");
+    expect(menuButton.querySelector("span.bg-indigo-500")).toBeInTheDocument();
+
+    for (const primaryName of ["Overview", "Services", "Streaming"]) {
+      const primaryButton = within(mobileNavigation).getByRole("button", { name: new RegExp(primaryName, "i") });
+      expect(primaryButton).not.toHaveAttribute("aria-current");
+    }
+
+    fireEvent.click(menuButton);
+    const mobileDrawer = screen.getByRole("dialog", { name: "Navigation Menu" });
+    const activeSettingsButton = within(mobileDrawer).getByRole("button", { name: "Settings" });
+    expect(activeSettingsButton).toHaveAttribute("aria-current", "page");
+
+    const nonActiveDrawerButtons = within(mobileDrawer).getAllByRole("button").filter((buttonElement) => buttonElement !== activeSettingsButton);
+    nonActiveDrawerButtons.forEach((buttonElement) => {
+      expect(buttonElement).not.toHaveAttribute("aria-current", "page");
+    });
+  });
+
+  it("shows left-pointing collapse chevron whenever desktop rail is visually expanded by keyboard focus", () => {
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const servicesButton = within(desktopAside).getByRole("button", { name: "Services" });
+
+    act(() => {
+      servicesButton.focus();
+    });
+
+    expect(desktopAside.parentElement).toHaveClass("md:w-64");
+    const chevronButton = within(desktopAside).getByRole("button", { name: "Pin sidebar open" });
+    expect(chevronButton).toHaveAttribute("aria-pressed", "false");
+    const chevronIcon = chevronButton.querySelector("svg.lucide-chevron-left");
+    expect(chevronIcon).toBeInTheDocument();
+    expect(chevronButton.querySelector("svg.lucide-chevron-right")).toBeNull();
   });
 });

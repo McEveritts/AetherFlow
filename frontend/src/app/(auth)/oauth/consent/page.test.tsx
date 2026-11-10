@@ -126,4 +126,73 @@ describe('ConsentPage (/oauth/consent)', () => {
             approved: false,
         });
     });
+
+    it.each(['client_id', 'redirect_uri', 'response_type'])('offers safe recovery without authorizing when %s is missing', (missingParameter) => {
+        currentSearchParams.delete(missingParameter);
+
+        render(<ConsentPage />);
+
+        expect(screen.getByRole('main')).toHaveAttribute('aria-labelledby', 'invalid-authorization-heading');
+        expect(screen.getByRole('heading', { name: 'Invalid Authorization Request', level: 1 })).toBeInTheDocument();
+        expect(screen.getByText(/No access has been granted/)).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Start again safely' })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'Open AetherFlow' })).toHaveAttribute('href', '/');
+        expect(screen.queryByRole('button', { name: /Grant Authorization/i })).not.toBeInTheDocument();
+        expect(apiFetch).not.toHaveBeenCalled();
+        expect(mockReplace).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['redirect_uri', 'not-a-url'],
+        ['redirect_uri', '/relative/callback'],
+        ['redirect_uri', 'javascript:alert(1)'],
+        ['redirect_uri', 'data:text/html,callback'],
+        ['redirect_uri', 'https://client.example.com/callback#fragment'],
+        ['redirect_uri', 'https://client.example.com/callback#'],
+        ['redirect_uri', 'https://user:password@client.example.com/callback'],
+        ['redirect_uri', 'https://@client.example.com/callback'],
+        ['redirect_uri', 'https:/callback'],
+        ['redirect_uri', 'https:callback'],
+        ['redirect_uri', 'https:///callback'],
+        ['redirect_uri', 'https://client.example.com\\callback'],
+        ['redirect_uri', 'https://client.example.com/oauth\\callback'],
+        ['redirect_uri', 'https://client.example.com/\\callback'],
+        ['redirect_uri', ' https://client.example.com/callback '],
+        ['redirect_uri', 'https://client.example.com/\ncallback'],
+        ['redirect_uri', 'about:blank'],
+        ['redirect_uri', 'com.example.app:'],
+        ['response_type', 'token'],
+        ['client_id', '   '],
+    ])('rejects malformed %s=%s before presenting either consent action', (parameter, value) => {
+        currentSearchParams.set(parameter, value);
+        render(<ConsentPage />);
+        expect(screen.getByRole('heading', { name: 'Invalid Authorization Request' })).toBeInTheDocument();
+        expect(screen.getByText(/No access has been granted/)).toBeVisible();
+        expect(screen.queryByRole('button', { name: /Grant Authorization|Reject & Revoke/ })).not.toBeInTheDocument();
+        expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it.each(['http://127.0.0.1:4311/callback', 'http://[::1]:4311/callback', 'com.example.app:/oauth/callback', 'myapp://callback', 'com.example.app:callback', 'https://client.example.com/callback?label=operator%40example.com', 'https://client.example.com/callback?path=raw\\callback'])('preserves absolute loopback and native callback support for %s', (redirectUri) => {
+        currentSearchParams.set('redirect_uri', redirectUri);
+        render(<ConsentPage />);
+        expect(screen.getByRole('button', { name: 'Grant Authorization' })).toBeEnabled();
+        expect(screen.getByDisplayValue(redirectUri)).toBeVisible();
+        expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it('renders unboxed brand emblem and transparent hairline-separated scopes with readable descriptions', async () => {
+        render(<ConsentPage />);
+
+        const brandLogo = document.querySelector('.obs-brand-logo');
+        expect(brandLogo).toBeInTheDocument();
+        expect(brandLogo).not.toHaveClass('rounded-2xl');
+
+        const scopeListElement = screen.getByRole('list');
+        expect(scopeListElement).toHaveClass('divide-y');
+        expect(scopeListElement).toHaveClass('divide-white/[0.07]');
+
+        const openidDesc = screen.getByText('Core federated identity context');
+        expect(openidDesc).toHaveClass('text-slate-400');
+        expect(openidDesc.closest('.rounded-xl')).toBeNull();
+    });
 });

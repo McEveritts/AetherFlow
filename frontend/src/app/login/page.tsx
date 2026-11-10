@@ -193,31 +193,29 @@ function LoginFormContent() {
     };
 
     return (
-        <div className="min-h-screen bg-transparent flex items-center justify-center relative selection:bg-indigo-500/30 p-4">
-            <div className="w-full max-w-md p-4 sm:p-8 relative z-10 transition-all duration-500">
-                <div className="glass-panel overflow-hidden rounded-3xl p-6 sm:p-8 relative shadow-2xl border border-indigo-500/30">
-                    {/* Chromatic Top Edge Accent */}
-                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50 rounded-t-3xl"></div>
+        <div className="min-h-screen bg-transparent flex flex-col justify-center relative selection:bg-indigo-500/30">
+            <header className="w-full border-b border-white/[0.07] px-4 py-8 sm:py-10 text-center">
+                <div className="w-full max-w-md mx-auto">
+                    {step === 'credentials' ? (
+                        <div className="obs-brand-logo mx-auto h-20 w-20 mb-6 flex items-center justify-center">
+                            <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="obs-brand-mark w-16 h-16 object-contain" />
+                        </div>
+                    ) : (
+                        <div className="obs-brand-logo mx-auto h-16 w-16 mb-6 flex items-center justify-center">
+                            <Fingerprint className="obs-brand-mark text-indigo-300 w-10 h-10 drop-shadow-md" />
+                        </div>
+                    )}
+                    <h1 className="text-2xl font-bold text-slate-100 tracking-tight">
+                        {isSetup ? 'Initialize Nexus' : (step === 'credentials' ? 'AetherFlow' : 'Verify Identity')}
+                    </h1>
+                    <p className="text-slate-400 text-sm mt-2 font-medium">
+                        {isSetup ? 'Create primary administrative context' : (step === 'credentials' ? 'Welcome to the Aether' : 'Multi-factor authentication required')}
+                    </p>
+                </div>
+            </header>
 
-                    <div className="text-center mb-10">
-                        {step === 'credentials' ? (
-                            <div className="mx-auto h-20 w-20 mb-6 rounded-[1.25rem] shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
-                                <img src="/img/aetherflow-icon.svg" alt="AetherFlow Logo" className="w-full h-full" />
-                            </div>
-                        ) : (
-                            <div className="mx-auto h-16 w-16 mb-6 rounded-2xl bg-gradient-to-br from-indigo-500 via-blue-600 to-indigo-800 flex items-center justify-center shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden">
-                                <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMSIvPgo8L3N2Zz4=')] opacity-30 mix-blend-overlay"></div>
-                                <Fingerprint className="text-white w-8 h-8 opacity-90 drop-shadow-md" />
-                            </div>
-                        )}
-                        <h1 className="text-2xl font-bold text-slate-100 tracking-tight">
-                            {isSetup ? 'Initialize Nexus' : (step === 'credentials' ? 'AetherFlow' : 'Verify Identity')}
-                        </h1>
-                        <p className="text-slate-400 text-sm mt-2 font-medium">
-                            {isSetup ? 'Create primary administrative context' : (step === 'credentials' ? 'Welcome to the Aether' : 'Multi-factor authentication required')}
-                        </p>
-                    </div>
-
+            <main className="w-full border-b border-white/[0.07] px-4 py-8 sm:py-10">
+                <div className="w-full max-w-md mx-auto">
                     {error && (
                         <div className="mb-6 p-3 bg-red-500/10 border border-red-500/30 rounded-xl flex gap-3 text-red-200 text-sm">
                             <Info size={18} className="text-red-400 mt-0.5 shrink-0" />
@@ -228,29 +226,39 @@ function LoginFormContent() {
                     {step === 'credentials' && (
                         <form onSubmit={handleLogin} className="space-y-6">
                             <div className="space-y-4">
-                                <div className="relative">
+                                <div>
+                                    <label htmlFor="login-username" className="block text-sm font-medium text-slate-300 mb-2">{isSetup ? 'Administrative username' : 'Username'}</label>
+                                    <div className="relative">
                                     <Input
+                                        id="login-username"
+                                        autoComplete="username"
                                         type="text"
                                         placeholder={isSetup ? 'Choose administrative operator ID' : 'Username'}
                                         value={username}
-                                        onChange={(e) => setUsername(e.target.value)}
+                                        onChange={(event) => setUsername(event.target.value)}
                                         required
                                         autoFocus
                                         className="pl-11 !text-sm font-medium"
                                     />
                                     <ShieldCheck size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                                    </div>
                                 </div>
-                                <div className="relative">
+                                <div>
+                                    <label htmlFor="login-password" className="block text-sm font-medium text-slate-300 mb-2">Password</label>
+                                    <div className="relative">
                                     <Input
+                                        id="login-password"
+                                        autoComplete={isSetup ? 'new-password' : 'current-password'}
                                         type="password"
                                         placeholder={isSetup ? 'Establish cryptographic key (min 6)' : 'Password'}
                                         value={password}
-                                        onChange={(e) => setPassword(e.target.value)}
+                                        onChange={(event) => setPassword(event.target.value)}
                                         required
                                         minLength={isSetup ? 6 : 1}
                                         className="pl-11 !text-sm font-medium"
                                     />
                                     <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                                    </div>
                                 </div>
                             </div>
 
@@ -275,28 +283,28 @@ function LoginFormContent() {
                                             type="text"
                                             placeholder="XXXX-XXXX"
                                             value={recoveryCode}
-                                            onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
+                                            onChange={(event) => setRecoveryCode(event.target.value.toUpperCase())}
                                             required
                                             autoFocus
                                             className="pl-11 !text-sm font-bold tracking-widest font-mono"
                                         />
                                         <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                                     </div>
-                                    <p className="text-xs text-slate-500 text-center px-4">
+                                    <p className="text-xs text-slate-400 leading-relaxed text-center px-4">
                                         Enter one of your 8-character recovery codes to unlock your account.
                                     </p>
                                 </div>
                             ) : (
                                 <div className="flex justify-between gap-2 px-1">
-                                    {mfaCode.map((val, i) => (
+                                    {mfaCode.map((digitValue, digitIndex) => (
                                         <input
-                                            key={i}
-                                            ref={mfaRefs[i]}
+                                            key={digitIndex}
+                                            ref={mfaRefs[digitIndex]}
                                             type="text"
                                             maxLength={1}
-                                            value={val}
-                                            onChange={(e) => handleMfaChange(i, e.target.value)}
-                                            onKeyDown={(e) => handleMfaKeyDown(i, e)}
+                                            value={digitValue}
+                                            onChange={(event) => handleMfaChange(digitIndex, event.target.value)}
+                                            onKeyDown={(event) => handleMfaKeyDown(digitIndex, event)}
                                             onPaste={handlePaste}
                                             className="glass-input w-12 h-14 text-center text-xl font-bold font-mono !px-0 focus:ring-2 focus:ring-indigo-500"
                                         />
@@ -335,7 +343,7 @@ function LoginFormContent() {
                                             setRecoveryCode('');
                                             setError('');
                                         }}
-                                        className="w-full text-center text-slate-500 hover:text-slate-300 text-sm font-medium transition-colors"
+                                        className="w-full text-center text-slate-400 hover:text-slate-200 text-sm font-medium transition-colors"
                                     >
                                         Cancel and return
                                     </Button>
@@ -343,25 +351,27 @@ function LoginFormContent() {
                             </div>
                         </form>
                     )}
-
-                    {step === 'credentials' && (
-                        <div className="mt-8 pt-6 border-t border-white/5 relative">
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 bg-slate-950/50 backdrop-blur-md text-[10px] font-semibold text-slate-500 tracking-widest uppercase rounded-full whitespace-nowrap">
-                                External Providers
-                            </div>
-                            <Button
-                                type="button"
-                                variant="default"
-                                onClick={() => login()}
-                                className="w-full py-3 mt-2 text-sm font-semibold flex items-center justify-center gap-2 text-slate-200"
-                            >
-                                <Sparkles size={16} className="text-indigo-400" />
-                                Authenticate via OIDC Core
-                            </Button>
-                        </div>
-                    )}
                 </div>
-            </div>
+            </main>
+
+            {step === 'credentials' && (
+                <footer className="w-full px-4 py-8 text-center relative">
+                    <div className="w-full max-w-md mx-auto">
+                        <div className="text-xs font-semibold text-slate-400 tracking-widest uppercase mb-3">
+                            External Providers
+                        </div>
+                        <Button
+                            type="button"
+                            variant="default"
+                            onClick={() => login()}
+                            className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 text-slate-200"
+                        >
+                            <Sparkles size={16} className="text-indigo-400" />
+                            Authenticate via OIDC Core
+                        </Button>
+                    </div>
+                </footer>
+            )}
         </div>
     );
 }
@@ -369,11 +379,11 @@ function LoginFormContent() {
 export default function LoginPage() {
     return (
         <Suspense fallback={
-            <div className="min-h-screen bg-transparent flex items-center justify-center p-4">
-                <div className="w-full max-w-md p-4 sm:p-8 relative z-10">
-                    <div className="glass-panel overflow-hidden rounded-3xl p-6 sm:p-8 relative shadow-2xl border border-indigo-500/30 text-center text-slate-400">
-                        <div className="mx-auto h-20 w-20 mb-6 rounded-[1.25rem] shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
-                            <img src="/img/aetherflow-icon.svg" alt="AetherFlow Logo" className="w-full h-full" />
+            <div className="min-h-screen bg-transparent flex flex-col justify-center">
+                <div className="w-full border-b border-white/[0.07] px-4 py-8 sm:py-10 text-center text-slate-400">
+                    <div className="w-full max-w-md mx-auto">
+                        <div className="obs-brand-logo mx-auto h-20 w-20 mb-6 flex items-center justify-center">
+                            <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="obs-brand-mark w-16 h-16 object-contain" />
                         </div>
                         <p className="text-sm font-medium">Verifying session context...</p>
                     </div>

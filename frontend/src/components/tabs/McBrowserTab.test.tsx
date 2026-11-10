@@ -232,6 +232,17 @@ describe('McBrowserTab Component & Workspace Integration', () => {
         expect(screen.getByText(/This folder is empty/i)).toBeInTheDocument();
     });
 
+    it('keeps guardrail details available without expanding the initial browser prelude', async () => {
+        render(<McBrowserTab />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /^New Folder$/i })).toBeEnabled());
+        const summary = screen.getByText('Workspace scope & safety', { exact: false }).closest('summary');
+        const details = summary?.closest('details');
+        expect(summary).toHaveClass('min-h-[44px]');
+        expect(details).not.toHaveAttribute('open');
+        expect(details).toContainElement(screen.getByText('Upload Guardrails'));
+        expect(details).toContainElement(screen.getByText('Safety Rules'));
+    });
+
     it('opens the mounted rename confirmation from the workspace F2 shortcut', async () => {
         render(<McBrowserTab />);
         const workspace = await screen.findByRole('region', { name: 'Advanced file actions and workspace explorer' });
@@ -935,6 +946,8 @@ describe('McBrowserTab Component & Workspace Integration', () => {
 
         const settingsView = render(<McBrowserSettingsTab />);
         expect(screen.getByRole('region', { name: 'File policy administration' })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Open McBrowser' }));
+        expect(useSystemStore.getState().activeTab).toBe('mcbrowser');
         expect(screen.queryByRole('region', { name: 'Mounted event administration' })).not.toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: 'Audit Events & Internal Queue' }));
         expect(screen.getByRole('region', { name: 'Mounted event administration' })).toBeInTheDocument();
@@ -1175,5 +1188,364 @@ describe('McBrowserTab Component & Workspace Integration', () => {
         expect(mockedFetchPreview).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole('button', { name: 'Close media preview' }));
         expect(screen.queryByRole('dialog', { name: `Media preview ${name}` })).not.toBeInTheDocument();
+    });
+
+    it('renders advanced workspace inside an initially collapsed disclosure while preserving mounted state', async () => {
+        render(<McBrowserTab />);
+        await screen.findByRole('table', { name: /Directory entries/i });
+        const summary = screen.getByText('Advanced workspace', { exact: false }).closest('summary');
+        expect(summary).not.toBeNull();
+        expect(summary).toHaveClass('min-h-[44px]');
+        const details = summary?.closest('details');
+        expect(details).not.toBeNull();
+        expect(details).not.toHaveAttribute('open');
+        expect(
+            within(details!).getByRole('region', {
+                name: 'Advanced file actions and workspace explorer',
+            })
+        ).toBeInTheDocument();
+    });
+
+    it('manages Create New Folder modal accessible name, initial input focus, tab cycle, escape dismiss, and opener restoration', async () => {
+        render(<McBrowserTab />);
+        const openerButton = await screen.findByRole('button', { name: /^New Folder$/i });
+        await waitFor(() => expect(openerButton).toBeEnabled());
+        fireEvent.click(openerButton);
+
+        const dialog = screen.getByRole('dialog', { name: 'Create New Folder' });
+        expect(dialog).toBeInTheDocument();
+
+        const folderInput = within(dialog).getByLabelText(/Folder Name/i);
+        expect(folderInput).toHaveFocus();
+
+        const closeButton = within(dialog).getByRole('button', { name: 'Close Create New Folder' });
+        const submitButton = within(dialog).getByRole('button', { name: /^Create Folder$/i });
+        submitButton.focus();
+        expect(submitButton).toHaveFocus();
+        fireEvent.keyDown(document, { key: 'Tab' });
+        expect(closeButton).toHaveFocus();
+        fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+        expect(submitButton).toHaveFocus();
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Create New Folder' })).not.toBeInTheDocument();
+        expect(openerButton).toHaveFocus();
+    });
+
+    it.each([
+        { action: 'New Folder', title: 'Create New Folder' },
+        { action: 'Rename alpha-notes.txt', title: 'Rename File' },
+        { action: 'Delete alpha-notes.txt', title: 'Delete File' },
+        { action: 'Preview alpha-notes.txt', title: 'Preview: alpha-notes.txt' },
+    ])('dismisses the $title portal and releases focus when its persistent pane becomes inactive', async ({ action, title }) => {
+        mockedFetchPreview.mockResolvedValueOnce({ path: 'alpha-notes.txt', content: 'Preview text', truncated: false });
+        const originalOverflow = document.body.style.overflow;
+        const workspace = (isActive: boolean) => (
+            <>
+                <button type="button">Destination tab control</button>
+                <div hidden={!isActive}>
+                    <McBrowserTab isActive={isActive} />
+                </div>
+            </>
+        );
+        const view = render(workspace(true));
+        await screen.findByRole('table', { name: /Directory entries/i });
+        const opener = screen.getByRole('button', { name: action });
+        await waitFor(() => expect(opener).toBeEnabled());
+        fireEvent.click(opener);
+        const dialog = await screen.findByRole('dialog', { name: title });
+        expect(view.container).not.toContainElement(dialog);
+        expect(document.body.style.overflow).toBe('hidden');
+
+        view.rerender(workspace(false));
+        await waitFor(() => expect(dialog).not.toBeInTheDocument());
+        expect(document.body.style.overflow).toBe(originalOverflow);
+        const destinationControl = screen.getByRole('button', { name: 'Destination tab control' });
+        destinationControl.focus();
+        expect(destinationControl).toHaveFocus();
+
+        view.rerender(workspace(true));
+        expect(screen.queryByRole('dialog', { name: title })).not.toBeInTheDocument();
+        expect(screen.getByRole('table', { name: /Directory entries/i })).toBeInTheDocument();
+    });
+
+    it('manages Rename modal accessible name, initial input focus, escape dismiss, and opener restoration', async () => {
+        render(<McBrowserTab />);
+        const table = await screen.findByRole('table', { name: /Directory entries/i });
+        const openerButton = within(table).getByRole('button', { name: /Rename alpha-notes\.txt/i });
+        await waitFor(() => expect(openerButton).toBeEnabled());
+        fireEvent.click(openerButton);
+
+        const dialog = screen.getByRole('dialog', { name: 'Rename File' });
+        expect(dialog).toBeInTheDocument();
+
+        const renameInput = within(dialog).getByLabelText(/New Name for/i);
+        expect(renameInput).toHaveFocus();
+        expect(within(dialog).getByText(/New Name for/)).toHaveClass('min-w-0', 'max-w-full', 'break-words', '[overflow-wrap:anywhere]');
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Rename File' })).not.toBeInTheDocument();
+        expect(openerButton).toHaveFocus();
+    });
+
+    it('manages Delete modal accessible name, initial non-destructive focus, escape dismiss, and opener restoration', async () => {
+        render(<McBrowserTab />);
+        const table = await screen.findByRole('table', { name: /Directory entries/i });
+        const openerButton = within(table).getByRole('button', { name: /Delete alpha-notes\.txt/i });
+        await waitFor(() => expect(openerButton).toBeEnabled());
+        fireEvent.click(openerButton);
+
+        const dialog = screen.getByRole('dialog', { name: 'Delete File' });
+        expect(dialog).toBeInTheDocument();
+
+        const cancelButton = within(dialog).getByRole('button', { name: 'Cancel' });
+        expect(cancelButton).toHaveFocus();
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Delete File' })).not.toBeInTheDocument();
+        expect(openerButton).toHaveFocus();
+    });
+
+    it('manages Text Preview modal accessible name, non-destructive initial focus, tab containment, escape dismiss, and opener restoration', async () => {
+        mockedFetchPreview.mockResolvedValueOnce({
+            path: 'alpha-notes.txt',
+            content: 'Hello preview text',
+            truncated: false,
+        });
+
+        render(<McBrowserTab />);
+        const table = await screen.findByRole('table', { name: /Directory entries/i });
+        const openerButton = within(table).getByRole('button', { name: /Preview alpha-notes\.txt/i });
+        await waitFor(() => expect(openerButton).toBeEnabled());
+        fireEvent.click(openerButton);
+
+        const dialog = await screen.findByRole('dialog', { name: 'Preview: alpha-notes.txt' });
+        expect(dialog).toBeInTheDocument();
+
+        const downloadButton = within(dialog).getByRole('button', { name: 'Download' });
+        expect(downloadButton).toHaveFocus();
+
+        const closeButton = within(dialog).getByRole('button', { name: 'Close Preview: alpha-notes.txt' });
+        fireEvent.keyDown(document, { key: 'Tab' });
+        expect(closeButton).toHaveFocus();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: "Preview: alpha-notes.txt" })).not.toBeInTheDocument();
+        expect(openerButton).toHaveFocus();
+    });
+
+    it("renders responsive stacked ledger rows for long-name entries with bounded desktop table and 44px touch targets", async () => {
+        const longDirectoryName = "deeply-nested-backup-directory-storage-ledger-archive-record-node-alpha-cluster";
+        const longFileName = "report_quarterly_telemetry_metrics_breakdown_aggregate_summary_database_backup.log";
+        const testEntries: McBrowserEntry[] = [
+            {
+                name: longDirectoryName,
+                path: longDirectoryName,
+                kind: "directory",
+                size: 0,
+                modified: "2026-10-25T11:00:00Z",
+            },
+            {
+                name: longFileName,
+                path: longFileName,
+                kind: "file",
+                size: 2048576,
+                modified: "2026-10-26T16:45:00Z",
+            },
+        ];
+        mockedListEntries.mockResolvedValueOnce({
+            path: "",
+            entries: testEntries,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        });
+
+        render(<McBrowserTab />);
+
+        const tableElement = await screen.findByRole("table", { name: /Directory entries/i });
+        expect(tableElement).toHaveClass("block", "xl:table", "xl:table-fixed", "w-full", "min-w-0");
+
+        const theadElement = tableElement.querySelector("thead");
+        expect(theadElement).not.toBeNull();
+        expect(theadElement).toHaveClass("sr-only", "xl:not-sr-only", "xl:table-header-group");
+        expect(theadElement).not.toHaveClass("hidden");
+        expect(tableElement.querySelector('#header-name')).toHaveAttribute('aria-sort', 'ascending');
+
+        const nameSortButton = within(tableElement).getByRole("button", { name: "Name" });
+        expect(nameSortButton).toHaveClass("obs-touch-target-standard", "min-h-[44px]");
+
+        const sizeSortButton = within(tableElement).getByRole("button", { name: "Size" });
+        expect(sizeSortButton).toHaveClass("obs-touch-target-standard", "min-h-[44px]");
+
+        const modifiedSortButton = within(tableElement).getByRole("button", { name: "Modified" });
+        expect(modifiedSortButton).toHaveClass("obs-touch-target-standard", "min-h-[44px]");
+        expect(nameSortButton).toHaveClass('hidden', 'xl:inline-flex');
+        fireEvent.click(sizeSortButton);
+        expect(tableElement.querySelector('#header-size')).toHaveAttribute('aria-sort', 'ascending');
+        expect(tableElement.querySelector('#header-name')).toHaveAttribute('aria-sort', 'none');
+        fireEvent.click(nameSortButton);
+
+        const tbodyElement = tableElement.querySelector("tbody");
+        expect(tbodyElement).not.toBeNull();
+        expect(tbodyElement).toHaveClass("block", "xl:table-row-group");
+
+        const tableRows = within(tableElement).getAllByRole("row").slice(1);
+        expect(tableRows).toHaveLength(2);
+        tableRows.forEach((tableRow) => {
+            expect(tableRow).toHaveClass("block", "xl:table-row");
+        });
+
+        const directoryRow = tableRows[0];
+        const directoryNameButton = within(directoryRow).getByRole("button", { name: longDirectoryName });
+        expect(directoryNameButton).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "break-words", "[overflow-wrap:anywhere]");
+        expect(directoryNameButton).not.toHaveClass("truncate");
+
+        const fileRow = tableRows[1];
+        const fileNameButton = within(fileRow).getByRole("button", { name: longFileName });
+        expect(fileNameButton).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "min-w-0", "block", "break-words", "[overflow-wrap:anywhere]");
+        expect(fileNameButton).not.toHaveClass("truncate", "inline-flex");
+
+        const fileKindCell = fileRow.querySelector('[headers="header-kind"]');
+        expect(fileKindCell).not.toBeNull();
+        expect(fileKindCell).toHaveClass("inline-block", "xl:table-cell");
+        expect(within(fileRow).getByText("Kind:")).toHaveClass("xl:hidden");
+        expect(fileKindCell).toHaveTextContent("file");
+
+        const fileSizeCell = fileRow.querySelector('[headers="header-size"]');
+        expect(fileSizeCell).not.toBeNull();
+        expect(fileSizeCell).toHaveClass("inline-block", "xl:table-cell");
+        expect(within(fileRow).getByText("Size:")).toHaveClass("xl:hidden");
+        expect(fileSizeCell).toHaveTextContent("2 MiB");
+
+        const fileModifiedCell = fileRow.querySelector('[headers="header-modified"]');
+        expect(fileModifiedCell).not.toBeNull();
+        expect(fileModifiedCell).toHaveClass("inline-block", "xl:table-cell");
+        expect(within(fileRow).getByText("Modified:")).toHaveClass("xl:hidden");
+
+        const actionCell = fileRow.querySelector('[headers="header-actions"]');
+        expect(actionCell).not.toBeNull();
+        expect(actionCell).toHaveClass("block", "xl:table-cell");
+
+        const previewButtons = within(fileRow).getAllByRole("button", { name: `Preview ${longFileName}` });
+        expect(previewButtons).toHaveLength(1);
+        expect(previewButtons[0]).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "min-w-[44px]");
+
+        const downloadButtons = within(fileRow).getAllByRole("button", { name: `Download ${longFileName}` });
+        expect(downloadButtons).toHaveLength(1);
+        expect(downloadButtons[0]).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "min-w-[44px]");
+
+        const renameButtons = within(fileRow).getAllByRole("button", { name: `Rename ${longFileName}` });
+        expect(renameButtons).toHaveLength(1);
+        expect(renameButtons[0]).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "min-w-[44px]");
+
+        const deleteButtons = within(fileRow).getAllByRole("button", { name: `Delete ${longFileName}` });
+        expect(deleteButtons).toHaveLength(1);
+        expect(deleteButtons[0]).toHaveClass("obs-touch-target-standard", "min-h-[44px]", "min-w-[44px]");
+    });
+
+    it("preserves directory navigation, selection, exact paths, and authorized actions on stacked ledger rows", async () => {
+        const longDirectoryName = "deeply-nested-backup-directory-storage-ledger-archive-record-node-alpha-cluster";
+        const longFileName = "report-quarterly-telemetry-metrics-breakdown-aggregate-summary-database-backup.log";
+        const testEntries: McBrowserEntry[] = [
+            {
+                name: longDirectoryName,
+                path: longDirectoryName,
+                kind: "directory",
+                size: 0,
+                modified: "2026-10-25T11:00:00Z",
+            },
+            {
+                name: longFileName,
+                path: longFileName,
+                kind: "file",
+                size: 2048576,
+                modified: "2026-10-26T16:45:00Z",
+            },
+        ];
+        mockedListEntries.mockResolvedValueOnce({
+            path: "",
+            entries: testEntries,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        });
+        mockedFetchPreview.mockResolvedValueOnce({
+            path: longFileName,
+            content: "Database backup telemetry verification output",
+            truncated: false,
+        });
+
+        render(<McBrowserTab />);
+
+        const tableElement = await screen.findByRole("table", { name: /Directory entries/i });
+        const tableRows = within(tableElement).getAllByRole("row").slice(1);
+        const directoryRow = tableRows[0];
+        const fileRow = tableRows[1];
+
+        expect(fileRow).toHaveAttribute("aria-selected", "false");
+        fireEvent.click(fileRow);
+        expect(fileRow).toHaveAttribute("aria-selected", "true");
+        expect(screen.getByRole("region", { name: "Selected item actions" })).toHaveTextContent(`Selected: ${longFileName}`);
+
+        const previewButton = within(fileRow).getByRole("button", { name: `Preview ${longFileName}` });
+        fireEvent.click(previewButton);
+        const previewDialog = await screen.findByRole("dialog", { name: `Preview: ${longFileName}` });
+        expect(previewDialog).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: `Preview: ${longFileName}` })).not.toBeInTheDocument();
+
+        const renameButton = within(fileRow).getByRole("button", { name: `Rename ${longFileName}` });
+        fireEvent.click(renameButton);
+        const renameDialog = await screen.findByRole("dialog", { name: "Rename File" });
+        expect(renameDialog).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: "Rename File" })).not.toBeInTheDocument();
+
+        const deleteButton = within(fileRow).getByRole("button", { name: `Delete ${longFileName}` });
+        fireEvent.click(deleteButton);
+        const deleteDialog = await screen.findByRole("dialog", { name: "Delete File" });
+        expect(deleteDialog).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: "Delete File" })).not.toBeInTheDocument();
+
+        const downloadButton = within(fileRow).getByRole("button", { name: `Download ${longFileName}` });
+        fireEvent.click(downloadButton);
+        expect(mockedDownloadFile).toHaveBeenCalledWith(longFileName, longFileName);
+        mockedListEntries.mockResolvedValueOnce({
+            path: longDirectoryName,
+            entries: [],
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        });
+
+        const directoryButton = within(directoryRow).getByRole("button", { name: longDirectoryName });
+        await act(async () => {
+            fireEvent.click(directoryButton);
+        });
+        expect(mockedListEntries).toHaveBeenLastCalledWith(longDirectoryName, expect.any(AbortSignal));
+    });
+
+    it("configures responsive full-width mobile search and balanced desktop action columns", async () => {
+        mockedListEntries.mockResolvedValueOnce({
+            path: "",
+            entries: SAMPLE_ENTRIES,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+        });
+
+        render(<McBrowserTab />);
+        const searchInput = await screen.findByRole("searchbox", { name: /Filter files by name/i });
+        const searchContainer = searchInput.parentElement;
+        expect(searchContainer).toHaveClass("w-full", "sm:w-60");
+
+        const tableElement = await screen.findByRole("table", { name: /Directory entries/i });
+        const nameHeader = tableElement.querySelector("#header-name");
+        const kindHeader = tableElement.querySelector("#header-kind");
+        const sizeHeader = tableElement.querySelector("#header-size");
+        const modifiedHeader = tableElement.querySelector("#header-modified");
+        const actionsHeader = tableElement.querySelector("#header-actions");
+
+        expect(nameHeader).toHaveClass("xl:w-[38%]");
+        expect(kindHeader).toHaveClass("xl:w-[10%]");
+        expect(sizeHeader).toHaveClass("xl:w-[10%]");
+        expect(modifiedHeader).toHaveClass("xl:w-[18%]");
+        expect(actionsHeader).toHaveClass("xl:w-[24%]");
+
+        const actionButtonsGroup = tableElement.querySelector('[headers="header-actions"] > div');
+        expect(actionButtonsGroup).toHaveClass("xl:flex-nowrap");
     });
 });

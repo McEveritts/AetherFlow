@@ -1,0 +1,85 @@
+.container {
+  container-type: inline-size;
+}
+
+.auditTable {
+  min-width: 100%;
+}
+
+.detailHeader {
+  min-width: 180px;
+}
+
+.detailCell {
+  min-width: 180px;
+}
+
+@container (max-width: 900px) {
+  .auditTable,
+  .auditTable > thead,
+  .auditTable > tbody {
+    display: block;
+    width: 100%;
+    table-layout: auto;
+  }
+
+  .auditTable > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .auditTable > thead > tr {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .auditTable > thead > tr > th {
+    display: block;
+    flex: 1 1 auto;
+    width: auto;
+    padding: 0.25rem 0.5rem;
+  }
+
+  .auditTable > tbody > tr:not([data-grid-spacer]) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    padding: 0.75rem 0;
+  }
+
+  .auditTable > tbody > tr > td {
+    display: block;
+    min-width: 0;
+    width: auto;
+    padding: 0.25rem 0.75rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .auditTable > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--obs-slate-400);
+    font: 600 0.75rem var(--obs-font-sans);
+  }
+
+  .auditTable > tbody > tr > td:is([data-primary], [data-actions], [colspan]) {
+    grid-column: 1 / -1;
+  }
+
+  .auditTable > tbody > tr > td[data-label="IP"] {
+    grid-column: 1 / -1;
+  }
+
+  .auditTable [data-grid-spacer] > td {
+    padding: 0;
+  }
+}

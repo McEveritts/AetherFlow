@@ -10,6 +10,12 @@ const mockedFetch = jest.mocked(apiFetch);
 describe('host filesystem path picker authorization', () => {
   beforeEach(() => jest.clearAllMocks());
 
+  it('reserves a full touch target and text clearance for the directory toggle', () => {
+    render(<PathSelector value="/mnt/library" onChange={jest.fn()} />);
+    expect(screen.getByRole('button', { name: 'Toggle Directory Dropdown' })).toHaveClass('min-w-[44px]', 'min-h-[44px]');
+    expect(screen.getByRole('textbox')).toHaveClass('pr-12');
+  });
+
   it('explains forbidden host browsing without suggesting alternate host roots', async () => {
     mockedFetch.mockResolvedValue({ ok: false, status: 403 } as Response);
     render(<PathSelector value="/tmp" onChange={jest.fn()} />);

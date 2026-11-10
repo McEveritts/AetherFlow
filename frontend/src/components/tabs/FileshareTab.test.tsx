@@ -42,6 +42,16 @@ describe('FileshareTab Chunked Upload Contract', () => {
         });
     });
 
+    it('wraps full file identities without hiding the decision context', () => {
+        const filename = 'enterprise-archive-2026-11-08-production-media-index-and-recovery-manifest.tar.zst';
+        mockedUseSWR.mockReturnValue({ data: [{ name: filename, size: 1024, modTime: '2026-11-08T04:00:00Z', extension: 'zst' }], mutate: mockMutate });
+        render(<FileshareTab />);
+        const identity = screen.getByText(filename);
+        expect(identity).toHaveClass('break-words', '[overflow-wrap:anywhere]');
+        expect(identity).toHaveAttribute('title', filename);
+        expect(identity).not.toHaveClass('truncate');
+    });
+
     it('splits multi-chunk uploads into 5 MiB chunks with a stable 32-hex X-Upload-ID and exact chunk headers', async () => {
         const capturedCalls: Array<{ url: string; headers: Record<string, string>; hasChunk: boolean }> = [];
 

@@ -245,7 +245,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                     type="button"
                                     onClick={() => setDaysWindow(dayOption)}
                                     aria-label={`View ${dayOption} days telemetry`}
-                                    className={`min-h-[40px] px-3.5 py-2 text-xs font-semibold rounded-lg transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                                    className={`min-h-[44px] px-3.5 py-2 text-xs font-semibold rounded-lg transition-all focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
                                         daysWindow === dayOption
                                             ? 'bg-indigo-600/30 text-indigo-200 border border-indigo-500/50 shadow-sm'
                                             : 'text-slate-400 hover:text-slate-200'

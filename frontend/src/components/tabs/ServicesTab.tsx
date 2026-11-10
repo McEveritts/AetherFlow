@@ -18,6 +18,7 @@ import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { Modal } from '@/components/ui/Modal';
+import { ViewportMenu } from '@/components/ui/ViewportMenu';
 import { isLifecycleStatus, lifecycleIdentity, matchingActiveJob, matchingJobOutcome, MarketplaceJobOutcome, PendingAction, LIFECYCLE_RECEIPT_TIMEOUT_MS } from '@/hooks/useMarketplace';
 
 const SERVICE_ROW_TRACKS = '@[720px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,2fr)]';
@@ -748,7 +749,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const stoppedCount = allEntries.filter(([, serviceData]) => {
         const info = serviceData as ServiceInfo;
         const isStoppedStatus = info.status === 'stopped' || info.status === 'inactive' || !info.status;
-        return isStoppedStatus && !hasAttentionNeed(info);
+        return isStoppedStatus;
     }).length;
     const attentionCount = allEntries.filter(([, serviceData]) => hasAttentionNeed(serviceData as ServiceInfo)).length;
     const updatesAvailableCount = appServices.filter(([, serviceData]) => hasAvailableUpdate(serviceData as ServiceInfo)).length;
@@ -1011,7 +1012,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         }
         if (statusFilter === 'stopped') {
             const isStopped = serviceData.status === 'stopped' || serviceData.status === 'inactive' || !serviceData.status;
-            return isStopped && !hasAttentionNeed(serviceData);
+            return isStopped;
         }
         if (statusFilter === 'attention') {
             return hasAttentionNeed(serviceData);
@@ -1213,7 +1214,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                     href={data.update_url}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
-                                                    className="inline-flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
+                                                    className="obs-touch-target-standard min-h-[36px] min-w-[36px] px-1.5 inline-flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
                                                     title="View release notes"
                                                 >
                                                     → {formatVersion(latestVer)}
@@ -1721,11 +1722,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 )}
                             </div>
                             {(webAvailable || isCore || Boolean(data.public_domain || data.internal_domain)) && openAccessMenuService === name && (
-                                <div
+                                <ViewportMenu
                                     id={`connection-menu-${appId || name}`}
                                     role="menu"
                                     aria-label={`Connection details for ${name}`}
-                                    className="absolute left-0 top-full mt-1.5 z-30 min-w-[200px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                    align="left"
+                                    onDismiss={() => setOpenAccessMenuService(null)}
+                                    className="min-w-[200px] p-1.5 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                 >
                                     {(data.public_domain || data.internal_domain) && (
                                         <div className="px-2.5 py-1.5 border-b border-white/[0.08] text-xs">
@@ -1777,7 +1780,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             <span>Settings</span>
                                         </button>
                                     )}
-                                </div>
+                                </ViewportMenu>
                             )}
                         </div>
 
@@ -1867,11 +1870,12 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     <Sliders size={14} /> Manage
                                 </button>
                                 {openManageMenuService === name && (
-                                    <div
+                                    <ViewportMenu
                                         id={`manage-menu-${appId || name}`}
                                         role="menu"
                                         aria-label={`${name} service actions`}
-                                        className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                        onDismiss={() => setOpenManageMenuService(null)}
+                                        className="min-w-[170px] p-1.5 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                     >
                                         <RequireClaim>
                                             <button
@@ -1915,7 +1919,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                 </button>
                                             )}
                                         </RequireClaim>
-                                    </div>
+                                    </ViewportMenu>
                                 )}
                             </div>
                         </>
@@ -1966,11 +1970,12 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         <Sliders size={14} /> Manage
                                     </button>
                                     {openManageMenuService === name && (
-                                        <div
+                                        <ViewportMenu
                                             id={`manage-menu-${appId || name}`}
                                             role="menu"
                                             aria-label={`${name} service actions`}
-                                            className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-white/[0.04] border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                            onDismiss={() => setOpenManageMenuService(null)}
+                                            className="min-w-[170px] p-1.5 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl flex flex-col gap-1.5"
                                         >
                                             <RequireClaim>
                                                 <button
@@ -1988,7 +1993,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                     <span>{isCheckingThis ? 'Checking updates...' : 'Check for updates'}</span>
                                                 </button>
                                             </RequireClaim>
-                                        </div>
+                                        </ViewportMenu>
                                     )}
                                 </div>
                             )}
@@ -2250,7 +2255,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             aria-pressed={viewMode === 'list'}
                             className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'list' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                         >
-                            <LayoutList size={14} /> <span className="hidden sm:inline">List</span>
+                            <LayoutList size={14} aria-hidden="true" /> <span>List</span>
                         </button>
                         <button
                             type="button"
@@ -2260,7 +2265,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             aria-pressed={viewMode === 'card'}
                             className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'card' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                         >
-                            <LayoutGrid size={14} /> <span className="hidden sm:inline">Cards</span>
+                            <LayoutGrid size={14} aria-hidden="true" /> <span>Cards</span>
                         </button>
                     </div>
                 </div>

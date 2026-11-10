@@ -21,11 +21,11 @@ import {
     HardDrive,
     Activity,
     Layers,
-    X,
     ExternalLink
 } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
 import { useToast } from '@/contexts/ToastContext';
+import { Modal } from '@/components/ui/Modal';
 
 export interface NotificationRule {
     id: number;
@@ -239,19 +239,19 @@ export default function NotificationsSettingsTab() {
         switch (level) {
             case 'critical':
                 return (
-                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/40">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/40">
                         Critical
                     </span>
                 );
             case 'warning':
                 return (
-                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/40">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/40">
                         Warning
                     </span>
                 );
             default:
                 return (
-                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-sky-500/20 text-sky-400 border border-sky-500/40">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-sky-500/20 text-sky-400 border border-sky-500/40">
                         Info
                     </span>
                 );
@@ -289,30 +289,28 @@ export default function NotificationsSettingsTab() {
     };
 
     return (
-        <div className="space-y-6 w-full animate-fade-in text-slate-100">
-            {/* Sub-toolbar with Segmented Switcher */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
+        <div className="space-y-6 w-full animate-fade-in text-slate-100 min-w-0 max-w-full">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.07]">
                 <div className="flex items-center gap-3">
-                    <div className="h-9 w-9 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 text-indigo-400">
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0">
                         <Bell size={18} />
                     </div>
                     <div>
-                        <h3 className="text-base font-semibold text-slate-100">Alert Dispatcher & Rules</h3>
+                        <h3 className="text-base font-bold text-slate-100">Alert Dispatcher &amp; Rules</h3>
                         <p className="text-xs text-slate-400 mt-0.5">
                             Real-time monitoring rules, threshold alerts, and outbound webhook dispatchers.
                         </p>
                     </div>
                 </div>
 
-                {/* Segmented Switcher */}
-                <div className="flex items-center bg-slate-900/60 border border-white/[0.06] p-1 rounded-xl">
+                <nav aria-label="Notifications navigation rail" className="flex items-center gap-1 border-b sm:border-b-0 border-white/[0.07] shrink-0">
                     <button
                         type="button"
                         onClick={() => setActiveSection('rules')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 ${
+                        className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 border ${
                             activeSection === 'rules'
-                                ? 'bg-indigo-600 text-white shadow-sm'
-                                : 'text-slate-400 hover:text-slate-200'
+                                ? 'bg-indigo-600/30 border-indigo-500/50 text-indigo-200 shadow-sm'
+                                : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
                         }`}
                     >
                         <Sliders size={13} /> Alert Rules ({rules.length})
@@ -320,23 +318,23 @@ export default function NotificationsSettingsTab() {
                     <button
                         type="button"
                         onClick={() => setActiveSection('channels')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 ${
+                        className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 border ${
                             activeSection === 'channels'
-                                ? 'bg-indigo-600 text-white shadow-sm'
-                                : 'text-slate-400 hover:text-slate-200'
+                                ? 'bg-indigo-600/30 border-indigo-500/50 text-indigo-200 shadow-sm'
+                                : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
                         }`}
                     >
                         <Radio size={13} /> Delivery Channels ({channels.length})
                     </button>
-                </div>
+                </nav>
             </div>
 
             {/* SECTION 1: ALERT RULES */}
             {activeSection === 'rules' && (
                 <div className="space-y-4">
-                    <div className="flex items-center justify-between px-1">
+                    <div className="flex flex-wrap items-center justify-between gap-3 px-1">
                         <div>
-                            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
                                 Configured Trigger Conditions
                             </h3>
                             <p className="text-xs text-slate-500">
@@ -346,13 +344,13 @@ export default function NotificationsSettingsTab() {
                         <button
                             type="button"
                             onClick={() => setShowAddRuleModal(true)}
-                            className="px-4 py-2 bg-gradient-to-r from-indigo-500 to-fuchsia-600 hover:from-indigo-400 hover:to-fuchsia-500 rounded-xl text-xs font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold text-white transition-all flex items-center gap-2 shrink-0"
                         >
                             <Plus size={15} /> Add Rule
                         </button>
                     </div>
 
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden divide-y divide-white/[0.06]">
+                    <div className="obs-canvas-section divide-y divide-white/[0.06] border-y border-white/[0.07] w-full min-w-0">
                         {rulesLoading ? (
                             <div className="p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3">
                                 <RefreshCw size={18} className="animate-spin text-indigo-400" />
@@ -375,7 +373,7 @@ export default function NotificationsSettingsTab() {
                                     }`}
                                 >
                                     <div className="flex items-start sm:items-center gap-3.5">
-                                        <div className="p-2.5 rounded-xl bg-white/[0.04] border border-white/10 shrink-0 mt-0.5 sm:mt-0">
+                                        <div className="p-2.5 rounded-lg bg-white/[0.03] border border-white/10 shrink-0 mt-0.5 sm:mt-0">
                                             {renderConditionIcon(rule.condition_type)}
                                         </div>
                                         <div>
@@ -401,7 +399,7 @@ export default function NotificationsSettingsTab() {
                                             type="button"
                                             disabled={togglingRuleId === rule.id}
                                             onClick={() => handleToggleRule(rule)}
-                                            className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/10 hover:border-white/20 text-slate-300 hover:text-white flex items-center gap-1.5 transition-colors"
+                                            className="obs-touch-target-standard min-h-[44px] px-3.5 py-1.5 rounded-lg text-xs font-semibold border border-white/10 hover:border-white/20 text-slate-300 hover:text-white flex items-center gap-1.5 transition-colors"
                                         >
                                             {rule.enabled ? (
                                                 <>
@@ -416,7 +414,7 @@ export default function NotificationsSettingsTab() {
                                         <button
                                             type="button"
                                             onClick={() => handleDeleteRule(rule.id, rule.name)}
-                                            className="p-2 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                                            className="obs-touch-target-standard min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors flex items-center justify-center"
                                             title="Delete Rule"
                                         >
                                             <Trash2 size={16} />
@@ -432,9 +430,9 @@ export default function NotificationsSettingsTab() {
             {/* SECTION 2: DELIVERY CHANNELS */}
             {activeSection === 'channels' && (
                 <div className="space-y-4">
-                    <div className="flex items-center justify-between px-1">
+                    <div className="flex flex-wrap items-center justify-between gap-3 px-1">
                         <div>
-                            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
                                 Outbound Webhook Integrations
                             </h3>
                             <p className="text-xs text-slate-500">
@@ -444,20 +442,20 @@ export default function NotificationsSettingsTab() {
                         <button
                             type="button"
                             onClick={() => setShowAddChannelModal(true)}
-                            className="px-4 py-2 bg-gradient-to-r from-indigo-500 to-fuchsia-600 hover:from-indigo-400 hover:to-fuchsia-500 rounded-xl text-xs font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold text-white transition-all flex items-center gap-2 shrink-0"
                         >
                             <Plus size={15} /> Add Channel
                         </button>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 border-t border-white/[0.07] w-full min-w-0">
                         {channelsLoading ? (
-                            <div className="col-span-full p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3">
+                            <div className="col-span-full p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3 border-b border-white/[0.07]">
                                 <RefreshCw size={18} className="animate-spin text-indigo-400" />
                                 Loading delivery channels...
                             </div>
                         ) : channels.length === 0 ? (
-                            <div className="col-span-full p-12 text-center rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl space-y-3">
+                            <div className="col-span-full p-12 text-center border-b border-white/[0.07] space-y-3">
                                 <MessageSquare size={32} className="mx-auto text-slate-600" />
                                 <h4 className="text-sm font-semibold text-slate-300">No Delivery Channels Connected</h4>
                                 <p className="text-xs text-slate-500 max-w-sm mx-auto">
@@ -468,7 +466,7 @@ export default function NotificationsSettingsTab() {
                             channels.map((channel) => (
                                 <div
                                     key={channel.id}
-                                    className="p-5 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl flex flex-col justify-between gap-4 relative overflow-hidden group hover:border-white/10 transition-all"
+                                    className="p-5 border-b border-white/[0.07] md:odd:border-r md:odd:border-white/[0.07] flex flex-col justify-between gap-4 relative transition-colors hover:bg-white/[0.02] min-w-0"
                                 >
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex items-center gap-3">
@@ -482,7 +480,7 @@ export default function NotificationsSettingsTab() {
                                                 <h4 className="font-semibold text-sm text-white group-hover:text-indigo-200 transition-colors">
                                                     {channel.name}
                                                 </h4>
-                                                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 bg-white/[0.04] px-2 py-0.5 rounded border border-white/5">
+                                                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 bg-white/[0.04] px-2 py-0.5 rounded border border-white/5">
                                                     {channel.type}
                                                 </span>
                                             </div>
@@ -498,19 +496,19 @@ export default function NotificationsSettingsTab() {
                                         </button>
                                     </div>
 
-                                    <div className="text-xs text-slate-400 font-mono bg-black/40 px-3 py-2 rounded-xl border border-white/5 truncate">
+                                    <div className="text-xs text-slate-400 font-mono bg-black/40 px-3 py-2 rounded-lg border border-white/5 truncate">
                                         {parseChannelTarget(channel)}
                                     </div>
 
                                     <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                                        <span className="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                                        <span className="text-xs text-emerald-400 flex items-center gap-1.5">
                                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Ready
                                         </span>
                                         <button
                                             type="button"
                                             disabled={testingChannelId === channel.id}
                                             onClick={() => handleTestChannel(channel)}
-                                            className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-50 rounded-xl text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition-all"
+                                            className="obs-touch-target-standard min-h-[40px] px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-50 rounded-lg text-xs font-semibold text-slate-200 hover:text-white flex items-center gap-1.5 transition-all"
                                         >
                                             {testingChannelId === channel.id ? (
                                                 <>
@@ -532,20 +530,7 @@ export default function NotificationsSettingsTab() {
 
             {/* MODAL: ADD ALERT RULE */}
             {showAddRuleModal && (
-                <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="w-full max-w-md p-6 rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative animate-fade-in">
-                        <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-5">
-                            <h3 className="text-base font-bold text-white flex items-center gap-2">
-                                <Plus size={18} className="text-indigo-400" /> Add Alert Threshold Rule
-                            </h3>
-                            <button
-                                onClick={() => setShowAddRuleModal(false)}
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                            >
-                                <X size={18} />
-                            </button>
-                        </div>
-
+                <Modal isOpen onClose={() => setShowAddRuleModal(false)} title="Add Alert Threshold Rule" className="max-w-md">
                         <form onSubmit={handleCreateRule} className="space-y-4">
                             <div>
                                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block mb-1.5">
@@ -555,9 +540,10 @@ export default function NotificationsSettingsTab() {
                                     type="text"
                                     required
                                     placeholder="e.g. High CPU Usage Warning"
+                                    aria-label="Rule Name"
                                     value={ruleName}
                                     onChange={(e) => setRuleName(e.target.value)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
                                 />
                             </div>
 
@@ -566,9 +552,10 @@ export default function NotificationsSettingsTab() {
                                     Condition Metric
                                 </label>
                                 <select
+                                    aria-label="Condition Metric"
                                     value={conditionType}
                                     onChange={(e) => setConditionType(e.target.value as typeof conditionType)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="cpu_usage">CPU Usage (%)</option>
                                     <option value="memory_usage">Memory Usage (%)</option>
@@ -585,9 +572,10 @@ export default function NotificationsSettingsTab() {
                                     type="text"
                                     required
                                     placeholder={conditionType === 'service_down' ? 'e.g. rtorrent, plex, nginx' : 'e.g. 90'}
+                                    aria-label={conditionType === 'service_down' ? 'Service Name' : 'Threshold Value (%)'}
                                     value={conditionValue}
                                     onChange={(e) => setConditionValue(e.target.value)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
                                 />
                             </div>
 
@@ -596,9 +584,10 @@ export default function NotificationsSettingsTab() {
                                     Severity Level
                                 </label>
                                 <select
+                                    aria-label="Severity Level"
                                     value={ruleLevel}
                                     onChange={(e) => setRuleLevel(e.target.value as typeof ruleLevel)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="info">Info</option>
                                     <option value="warning">Warning</option>
@@ -610,39 +599,25 @@ export default function NotificationsSettingsTab() {
                                 <button
                                     type="button"
                                     onClick={() => setShowAddRuleModal(false)}
-                                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                                    className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     type="submit"
                                     disabled={isSubmittingRule}
-                                    className="px-5 py-2 bg-gradient-to-r from-indigo-500 to-fuchsia-600 hover:from-indigo-400 hover:to-fuchsia-500 rounded-xl text-xs font-bold text-white transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+                                    className="obs-touch-target-standard min-h-[44px] px-5 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold text-white transition-all disabled:opacity-50"
                                 >
                                     {isSubmittingRule ? 'Saving...' : 'Create Rule'}
                                 </button>
                             </div>
                         </form>
-                    </div>
-                </div>
+                </Modal>
             )}
 
             {/* MODAL: ADD DELIVERY CHANNEL */}
             {showAddChannelModal && (
-                <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="w-full max-w-md p-6 rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative animate-fade-in">
-                        <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-5">
-                            <h3 className="text-base font-bold text-white flex items-center gap-2">
-                                <Plus size={18} className="text-indigo-400" /> Connect Notification Channel
-                            </h3>
-                            <button
-                                onClick={() => setShowAddChannelModal(false)}
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                            >
-                                <X size={18} />
-                            </button>
-                        </div>
-
+                <Modal isOpen onClose={() => setShowAddChannelModal(false)} title="Connect Notification Channel" className="max-w-md">
                         <form onSubmit={handleCreateChannel} className="space-y-4">
                             <div>
                                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block mb-1.5">
@@ -652,9 +627,10 @@ export default function NotificationsSettingsTab() {
                                     type="text"
                                     required
                                     placeholder="e.g. DevOps Discord, Alert Slack"
+                                    aria-label="Channel Name"
                                     value={channelName}
                                     onChange={(e) => setChannelName(e.target.value)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60"
                                 />
                             </div>
 
@@ -663,9 +639,10 @@ export default function NotificationsSettingsTab() {
                                     Platform Type
                                 </label>
                                 <select
+                                    aria-label="Channel Type"
                                     value={channelType}
                                     onChange={(e) => setChannelType(e.target.value as typeof channelType)}
-                                    className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
+                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="discord">Discord Webhook</option>
                                     <option value="slack">Slack Incoming Webhook</option>
@@ -683,9 +660,10 @@ export default function NotificationsSettingsTab() {
                                         type="url"
                                         required
                                         placeholder="https://discord.com/api/webhooks/..."
+                                        aria-label="Webhook URL"
                                         value={webhookUrl}
                                         onChange={(e) => setWebhookUrl(e.target.value)}
-                                        className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
+                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
                                     />
                                 </div>
                             ) : (
@@ -698,9 +676,10 @@ export default function NotificationsSettingsTab() {
                                             type="password"
                                             required
                                             placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                                            aria-label="Bot token"
                                             value={botToken}
                                             onChange={(e) => setBotToken(e.target.value)}
-                                            className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
+                                            className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
                                         />
                                     </div>
                                     <div>
@@ -711,9 +690,10 @@ export default function NotificationsSettingsTab() {
                                             type="text"
                                             required
                                             placeholder="-100123456789"
+                                            aria-label="Target chat ID"
                                             value={chatId}
                                             onChange={(e) => setChatId(e.target.value)}
-                                            className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
+                                            className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 font-mono"
                                         />
                                     </div>
                                 </>
@@ -723,21 +703,20 @@ export default function NotificationsSettingsTab() {
                                 <button
                                     type="button"
                                     onClick={() => setShowAddChannelModal(false)}
-                                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                                    className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     type="submit"
                                     disabled={isSubmittingChannel}
-                                    className="px-5 py-2 bg-gradient-to-r from-indigo-500 to-fuchsia-600 hover:from-indigo-400 hover:to-fuchsia-500 rounded-xl text-xs font-bold text-white transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+                                    className="obs-touch-target-standard min-h-[44px] px-5 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold text-white transition-all disabled:opacity-50"
                                 >
-                                    {isSubmittingChannel ? 'Saving...' : 'Connect Channel'}
-                                </button>
+                                    {isSubmittingChannel ? 'Saving...' : 'Connect Channel'
+                                }</button>
                             </div>
                         </form>
-                    </div>
-                </div>
+                </Modal>
             )}
         </div>
     );

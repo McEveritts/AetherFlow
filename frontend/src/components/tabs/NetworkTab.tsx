@@ -985,15 +985,15 @@ export default function NetworkTab() {
             )}
 
             {isStatusLoading && !networkStatus && !statusError && (
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 p-6 text-xs text-slate-300 flex items-center gap-3">
+                <div className="obs-canvas-section py-5 text-xs text-slate-300 flex items-center gap-3">
                     <RefreshCw size={16} className="animate-spin text-indigo-400" />
                     <span>Loading live WireGuard and Tailscale telemetry...</span>
                 </div>
             )}
 
             {/* 4-Card Truthful Telemetry Strip */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+            <div className="obs-canvas-section grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y divide-white/[0.07] sm:divide-y-0 sm:[&>*:nth-child(n+3)]:border-t sm:[&>*:nth-child(n+3)]:border-white/[0.07] sm:max-lg:[&>*:nth-child(even)]:border-l sm:max-lg:[&>*:nth-child(even)]:border-white/[0.07] lg:[&>*]:border-t-0 lg:divide-x lg:divide-white/[0.07]">
+                <div className="p-4 flex items-center justify-between min-w-0">
                     <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Tunnel Health</p>
                         <p className="text-base font-bold text-slate-100 mt-1">
@@ -1017,7 +1017,7 @@ export default function NetworkTab() {
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 flex items-center justify-between min-w-0">
                     <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Active Peers</p>
                         <p className="text-2xl font-bold text-slate-100 mt-1" data-testid="active-wg-peers-count">
@@ -1032,7 +1032,7 @@ export default function NetworkTab() {
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 flex items-center justify-between min-w-0">
                     <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Transfer Metrics</p>
                         <p className="text-sm font-bold text-slate-100 mt-1 font-mono" data-testid="transfer-rate-display">
@@ -1051,7 +1051,7 @@ export default function NetworkTab() {
                     </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                <div className="p-4 flex items-center justify-between min-w-0">
                     <div className="min-w-0">
                         <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Tailnet Mesh Status</p>
                         <p className="text-base font-bold text-slate-100 mt-1">
@@ -1086,7 +1086,7 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => openDiagnostics('wireguard')}
-                                className="px-3 py-1.5 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-xs font-bold text-red-100"
+                                className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-xs font-bold text-red-100 inline-flex items-center justify-center transition-colors"
                             >
                                 Inspect Diagnostics
                             </button>
@@ -1105,7 +1105,7 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => setActiveTab('marketplace')}
-                                className="px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-xs font-bold text-amber-100 flex items-center gap-2"
+                                className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-xs font-bold text-amber-100 inline-flex items-center justify-center gap-2 transition-colors"
                             >
                                 <Store size={14} />
                                 <span>Open Marketplace</span>
@@ -1114,7 +1114,7 @@ export default function NetworkTab() {
                     )}
 
                     {/* Interface Status & Service Controls Card */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 space-y-4">
+                    <div className="obs-canvas-section py-5 space-y-4">
                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                             <div className="flex items-center gap-3">
                                 <div className="h-9 w-9 bg-indigo-500/20 rounded-xl flex items-center justify-center border border-indigo-500/30 text-indigo-400 shrink-0">
@@ -1142,12 +1142,12 @@ export default function NetworkTab() {
                                 </span>
 
                                 {wgState !== 'not_installed' && (
-                                    <div className="flex items-center gap-1.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
                                         <button
                                             type="button"
                                             disabled={isRunningServiceAction}
                                             onClick={() => handleServiceControl('wireguard', 'start')}
-                                            className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 transition-colors"
                                             title="Start WireGuard service"
                                         >
                                             <Play size={12} />
@@ -1157,7 +1157,7 @@ export default function NetworkTab() {
                                             type="button"
                                             disabled={isRunningServiceAction}
                                             onClick={() => handleServiceControl('wireguard', 'restart')}
-                                            className="px-2.5 py-1.5 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 transition-colors"
                                             title="Restart WireGuard service"
                                         >
                                             <RotateCw size={12} />
@@ -1167,7 +1167,7 @@ export default function NetworkTab() {
                                             type="button"
                                             disabled={isRunningServiceAction}
                                             onClick={() => handleServiceControl('wireguard', 'stop')}
-                                            className="px-2.5 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 transition-colors"
                                             title="Stop WireGuard service"
                                         >
                                             <Square size={12} />
@@ -1179,13 +1179,13 @@ export default function NetworkTab() {
                         </div>
 
                         {wgStatus?.public_key && (
-                            <div className="bg-black/40 rounded-xl p-3 border border-white/[0.06] font-mono text-xs flex flex-wrap items-center justify-between gap-4">
+                            <div className="border-y border-white/[0.07] py-2.5 font-mono text-xs flex flex-wrap items-center justify-between gap-4">
                                 <span className="text-slate-400 shrink-0">Server Public Key:</span>
                                 <span className="text-slate-200 break-all select-all">{wgStatus.public_key}</span>
                             </div>
                         )}
 
-                        <div className="flex items-start gap-2 text-xs text-slate-400 bg-white/[0.02] border border-white/[0.05] rounded-xl p-3">
+                        <div className="flex items-start gap-2 text-xs text-slate-400 py-1">
                             <Info size={14} className="text-indigo-400 shrink-0 mt-0.5" />
                             <span>
                                 Keys generated here are returned once and are not saved by AetherFlow. Full client <code className="text-indigo-300">.conf</code> and QR code export are available once during enrollment when generating a one-time client keypair. Existing or manual-key peers require the original client private key on your device.
@@ -1194,7 +1194,7 @@ export default function NetworkTab() {
                     </div>
 
                     {/* WireGuard Peers Table */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 min-w-0 max-w-full">
+                    <div className="obs-canvas-section py-5 min-w-0 max-w-full">
                         <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                                 Registered Peers ({wgPeers.length})
@@ -1202,15 +1202,16 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => mutateStatus()}
-                                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
+                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-white rounded-xl hover:bg-white/5 transition-colors"
                                 title="Refresh peers"
+                                aria-label="Refresh peers"
                             >
                                 <RefreshCw size={14} />
                             </button>
                         </div>
 
                         <div className="overflow-x-auto min-w-0 max-w-full">
-                            <table className="w-full text-left border-collapse text-xs">
+                            <table aria-label="WireGuard peers" className="obs-mobile-ledger w-full text-left border-collapse text-xs">
                                 <thead>
                                     <tr className="border-b border-white/[0.06] text-slate-400 text-xs uppercase tracking-wider">
                                         <th className="py-2.5 px-3">Peer / Public Key</th>
@@ -1233,7 +1234,7 @@ export default function NetworkTab() {
                                             const active = isWireGuardPeerActive(peer);
                                             return (
                                                 <tr key={peer.public_key} className="hover:bg-white/[0.02] transition-colors">
-                                                    <td className="py-3 px-3">
+                                                    <td data-primary data-label="Peer / Public Key" className="py-3 px-3">
                                                         <div className="flex items-center gap-2">
                                                             <span
                                                                 className={`h-2 w-2 rounded-full shrink-0 ${
@@ -1257,13 +1258,13 @@ export default function NetworkTab() {
                                                             {peer.public_key.substring(0, 20)}...
                                                         </div>
                                                     </td>
-                                                    <td className="py-3 px-3 font-mono text-slate-200">
+                                                    <td data-label="Allowed IPs" className="py-3 px-3 font-mono text-slate-200">
                                                         {peer.allowed_ips || '—'}
                                                     </td>
-                                                    <td className="py-3 px-3 font-mono text-slate-400">
+                                                    <td data-label="Endpoint" className="py-3 px-3 font-mono text-slate-400">
                                                         {peer.endpoint || 'Roaming'}
                                                     </td>
-                                                    <td className="py-3 px-3 text-slate-300">
+                                                    <td data-label="Latest Handshake" className="py-3 px-3 text-slate-300">
                                                         <span>{formatHandshakeRelative(peer.latest_handshake)}</span>
                                                         {peer.persistent_keepalive ? (
                                                             <span className="block text-slate-500 text-xs">
@@ -1271,15 +1272,15 @@ export default function NetworkTab() {
                                                             </span>
                                                         ) : null}
                                                     </td>
-                                                    <td className="py-3 px-3 text-slate-300 font-mono text-xs">
+                                                    <td data-label="Transfer" className="py-3 px-3 text-slate-300 font-mono text-xs">
                                                         ↓ {formatBytes(peer.transfer_rx)} &middot; ↑ {formatBytes(peer.transfer_tx)}
                                                     </td>
-                                                    <td className="py-3 px-3 text-right">
+                                                    <td data-actions data-label="Actions" className="py-3 px-3 text-right">
                                                         <div className="inline-flex items-center gap-1">
                                                             <button
                                                                 type="button"
                                                                 onClick={() => openEditPeerModal(peer)}
-                                                                className="p-1.5 text-slate-400 hover:text-indigo-300 rounded-lg hover:bg-indigo-500/10 transition-colors"
+                                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-indigo-300 rounded-xl hover:bg-indigo-500/10 transition-colors"
                                                                 title={`Edit peer ${peer.name || peer.public_key}`}
                                                                 aria-label={`Edit peer ${peer.name || peer.public_key}`}
                                                             >
@@ -1288,7 +1289,7 @@ export default function NetworkTab() {
                                                             <button
                                                                 type="button"
                                                                 onClick={() => requestRemoveWgPeer(peer)}
-                                                                className="p-1.5 text-slate-400 hover:text-red-400 rounded-lg hover:bg-red-500/10 transition-colors"
+                                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-red-400 rounded-xl hover:bg-red-500/10 transition-colors"
                                                                 title={`Remove peer ${peer.name || peer.public_key}`}
                                                                 aria-label={`Remove peer ${peer.name || peer.public_key}`}
                                                             >
@@ -1326,7 +1327,7 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => openDiagnostics('tailscale')}
-                                className="px-3 py-1.5 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-xs font-bold text-red-100"
+                                className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-xs font-bold text-red-100 inline-flex items-center justify-center transition-colors"
                             >
                                 Inspect Diagnostics
                             </button>
@@ -1345,7 +1346,7 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => setActiveTab('marketplace')}
-                                className="px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-xs font-bold text-amber-100 flex items-center gap-2"
+                                className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-xs font-bold text-amber-100 inline-flex items-center justify-center gap-2 transition-colors"
                             >
                                 <Store size={14} />
                                 <span>Open Marketplace</span>
@@ -1354,7 +1355,7 @@ export default function NetworkTab() {
                     )}
 
                     {/* Tailscale Control Plane, Auth & Lifecycle Card */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 space-y-5">
+                    <div className="obs-canvas-section py-5 space-y-5">
                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                             <div className="flex items-center gap-3">
                                 <div className="h-9 w-9 bg-violet-500/20 rounded-xl flex items-center justify-center border border-violet-500/30 text-violet-400 shrink-0">
@@ -1390,7 +1391,7 @@ export default function NetworkTab() {
                                             type="button"
                                             disabled={isConnectingTs}
                                             onClick={() => handleTailscaleConnect(false)}
-                                            className="px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-50 transition-colors"
                                         >
                                             <Play size={12} />
                                             <span>{tsState === 'running' ? 'Reconnect' : 'Connect / Login'}</span>
@@ -1400,7 +1401,7 @@ export default function NetworkTab() {
                                             type="button"
                                             disabled={isConnectingTs}
                                             onClick={() => handleTailscaleConnect(true)}
-                                            className="px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-slate-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                                            className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-slate-200 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 transition-colors"
                                         >
                                             <KeyRound size={12} />
                                             <span>Reauthenticate</span>
@@ -1410,7 +1411,7 @@ export default function NetworkTab() {
                                             <button
                                                 type="button"
                                                 onClick={handleTailscaleDisconnect}
-                                                className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center gap-1.5"
+                                                className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
                                             >
                                                 <Unplug size={12} />
                                                 <span>Disconnect</span>
@@ -1420,7 +1421,7 @@ export default function NetworkTab() {
                                         <button
                                             type="button"
                                             onClick={handleTailscaleLogout}
-                                            className="px-3 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1.5"
+                                            className="obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
                                         >
                                             <LogOut size={12} />
                                             <span>Logout</span>
@@ -1437,12 +1438,12 @@ export default function NetworkTab() {
                                     Daemon Service (<code className="text-violet-300">tailscaled</code>):{' '}
                                     <strong className="text-slate-200">{tsStatus?.service_state || tsStateBadge.label}</strong>
                                 </span>
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
                                     <button
                                         type="button"
                                         disabled={isRunningServiceAction}
                                         onClick={() => handleServiceControl('tailscale', 'start')}
-                                        className="px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 text-xs font-semibold"
+                                        className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 text-xs font-semibold inline-flex items-center justify-center transition-colors"
                                     >
                                         Start Daemon
                                     </button>
@@ -1450,7 +1451,7 @@ export default function NetworkTab() {
                                         type="button"
                                         disabled={isRunningServiceAction}
                                         onClick={() => handleServiceControl('tailscale', 'restart')}
-                                        className="px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 text-xs font-semibold"
+                                        className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-slate-300 text-xs font-semibold inline-flex items-center justify-center transition-colors"
                                     >
                                         Restart Daemon
                                     </button>
@@ -1458,7 +1459,7 @@ export default function NetworkTab() {
                                         type="button"
                                         disabled={isRunningServiceAction}
                                         onClick={() => handleServiceControl('tailscale', 'stop')}
-                                        className="px-2.5 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/25 text-red-300 text-xs font-semibold"
+                                        className="obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/25 text-red-300 text-xs font-semibold inline-flex items-center justify-center transition-colors"
                                     >
                                         Stop Daemon
                                     </button>
@@ -1532,7 +1533,7 @@ export default function NetworkTab() {
                                     (tsStatus?.advertised_routes ?? []).map((cidr) => (
                                         <span
                                             key={cidr}
-                                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-500/15 border border-violet-500/30 text-xs font-mono text-violet-200"
+                                            className="inline-flex items-center gap-1.5 pl-3 pr-1 py-1 rounded-xl bg-violet-500/15 border border-violet-500/30 text-xs font-mono text-violet-200"
                                         >
                                             <span>{cidr}</span>
                                             <button
@@ -1540,7 +1541,7 @@ export default function NetworkTab() {
                                                 disabled={isAdvertisingRoutes}
                                                 onClick={() => handleRemoveSingleRoute(cidr)}
                                                 aria-label={`Remove route ${cidr}`}
-                                                className="text-violet-300 hover:text-white"
+                                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-violet-300 hover:text-white rounded-lg hover:bg-violet-500/20 disabled:opacity-40 transition-colors text-base"
                                             >
                                                 &times;
                                             </button>
@@ -1559,12 +1560,12 @@ export default function NetworkTab() {
                                     value={subnetRouteInput}
                                     onChange={(e) => setSubnetRouteInput(e.target.value)}
                                     placeholder="10.0.0.0/24, 192.168.1.0/24 (leave empty to clear all)"
-                                    className="flex-1 bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-violet-500/50"
+                                    className="obs-touch-target-standard min-h-[44px] h-11 flex-1 bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-violet-500/50"
                                 />
                                 <button
                                     type="submit"
                                     disabled={isAdvertisingRoutes}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 shrink-0"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] h-11 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 shrink-0"
                                 >
                                     <Send size={13} />
                                     <span>{isAdvertisingRoutes ? 'Saving...' : 'Save Routes'}</span>
@@ -1573,7 +1574,7 @@ export default function NetworkTab() {
                                     type="button"
                                     disabled={isAdvertisingRoutes}
                                     onClick={handleClearAllRoutes}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl transition-all shrink-0"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive min-h-[44px] h-11 px-3.5 py-2 bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl transition-all shrink-0 inline-flex items-center justify-center"
                                 >
                                     Clear All Routes
                                 </button>
@@ -1581,8 +1582,8 @@ export default function NetworkTab() {
                         </div>
 
                         {/* Routing & Exit Node Controls */}
-                        <div className="pt-4 border-t border-white/[0.06] grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                            <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-black/30 border border-white/[0.06] cursor-pointer">
+                        <div className="pt-4 border-t border-white/[0.07] grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/[0.07] text-xs">
+                            <label className="flex items-center justify-between gap-3 py-3 md:pr-4 cursor-pointer">
                                 <div>
                                     <span className="font-semibold text-slate-200 block">Accept Subnet Routes</span>
                                     <span className="text-slate-400">Accept routes advertised by other tailnet nodes</span>
@@ -1599,7 +1600,7 @@ export default function NetworkTab() {
                                 />
                             </label>
 
-                            <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-black/30 border border-white/[0.06] cursor-pointer">
+                            <label className="flex items-center justify-between gap-3 py-3 md:px-4 cursor-pointer">
                                 <div>
                                     <span className="font-semibold text-slate-200 block">Advertise as Exit Node</span>
                                     <span className="text-slate-400">Offer this server as a tailnet exit node</span>
@@ -1616,7 +1617,7 @@ export default function NetworkTab() {
                                 />
                             </label>
 
-                            <div className="p-3 rounded-xl bg-black/30 border border-white/[0.06] space-y-2">
+                            <div className="py-3 md:pl-4 space-y-2">
                                 <label
                                     htmlFor="tailscale-exit-node-select"
                                     className="font-semibold text-slate-200 block"
@@ -1631,7 +1632,7 @@ export default function NetworkTab() {
                                     onChange={(e) =>
                                         handleUpdateTailscaleSettings({ exit_node: e.target.value })
                                     }
-                                    className="w-full bg-black/60 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-slate-100"
+                                    className="obs-touch-target-standard min-h-[44px] h-11 w-full bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-violet-500/50"
                                 >
                                     <option value="">None (Direct Internet)</option>
                                     {exitNodeCandidates.map((peer) => (
@@ -1662,7 +1663,7 @@ export default function NetworkTab() {
                     </div>
 
                     {/* Tailscale Peers Table */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 min-w-0 max-w-full">
+                    <div className="obs-canvas-section py-5 min-w-0 max-w-full">
                         <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                                 Tailnet Mesh Devices ({tsPeers.length})
@@ -1670,8 +1671,9 @@ export default function NetworkTab() {
                             <button
                                 type="button"
                                 onClick={() => mutateStatus()}
-                                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
+                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] inline-flex items-center justify-center p-2 text-slate-400 hover:text-white rounded-xl hover:bg-white/5 transition-colors"
                                 title="Refresh Tailscale peers"
+                                aria-label="Refresh Tailscale peers"
                             >
                                 <RefreshCw size={14} />
                             </button>
