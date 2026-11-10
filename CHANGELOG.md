@@ -8,6 +8,11 @@ Marketplace lifecycle, installer reliability, update certification, and diagnost
 * Require bundled SQLite 3.54.0 or newer in a runtime regression test. Preserve checked unsigned-integer SQL conversions through the driver's `fallible_uint` compatibility feature, with coverage for maximum signed values, ordinary offsets, and rejected negative values.
 * Keep existing database migrations, WAL reader isolation, and all advisory-policy exceptions unchanged. This follow-up does not add new advisory exemptions, deploy to running hosts, or restart services.
 
+### Release-Core Compatibility
+
+* Replace positional lifecycle completion diagnostics with named fields across the shared release core, privileged runner, and job coordinator. Preserve completion identity, outcome details, timestamp handling, and persisted secret redaction.
+* Resolve strict release-core Clippy failures without relaxing lint or security gates, and remove an ineffective runner lint attribute.
+
 ### Open Canvas UI Included
 
 * Include the existing open-canvas UI nightly: continuous obsidian surfaces, the unboxed luminous logo, a docked collapsible sidebar, improved keyboard focus, and clearer mobile navigation state.

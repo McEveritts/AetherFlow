@@ -128,7 +128,7 @@ pub fn find_closing_header_quote(raw_val: &str, pre: &str) -> Option<usize> {
                 {
                     return Some(idx - backslashes);
                 }
-            } else if backslashes % 2 == 0 {
+            } else if backslashes.is_multiple_of(2) {
                 return Some(idx);
             }
         }
@@ -1152,14 +1152,22 @@ pub fn finish_job(
         job_id,
         action,
         success,
-        failure_category,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        LifecycleJobDiagnostics {
+            failure_category,
+            ..Default::default()
+        },
     )
+}
+
+#[derive(Default)]
+pub struct LifecycleJobDiagnostics<'a> {
+    pub failure_category: &'a str,
+    pub failed_stage: Option<&'a str>,
+    pub exit_code: Option<i32>,
+    pub sanitized_summary: Option<&'a str>,
+    pub expected_target_version: Option<&'a str>,
+    pub achieved_version: Option<&'a str>,
+    pub finished_at: Option<&'a str>,
 }
 
 pub fn finish_job_with_diagnostics(
@@ -1168,14 +1176,17 @@ pub fn finish_job_with_diagnostics(
     job_id: &str,
     action: &str,
     success: bool,
-    failure_category: &str,
-    failed_stage: Option<&str>,
-    exit_code: Option<i32>,
-    sanitized_summary: Option<&str>,
-    expected_target_version: Option<&str>,
-    achieved_version: Option<&str>,
-    finished_at: Option<&str>,
+    diagnostics: LifecycleJobDiagnostics<'_>,
 ) -> Result<()> {
+    let LifecycleJobDiagnostics {
+        failure_category,
+        failed_stage,
+        exit_code,
+        sanitized_summary,
+        expected_target_version,
+        achieved_version,
+        finished_at,
+    } = diagnostics;
     let status = if success { "completed" } else { "failed" };
     let finished_at_owned = finished_at
         .map(ToString::to_string)
@@ -1250,13 +1261,13 @@ pub fn record_completed_lifecycle_job(
         job_id,
         action,
         true,
-        "",
-        None,
-        Some(0),
-        sanitized_summary,
-        expected_target_version,
-        achieved_version,
-        None,
+        LifecycleJobDiagnostics {
+            exit_code: Some(0),
+            sanitized_summary,
+            expected_target_version,
+            achieved_version,
+            ..Default::default()
+        },
     )
 }
 
@@ -1285,7 +1296,7 @@ pub fn commits_match_prefix(a: &str, b: &str, known_git_context: bool) -> bool {
 
 pub fn is_debian_plus_revision(suffix_after_plus: &str) -> bool {
     let lower = suffix_after_plus.to_ascii_lowercase();
-    let trimmed = lower.trim_start_matches(|c: char| c == '+' || c == '~');
+    let trimmed = lower.trim_start_matches(['+', '~']);
     if trimmed.is_empty() {
         return false;
     }
@@ -1738,7 +1749,7 @@ fn parse_semver(raw: &str) -> Option<SemverVersion> {
         return None;
     }
 
-    let (normal_str, prerelease_opt) = match rest.find(|c: char| c == '-' || c == '~') {
+    let (normal_str, prerelease_opt) = match rest.find(['-', '~']) {
         Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
         None => (rest, None),
     };
@@ -1850,10 +1861,12 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     if commits_match_prefix(an, bn, false) {
         return std::cmp::Ordering::Equal;
     }
-    if is_hex_digits_7_to_40(an) && is_hex_digits_7_to_40(bn) {
-        if !(an.bytes().all(|b| b.is_ascii_digit()) && bn.bytes().all(|b| b.is_ascii_digit())) {
-            return an.to_ascii_lowercase().cmp(&bn.to_ascii_lowercase());
-        }
+    if is_hex_digits_7_to_40(an)
+        && is_hex_digits_7_to_40(bn)
+        && !(an.bytes().all(|byte| byte.is_ascii_digit())
+            && bn.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return an.to_ascii_lowercase().cmp(&bn.to_ascii_lowercase());
     }
     compare_semver_versions(a, b)
 }
@@ -1883,7 +1896,7 @@ pub fn strip_version_prefix(s: &str) -> &str {
             || lower.starts_with("ver/")
         {
             trimmed = trimmed[4..].trim();
-        } else if let Some(idx) = trimmed.find(|c: char| c == '-' || c == '/' || c == '_') {
+        } else if let Some(idx) = trimmed.find(['-', '/', '_']) {
             let prefix = &trimmed[..idx];
             if prefix.eq_ignore_ascii_case("release")
                 || prefix.eq_ignore_ascii_case("rel")
@@ -2145,10 +2158,9 @@ pub fn validate_single_version_token(ver: &str) -> bool {
         let stripped_lower = stripped.to_ascii_lowercase();
         if !FORBIDDEN_TOKENS.contains(&stripped_lower.as_str())
             && !is_sensitive_key_name(&stripped_lower)
+            && (is_hex_sha_7_to_64(stripped) || check_numeric_semver_debian(stripped))
         {
-            if is_hex_sha_7_to_64(stripped) || check_numeric_semver_debian(stripped) {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -2161,14 +2173,12 @@ pub fn validate_single_version_token(ver: &str) -> bool {
             let prefix_lower = prefix.to_ascii_lowercase();
             if prefix
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            {
-                if prefix.starts_with(|c: char| c.is_ascii_digit())
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+                && (prefix.starts_with(|character: char| character.is_ascii_digit())
                     || (!FORBIDDEN_TOKENS.contains(&prefix_lower.as_str())
-                        && !is_sensitive_key_name(&prefix_lower))
-                {
-                    return true;
-                }
+                        && !is_sensitive_key_name(&prefix_lower)))
+            {
+                return true;
             }
         }
     }
@@ -2197,13 +2207,9 @@ pub fn parse_component_manifest(s: &str) -> Option<std::collections::HashMap<Str
         if item.is_empty() {
             return None;
         }
-        let (k, v) = if let Some(idx) = item.find(['=', ':']) {
-            (&item[..idx], &item[idx + 1..])
-        } else {
-            return None;
-        };
-        let key = k.trim().to_lowercase();
-        let val = v.trim().to_string();
+        let delimiter_index = item.find(['=', ':'])?;
+        let key = item[..delimiter_index].trim().to_lowercase();
+        let val = item[delimiter_index + 1..].trim().to_string();
         if key.is_empty() || val.is_empty() {
             return None;
         }
@@ -3052,13 +3058,15 @@ mod tests {
             "job-history-1",
             "update",
             false,
-            "target_verification",
-            Some("target_verification"),
-            Some(1),
-            Some("version did not advance"),
-            Some("5.3.6"),
-            Some("5.3.5"),
-            None,
+            LifecycleJobDiagnostics {
+                failure_category: "target_verification",
+                failed_stage: Some("target_verification"),
+                exit_code: Some(1),
+                sanitized_summary: Some("version did not advance"),
+                expected_target_version: Some("5.3.6"),
+                achieved_version: Some("5.3.5"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -3090,13 +3098,12 @@ mod tests {
             "job-history-2",
             "update",
             true,
-            "",
-            None,
-            Some(0),
-            None,
-            Some("5.3.6"),
-            Some("5.3.6"),
-            None,
+            LifecycleJobDiagnostics {
+                exit_code: Some(0),
+                expected_target_version: Some("5.3.6"),
+                achieved_version: Some("5.3.6"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -3249,13 +3256,12 @@ mod tests {
             "job-zero-row-1",
             "update",
             true,
-            "",
-            None,
-            Some(0),
-            None,
-            Some("1.0.0"),
-            Some("1.0.0"),
-            None,
+            LifecycleJobDiagnostics {
+                exit_code: Some(0),
+                expected_target_version: Some("1.0.0"),
+                achieved_version: Some("1.0.0"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -3489,13 +3495,15 @@ mod tests {
             "job-secret-1",
             "update",
             false,
-            "configuration",
-            Some("install_stage"),
-            Some(1),
-            Some("password='prefix\nPERSISTED_QUOTE_CANARY' curl -u operator:\" PERSISTED_QUOTE_CANARY\" --verbose; failed connecting with Bearer supersecret and curl -u admin:hunter2 https://example.com"),
-            Some("password:secret"),
-            Some("0.9.0"),
-            None,
+            LifecycleJobDiagnostics {
+                failure_category: "configuration",
+                failed_stage: Some("install_stage"),
+                exit_code: Some(1),
+                sanitized_summary: Some("password='prefix\nPERSISTED_QUOTE_CANARY' curl -u operator:\" PERSISTED_QUOTE_CANARY\" --verbose; failed connecting with Bearer supersecret and curl -u admin:hunter2 https://example.com"),
+                expected_target_version: Some("password:secret"),
+                achieved_version: Some("0.9.0"),
+                ..Default::default()
+            },
         )
         .unwrap();
 

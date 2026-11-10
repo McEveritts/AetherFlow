@@ -2351,13 +2351,14 @@ impl CoordinatedOperation {
                         &self.request.lifecycle_job_id,
                         &self.request.action,
                         false,
-                        "preflight",
-                        Some("preflight_receipt_snapshot"),
-                        Some(1),
-                        Some(&sanitized_err),
-                        sanitized_expected.as_deref(),
-                        None,
-                        None,
+                        lifecycle::LifecycleJobDiagnostics {
+                            failure_category: "preflight",
+                            failed_stage: Some("preflight_receipt_snapshot"),
+                            exit_code: Some(1),
+                            sanitized_summary: Some(&sanitized_err),
+                            expected_target_version: sanitized_expected.as_deref(),
+                            ..Default::default()
+                        },
                     );
                     if finish_res.is_ok() {
                         break;
@@ -2384,13 +2385,14 @@ impl CoordinatedOperation {
                         &self.request.lifecycle_job_id,
                         &self.request.action,
                         false,
-                        "preflight",
-                        Some("preflight_receipt_snapshot"),
-                        Some(1),
-                        Some(&sanitized_err),
-                        sanitized_expected.as_deref(),
-                        None,
-                        None,
+                        lifecycle::LifecycleJobDiagnostics {
+                            failure_category: "preflight",
+                            failed_stage: Some("preflight_receipt_snapshot"),
+                            exit_code: Some(1),
+                            sanitized_summary: Some(&sanitized_err),
+                            expected_target_version: sanitized_expected.as_deref(),
+                            ..Default::default()
+                        },
                     );
                     if finish_res.is_ok() {
                         break;
@@ -2749,37 +2751,43 @@ impl CoordinatedOperation {
             &self.request.lifecycle_job_id,
             &self.request.action,
             success,
-            failure,
-            if target_match_failed {
-                Some("target_certification_after_install_commit")
-            } else if restore_failed {
-                Some("service_restoration")
-            } else if execution.is_err() {
-                Some(failure)
-            } else if receipt_restore_error.is_some() {
-                Some("rollback")
-            } else {
-                None
+            lifecycle::LifecycleJobDiagnostics {
+                failure_category: failure,
+                failed_stage: if target_match_failed {
+                    Some("target_certification_after_install_commit")
+                } else if restore_failed {
+                    Some("service_restoration")
+                } else if execution.is_err() {
+                    Some(failure)
+                } else if receipt_restore_error.is_some() {
+                    Some("rollback")
+                } else {
+                    None
+                },
+                exit_code: if target_match_failed
+                    || restore_failed
+                    || execution.is_err()
+                    || receipt_restore_error.is_some()
+                {
+                    Some(1)
+                } else {
+                    None
+                },
+                sanitized_summary: sanitized_diag_summary.as_deref().or(if target_match_failed {
+                    Some("Post-execution installed version did not match expected target")
+                } else if restore_failed {
+                    Some("Service restart verification failed")
+                } else if execution.is_err() {
+                    Some("Lifecycle execution failed")
+                } else if receipt_restore_error.is_some() {
+                    Some("Receipt restoration failed")
+                } else {
+                    None
+                }),
+                expected_target_version: sanitized_expected.as_deref(),
+                achieved_version: sanitized_achieved.as_deref(),
+                ..Default::default()
             },
-            if target_match_failed || restore_failed || execution.is_err() || receipt_restore_error.is_some() {
-                Some(1)
-            } else {
-                None
-            },
-            sanitized_diag_summary.as_deref().or(if target_match_failed {
-                Some("Post-execution installed version did not match expected target")
-            } else if restore_failed {
-                Some("Service restart verification failed")
-            } else if execution.is_err() {
-                Some("Lifecycle execution failed")
-            } else if receipt_restore_error.is_some() {
-                Some("Receipt restoration failed")
-            } else {
-                None
-            }),
-            sanitized_expected.as_deref(),
-            sanitized_achieved.as_deref(),
-            None,
         )?;
         let finished_at = self.conn.query_row(
             "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
@@ -5272,7 +5280,6 @@ pub enum LiveRuntimeProbeOutcome {
     NotConfigured,
 }
 
-#[allow(non_upper_case_globals)]
 pub use LiveRuntimeProbeOutcome::Verified as Confirmed;
 
 pub fn has_prerelease_or_build(token: &str) -> bool {

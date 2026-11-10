@@ -1427,13 +1427,15 @@ impl JobRegistry {
                 &outcome.job_id,
                 action,
                 success,
-                category,
-                failed_stage.as_deref(),
-                exit_code,
-                sanitized_summary.as_deref(),
-                outcome.expected_target_version.as_deref(),
-                outcome.achieved_version.as_deref(),
-                Some(outcome.finished_at.as_str()),
+                af_release::lifecycle::LifecycleJobDiagnostics {
+                    failure_category: category,
+                    failed_stage: failed_stage.as_deref(),
+                    exit_code,
+                    sanitized_summary: sanitized_summary.as_deref(),
+                    expected_target_version: outcome.expected_target_version.as_deref(),
+                    achieved_version: outcome.achieved_version.as_deref(),
+                    finished_at: Some(outcome.finished_at.as_str()),
+                },
             )?;
         }
         self.outcomes.insert(pkg.to_string(), outcome.clone());
@@ -3000,8 +3002,19 @@ mod tests {
                      INSERT INTO package_lifecycle_history (package_id,job_id,action,status,started_at) VALUES ('sonarr','fixture','update','updating','fixture');"
                 ).unwrap();
                 af_release::lifecycle::finish_job_with_diagnostics(
-                    &connection, "sonarr", "fixture", "update", false, "installer",
-                    Some("fixture"), Some(1), Some(input), None, None, Some("fixture"),
+                    &connection,
+                    "sonarr",
+                    "fixture",
+                    "update",
+                    false,
+                    af_release::lifecycle::LifecycleJobDiagnostics {
+                        failure_category: "installer",
+                        failed_stage: Some("fixture"),
+                        exit_code: Some(1),
+                        sanitized_summary: Some(input),
+                        finished_at: Some("fixture"),
+                        ..Default::default()
+                    },
                 ).unwrap();
                 for query in [
                     "SELECT sanitized_summary FROM package_lifecycle_jobs WHERE job_id='fixture'",
