@@ -51,8 +51,10 @@ func loadOrGenerateOIDCKey() {
 		}
 	}
 
+	keyPath = filepath.Clean(keyPath)
+
 	// Try to load existing key
-	keyBytes, err := os.ReadFile(keyPath)
+	keyBytes, err := os.ReadFile(keyPath) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
 	if err == nil {
 		block, _ := pem.Decode(keyBytes)
 		if block != nil {
@@ -78,13 +80,13 @@ func loadOrGenerateOIDCKey() {
 
 	// Persist to disk — create parent directory if needed
 	keyDir := filepath.Dir(keyPath)
-	os.MkdirAll(keyDir, 0700)
+	_ = os.MkdirAll(keyDir, 0700) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil { // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
 		slog.Warn("OIDC: failed to persist RSA key", "error", err)
 	} else {
 		slog.Info("OIDC key generated", "path", keyPath, "kid", oidcKeyID)

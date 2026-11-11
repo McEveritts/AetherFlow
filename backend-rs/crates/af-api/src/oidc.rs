@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use rand::RngCore;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey, PublicKey};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +23,32 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path as StdPath, PathBuf};
+
+struct OsCryptoRng;
+
+impl rsa::rand_core::TryRng for OsCryptoRng {
+    type Error = std::io::Error;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut buf = [0u8; 4];
+        self.try_fill_bytes(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut buf = [0u8; 8];
+        self.try_fill_bytes(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        rand::rngs::OsRng
+            .try_fill_bytes(dst)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+}
+
+impl rsa::rand_core::TryCryptoRng for OsCryptoRng {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OIDC RSA-2048 Key Management (`backend/api/oidc.go`)
@@ -57,7 +83,7 @@ fn resolve_oidc_key_path() -> PathBuf {
     )
 }
 
-fn compute_key_id(pub_key: &RsaPublicKey) -> String {
+fn compute_key_id(pub_key: &PublicKey) -> String {
     if let Ok(der) = pub_key.to_pkcs1_der() {
         let mut hasher = Sha256::new();
         hasher.update(der.as_bytes());
@@ -68,13 +94,13 @@ fn compute_key_id(pub_key: &RsaPublicKey) -> String {
 }
 
 fn build_material_from_private_key(
-    priv_key: &RsaPrivateKey,
+    priv_key: &PrivateKey,
     pem_str: &str,
 ) -> Option<OidcKeyMaterial> {
-    let pub_key = RsaPublicKey::from(priv_key);
+    let pub_key = PublicKey::from(priv_key);
     let kid = compute_key_id(&pub_key);
-    let n_b64 = URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be());
-    let e_b64 = URL_SAFE_NO_PAD.encode(pub_key.e().to_bytes_be());
+    let n_b64 = URL_SAFE_NO_PAD.encode(pub_key.n().as_ref().to_be_bytes_trimmed_vartime());
+    let e_b64 = URL_SAFE_NO_PAD.encode(pub_key.e().to_be_bytes_trimmed_vartime());
     let encoding_key = EncodingKey::from_rsa_pem(pem_str.as_bytes()).ok()?;
     let decoding_key = DecodingKey::from_rsa_components(&n_b64, &e_b64).ok()?;
     Some(OidcKeyMaterial {
@@ -122,7 +148,7 @@ fn read_oidc_key(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
 fn read_oidc_material(mut file: fs::File) -> anyhow::Result<OidcKeyMaterial> {
     let mut pem = String::new();
     file.read_to_string(&mut pem)?;
-    let private_key = RsaPrivateKey::from_pkcs1_pem(&pem)?;
+    let private_key = PrivateKey::from_pkcs1_pem(&pem)?;
     build_material_from_private_key(&private_key, &pem)
         .ok_or_else(|| anyhow::anyhow!("Invalid OIDC signing key"))
 }
@@ -141,7 +167,7 @@ fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<OidcKeyMateria
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| StdPath::new("."));
     fs::create_dir_all(parent)?;
-    let private_key = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)?;
+    let private_key = PrivateKey::new(&mut OsCryptoRng, 2048)?;
     let pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
     // Write and fsync a private file, then publish it without replacing another process's key.
     let temporary = parent.join(format!(".oidc-{}.tmp", uuid::Uuid::new_v4()));

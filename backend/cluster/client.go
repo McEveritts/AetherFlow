@@ -189,7 +189,7 @@ func loadClientTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("load client key pair: %w", err)
 	}
 
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G703 -- trusted operator mTLS CA certificate path
 	if err != nil {
 		return nil, fmt.Errorf("read CA cert: %w", err)
 	}

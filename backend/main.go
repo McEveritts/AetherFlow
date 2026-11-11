@@ -26,7 +26,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -294,14 +293,6 @@ func main() {
 
 	// Start Phase 14: Automated Auto-Heal Recovery process
 	services.StartHealWorker(10 * time.Second)
-
-	// Phase 12: Profiling & Optimization Listener
-	go func() {
-		slog.Info("pprof profiler listening", "addr", "127.0.0.1:6060")
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			slog.Error("pprof profiler error", "error", err)
-		}
-	}()
 
 	// ── Phase 24: Graceful Shutdown ─────────────────────────────────────
 	// Use http.Server directly for proper lifecycle control

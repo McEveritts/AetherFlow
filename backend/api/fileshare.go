@@ -30,9 +30,10 @@ type FileInfo struct {
 
 func getUploadDir() string {
 	// Check environment variable first
-	if envPath := os.Getenv("AETHERFLOW_UPLOAD_DIR"); envPath != "" {
-		if _, err := os.Stat(envPath); err == nil {
-			return envPath
+	if envPath := strings.TrimSpace(os.Getenv("AETHERFLOW_UPLOAD_DIR")); envPath != "" {
+		cleanEnvPath := filepath.Clean(envPath)
+		if _, err := os.Stat(cleanEnvPath); err == nil { // #nosec G703 -- trusted operator AETHERFLOW_UPLOAD_DIR environment variable
+			return cleanEnvPath
 		}
 	}
 

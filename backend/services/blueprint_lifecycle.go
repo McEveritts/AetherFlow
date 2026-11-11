@@ -403,7 +403,8 @@ func SyncNetworkDNSProviders() (bool, error) {
 	if piholeDir == "" {
 		piholeDir = resolveFilesystemPath("/etc/pihole")
 	}
-	if info, err := os.Stat(piholeDir); err == nil && info.IsDir() {
+	piholeDir = filepath.Clean(piholeDir)
+	if info, err := os.Stat(piholeDir); err == nil && info.IsDir() { // #nosec G703 -- trusted operator environment override
 		customListPath := filepath.Join(piholeDir, "custom.list")
 		if err := updatePiHoleCustomList(customListPath, lanIP, sortedDomains); err != nil {
 			slog.Warn("failed to update Pi-hole custom.list", "path", customListPath, "error", err)
@@ -417,14 +418,15 @@ func SyncNetworkDNSProviders() (bool, error) {
 	if dnsmasqDir == "" {
 		dnsmasqDir = resolveFilesystemPath("/etc/dnsmasq.d")
 	}
-	if info, err := os.Stat(dnsmasqDir); err == nil && info.IsDir() {
+	dnsmasqDir = filepath.Clean(dnsmasqDir)
+	if info, err := os.Stat(dnsmasqDir); err == nil && info.IsDir() { // #nosec G703 -- trusted operator environment override
 		dnsmasqConf := filepath.Join(dnsmasqDir, "05-aetherflow-dns.conf")
 		var lines []string
 		lines = append(lines, "# Automatically managed by AetherFlow Blueprint Engine")
 		for _, domain := range sortedDomains {
 			lines = append(lines, fmt.Sprintf("address=/%s/%s", domain, lanIP))
 		}
-		if err := os.WriteFile(dnsmasqConf, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		if err := os.WriteFile(dnsmasqConf, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil { // #nosec G703 -- trusted operator environment override
 			slog.Warn("failed to write dnsmasq AetherFlow config", "path", dnsmasqConf, "error", err)
 		} else {
 			syncedAny = true
@@ -435,7 +437,8 @@ func SyncNetworkDNSProviders() (bool, error) {
 }
 
 func updatePiHoleCustomList(customListPath, lanIP string, domains []string) error {
-	content, err := os.ReadFile(customListPath)
+	cleanPath := filepath.Clean(customListPath)
+	content, err := os.ReadFile(cleanPath) // #nosec G703 -- trusted operator environment override
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -466,7 +469,7 @@ func updatePiHoleCustomList(customListPath, lanIP string, domains []string) erro
 	managed = append(managed, piholeBlockEnd)
 
 	finalLines := append(preservedLines, managed...)
-	return os.WriteFile(customListPath, []byte(strings.Join(finalLines, "\n")+"\n"), 0644)
+	return os.WriteFile(cleanPath, []byte(strings.Join(finalLines, "\n")+"\n"), 0644) // #nosec G703 -- trusted operator environment override
 }
 
 // ResolveBaseDomain determines the active server base domain for Whatbox-style automatic

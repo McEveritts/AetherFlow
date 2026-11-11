@@ -234,9 +234,6 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(targetURL)
-		proxy.FlushInterval = -1
-		origDirector := proxy.Director
 		incomingHost := c.Request.Host
 		upgradeHeader := strings.TrimSpace(c.GetHeader("Upgrade"))
 		authenticatedUser := ""
@@ -245,27 +242,36 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 				_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", int(userIDFloat)).Scan(&authenticatedUser)
 			}
 		}
-		proxy.Director = func(req *http.Request) {
-			origDirector(req)
-			req.Host = incomingHost
-			if upgradeHeader != "" {
-				req.Header.Set("Upgrade", upgradeHeader)
-				req.Header.Set("Connection", "Upgrade")
-			}
-			req.Header.Del("X-Aetherflow-User")
-			if authenticatedUser != "" {
-				req.Header.Set("X-Aetherflow-User", authenticatedUser)
-			}
-			if req.Header.Get("X-Forwarded-Host") == "" {
-				req.Header.Set("X-Forwarded-Host", incomingHost)
-			}
-			if req.Header.Get("X-Forwarded-Proto") == "" {
-				if c.Request.TLS != nil {
-					req.Header.Set("X-Forwarded-Proto", "https")
-				} else {
-					req.Header.Set("X-Forwarded-Proto", "http")
+		proxy := &httputil.ReverseProxy{
+			FlushInterval: -1,
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(targetURL)
+				pr.Out.Host = incomingHost
+				if upgradeHeader != "" {
+					pr.Out.Header.Set("Upgrade", upgradeHeader)
+					pr.Out.Header.Set("Connection", "Upgrade")
 				}
-			}
+				pr.Out.Header.Del("X-Aetherflow-User")
+				if authenticatedUser != "" {
+					pr.Out.Header.Set("X-Aetherflow-User", authenticatedUser)
+				}
+				pr.SetXForwarded()
+				if priorHost := pr.In.Header.Get("X-Forwarded-Host"); priorHost != "" {
+					pr.Out.Header.Set("X-Forwarded-Host", priorHost)
+				} else {
+					pr.Out.Header.Set("X-Forwarded-Host", incomingHost)
+				}
+				if priorProto := pr.In.Header.Get("X-Forwarded-Proto"); priorProto != "" {
+					pr.Out.Header.Set("X-Forwarded-Proto", priorProto)
+				}
+				if priorFor := pr.In.Header.Get("X-Forwarded-For"); priorFor != "" {
+					if xff := pr.Out.Header.Get("X-Forwarded-For"); xff != "" {
+						pr.Out.Header.Set("X-Forwarded-For", priorFor+", "+xff)
+					} else {
+						pr.Out.Header.Set("X-Forwarded-For", priorFor)
+					}
+				}
+			},
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Warn("subdomain reverse proxy upstream error", "app", appName, "host", incomingHost, "port", targetPort, "error", err)

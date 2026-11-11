@@ -55,11 +55,12 @@ func InitDB() {
 		dbPath = os.Getenv("AETHERFLOW_DB_PATH")
 	}
 	if dbPath == "" {
-		if stateDir := os.Getenv("STATE_DIRECTORY"); stateDir != "" {
-			if mkErr := os.MkdirAll(stateDir, 0700); mkErr != nil {
-				log.Fatalf("CRITICAL: Failed to create state directory at %s: %v", stateDir, mkErr)
+		if stateDir := strings.TrimSpace(os.Getenv("STATE_DIRECTORY")); stateDir != "" {
+			cleanStateDir := filepath.Clean(strings.Split(stateDir, ":")[0])
+			if mkErr := os.MkdirAll(cleanStateDir, 0700); mkErr != nil { // #nosec G703 -- trusted systemd STATE_DIRECTORY
+				log.Fatalf("CRITICAL: Failed to create state directory at %s: %v", cleanStateDir, mkErr)
 			}
-			dbPath = filepath.Join(stateDir, "aetherflow.sqlite")
+			dbPath = filepath.Join(cleanStateDir, "aetherflow.sqlite")
 			slog.Info("database path anchored to systemd STATE_DIRECTORY", "path", dbPath)
 		} else {
 			// Anchor the database path to the executable's directory, not the CWD.
@@ -79,8 +80,9 @@ func InitDB() {
 			slog.Info("database path anchored", "path", dbPath)
 		}
 	} else if dbPath != ":memory:" && !strings.HasPrefix(dbPath, "file:") {
+		dbPath = filepath.Clean(dbPath)
 		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
-			_ = os.MkdirAll(dir, 0700)
+			_ = os.MkdirAll(dir, 0700) // #nosec G703 -- trusted operator DB_PATH environment variable
 		}
 	}
 

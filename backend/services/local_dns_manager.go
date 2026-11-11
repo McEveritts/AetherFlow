@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +20,7 @@ const (
 
 func resolveHostsFilePath() string {
 	if custom := strings.TrimSpace(os.Getenv("AETHERFLOW_HOSTS_FILE")); custom != "" {
-		return custom
+		return filepath.Clean(custom)
 	}
 	return defaultHostsFile
 }
@@ -122,11 +123,11 @@ func (d *DNSManager) AppendOrUpdateDomainsLocal(domains []string) error {
 
 	// Atomic write sequence
 	tmpHosts := targetHostsFile + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
-	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil {
+	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil { // #nosec G703 -- trusted operator hosts file override
 		return fmt.Errorf("failed to write temporary host file: %w", err)
 	}
 
-	if err := os.Rename(tmpHosts, targetHostsFile); err != nil {
+	if err := os.Rename(tmpHosts, targetHostsFile); err != nil { // #nosec G703 -- trusted operator hosts file override
 		os.Remove(tmpHosts)
 		return fmt.Errorf("atomic rename on %s failed: %w", targetHostsFile, err)
 	}
@@ -146,7 +147,7 @@ func (d *DNSManager) RemoveDomainsLocal(domains []string) error {
 		toRemove[domain] = true
 	}
 
-	content, err := os.ReadFile(targetHostsFile)
+	content, err := os.ReadFile(targetHostsFile) // #nosec G703 -- trusted operator hosts file override
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -205,10 +206,10 @@ func (d *DNSManager) RemoveDomainsLocal(domains []string) error {
 
 	finalContent := strings.Join(finalLines, "\n") + "\n"
 	tmpHosts := targetHostsFile + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
-	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil {
+	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil { // #nosec G703 -- trusted operator hosts file override
 		return fmt.Errorf("failed to write temporary host file: %w", err)
 	}
-	if err := os.Rename(tmpHosts, targetHostsFile); err != nil {
+	if err := os.Rename(tmpHosts, targetHostsFile); err != nil { // #nosec G703 -- trusted operator hosts file override
 		os.Remove(tmpHosts)
 		return fmt.Errorf("atomic rename on %s failed: %w", targetHostsFile, err)
 	}

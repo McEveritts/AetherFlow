@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -18,8 +19,9 @@ var embeddedDist embed.FS
 // or an external static directory if STATIC_DIR is explicitly configured.
 func GetFileSystem() (fs.FS, bool) {
 	if customDir := strings.TrimSpace(os.Getenv("STATIC_DIR")); customDir != "" {
-		if info, err := os.Stat(customDir); err == nil && info.IsDir() {
-			return os.DirFS(customDir), true
+		cleanDir := filepath.Clean(customDir)
+		if info, err := os.Stat(cleanDir); err == nil && info.IsDir() { // #nosec G703 -- trusted operator STATIC_DIR environment variable
+			return os.DirFS(cleanDir), true
 		}
 	}
 

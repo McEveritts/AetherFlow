@@ -86,7 +86,7 @@ jobs:
 
       - name: RustSec Vulnerability Scan (cargo-audit)
         run: |
-          cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+          cargo audit --file Cargo.lock
 
       - name: Rust Static Analysis (workspace + strict restore/release core)
         run: |
@@ -99,6 +99,7 @@ jobs:
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          TMPDIR: /tmp
         run: |
           cargo test --workspace --locked -- --test-threads=1
 
@@ -119,9 +120,9 @@ jobs:
 
       - name: Install pinned Go security tools
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.1
-          go install honnef.co/go/tools/cmd/staticcheck@v0.6.0
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
       - name: Dependency verification
         run: |
@@ -144,6 +145,7 @@ jobs:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          TMPDIR: /tmp
         run: go test -v -count=1 -race ./...
 
       - name: Build verification

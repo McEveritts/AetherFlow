@@ -160,10 +160,6 @@ func resolveExistingUpdatePort(pkgID string) (int, error) {
 	return existingConfig.ListenPort, nil
 }
 
-func applyPostInstallWithoutCallerRestart(pkgID string, allocatedPort int) (*BlueprintSetupResult, error) {
-	return applyPostInstallWithoutCallerRestartWithIngress(pkgID, allocatedPort, db.SetAppIngressConfig)
-}
-
 func applyPostInstallWithoutCallerRestartWithIngress(pkgID string, allocatedPort int, saveIngress func(models.AppIngressConfig) error) (*BlueprintSetupResult, error) {
 	cleanID := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
 	blueprint := GetBlueprint(cleanID)

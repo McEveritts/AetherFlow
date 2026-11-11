@@ -6,11 +6,28 @@
 
 ---
 
-## Nightly Patch Notes — November 11, 2026 — Release Test Isolation
+## Nightly Patch Notes — November 11, 2026 — Release Test Isolation & Multi-Ecosystem Vulnerability Cleanup
 
 * Make the runner's rclone version-extraction regression use an isolated package catalog and mock executable while preserving the production version regex and receipt-certification assertions. The release tests no longer depend on rclone or AetherFlow being installed on the CI host.
 * Restore the test's catalog environment before checking its result so an assertion failure does not leak fixture configuration to later tests. Keep production probes and all release security gates unchanged.
 * Update the YouTube installer fixtures for Piped's clean build environment, trusted Rust toolchain lookup, and running-proxy provenance checks. Exercise the real source-copy and artifact-certification paths, including rejection of a proxy running from a stale path, while retaining the loopback listener guard.
+
+### Rust Control Plane Advisories & Policy
+
+* Upgrade `jsonwebtoken` from `9.3.1` to `10.4.0` with the `aws_lc_rs` cryptographic backend to remediate `GHSA-h395-gr6q-cpjc` (`CVE-2026-25537`), a type-confusion authorization bypass advisory, without re-introducing `rsa` 0.9 transitive dependencies.
+* Upgrade `rsa` from `0.9.10` to `0.10.0` in `af-api` OIDC RS256 key management (`PrivateKey`/`PublicKey` and minimal RFC 7518 `Base64urlUInt` component encoding) to remediate `RUSTSEC-2023-0071` (`CVE-2023-49092`), and remove the `RUSTSEC-2023-0071` advisory exception from `backend-rs/deny.toml`, `.github/workflows/security.yml`, and `.github/workflows/release.yml`.
+* Add `bzip2-1.0.6` to the explicit SPDX license allowlist in `backend-rs/deny.toml` for `libbz2-rs-sys`.
+
+### Frontend & NPM Workspace Advisories
+
+* Add semver-scoped workspace `overrides` in `package.json` and regenerate `package-lock.json` to upgrade vulnerable transitive ranges to `glob` `14.0.4` (`GHSA-3g3m-2fjr-6pw4` / `CVE-2026-118773`), `minimatch` `11.0.6` (`GHSA-g3hv-75wg-m249` / `CVE-2026-118764`), and `deepmerge` `4.1.2` (`GHSA-gcqx-w48m-w2h4` / `CVE-2026-93753`) while preserving `minimatch` `3.x` compatibility for ESLint 9.
+
+### Legacy Go Backend Advisories, SAST & Security Gate
+
+* Upgrade `golang.org/x/net` to `v0.62.0` (`GO-2026-6860` / `CVE-2026-78661`, `GO-2026-6866` / `CVE-2026-97045`) and `golang.org/x/crypto` to `v0.58.1-0.20261109165751-4e10f38b063d` (`GO-2026-5932`).
+* Remove the unauthenticated `net/http/pprof` import and `127.0.0.1:6060` listener from `backend/main.go` (`G108` / `CWE-200`), migrate `AppSubdomainProxyMiddleware` from deprecated `ReverseProxy.Director` to `ReverseProxy.Rewrite` (`SA1019`), clean operator-configured filesystem paths (`G703`), and align Go 1.26 security gate tooling (`gosec` `v2.30.0`, `staticcheck` `v0.8.2`, `govulncheck` `v1.9.0`) in `.github/workflows/security.yml`.
+
+---
 
 ## Nightly Patch Notes — November 10, 2026 — SQLite Security, Open Canvas UI & Marketplace Lifecycle
 

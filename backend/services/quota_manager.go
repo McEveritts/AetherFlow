@@ -128,32 +128,6 @@ func parseHumanSize(input string) (int64, error) {
 	return int64(value * multiplier), nil
 }
 
-func humanizeBytes(bytes int64) string {
-	type unitDef struct {
-		label string
-		value int64
-	}
-
-	units := []unitDef{
-		{"PB", 1024 * 1024 * 1024 * 1024 * 1024},
-		{"TB", 1024 * 1024 * 1024 * 1024},
-		{"GB", 1024 * 1024 * 1024},
-		{"MB", 1024 * 1024},
-		{"KB", 1024},
-	}
-
-	for _, unit := range units {
-		if bytes >= unit.value {
-			if bytes%unit.value == 0 {
-				return fmt.Sprintf("%d%s", bytes/unit.value, unit.label)
-			}
-			return fmt.Sprintf("%.1f%s", float64(bytes)/float64(unit.value), unit.label)
-		}
-	}
-
-	return fmt.Sprintf("%dB", bytes)
-}
-
 func quotaScriptSize(bytes int64) string {
 	if bytes <= 0 {
 		return "0MB"

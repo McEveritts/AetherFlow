@@ -167,7 +167,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				pkg.Name, pkg.UpdateSource, pkg.UpdateRepo, pkg.UpdateRepoURL, pkg.UpdatePackage)
 		}
 		switch pkg.UpdateSource {
-		case "apt", "github", "git_tags", "git":
+		case "apt", "github", "github_release", "git_tags", "git", "pypi", "retired":
 		default:
 			t.Errorf("package %q has unsupported UpdateSource %q", pkg.Name, pkg.UpdateSource)
 		}

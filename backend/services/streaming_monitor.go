@@ -827,7 +827,7 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 		return nil, reqErr
 	}
 	if code < 200 || code >= 300 {
-		return nil, fmt.Errorf("Jellyfin /Sessions returned HTTP %d", code)
+		return nil, fmt.Errorf("jellyfin /Sessions returned HTTP %d", code)
 	}
 
 	var rawSessions []jellyfinSessionRaw
@@ -1204,7 +1204,7 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 	}
 	serverName, serverURL, apiKey, _ := GetStoredJellyfinConfig()
 	if apiKey == "" {
-		return 0, fmt.Errorf("Jellyfin API key is not configured")
+		return 0, fmt.Errorf("jellyfin API key is not configured")
 	}
 	cleanURL, err := ValidateServerURL(serverURL)
 	if err != nil {
@@ -1216,7 +1216,7 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	if code < 200 || code >= 300 {
-		return 0, fmt.Errorf("Jellyfin /Users returned HTTP %d", code)
+		return 0, fmt.Errorf("jellyfin /Users returned HTTP %d", code)
 	}
 
 	var users []struct {
@@ -1443,7 +1443,7 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 
 	_, serverURL, apiKey, _ := GetStoredJellyfinConfig()
 	if apiKey == "" {
-		return fmt.Errorf("Jellyfin API key is not configured")
+		return fmt.Errorf("jellyfin API key is not configured")
 	}
 	cleanURL, err := ValidateServerURL(serverURL)
 	if err != nil {
@@ -1524,7 +1524,7 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 		return reqErr
 	}
 	if code < 200 || code >= 300 {
-		return fmt.Errorf("Jellyfin command %q returned HTTP %d", command, code)
+		return fmt.Errorf("jellyfin command %q returned HTTP %d", command, code)
 	}
 
 	if command == "stop" {
@@ -1545,7 +1545,7 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 func FetchJellyfinArtwork(ctx context.Context, itemID string) ([]byte, string, error) {
 	_, serverURL, apiKey, _ := GetStoredJellyfinConfig()
 	if apiKey == "" {
-		return nil, "", fmt.Errorf("Jellyfin not configured")
+		return nil, "", fmt.Errorf("jellyfin not configured")
 	}
 	cleanURL, err := ValidateServerURL(serverURL)
 	if err != nil {

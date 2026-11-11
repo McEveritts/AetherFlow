@@ -138,7 +138,8 @@ func (im *INIMutator) ApplySettings(settings map[string]string) error {
 		outputLines = append(outputLines, fmt.Sprintf("%s=%s", k, settings[k]))
 	}
 
-	return os.WriteFile(im.ConfigPath, []byte(strings.Join(outputLines, "\n")+"\n"), 0644)
+	cleanPath := filepath.Clean(im.ConfigPath)
+	return os.WriteFile(cleanPath, []byte(strings.Join(outputLines, "\n")+"\n"), 0644) // #nosec G703 -- trusted blueprint/operator config path
 }
 
 // copyFileStruct handles basic I/O

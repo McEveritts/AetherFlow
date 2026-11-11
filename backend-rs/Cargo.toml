@@ -52,7 +52,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
 bcrypt = "0.16"
-jsonwebtoken = "9.3"
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 totp-lite = "2.0"
 data-encoding = "2.6"
 url = "2.5"
@@ -88,7 +88,7 @@ brotli = "8.0.2"
 zstd = { version = "0.13.3", default-features = false }
 prost = "0.13"
 tonic = { version = "0.12", features = ["tls"] }
-rsa = { version = "0.9", features = ["pem"] }
+rsa = "0.10"
 
 [profile.release]
 opt-level = 3

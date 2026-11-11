@@ -109,7 +109,8 @@ func (xm *XMLMutator) ApplySettings(settings map[string]string) error {
 		}
 	}
 
-	return os.WriteFile(xm.ConfigPath, []byte(content), 0644)
+	cleanPath := filepath.Clean(xm.ConfigPath)
+	return os.WriteFile(cleanPath, []byte(content), 0644) // #nosec G703 -- trusted blueprint/operator config path
 }
 
 // PiHoleMutator manages Pi-hole v6 (pihole.toml) and v5 (lighttpd/external.conf) web port settings.
@@ -121,7 +122,7 @@ func NewPiHoleMutator(path string) *PiHoleMutator {
 	if path == "" {
 		path = "/etc/pihole/pihole.toml"
 	}
-	return &PiHoleMutator{ConfigPath: path}
+	return &PiHoleMutator{ConfigPath: filepath.Clean(path)}
 }
 
 func (pm *PiHoleMutator) Backup() error {
@@ -147,6 +148,7 @@ func (pm *PiHoleMutator) ApplyPortAndSettings(port int, extra map[string]string)
 	if pm.ConfigPath == "" {
 		return nil
 	}
+	cleanPath := filepath.Clean(pm.ConfigPath)
 
 	portStr := ""
 	if port > 0 {
@@ -155,7 +157,7 @@ func (pm *PiHoleMutator) ApplyPortAndSettings(port int, extra map[string]string)
 		portStr = p
 	}
 
-	if data, err := os.ReadFile(pm.ConfigPath); err == nil {
+	if data, err := os.ReadFile(cleanPath); err == nil { // #nosec G703 -- trusted blueprint/operator config path
 		content := string(data)
 		if portStr != "" {
 			rePort := regexp.MustCompile(`(?m)^(\s*port\s*=\s*)"[^"]*"`)
@@ -171,7 +173,7 @@ func (pm *PiHoleMutator) ApplyPortAndSettings(port int, extra map[string]string)
 				content = reDnsmasq.ReplaceAllString(content, `${1}true`)
 			}
 		}
-		if err := os.WriteFile(pm.ConfigPath, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(cleanPath, []byte(content), 0644); err != nil { // #nosec G703 -- trusted blueprint/operator config path
 			return err
 		}
 	}
