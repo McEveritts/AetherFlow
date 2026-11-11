@@ -1,3 +1,8 @@
+## Nightly Patch Notes — November 11, 2026 — Release Test Isolation
+
+* Make the runner's rclone version-extraction regression use an isolated package catalog and mock executable while preserving the production version regex and receipt-certification assertions. The release tests no longer depend on rclone or AetherFlow being installed on the CI host.
+* Restore the test's catalog environment before checking its result so an assertion failure does not leak fixture configuration to later tests. Keep production probes and all release security gates unchanged.
+
 ## Nightly Patch Notes — November 10, 2026 — SQLite Security, Open Canvas UI & Marketplace Lifecycle
 
 Marketplace lifecycle, installer reliability, update certification, and diagnostic-safety improvements since `2d3715e4` (`v4.0.0-nightly.101.2`). These notes describe source changes; they do not claim successful live installation of every catalog application.

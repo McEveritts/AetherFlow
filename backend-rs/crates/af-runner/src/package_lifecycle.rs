@@ -6368,8 +6368,32 @@ mod version_verification_tests {
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
+        // Keep the production regex, but execute the fixture rather than the
+        // catalog's shell command, which names the host's /usr/bin/rclone.
+        let packages_path = temp_dir.join("packages.json");
+        std::fs::write(&packages_path, crate::EMBEDDED_PACKAGES_JSON).unwrap();
+        let mut automation: serde_json::Value =
+            serde_json::from_str(crate::EMBEDDED_AUTOMATION_JSON).unwrap();
+        automation["rclone"]["version_command"] =
+            serde_json::json!(["/usr/local/bin/rclone", "version"]);
+        let automation_path = temp_dir.join("package_automation.json");
+        std::fs::write(&automation_path, serde_json::to_vec(&automation).unwrap()).unwrap();
+        let previous_packages = std::env::var_os("AETHERFLOW_PACKAGES_CONFIG");
+        let previous_automation = std::env::var_os("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG");
+        std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &packages_path);
+        std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation_path);
+
         // Probe live runtime version for "rclone"
         let outcome = probe_live_runtime_version("rclone", &env_cfg);
+        for (key, previous) in [
+            ("AETHERFLOW_PACKAGES_CONFIG", previous_packages),
+            ("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", previous_automation),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
         assert_eq!(
             outcome,
             LiveRuntimeProbeOutcome::Verified("1.75.2".to_string()),
