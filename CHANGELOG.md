@@ -2,6 +2,7 @@
 
 * Make the runner's rclone version-extraction regression use an isolated package catalog and mock executable while preserving the production version regex and receipt-certification assertions. The release tests no longer depend on rclone or AetherFlow being installed on the CI host.
 * Restore the test's catalog environment before checking its result so an assertion failure does not leak fixture configuration to later tests. Keep production probes and all release security gates unchanged.
+* Update the YouTube installer fixtures for Piped's clean build environment, trusted Rust toolchain lookup, and running-proxy provenance checks. Exercise the real source-copy and artifact-certification paths, including rejection of a proxy running from a stale path, while retaining the loopback listener guard.
 
 ## Nightly Patch Notes — November 10, 2026 — SQLite Security, Open Canvas UI & Marketplace Lifecycle
 

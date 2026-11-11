@@ -76,6 +76,13 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
 remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
 id() { return 0; }
 chown() { :; }
+stat() {
+    if [[ "$1" == -c && "$2" == %u && ( "$3" == "$TEST_ROOT/mock-bin/cargo" || "$3" == "$TEST_ROOT/mock-bin/rustc" ) ]]; then
+        printf '0\n'
+    else
+        command stat "$@"
+    fi
+}
 sleep() { :; }
 curl() { [[ "${MOCK_FAIL_HTTP:-0}" != 1 ]]; }
 systemctl() {
@@ -85,6 +92,12 @@ systemctl() {
     if [[ "$1" == disable && "${MOCK_FAIL_REMOVE:-0}" == 1 ]]; then return 42; fi
     local action="$1" unit load_state=not-found active_state=inactive main_pid=0 unit_file_state=disabled
     shift
+    if [[ "$action" == show && "$*" == '-p ExecMainPID --value '* ]]; then
+        unit="${@: -1}"
+        [[ ! -f "$TEST_ROOT/systemd-state/${unit%.service}.active" ]] || main_pid=123
+        printf '%s\n' "$main_pid"
+        return 0
+    fi
     local units=()
     for unit in "$@"; do
         [[ "$unit" == -* ]] || units+=("${unit%.service}")
@@ -95,9 +108,20 @@ systemctl() {
                 touch "$TEST_ROOT/systemd-state/$unit.active"
                 if [[ "$unit" == af-invidious ]]; then
                     touch "$TEST_ROOT/systemd-state/af-invidious-companion.active"
+                elif [[ "$unit" == af-piped-proxy ]]; then
+                    mkdir -p "$TEST_ROOT/proc/123"
+                    local proxy="$TEST_ROOT/opt/piped/piped-proxy"
+                    if [[ "${MOCK_STALE_PROXY:-0}" == 1 ]]; then
+                        cp "$proxy" "$TEST_ROOT/stale-piped-proxy"
+                        proxy="$TEST_ROOT/stale-piped-proxy"
+                    fi
+                    ln -sfn "$proxy" "$TEST_ROOT/proc/123/exe"
                 fi
                 ;;
-            stop) rm -f "$TEST_ROOT/systemd-state/$unit.active" ;;
+            stop)
+                rm -f "$TEST_ROOT/systemd-state/$unit.active"
+                [[ "$unit" != af-piped-proxy ]] || rm -f "$TEST_ROOT/proc/123/exe"
+                ;;
             enable) touch "$TEST_ROOT/systemd-state/$unit.enabled" ;;
             disable) rm -f "$TEST_ROOT/systemd-state/$unit.enabled" ;;
             is-active) [[ -f "$TEST_ROOT/systemd-state/$unit.active" ]] || return 3 ;;
@@ -127,6 +151,13 @@ runuser() {
     if [[ "$1" == --preserve-environment ]]; then shift; fi
     shift 3
     record "runuser $*"
+    local clean_environment=false
+    while [[ "${1:-}" == env ]]; do
+        clean_environment=true
+        shift
+        [[ "${1:-}" != -i ]] || shift
+        while [[ "${1:-}" == *=* ]]; do shift; done
+    done
     if [[ "$1" == git ]]; then
         if [[ "$2" == clone ]]; then
             local target="${@: -1}"
@@ -143,9 +174,7 @@ runuser() {
     if [[ "$1" == psql ]]; then cat >/dev/null; return 0; fi
     if [[ "$1" == pg_dump ]]; then printf 'fixture SQL backup\n'; return 0; fi
     if [[ "$1" == cp ]]; then command cp "${@:2}"; return; fi
-    if [[ "$1" == env ]]; then
-        shift
-        while [[ "$1" == *=* ]]; do shift; done
+    if [[ "$clean_environment" == true ]]; then
         if [[ "${MOCK_FAIL_BUILD:-0}" == 1 ]]; then return 42; fi
         if [[ "$1" == rustc && "${2:-}" == --version ]]; then printf 'rustc 1.90.0 (fixture)\n'; return 0; fi
         if [[ "$1" == npm ]]; then return 0; fi
@@ -158,6 +187,11 @@ runuser() {
         elif [[ "$*" == *pnpm* ]]; then
             mkdir -p "$INSTALL_DIR/frontend/dist"
             printf 'Piped frontend' > "$INSTALL_DIR/frontend/dist/index.html"
+        elif [[ "$1" == bash && ( "$3" == 'cd "$1"; make' || "$3" == 'cd "$1"; ./invidious --migrate' ) ]]; then
+            :
+        else
+            print_error "Unexpected clean-environment command: $*"
+            return 1
         fi
         return 0
     fi
@@ -209,6 +243,10 @@ class YouTubeLifecycleTest(unittest.TestCase):
             executable = self.root / "mock-bin" / command
             executable.write_text(PACKAGE_MANAGER)
             executable.chmod(0o755)
+        for command in ("cargo", "rustc"):
+            executable = self.root / "mock-bin" / command
+            executable.write_text("#!/bin/sh\nexit 99\n")
+            executable.chmod(0o755)
         self.command_path = os.pathsep.join((str(self.root / "mock-bin"), str(Path(sys.executable).parent), os.environ.get("PATH", "")))
         helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit", "safe_rm_rf", "backup_postgresql_database", "restore_postgresql_database")
         (self.root / "common.sh").write_text(COMMON + self.rewrite(helpers))
@@ -235,6 +273,7 @@ class YouTubeLifecycleTest(unittest.TestCase):
         path.write_text(source)
         return subprocess.run(["bash", str(path)], text=True, capture_output=True,
                               env=dict(os.environ, TEST_ROOT=str(self.root),
+                                       AF_PROC_ROOT=str(self.root / "proc"),
                                        PATH=self.command_path,
                                        **environment))
 
@@ -325,6 +364,12 @@ rollback_apt_packages
         result = self.run_script("invidious", MOCK_BAD_ASSET="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "install/.invidious.lock").exists())
+
+    def test_piped_rejects_a_running_proxy_from_a_stale_path(self):
+        result = self.run_script("piped", MOCK_STALE_PROXY="1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("does not match deployed path", result.stdout + result.stderr)
+        self.assertFalse((self.root / "install/.piped.lock").exists())
 
     def test_invalid_saved_companion_key_fails_without_rotation(self):
         config_dir = self.root / "etc/invidious"
