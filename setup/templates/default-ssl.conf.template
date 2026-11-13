@@ -2,6 +2,7 @@
         ServerName _
         ProxyRequests Off
         ProxyPreserveHost On
+        ProxyTimeout 3600
         RewriteEngine On
         RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
         RewriteCond %{HTTP:Upgrade} websocket [NC]
@@ -54,7 +55,7 @@
 
         ProxyRequests Off
         ProxyPreserveHost On
-        ProxyTimeout 300
+        ProxyTimeout 3600
         RequestHeader set X-Forwarded-Proto "https"
         RequestHeader set X-Forwarded-Port "443"
 
@@ -65,12 +66,12 @@
 
         ProxyPass /.well-known/acme-challenge/ !
 
-        ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=60 keepalive=On
+        ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=3600 keepalive=On
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
 
-        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=60 keepalive=On
+        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=3600 keepalive=On
         ProxyPassReverse /_next/ http://127.0.0.1:8080/_next/
 
-        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=60 keepalive=On upgrade=websocket
+        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=3600 keepalive=On upgrade=websocket
         ProxyPassReverse / http://127.0.0.1:8080/
 </VirtualHost>

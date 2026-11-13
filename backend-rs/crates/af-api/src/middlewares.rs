@@ -223,7 +223,8 @@ static PRIVATE_IP_RE: Lazy<Regex> = Lazy::new(|| {
 static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(60))
+        // Bound connection setup without limiting long-lived media response bodies.
+        .connect_timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });

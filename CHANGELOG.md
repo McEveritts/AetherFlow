@@ -1,3 +1,11 @@
+## Nightly Patch Notes — November 13, 2026 — Streaming Proxy Timeouts
+
+* Replace the subdomain proxy's 60-second total HTTP deadline with a 10-second connection timeout. Long-lived Jellyfin, media, and download response bodies can continue streaming beyond 60 seconds while connection setup remains bounded.
+* Set the Apache setup template's proxy I/O timeouts to 3600 seconds, including local HTTP ingress and all HTTPS proxy mappings, so future setups retain streaming-friendly timeouts.
+* Existing hosts need their Apache timeout settings updated separately. API binaries retain their original client behavior until upgraded; routing the Jellyfin hostname directly to its loopback listener can provide an immediate workaround.
+
+---
+
 ## Nightly Patch Notes — November 11, 2026 — Release Test Isolation
 
 * Make the runner's rclone version-extraction regression use an isolated package catalog and mock executable while preserving the production version regex and receipt-certification assertions. The release tests no longer depend on rclone or AetherFlow being installed on the CI host.
