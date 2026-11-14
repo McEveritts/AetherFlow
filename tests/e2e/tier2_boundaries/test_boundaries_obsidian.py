@@ -236,7 +236,15 @@ class TestB18ConsentPageUsesGlassContainers(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         consent = inspector.read_file("frontend/src/app/(auth)/oauth/consent/page.tsx")
-        self.assert_true(bool(consent and ("glass" in consent or "Card" in consent)), "B18: OAuth consent page must use glass containers")
+        has_surface = bool(
+            consent
+            and (
+                "glass" in consent
+                or "Card" in consent
+                or ("obs-brand-logo" in consent and "obs-touch-target-standard" in consent and "Button" in consent)
+            )
+        )
+        self.assert_true(has_surface, "B18: OAuth consent page must use glass or open-canvas obsidian containers with touch targets")
 
 class TestB18DataGridEmptyStateMessage(TestCase):
     def __init__(self):

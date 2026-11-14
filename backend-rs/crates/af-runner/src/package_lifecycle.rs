@@ -5447,8 +5447,12 @@ pub fn probe_live_runtime_version(
             prog.clone()
         };
 
+        let sanitized_args = crate::probe_metadata::sanitize_probe_shell_args(
+            std::path::Path::new(&prog_to_run),
+            args,
+        );
         let mut cmd = std::process::Command::new(&prog_to_run);
-        cmd.args(args);
+        cmd.args(&sanitized_args);
         let sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
             drop_to_path_owner: true,
             fs_root: env_cfg.fs_root.clone(),
@@ -5457,7 +5461,7 @@ pub fn probe_live_runtime_version(
         if let Err(err) = crate::probe_metadata::configure_sandboxed_std_command(
             &mut cmd,
             std::path::Path::new(&prog_to_run),
-            args,
+            &sanitized_args,
             &sandbox_spec,
         ) {
             return LiveRuntimeProbeOutcome::Failed(format!(
@@ -5569,12 +5573,51 @@ pub fn probe_live_runtime_version(
     pkg_names.push(pkg.name.clone());
     pkg_names.push(pkg.service_name.clone());
 
+    let fallback_sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
+        drop_to_path_owner: true,
+        fs_root: env_cfg.fs_root.clone(),
+        package_user: Some(package_id.to_string()),
+    };
+    let dpkg_prog = if let Some(root) = &env_cfg.fs_root {
+        ["usr/bin/dpkg-query", "usr/local/bin/dpkg-query", "bin/dpkg-query"]
+            .into_iter()
+            .map(|rel| root.join(rel))
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "dpkg-query".to_string())
+    } else if Path::new("/usr/bin/dpkg-query").exists() {
+        "/usr/bin/dpkg-query".to_string()
+    } else {
+        "dpkg-query".to_string()
+    };
+
     for name in &pkg_names {
         if name.is_empty() {
             continue;
         }
-        let mut cmd = std::process::Command::new("dpkg-query");
-        cmd.args(["-W", "-f=${Version}\n", name]);
+        let mut dpkg_args: Vec<String> = Vec::new();
+        if let Some(root) = &env_cfg.fs_root {
+            let dpkg_dir = root.join("var/lib/dpkg");
+            if dpkg_dir.exists() {
+                dpkg_args.push(format!("--admindir={}", dpkg_dir.display()));
+            }
+        }
+        dpkg_args.push("-W".to_string());
+        dpkg_args.push("-f=${Version}\n".to_string());
+        dpkg_args.push(name.clone());
+
+        let mut cmd = std::process::Command::new(&dpkg_prog);
+        if crate::probe_metadata::configure_sandboxed_std_command(
+            &mut cmd,
+            Path::new(&dpkg_prog),
+            &dpkg_args,
+            &fallback_sandbox_spec,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        cmd.args(&dpkg_args);
         if let Ok(output) = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
             if output.status.success() {
                 let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -5623,8 +5666,19 @@ pub fn probe_live_runtime_version(
         };
 
         if let Some(bin) = bin_path {
+            let bin_args = vec!["--version".to_string()];
             let mut cmd = std::process::Command::new(&bin);
-            cmd.arg("--version");
+            if crate::probe_metadata::configure_sandboxed_std_command(
+                &mut cmd,
+                &bin,
+                &bin_args,
+                &fallback_sandbox_spec,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            cmd.args(&bin_args);
             if let Ok(output) = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
                 if output.status.success() {
                     let combined = format!(

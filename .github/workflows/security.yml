@@ -86,7 +86,7 @@ jobs:
       - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cargo-audit, cargo-deny
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
@@ -160,3 +160,23 @@ jobs:
 
       - name: Build verification
         run: go build ./...
+
+  npm-security:
+    name: Monorepo NPM Production Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Audit root and workspace production dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm audit --workspaces --include-workspace-root --omit=dev --audit-level=high

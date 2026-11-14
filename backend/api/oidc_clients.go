@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"aetherflow/db"
 
@@ -51,33 +52,50 @@ func GetOIDCClients(c *gin.Context) {
 // CreateOIDCClient registers a new OIDC client application.
 func CreateOIDCClient(c *gin.Context) {
 	var req struct {
-		Name         string   `json:"name" binding:"required"`
-		RedirectURIs []string `json:"redirect_uris" binding:"required"`
+		Name                    string   `json:"name" binding:"required"`
+		RedirectURIs            []string `json:"redirect_uris" binding:"required"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+		Public                  bool     `json:"public"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		BadRequest(c, err.Error())
 		return
 	}
-
-	if len(req.RedirectURIs) == 0 {
-		BadRequest(c, "At least one redirect_uri is required")
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.RedirectURIs) == 0 {
+		BadRequest(c, "name and at least one redirect_uri are required")
 		return
 	}
+	for _, u := range req.RedirectURIs {
+		if !isSafeRedirectURI(u) {
+			BadRequest(c, "redirect_uris must use valid https URLs or loopback http URLs without credentials or fragments")
+			return
+		}
+	}
+
+	isPublic := req.Public || strings.EqualFold(strings.TrimSpace(req.TokenEndpointAuthMethod), "none")
 
 	// Generate client_id
 	idBytes := make([]byte, 16)
-	rand.Read(idBytes)
+	if _, err := rand.Read(idBytes); err != nil {
+		InternalError(c, "Failed to generate client_id")
+		return
+	}
 	clientID := hex.EncodeToString(idBytes)
 
-	// Generate client_secret
-	secretBytes := make([]byte, 32)
-	rand.Read(secretBytes)
-	clientSecret := hex.EncodeToString(secretBytes)
-
-	// Hash the secret for storage
-	secretHash := sha256.Sum256([]byte(clientSecret))
-	secretHashHex := hex.EncodeToString(secretHash[:])
+	clientSecret := ""
+	secretHashHex := ""
+	if !isPublic {
+		secretBytes := make([]byte, 32)
+		if _, err := rand.Read(secretBytes); err != nil {
+			InternalError(c, "Failed to generate client_secret")
+			return
+		}
+		clientSecret = hex.EncodeToString(secretBytes)
+		secretHash := sha256.Sum256([]byte(clientSecret))
+		secretHashHex = hex.EncodeToString(secretHash[:])
+	}
 
 	// Serialize redirect URIs as JSON
 	redirectURIsJSON, _ := json.Marshal(req.RedirectURIs)
@@ -99,14 +117,18 @@ func CreateOIDCClient(c *gin.Context) {
 	aname, _ := actorName.(string)
 	db.RecordAudit(aid, aname, "oidc_client_create", "oidc_client", clientID, "name="+req.Name, c.ClientIP(), c.Request.UserAgent())
 
-	// Return the secret once (it cannot be retrieved later)
-	c.JSON(http.StatusCreated, gin.H{
+	resp := gin.H{
 		"client_id":     clientID,
 		"client_secret": clientSecret,
 		"name":          req.Name,
 		"redirect_uris": req.RedirectURIs,
 		"message":       "Save the client_secret now — it cannot be retrieved later",
-	})
+	}
+	if isPublic {
+		resp["token_endpoint_auth_method"] = "none"
+		resp["message"] = "Public PKCE client created (no client_secret)"
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 // DeleteOIDCClient removes a registered OIDC client and revokes its tokens.

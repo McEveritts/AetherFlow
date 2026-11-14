@@ -18,7 +18,7 @@ REAL_TOOLS = (
     "sqlite3", "flock", "mkdir", "date", "cp", "mv", "ln", "rm", "cat", "tee",
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
     "head", "cut", "tr", "sha256sum", "tar", "gzip", "python3", "touch", "sleep",
-    "basename", "dirname", "sort", "tail", "runuser", "sh", "stat",
+    "basename", "dirname", "sort", "tail", "runuser", "sh", "stat", "openssl",
 )
 
 CURL_MOCK = r'''#!/usr/bin/python3
@@ -238,6 +238,7 @@ os.execvp(inner[0], inner)
             "HEALTH_INTERVAL": "0",
             "SNAPSHOT_TIMEOUT": "5",
             "MAX_RELEASES": "3",
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
         })
         env.update(extra)
         return env
@@ -1004,6 +1005,39 @@ os.execvp(inner[0], inner)
         """)
         result = subprocess.run([sys.executable, "-c", prelude + script, str(database), "deploy"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v4_provenance_verification_fails_closed_when_unattested(self):
+        self.write_db(self.data / "aetherflow.sqlite", "live-marker")
+        missing_bundle = self.root / "empty-attestations.json"
+        missing_bundle.write_text('{"attestations": []}\n')
+        result = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            AETHERFLOW_SKIP_PROVENANCE_VERIFY="0",
+            AETHERFLOW_PROVENANCE_BUNDLE_FILE=str(missing_bundle),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Sigstore build provenance verification FAILED", result.stdout + result.stderr)
+        self.assertFalse(self.current.exists())
+        # Staging directory must be cleaned up on verification failure
+        leftover_staging = list(self.releases.glob(".staging.*"))
+        self.assertEqual(leftover_staging, [])
+
+    def test_cleanup_prunes_stale_staging_directories_even_below_max_releases(self):
+        stale_stage = self.releases / ".staging.1700000000.abcdef"
+        stale_stage.mkdir(parents=True)
+        (stale_stage / "partial").write_text("leftover\n")
+        old_ts = 1700000000
+        os.utime(stale_stage, (old_ts, old_ts))
+
+        fresh_stage = self.releases / ".staging.fresh.123456"
+        fresh_stage.mkdir(parents=True)
+
+        result = self.run_manager("cleanup")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(stale_stage.exists())
+        self.assertTrue(fresh_stage.exists())
 
 
 if __name__ == "__main__":

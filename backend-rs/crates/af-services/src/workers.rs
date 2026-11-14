@@ -3417,7 +3417,7 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                 }
             }
             let prog = resolve_probe_program(&version_command[0], fs_root.as_deref());
-            let args: Vec<String> = version_command[1..]
+            let raw_args: Vec<String> = version_command[1..]
                 .iter()
                 .map(|arg| {
                     if arg.starts_with('/') {
@@ -3429,6 +3429,7 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                     arg.clone()
                 })
                 .collect();
+            let args = af_runner::probe_metadata::sanitize_probe_shell_args(&prog, &raw_args);
             let mut command = Command::new(&prog);
             let sandbox_spec = af_runner::probe_metadata::ProbeSandboxSpec {
                 drop_to_path_owner: false,

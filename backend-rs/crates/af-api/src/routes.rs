@@ -50,8 +50,8 @@ use crate::streaming_ext::{
     test_streaming_server,
 };
 use crate::ws::{
-    broadcast_ws_message, extract_client_ip, handle_log_websocket, handle_websocket,
-    issue_ws_ticket_for_user,
+    broadcast_ws_message, extract_client_ip, extract_client_ip_for_peer, handle_log_websocket,
+    handle_websocket, issue_ws_ticket_for_session, normalize_request_forwarding_for_peer, PeerIp,
 };
 use af_models::{AppIngressConfig, MarketplaceApp, User};
 use axum::extract::{Extension, Path, Query, Request};
@@ -84,6 +84,7 @@ const OPENAPI_YAML: &str = include_str!("../../../../config/openapi-v1.yaml");
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn security_headers_middleware(mut req: Request, next: Next) -> Response {
+    normalize_request_forwarding_for_peer(&mut req);
     let req_id = req
         .headers()
         .get("X-Request-ID")
@@ -4874,6 +4875,7 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
 
 async fn issue_ws_ticket(
     Extension(auth_user): Extension<AuthUser>,
+    PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
 ) -> Response {
     if auth_user.plugin_id.is_some()
@@ -4886,8 +4888,8 @@ async fn issue_ws_ticket(
             "Scoped plugins cannot create operator WebSocket sessions; use scoped telemetry reads",
         );
     }
-    let ip = extract_client_ip(&headers);
-    let ticket = issue_ws_ticket_for_user(auth_user.user_id, &ip);
+    let ip = extract_client_ip_for_peer(&headers, peer_ip);
+    let ticket = issue_ws_ticket_for_session(auth_user.user_id, &auth_user.jti, &ip);
     Json(serde_json::json!({ "ticket": ticket })).into_response()
 }
 
@@ -4900,13 +4902,80 @@ async fn update_profile(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<UpdateProfileReq>,
 ) -> Response {
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "UPDATE users SET email = ?1 WHERE id = ?2",
-            params![req.email.trim(), auth_user.user_id],
+    let trimmed = req.email.trim().to_string();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "Invalid email address",
+        );
+    };
+    if local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || trimmed.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "Invalid email address",
         );
     }
-    Json(serde_json::json!({ "message": "Profile updated successfully" })).into_response()
+
+    let user_id = auth_user.user_id;
+    crate::auth::blocking_response(move || {
+        let Ok(mut conn) = af_db::get_conn() else {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database error",
+            );
+        };
+        let Ok(tx) = conn.transaction() else {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database error",
+            );
+        };
+        let conflict: i64 = match tx.query_row(
+            "SELECT COUNT(*) FROM users WHERE email = ?1 COLLATE NOCASE AND id != ?2",
+            params![trimmed, user_id],
+            |r| r.get(0),
+        ) {
+            Ok(c) => c,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to update profile",
+                );
+            }
+        };
+        if conflict > 0 {
+            return api_error(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Email address is already in use",
+            );
+        }
+        if tx
+            .execute(
+                "UPDATE users SET email = ?1 WHERE id = ?2",
+                params![trimmed, user_id],
+            )
+            .is_err()
+            || tx.commit().is_err()
+        {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to update profile",
+            );
+        }
+        Json(serde_json::json!({ "message": "Profile updated successfully" })).into_response()
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -7705,7 +7774,7 @@ mod tests {
             );
             if plugin.is_some() {
                 assert_eq!(
-                    issue_ws_ticket(Extension(user), HeaderMap::new())
+                    issue_ws_ticket(Extension(user), PeerIp(None), HeaderMap::new())
                         .await
                         .status(),
                     StatusCode::FORBIDDEN

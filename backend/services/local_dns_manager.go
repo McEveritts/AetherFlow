@@ -59,7 +59,15 @@ func withHostsFileLock(targetHostsFile string, fn func() error) error {
 	defer hostsFileMu.Unlock()
 
 	lockPath := targetHostsFile + ".af.lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+	if filepath.Clean(targetHostsFile) == "/etc/hosts" {
+		if info, err := os.Stat("/run/aetherflow"); err == nil && info.IsDir() {
+			if f, openErr := os.OpenFile("/run/aetherflow/hosts.lock", os.O_CREATE|os.O_RDWR, 0600); openErr == nil {
+				_ = f.Close()
+				lockPath = "/run/aetherflow/hosts.lock"
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0750); err != nil {
 		return fmt.Errorf("failed to create lock directory for %s: %w", targetHostsFile, err)
 	}
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G703 -- trusted operator hosts file override

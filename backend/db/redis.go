@@ -62,9 +62,10 @@ func InitRedis() {
 	}()
 }
 
-// minRevocationTTL enforces a minimum 2-hour floor on JTI revocations so short-TTL
-// caller durations or refresh grace windows cannot expire a revocation prematurely.
-const minRevocationTTL = 2 * time.Hour
+// minRevocationTTL enforces a minimum 136-minute (8160s) floor on JTI revocations so a newly minted
+// 15-minute access token remains revoked across its entire 2-hour post-expiry refresh grace window
+// plus 60 seconds of clock-skew tolerance.
+const minRevocationTTL = 136 * time.Minute
 
 // RevokeToken adds a token's JTI to the blacklist with a given expiration.
 func RevokeToken(jti string, expiration time.Duration) error {
@@ -80,7 +81,7 @@ func RevokeToken(jti string, expiration time.Duration) error {
 	localBlacklist.Store(jti, expTime) // Always store locally for immediate consistency/failover
 
 	if DB != nil {
-		expiresAt := now.Add(expiration).Format("2006-01-02 15:04:05")
+		expiresAt := now.Add(expiration).Format(time.RFC3339)
 		if _, err := DB.Exec(
 			"INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)",
 			jti, expiresAt,
@@ -125,7 +126,7 @@ func IsTokenRevoked(jti string) bool {
 	if DB != nil {
 		var one int
 		err := DB.QueryRow(
-			"SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at >= datetime('now') LIMIT 1",
+			"SELECT 1 FROM revoked_tokens WHERE jti = ? AND datetime(expires_at) > datetime('now') LIMIT 1",
 			jti,
 		).Scan(&one)
 		if err == sql.ErrNoRows {

@@ -18,7 +18,7 @@ use super::{
     validate_mcbrowser_user, McBrowserError, MutationSuccessResponse, ParsedByteRange,
 };
 use crate::auth::{api_error, jwt_secret_bytes, secure_cookie_enabled, AuthUser};
-use crate::ws::{extract_client_ip, extract_cookie};
+use crate::ws::extract_cookie;
 use af_files::{BrowserFs, Entry};
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, RawQuery, State};
@@ -2256,6 +2256,7 @@ async fn unlock_public_share(
     State(runtime): State<ShareRuntime>,
     AxumPath(token): AxumPath<String>,
     RawQuery(raw_query): RawQuery,
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
     Json(req): Json<UnlockShareRequest>,
 ) -> Response {
@@ -2263,7 +2264,7 @@ async fn unlock_public_share(
         return public_share_error_response(e);
     }
 
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = crate::ws::extract_client_ip_for_peer(&headers, peer_ip);
     let res = tokio::task::spawn_blocking(move || {
         runtime.with_conn_and_root(|conn, base_root, policy| {
             Ok(unlock_public_share_at(

@@ -298,30 +298,167 @@ func GoogleLogin(c *gin.Context) {
 	c.SetCookie("oauth2_state", state, 600, "/", "", secureCookie(), true)
 
 	scopes := []string{"openid", "email", "profile"}
-	authUrl := fmt.Sprintf("https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s&access_type=offline&prompt=consent",
-		clientId, redirectUri, strings.Join(scopes, " "), state)
+	params := url.Values{}
+	params.Set("client_id", clientId)
+	params.Set("redirect_uri", redirectUri)
+	params.Set("response_type", "code")
+	params.Set("scope", strings.Join(scopes, " "))
+	params.Set("state", state)
+	params.Set("access_type", "offline")
+	params.Set("prompt", "consent")
+	authUrl := "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 
 	c.Redirect(http.StatusTemporaryRedirect, authUrl)
 }
 
-const minRevocationTTL = 2 * time.Hour
+const minRevocationTTL = 136 * time.Minute
+
+func revocationTTLForClaims(claims jwt.MapClaims) time.Duration {
+	ttl := minRevocationTTL
+	if expVal, ok := claims["exp"].(float64); ok {
+		if covered := time.Until(time.Unix(int64(expVal), 0)) + 2*time.Hour + time.Minute; covered > ttl {
+			ttl = covered
+		}
+	}
+	return ttl
+}
 
 func clearOAuthStateCookie(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("oauth2_state", "", -1, "/", "", secureCookie(), true)
 }
 
+func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int, totpEnabled bool, authorized bool, err error) {
+	googleId = strings.TrimSpace(googleId)
+	email = strings.TrimSpace(email)
+	if googleId == "" || email == "" {
+		return 0, false, false, nil
+	}
+
+	tx, err := db.DB.Begin()
+	if err != nil {
+		return 0, false, false, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	err = tx.QueryRow(
+		"SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?",
+		googleId,
+	).Scan(&userID, &totpEnabled)
+	if err == nil {
+		if _, updErr := tx.Exec("UPDATE users SET avatar_url = ? WHERE id = ?", avatarUrl, userID); updErr != nil {
+			return 0, false, false, updErr
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, false, false, err
+		}
+		return userID, totpEnabled, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, false, err
+	}
+
+	var matches int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(?)", email).Scan(&matches); err != nil {
+		return 0, false, false, err
+	}
+	if matches > 1 {
+		return 0, false, false, nil
+	}
+	if matches == 1 {
+		var linkedGoogleID string
+		if err := tx.QueryRow(
+			"SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users WHERE LOWER(email) = LOWER(?)",
+			email,
+		).Scan(&userID, &linkedGoogleID, &totpEnabled); err != nil {
+			return 0, false, false, err
+		}
+		if strings.TrimSpace(linkedGoogleID) != "" {
+			return 0, false, false, nil
+		}
+		res, updErr := tx.Exec(
+			"UPDATE users SET google_id = ?, avatar_url = ? WHERE id = ? AND COALESCE(google_id, '') = ''",
+			googleId, avatarUrl, userID,
+		)
+		if updErr != nil {
+			return 0, false, false, updErr
+		}
+		affected, _ := res.RowsAffected()
+		if affected != 1 {
+			return 0, false, false, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, false, false, err
+		}
+		return userID, totpEnabled, true, nil
+	}
+
+	if !isGoogleEmailAllowedForProvision(email) {
+		return 0, false, false, nil
+	}
+
+	rawPrefix := name
+	if i := strings.Index(email, "@"); i != -1 {
+		rawPrefix = email[:i]
+	}
+	prefix := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			return r
+		}
+		return -1
+	}, rawPrefix)
+	if len(prefix) > 48 {
+		prefix = prefix[:48]
+	}
+	if prefix == "" {
+		prefix = "user"
+	}
+	suffixBytes := make([]byte, 4)
+	if _, randErr := io.ReadFull(rand.Reader, suffixBytes); randErr != nil {
+		return 0, false, false, randErr
+	}
+	username := prefix + "-" + hex.EncodeToString(suffixBytes)
+
+	role := "user"
+	if adminEmail := strings.TrimSpace(os.Getenv("ADMIN_EMAIL")); adminEmail != "" && strings.EqualFold(email, adminEmail) {
+		role = "admin"
+	}
+
+	res, err := tx.Exec(
+		"INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?, ?, ?, ?, ?)",
+		username, googleId, email, avatarUrl, role,
+	)
+	if err != nil {
+		return 0, false, false, err
+	}
+	insertedID, err := res.LastInsertId()
+	if err != nil {
+		return 0, false, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, false, err
+	}
+	return int(insertedID), false, true, nil
+}
+
 func isGoogleEmailAllowedForProvision(email string) bool {
 	allowedEmailsRaw := strings.TrimSpace(os.Getenv("AETHERFLOW_GOOGLE_ALLOWED_EMAILS"))
 	allowedDomainsRaw := strings.TrimSpace(os.Getenv("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS"))
 	if allowedEmailsRaw == "" && allowedDomainsRaw == "" {
-		return true
+		return false
 	}
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
 	if normalizedEmail == "" {
 		return false
 	}
+	parts := strings.SplitN(normalizedEmail, "@", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], "@") {
+		return false
+	}
+	domain := parts[1]
 
 	for _, entry := range strings.Split(allowedEmailsRaw, ",") {
 		if candidate := strings.ToLower(strings.TrimSpace(entry)); candidate != "" && candidate == normalizedEmail {
@@ -329,17 +466,39 @@ func isGoogleEmailAllowedForProvision(email string) bool {
 		}
 	}
 
-	if at := strings.LastIndex(normalizedEmail, "@"); at != -1 {
-		domain := normalizedEmail[at+1:]
-		for _, entry := range strings.Split(allowedDomainsRaw, ",") {
-			candidate := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(entry)), "@")
-			if candidate != "" && domain == candidate {
-				return true
-			}
+	for _, entry := range strings.Split(allowedDomainsRaw, ",") {
+		candidate := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(entry)), "@")
+		if candidate != "" && domain == candidate {
+			return true
 		}
 	}
 
 	return false
+}
+
+func isConfiguredTrustedProxyIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); raw != "" {
+		for _, item := range strings.Split(raw, ",") {
+			token := strings.TrimSpace(item)
+			if token == "" {
+				continue
+			}
+			if _, network, err := net.ParseCIDR(token); err == nil {
+				if network.Contains(ip) {
+					return true
+				}
+				continue
+			}
+			if parsed := net.ParseIP(strings.Trim(token, "[]")); parsed != nil && parsed.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 func isTrustedProxyPeer(c *gin.Context) bool {
@@ -357,10 +516,7 @@ func isTrustedProxyPeer(c *gin.Context) bool {
 		host = remoteAddr[1 : len(remoteAddr)-1]
 	}
 	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback() || ip.IsPrivate()
+	return isConfiguredTrustedProxyIP(ip)
 }
 
 func isLoopbackHost(host string) bool {
@@ -477,93 +633,19 @@ func GoogleCallback(c *gin.Context) {
 		return
 	}
 
-	// Lookup or provision user
-	var user models.User
-	var totpEnabled bool
-	err = db.DB.QueryRow(
-		"SELECT id, username, email, avatar_url, role, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?",
-		googleId,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &totpEnabled)
-
-	matchedByEmail := false
-	if err == sql.ErrNoRows {
-		err = db.DB.QueryRow(
-			"SELECT id, username, email, avatar_url, role, COALESCE(totp_enabled, 0) FROM users WHERE LOWER(email) = LOWER(?) AND (google_id IS NULL OR google_id = '')",
-			email,
-		).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &totpEnabled)
-		if err == nil {
-			matchedByEmail = true
-		}
-	}
-
-	if err == sql.ErrNoRows {
-		if !isGoogleEmailAllowedForProvision(email) {
-			c.Redirect(http.StatusTemporaryRedirect, "/login?error=not_authorized")
-			return
-		}
-
-		// Create new user
-		username := name
-		if i := strings.Index(email, "@"); i != -1 {
-			username = email[:i]
-		}
-
-		// Clean username
-		username = strings.Map(func(r rune) rune {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
-				return r
-			}
-			return -1
-		}, username)
-		if username == "" {
-			username = "user"
-		}
-
-		var count int
-		if err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
-			slog.Error("failed to query user count during OAuth", "error", err)
-			c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
-			return
-		}
-
-		role := "user"
-		if count == 0 || (os.Getenv("ADMIN_EMAIL") != "" && strings.EqualFold(email, os.Getenv("ADMIN_EMAIL"))) {
-			role = "admin"
-		}
-
-		res, err := db.DB.Exec("INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?, ?, ?, ?, ?)",
-			username, googleId, email, avatarUrl, role)
-
-		if err != nil {
-			slog.Error("user creation error during OAuth", "error", err)
-			c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
-			return
-		}
-
-		id, _ := res.LastInsertId()
-		user.ID = int(id)
-		user.Username = username
-		user.Email = email
-		user.AvatarURL = avatarUrl
-		user.Role = role
-	} else if err == nil {
-		// Update existing user (and bind google_id when matched by verified email)
-		if matchedByEmail {
-			if _, updErr := db.DB.Exec("UPDATE users SET google_id = ?, email = ?, avatar_url = ? WHERE id = ?", googleId, email, avatarUrl, user.ID); updErr != nil {
-				slog.Error("failed to bind google account during OAuth", "user_id", user.ID, "error", updErr)
-				c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
-				return
-			}
-		} else {
-			_, _ = db.DB.Exec("UPDATE users SET email = ?, avatar_url = ? WHERE google_id = ?", email, avatarUrl, googleId)
-		}
-		user.Email = email
-		user.AvatarURL = avatarUrl
-	} else {
-		slog.Error("database error during OAuth callback", "error", err)
+	// Lookup, link, or provision user transactionally
+	resolvedID, totpEnabled, authorized, resolveErr := resolveGoogleOAuthUser(googleId, email, name, avatarUrl)
+	if resolveErr != nil {
+		slog.Error("database error during OAuth callback", "error", resolveErr)
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
 		return
 	}
+	if !authorized {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=not_authorized")
+		return
+	}
+	var user models.User
+	user.ID = resolvedID
 
 	if totpEnabled {
 		mfaBytes := make([]byte, 32)
@@ -770,16 +852,11 @@ func GetSession(c *gin.Context) {
 // @Success      200  {object}  map[string]interface{}
 // @Router       /auth/logout [post]
 func Logout(c *gin.Context) {
-	// Attempt to revoke the token durably with >= 2h floor covering refresh grace window
+	// Revoke the token durably across the full token lifetime + 2h refresh grace window
 	if _, claims, err := resolveSessionToken(c); err == nil {
 		if jti, ok := claims["jti"].(string); ok && jti != "" {
 			rotatedTokenGrace.Delete(jti)
-			ttl := minRevocationTTL
-			if exp, ok := claims["exp"].(float64); ok {
-				if remaining := time.Until(time.Unix(int64(exp), 0)); remaining > ttl {
-					ttl = remaining
-				}
-			}
+			ttl := revocationTTLForClaims(claims)
 			if err := db.RevokeToken(jti, ttl); err != nil {
 				InternalError(c, "Failed to revoke session")
 				return
@@ -885,7 +962,7 @@ func RefreshSession(c *gin.Context) {
 			Unauthorized(c, "Session has been revoked")
 			return
 		}
-		if err := db.RevokeToken(jti, minRevocationTTL); err != nil {
+		if err := db.RevokeToken(jti, revocationTTLForClaims(claims)); err != nil {
 			InternalError(c, "Failed to revoke rotated session")
 			return
 		}
@@ -1028,10 +1105,44 @@ func UpdateProfile(c *gin.Context) {
 		BadRequest(c, err.Error())
 		return
 	}
+	trimmedEmail := strings.TrimSpace(req.Email)
+	emailParts := strings.SplitN(trimmedEmail, "@", 2)
+	if len(emailParts) != 2 || emailParts[0] == "" || emailParts[1] == "" || strings.Contains(emailParts[1], "@") || strings.ContainsAny(trimmedEmail, " \t\r\n") {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Invalid email address")
+		return
+	}
 
-	_, err := db.DB.Exec("UPDATE users SET email = ? WHERE id = ?", req.Email, userId)
-	if err != nil {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		slog.Error("profile update tx error", "error", txErr)
+		InternalError(c, "Failed to update profile")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var conflictCount int
+	if err := tx.QueryRow(
+		"SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(?) AND id != ?",
+		trimmedEmail, userId,
+	).Scan(&conflictCount); err != nil {
+		slog.Error("profile update email check error", "error", err)
+		InternalError(c, "Failed to update profile")
+		return
+	}
+	if conflictCount > 0 {
+		RespondError(c, http.StatusConflict, ErrCodeConflict, "Email address is already in use")
+		return
+	}
+
+	if _, err := tx.Exec("UPDATE users SET email = ? WHERE id = ?", trimmedEmail, userId); err != nil {
 		slog.Error("profile update error", "error", err)
+		InternalError(c, "Failed to update profile")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Error("profile update commit error", "error", err)
 		InternalError(c, "Failed to update profile")
 		return
 	}

@@ -7,10 +7,74 @@ use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tar::{Archive, EntryType};
+
+const EMBEDDED_VERIFY_PROVENANCE_PY: &str =
+    include_str!("../../../../deploy/verify-provenance.py");
+
+/// Verifies cryptographic Sigstore + SLSA v1 GitHub Actions build provenance for `expected_digest`
+/// using the embedded zero-PyPI stdlib+OpenSSL verifier (`deploy/verify-provenance.py`).
+pub fn verify_release_provenance(
+    github_repo: &str,
+    expected_digest: &str,
+    artifact_name: &str,
+    bundle_file: Option<&Path>,
+) -> ReleaseResult<()> {
+    let mut cmd = Command::new("python3");
+    cmd.args([
+        "-B",
+        "-",
+        "--repo",
+        github_repo,
+        "--digest",
+        expected_digest,
+        "--artifact-name",
+        artifact_name,
+    ]);
+    if let Some(bf) = bundle_file {
+        cmd.arg("--bundle-file").arg(bf);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        ReleaseError::ArtifactVerification(format!(
+            "failed to spawn python3 for Sigstore provenance verification: {}",
+            e
+        ))
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes())
+            .map_err(|e| {
+                ReleaseError::ArtifactVerification(format!(
+                    "failed to feed embedded provenance verifier to python3: {}",
+                    e
+                ))
+            })?;
+    }
+    let out = child.wait_with_output().map_err(|e| {
+        ReleaseError::ArtifactVerification(format!(
+            "waiting on Sigstore provenance verifier failed: {}",
+            e
+        ))
+    })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(ReleaseError::ArtifactVerification(format!(
+            "Sigstore build provenance verification failed for {} (sha256:{}): {}",
+            artifact_name, expected_digest, detail
+        )));
+    }
+    Ok(())
+}
 
 /// Subset of GitHub Releases API response item required for channel tag resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -883,6 +947,21 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
             manifest_content.as_bytes(),
             0o600,
         );
+
+        let verified_digest =
+            verify_artifact_checksum(&archive_dest, &manifest_content, &config.artifact_name)?;
+        if self.download_base_url.is_none()
+            && self.api_base_url.is_none()
+            && tag.starts_with("v4")
+            && std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() != Ok("1")
+        {
+            verify_release_provenance(
+                &config.github_repo,
+                &verified_digest,
+                &config.artifact_name,
+                None,
+            )?;
+        }
 
         Ok((archive_dest, manifest_content))
     }

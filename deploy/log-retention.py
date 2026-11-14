@@ -81,14 +81,14 @@ def _same_entry(directory, name, expected):
         raise UnsafeLogError(f"entry changed during retention: {name}")
 
 
-def _archive_entries(directory, name, group_id):
+def _archive_entries(directory, name, group_id, allowed_owners):
     archive_pattern = re.compile(re.escape(name) + r"\.af-retention\.([1-9][0-9]*|pending)\Z")
     archives = {}
     for entry in os.listdir(directory):
         match = archive_pattern.fullmatch(entry)
         if match is None:
             continue
-        descriptor = _open_file(directory, entry, os.O_RDONLY, {os.geteuid()})
+        descriptor = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
         try:
             _permissions(descriptor, group_id, 0o640)
             archives[entry] = os.fstat(descriptor)
@@ -126,7 +126,7 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
     pending = name + ".af-retention.pending"
     try:
         metadata = os.fstat(descriptor)
-        archives = _archive_entries(directory, name, group_id)
+        archives = _archive_entries(directory, name, group_id, allowed_owners)
         _same_entry(directory, name, metadata)
         _permissions(descriptor, group_id, 0o640)
         if pending in archives:
@@ -137,7 +137,7 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
                 _same_entry(directory, entry, archive)
                 os.unlink(entry, dir_fd=directory)
             elif archive.st_size > max_bytes:
-                source = _open_file(directory, entry, os.O_RDONLY, {os.geteuid()})
+                source = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
                 try:
                     _copy_tail(directory, source, pending, max_bytes, group_id)
                 finally:
@@ -150,7 +150,7 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
         for index in range(keep - 1, 0, -1):
             source = f"{name}.af-retention.{index}"
             try:
-                archive_descriptor = _open_file(directory, source, os.O_RDONLY, {os.geteuid()})
+                archive_descriptor = _open_file(directory, source, os.O_RDONLY, allowed_owners)
             except FileNotFoundError:
                 continue
             try:

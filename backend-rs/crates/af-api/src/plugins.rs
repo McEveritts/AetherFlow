@@ -995,7 +995,7 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
     if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
         if let Some(jtis) = map.remove(plugin_id) {
             for jti in jtis {
-                af_db::revoke_token(
+                let _ = af_db::revoke_token(
                     &jti,
                     Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
                 );
@@ -1194,11 +1194,13 @@ async fn stop_running_process(plugin_id: &str) {
             .await
             .is_ok();
         if !exited {
-            #[cfg(unix)]
-            send_signal_to_process_group(proc_entry.pgid, libc::SIGKILL);
             let _ = proc_entry.child.kill().await;
             let _ = tokio::time::timeout(Duration::from_secs(1), proc_entry.child.wait()).await;
         }
+        // Always sweep any surviving background descendants in the plugin process group,
+        // even when the immediate leader process exited cleanly after SIGTERM.
+        #[cfg(unix)]
+        send_signal_to_process_group(proc_entry.pgid, libc::SIGKILL);
     }
 }
 
@@ -1227,10 +1229,12 @@ async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
             .is_err()
         {
             #[cfg(unix)]
-            send_signal_to_process_group(pgid, libc::SIGKILL);
+            send_signal_to_process_group(pgid, libc::SIGTERM);
             let _ = child.kill().await;
             let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
         }
+        #[cfg(unix)]
+        send_signal_to_process_group(pgid, libc::SIGKILL);
     }
 }
 

@@ -63,6 +63,7 @@ build_release_tarball() {
     mkdir -p "${stage}/deploy/systemd" "${stage}/packages" "${stage}/config" "${stage}/bin" "${out_dir}"
 
     cp -f "${ROOT_DIR}/deploy/release-manager.sh" "${stage}/deploy/release-manager.sh"
+    cp -f "${ROOT_DIR}/deploy/verify-provenance.py" "${stage}/deploy/verify-provenance.py"
     cp -f "${ROOT_DIR}/deploy/release-manager.conf" "${stage}/deploy/release-manager.conf"
     cp -f "${ROOT_DIR}/deploy/systemd/aetherflow-api.service" "${stage}/deploy/systemd/aetherflow-api.service"
     cp -f "${ROOT_DIR}/deploy/systemd/aetherflow-runner.service" "${stage}/deploy/systemd/aetherflow-runner.service"
@@ -97,7 +98,7 @@ EOF
     cp -f "${stage}/af" "${stage}/bin/af"
     printf '%s\n' "${version_tag}" > "${stage}/.version"
 
-    chmod 0755 "${stage}/aetherflow-api" "${stage}/af" "${stage}/bin/af" "${stage}/deploy/release-manager.sh"
+    chmod 0755 "${stage}/aetherflow-api" "${stage}/af" "${stage}/bin/af" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py"
     find "${stage}" -type d -exec chmod 0755 {} +
 
     local archive="${out_dir}/aetherflow-linux-amd64.tar.gz"
@@ -266,7 +267,8 @@ export SMOKE_DB_PATH="${RM_ROOT}/data/aetherflow.sqlite"
 sqlite3 "${SMOKE_DB_PATH}" "PRAGMA journal_mode=WAL; CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT); INSERT INTO users (username) VALUES ('admin_sentinel');"
 
 cp -f "${ROOT_DIR}/deploy/release-manager.sh" "${RM_ROOT}/deploy/release-manager.sh"
-chmod 0755 "${RM_ROOT}/deploy/release-manager.sh"
+cp -f "${ROOT_DIR}/deploy/verify-provenance.py" "${RM_ROOT}/deploy/verify-provenance.py"
+chmod 0755 "${RM_ROOT}/deploy/release-manager.sh" "${RM_ROOT}/deploy/verify-provenance.py"
 
 cat > "${RM_ROOT}/etc/aetherflow.env" <<EOF
 DB_PATH=${SMOKE_DB_PATH}
@@ -401,9 +403,18 @@ EOF
 
 chmod 0755 "${RM_ROOT}/bin/systemctl" "${RM_ROOT}/bin/curl" "${RM_ROOT}/bin/id" "${RM_ROOT}/bin/runuser" "${RM_ROOT}/bin/chown"
 
+# 3a-0. Fail-closed Sigstore provenance check when unattested
+echo "v4.0.0" > "${SMOKE_STATE_DIR}/release_tag"
+echo '{"attestations":[]}' > "${SMOKE_STATE_DIR}/empty_bundle.json"
+UNATTESTED_RC=0
+AETHERFLOW_PROVENANCE_BUNDLE_FILE="${SMOKE_STATE_DIR}/empty_bundle.json" \
+PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null 2>&1 || UNATTESTED_RC=$?
+[[ "${UNATTESTED_RC}" -ne 0 ]] || fail "Deploy unexpectedly accepted an unattested v4.0.0 archive without AETHERFLOW_SKIP_PROVENANCE_VERIFY=1"
+pass "Fail-closed Sigstore provenance check rejected unattested v4.0.0 archive"
+
 # 3a. Initial deploy of v4.0.0
 echo "v4.0.0" > "${SMOKE_STATE_DIR}/release_tag"
-PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
+AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Initial deploy did not activate v4.0.0"
 [[ -x "${RM_ROOT}/current/af" ]] || fail "Initial deploy missing af binary"
 pass "Stage 1-3 initial deploy of v4.0.0 succeeded"
@@ -411,7 +422,7 @@ pass "Stage 1-3 initial deploy of v4.0.0 succeeded"
 # 3b. Atomic upgrade from v4.0.0 -> v4.0.1
 sleep 1
 echo "v4.0.1" > "${SMOKE_STATE_DIR}/release_tag"
-PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
+AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Upgrade did not activate v4.0.1"
 [[ -f "${RM_ROOT}/current/data-snapshot/aetherflow.sqlite.bak" ]] || fail "Upgrade did not capture SQLite online backup"
 [[ -f "${RM_ROOT}/current/data-snapshot/MANIFEST.sha256" ]] || fail "Upgrade did not write MANIFEST.sha256"
@@ -421,7 +432,7 @@ pass "Atomic upgrade v4.0.0 -> v4.0.1 succeeded with verified WAL-safe SQLite sn
 sleep 1
 echo "v4.0.2" > "${SMOKE_STATE_DIR}/release_tag"
 BROKEN_RC=0
-PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null 2>&1 || BROKEN_RC=$?
+AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null 2>&1 || BROKEN_RC=$?
 [[ "${BROKEN_RC}" -eq 2 ]] || fail "Expected exit code 2 on failed health probe rollback, got ${BROKEN_RC}"
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Auto-rollback did not revert symlink to v4.0.1"
 RESTORED_USER="$(sqlite3 "${SMOKE_DB_PATH}" "SELECT username FROM users WHERE username='admin_sentinel';" 2>/dev/null || true)"
@@ -432,7 +443,7 @@ pass "Broken v4.0.2 release triggered automatic Stage 4 symlink rollback to v4.0
 # Point .previous_release to the v4.0.0 release directory and run rollback
 V400_DIR="$(grep -l '^v4\.0\.0$' "${RM_ROOT}/releases/"*/.version | head -n1 | xargs dirname)"
 echo "${V400_DIR}" > "${RM_ROOT}/releases/.previous_release"
-PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" rollback >/dev/null
+AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" rollback >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Manual rollback did not revert to v4.0.0"
 pass "Manual rollback to v4.0.0 verified"
 

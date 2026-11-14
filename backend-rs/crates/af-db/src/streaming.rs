@@ -39,8 +39,21 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
 }
 
 pub fn migrate_history(conn: &Connection, db_path: &str) -> anyhow::Result<()> {
-    let applied: Option<i64> = conn.query_row("SELECT version FROM schema_versions WHERE version = 20", [], |row| row.get(0)).optional()?;
-    if applied.is_some() {
+    let applied: Option<i64> = conn
+        .query_row(
+            "SELECT version FROM schema_versions WHERE version = 20",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let policies_table_exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'streaming_tracking_policies'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if applied.is_some() && policies_table_exists.is_some() {
         return migrate_read_epoch(conn);
     }
     let backup = verified_backup(conn, db_path)?;
@@ -50,7 +63,10 @@ pub fn migrate_history(conn: &Connection, db_path: &str) -> anyhow::Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| -> anyhow::Result<()> {
         conn.execute_batch(include_str!("migrations/020_streaming_history.sql"))?;
-        conn.execute("INSERT INTO schema_versions(version, description) VALUES(20, 'Canonical streaming provenance, query indexes and evidence')", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_versions(version, description) VALUES(20, 'Canonical streaming provenance, query indexes and evidence')",
+            [],
+        )?;
         conn.execute_batch("COMMIT")?;
         Ok(())
     })();

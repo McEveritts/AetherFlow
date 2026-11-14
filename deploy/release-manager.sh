@@ -205,6 +205,8 @@ PY
     fi
 }
 
+ACTIVE_STAGE_DIR=""
+
 finalize_self_update_status_on_exit() {
     local rc="$1"
     [[ -n "${SELF_UPDATE_STATUS_FILE}" ]] || return 0
@@ -216,10 +218,19 @@ finalize_self_update_status_on_exit() {
     fi
 }
 
+cleanup_on_exit() {
+    local rc="$1"
+    if [[ -n "${ACTIVE_STAGE_DIR:-}" && -d "${ACTIVE_STAGE_DIR}" && ! -L "${ACTIVE_STAGE_DIR}" ]]; then
+        rm -rf "${ACTIVE_STAGE_DIR}" 2>/dev/null || true
+    fi
+    ACTIVE_STAGE_DIR=""
+    finalize_self_update_status_on_exit "${rc}"
+}
+
 if [[ -n "${SELF_UPDATE_STATUS_FILE}" ]]; then
     write_self_update_status_receipt "running" "false" "false" "null" "" || exit 1
-    trap 'finalize_self_update_status_on_exit $?' EXIT
 fi
+trap 'cleanup_on_exit $?' EXIT
 
 EFFECTIVE_RELEASE_ROOT=""
 if [[ -n "${CLI_ROOT_OVERRIDE}" && -n "${AETHERFLOW_RELEASE_ROOT:-}" ]]; then
@@ -869,6 +880,17 @@ ensure_fhs_layout() {
         if id -u aetherflow &>/dev/null; then
             chown -R aetherflow:aetherflow "${DATA_DIR}"
             chmod 0700 "${DATA_DIR}"
+            if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+                local host_dir
+                for host_dir in /var/log/aetherflow /run/aetherflow; do
+                    if [[ -L "${host_dir}" ]]; then
+                        log_fatal "Refusing symlinked host directory: ${host_dir}"
+                    fi
+                    mkdir -p "${host_dir}"
+                    chown root:aetherflow "${host_dir}"
+                    chmod 0750 "${host_dir}"
+                done
+            fi
         fi
     fi
 
@@ -1045,7 +1067,7 @@ stage_running_release_manager() {
         return 1
     fi
     mkdir -p "${RELEASE_DIR}/deploy"
-    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" ]]; then
+    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" || -L "${RELEASE_DIR}/deploy/verify-provenance.py" ]]; then
         log_error "Refusing to overwrite symlink inside ${RELEASE_DIR}/deploy."
         return 1
     fi
@@ -1054,6 +1076,11 @@ stage_running_release_manager() {
         cp -f "${SCRIPT_DIR}/release-manager.sh" "${RELEASE_DIR}/deploy/release-manager.sh"
         chmod +x "${RELEASE_DIR}/deploy/release-manager.sh"
         log_info "Staged the executing release-manager.sh into ${RELEASE_DIR}/deploy (published artifacts can predate this fix)."
+    fi
+    if [[ -f "${SCRIPT_DIR}/verify-provenance.py" ]]; then
+        rm -f "${RELEASE_DIR}/deploy/verify-provenance.py"
+        cp -f "${SCRIPT_DIR}/verify-provenance.py" "${RELEASE_DIR}/deploy/verify-provenance.py"
+        chmod +x "${RELEASE_DIR}/deploy/verify-provenance.py"
     fi
     if [[ -f "${CONF_FILE}" ]]; then
         rm -f "${RELEASE_DIR}/deploy/release-manager.conf"
@@ -1090,6 +1117,24 @@ pull_prebuilt_artifact() {
         return 1
     fi
     log_info "SHA-256 OK ${actual_hash}"
+
+    if [[ "${tag}" == v4* && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        log_info "Verifying Sigstore + SLSA v1 GitHub Actions build provenance for ${tag}..."
+        local -a prov_args=(
+            --repo "${GITHUB_REPO}"
+            --digest "${actual_hash}"
+            --artifact-name "${ARTIFACT_NAME}"
+        )
+        if [[ -n "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" ]]; then
+            prov_args+=(--bundle-file "${AETHERFLOW_PROVENANCE_BUNDLE_FILE}")
+        fi
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! python3 -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" >> "${LOG_FILE}" 2>&1; then
+            log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
+            rm -rf "${tmp_dir}"
+            return 1
+        fi
+        log_info "Sigstore build provenance OK for ${tag}"
+    fi
 
     if ! validate_release_tarball "${tmp_dir}/${ARTIFACT_NAME}"; then
         rm -rf "${tmp_dir}"
@@ -1160,8 +1205,11 @@ build_from_source() {
     local source_sha
     source_sha="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
 
-    rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
-        "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
+    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
+        "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
+        log_error "rsync source tree into ${RELEASE_DIR} failed."
+        return 1
+    fi
     if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
         echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version"
     fi
@@ -1170,14 +1218,24 @@ build_from_source() {
     cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing."
     export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${NODE_HEAP_MB}"
     export NEXT_STATIC_EXPORT="1"
-    npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1
-    npm run build >> "${LOG_FILE}" 2>&1
+    if ! npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1; then
+        log_error "Frontend npm ci failed."
+        return 1
+    fi
+    if ! npm run build >> "${LOG_FILE}" 2>&1; then
+        log_error "Frontend static export build failed."
+        return 1
+    fi
 
     log_info "Embedding frontend static bundle into web/dist and backend/web/dist..."
     rm -rf "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
     mkdir -p "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/"
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/"
+    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/" || { log_error "Failed staging web/dist."; return 1; }
+    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/" || { log_error "Failed staging backend/web/dist."; return 1; }
+    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" || ! -f "${RELEASE_DIR}/backend/web/dist/index.html" ]]; then
+        log_error "Frontend static export missing index.html."
+        return 1
+    fi
 
     if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
         log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
@@ -1243,11 +1301,13 @@ release_scaffold() {
     local stage_dir=""
     stage_dir="$(mktemp -d "${RELEASES_DIR}/.staging.${EPOCH}.XXXXXX")" || log_fatal "Failed to create staging directory under ${RELEASES_DIR}"
     chmod 0750 "${stage_dir}"
+    ACTIVE_STAGE_DIR="${stage_dir}"
     RELEASE_DIR="${stage_dir}"
 
     if [[ "${DRY_RUN}" == true && "${OFFLINE}" == true ]]; then
         if ! simulate_offline_artifact; then
             rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
             RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
@@ -1257,6 +1317,7 @@ release_scaffold() {
         if [[ -z "${target_tag}" ]]; then
             log_error "Could not resolve a release tag for channel ${CHANNEL}. Refusing implicit source-build fallback."
             rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
             RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
@@ -1264,14 +1325,17 @@ release_scaffold() {
         if ! pull_prebuilt_artifact "${target_tag}"; then
             log_error "Pre-built artifact pull or verification failed for ${target_tag}. Refusing implicit source-build fallback."
             rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
             RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
         if ! mv -T "${stage_dir}" "${final_release_dir}"; then
             rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
             RELEASE_DIR="${final_release_dir}"
             log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
         fi
+        ACTIVE_STAGE_DIR=""
         RELEASE_DIR="${final_release_dir}"
         log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
         return 0
@@ -1279,6 +1343,7 @@ release_scaffold() {
         if ! build_from_source; then
             log_error "Source build failed. Cleaning up ${stage_dir}."
             rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
             RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
@@ -1286,9 +1351,11 @@ release_scaffold() {
 
     if ! mv -T "${stage_dir}" "${final_release_dir}"; then
         rm -rf "${stage_dir}"
+        ACTIVE_STAGE_DIR=""
         RELEASE_DIR="${final_release_dir}"
         log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
     fi
+    ACTIVE_STAGE_DIR=""
     RELEASE_DIR="${final_release_dir}"
 
     log_info "=== STAGE 1 COMPLETE: Release ${EPOCH} scaffolded ==="
@@ -1516,6 +1583,45 @@ restart_systemd_units() {
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.service"
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.timer"
         fi
+        if [[ -L "${SYSTEMD_UNITS_DST}" ]]; then
+            printf 'Refusing symlinked systemd destination: %s\n' "${SYSTEMD_UNITS_DST}" >&2
+            return 1
+        fi
+        mkdir -p "${SYSTEMD_UNITS_DST}"
+        local dropin_unit dropin_dir dropin_dest tmp_dropin dropin_payload
+        for dropin_unit in aetherflow-runner.service aetherflow-api.service; do
+            dropin_dir="${SYSTEMD_UNITS_DST}/${dropin_unit}.d"
+            dropin_dest="${dropin_dir}/10-aetherflow-hardening.conf"
+            if [[ -L "${dropin_dir}" || -L "${dropin_dest}" ]]; then
+                printf 'Refusing symlinked systemd drop-in path: %s\n' "${dropin_dest}" >&2
+                return 1
+            fi
+            mkdir -p "${dropin_dir}"
+            chmod 0755 "${dropin_dir}"
+            if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
+                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\n'
+            else
+                dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\n'
+            fi
+            tmp_dropin="$(mktemp "${dropin_dir}/.10-aetherflow-hardening.conf.tmp.XXXXXX")" || return 1
+            if ! printf '%s' "${dropin_payload}" > "${tmp_dropin}" || ! chmod 0644 "${tmp_dropin}" || ! mv -f "${tmp_dropin}" "${dropin_dest}"; then
+                rm -f "${tmp_dropin}"
+                return 1
+            fi
+        done
+    fi
+
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]] && id -u aetherflow >/dev/null 2>&1; then
+        local host_dir
+        for host_dir in /var/log/aetherflow /run/aetherflow; do
+            if [[ -L "${host_dir}" ]]; then
+                printf 'Refusing symlinked host directory: %s\n' "${host_dir}" >&2
+                return 1
+            fi
+            mkdir -p "${host_dir}"
+            chown root:aetherflow "${host_dir}"
+            chmod 0750 "${host_dir}"
+        done
     fi
 
     systemctl daemon-reload
@@ -1765,6 +1871,10 @@ rollback() {
 cleanup_old_releases() {
     log_info "=== STAGE 5: Pruning Old Releases (retaining ${MAX_RELEASES}) ==="
 
+    if [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]]; then
+        find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -name '.staging.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+    fi
+
     local current_target=""
     [[ -L "${CURRENT_LINK}" ]] && current_target="$(readlink -f "${CURRENT_LINK}")"
 
@@ -1835,34 +1945,47 @@ try:
             sys.exit(0)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
         stale = []
-        if "owner_id" in columns:
-            for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
-                try:
-                    uuid.UUID(owner)
-                    lease_path = database.with_suffix(".lifecycle-owners") / owner
-                    descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
-                    with os.fdopen(descriptor, "rb") as lease:
+        held_leases = []
+        try:
+            if "owner_id" in columns:
+                for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+                    lease = None
+                    try:
+                        uuid.UUID(owner)
+                        lease_path = database.with_suffix(".lifecycle-owners") / owner
+                        descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
+                        lease = os.fdopen(descriptor, "rb")
                         if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+                            lease.close()
                             continue
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        held_leases.append(lease)
                         stale.append((package, job, owner))
-                except (OSError, ValueError):
-                    continue
-        if stale:
-            rw = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
-            try:
-                now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                for package, job, owner in stale:
-                    rw.execute(
-                        "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
-                        (now, package, job, owner),
-                    )
-                rw.commit()
-                active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
-            finally:
-                rw.close()
-        else:
-            active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                    except (OSError, ValueError):
+                        if lease is not None:
+                            lease.close()
+                        continue
+            if stale:
+                rw = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
+                try:
+                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    for package, job, owner in stale:
+                        rw.execute(
+                            "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                            (now, package, job, owner),
+                        )
+                    rw.commit()
+                    active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                finally:
+                    rw.close()
+            else:
+                active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+        finally:
+            for held in held_leases:
+                try:
+                    held.close()
+                except OSError:
+                    pass
         if active:
             sys.exit("Application lifecycle orchestration is active or its owner is unknown")
     finally:

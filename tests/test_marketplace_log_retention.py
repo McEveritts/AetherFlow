@@ -487,6 +487,98 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
         self.assertIn("Unit=aetherflow-log-retention.service", timer)
         self.assertIn("WantedBy=timers.target", timer)
 
+    def test_release_installs_hardening_dropins_without_mutating_operator_units(self):
+        self.units.mkdir()
+        custom_api = "[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nReadWritePaths=-/opt/AetherFlow/backend/data\n"
+        custom_runner = "[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\n"
+        (self.units / "aetherflow-api.service").write_text(custom_api)
+        (self.units / "aetherflow-runner.service").write_text(custom_runner)
+
+        result = self.restart()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.units / "aetherflow-api.service").read_text(), custom_api)
+        self.assertEqual((self.units / "aetherflow-runner.service").read_text(), custom_runner)
+
+        runner_dropin = (self.units / "aetherflow-runner.service.d/10-aetherflow-hardening.conf").read_text()
+        api_dropin = (self.units / "aetherflow-api.service.d/10-aetherflow-hardening.conf").read_text()
+        self.assertIn("UMask=0077", runner_dropin)
+        self.assertIn("LogsDirectory=aetherflow", runner_dropin)
+        self.assertIn("LogsDirectoryMode=0750", runner_dropin)
+        self.assertIn("UMask=0027", api_dropin)
+        self.assertIn("LogsDirectory=\n", api_dropin)
+
+
+class CommonShLogSymlinkTests(unittest.TestCase):
+    def test_common_sh_log_refuses_symlink_and_hardlink(self):
+        with tempfile.TemporaryDirectory(prefix="af-common-sh-") as tmp:
+            root = Path(tmp)
+            lock_dir = root / "lock"
+            lock_dir.mkdir()
+            env = {
+                **os.environ,
+                "LOCK_DIR": str(lock_dir),
+                "MASTER_USER": "admin",
+                "MASTER_PASS": "unit-test-fixture",
+            }
+            victim = root / "victim.txt"
+            victim.write_text("UNTOUCHED\n")
+            sym_log = root / "install-symlink.log"
+            sym_log.symlink_to(victim)
+
+            res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "should-not-write"',
+                    "--",
+                    str(sym_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+            hard_log = root / "install-hardlink.log"
+            os.link(victim, hard_log)
+            res_hard = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "should-not-write"',
+                    "--",
+                    str(hard_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(res_hard.returncode, 0)
+            self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+            regular_log = root / "install-regular.log"
+            res_ok = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "hello-hardened"',
+                    "--",
+                    str(regular_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
+            self.assertIn("hello-hardened", regular_log.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

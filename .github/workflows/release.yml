@@ -115,7 +115,7 @@ jobs:
         working-directory: .
         run: |
           npm ci --ignore-scripts
-          npm audit --omit=dev --audit-level=high
+          npm audit --workspaces --include-workspace-root --omit=dev --audit-level=high
 
       - name: Install System Build Dependencies
         run: |
@@ -147,7 +147,7 @@ jobs:
       - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cargo-audit, cargo-deny
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
@@ -283,8 +283,9 @@ jobs:
           fi
           cp -R packages "${STAGE_DIR}/packages"
           cp -R deploy "${STAGE_DIR}/deploy"
+          rm -rf "${STAGE_DIR}/deploy/__pycache__"
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh"
+          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py"
 
           mkdir -p release-dist
           tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .

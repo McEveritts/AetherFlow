@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,10 +110,56 @@ func computeKeyID(key *rsa.PrivateKey) string {
 
 // getOIDCIssuer returns the OIDC issuer URL, derived from env or request context.
 func getOIDCIssuer(c *gin.Context) string {
-	if issuer := os.Getenv("OIDC_ISSUER"); issuer != "" {
+	if issuer := strings.TrimRight(strings.TrimSpace(os.Getenv("OIDC_ISSUER")), "/"); issuer != "" {
 		return issuer
 	}
-	return getBaseURL(c)
+	return strings.TrimRight(getBaseURL(c), "/")
+}
+
+func isAcceptedOIDCIssuer(c *gin.Context, tokenIss string) bool {
+	normalized := strings.TrimRight(strings.TrimSpace(tokenIss), "/")
+	if normalized == "" {
+		return false
+	}
+	if cfgIss := strings.TrimRight(strings.TrimSpace(os.Getenv("OIDC_ISSUER")), "/"); cfgIss != "" {
+		return subtle.ConstantTimeCompare([]byte(normalized), []byte(cfgIss)) == 1
+	}
+	if c != nil && normalized == getOIDCIssuer(c) {
+		return true
+	}
+	if pubURL := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/"); pubURL != "" && normalized == pubURL {
+		return true
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return isAllowedHost(parsed.Host)
+	case "http":
+		return isLoopbackHost(parsed.Host) && (strings.TrimSpace(os.Getenv("ALLOWED_HOSTS")) == "" || isAllowedHost(parsed.Host))
+	default:
+		return false
+	}
+}
+
+func validatePKCERequestParams(codeChallenge, codeChallengeMethod string, isPublicClient bool) (string, bool) {
+	challenge := strings.TrimSpace(codeChallenge)
+	method := strings.TrimSpace(codeChallengeMethod)
+	if isPublicClient && challenge == "" {
+		return "PKCE S256 code_challenge is required for public clients", false
+	}
+	if challenge == "" {
+		if method != "" {
+			return "code_challenge is required when code_challenge_method is specified", false
+		}
+		return "", true
+	}
+	if method != "S256" {
+		return "code_challenge_method must be S256", false
+	}
+	return "", true
 }
 
 // ---- OIDC Discovery ----
@@ -131,12 +179,12 @@ func OIDCDiscovery(c *gin.Context) {
 		"response_types_supported": []string{"code"},
 		"subject_types_supported":  []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":     []string{"openid", "profile", "email"},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic", "none"},
 		"claims_supported": []string{
 			"sub", "iss", "aud", "exp", "iat", "name", "email", "picture", "role",
 		},
-		"code_challenge_methods_supported": []string{"S256", "plain"},
+		"code_challenge_methods_supported": []string{"S256"},
 	})
 }
 
@@ -183,8 +231,11 @@ func OIDCAuthorize(c *gin.Context) {
 	}
 
 	// Validate client
-	var storedRedirectURIs string
-	err := db.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE id = ?", clientID).Scan(&storedRedirectURIs)
+	var storedRedirectURIs, storedSecretHash string
+	err := db.DB.QueryRow(
+		"SELECT redirect_uris, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?",
+		clientID,
+	).Scan(&storedRedirectURIs, &storedSecretHash)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client"})
 		return
@@ -196,17 +247,27 @@ func OIDCAuthorize(c *gin.Context) {
 		return
 	}
 
-	// Check session — user must be logged in
-	cookie, err := c.Cookie("aetherflow_session")
+	if errDesc, ok := validatePKCERequestParams(codeChallenge, codeChallengeMethod, strings.TrimSpace(storedSecretHash) == ""); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": errDesc})
+		return
+	}
+
+	// Check session — user must have a non-revoked, fingerprint-matching session and still exist
+	_, claims, err := resolveSessionToken(c)
 	if err != nil {
-		// Redirect to login — URL-encode return_to to prevent open redirect (CWE-601)
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
-
-	userID, err := extractUserIDFromJWT(cookie)
-	if err != nil {
+	userIDFloat, ok := claims["user_id"].(float64)
+	if !ok {
+		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
+		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
+		return
+	}
+	userID := int(userIDFloat)
+	var activeUserID int
+	if err := db.DB.QueryRow("SELECT id FROM users WHERE id = ?", userID).Scan(&activeUserID); err != nil {
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
@@ -277,8 +338,11 @@ func OIDCConsent(c *gin.Context) {
 		return
 	}
 
-	var storedRedirectURIs string
-	err := db.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE id = ?", req.ClientID).Scan(&storedRedirectURIs)
+	var storedRedirectURIs, storedSecretHash string
+	err := db.DB.QueryRow(
+		"SELECT redirect_uris, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?",
+		req.ClientID,
+	).Scan(&storedRedirectURIs, &storedSecretHash)
 	if err != nil || !isSafeRedirectURI(req.RedirectURI) || !isAllowedRedirectURI(req.RedirectURI, storedRedirectURIs) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_or_redirect_uri"})
 		return
@@ -295,6 +359,11 @@ func OIDCConsent(c *gin.Context) {
 			redirectURL += "&state=" + url.QueryEscape(req.State)
 		}
 		c.JSON(http.StatusOK, gin.H{"redirect_uri": redirectURL, "redirect_url": redirectURL})
+		return
+	}
+
+	if errDesc, ok := validatePKCERequestParams(req.CodeChallenge, req.CodeChallengeMethod, strings.TrimSpace(storedSecretHash) == ""); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": errDesc})
 		return
 	}
 
@@ -345,31 +414,42 @@ func OIDCToken(c *gin.Context) {
 
 	// Validate client credentials
 	var storedSecretHash string
-	err := db.DB.QueryRow("SELECT client_secret_hash FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
+	err := db.DB.QueryRow("SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
 
-	secretHash := sha256.Sum256([]byte(clientSecret))
-	if hex.EncodeToString(secretHash[:]) != storedSecretHash {
+	isPublicClient := strings.TrimSpace(storedSecretHash) == ""
+	if !isPublicClient {
+		secretHash := sha256.Sum256([]byte(clientSecret))
+		computed := hex.EncodeToString(secretHash[:])
+		if subtle.ConstantTimeCompare([]byte(computed), []byte(storedSecretHash)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+			return
+		}
+	} else if clientSecret != "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
 
 	switch grantType {
 	case "authorization_code":
-		handleAuthCodeExchange(c, clientID)
+		handleAuthCodeExchange(c, clientID, isPublicClient)
 	case "refresh_token":
 		handleRefreshTokenExchange(c, clientID)
 	case "urn:ietf:params:oauth:grant-type:device_code":
+		if isPublicClient {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+			return
+		}
 		handleDeviceCodeExchange(c, clientID)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_grant_type"})
 	}
 }
 
-func handleAuthCodeExchange(c *gin.Context, clientID string) {
+func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool) {
 	code := c.PostForm("code")
 	redirectURI := c.PostForm("redirect_uri")
 	codeVerifier := c.PostForm("code_verifier")
@@ -424,12 +504,19 @@ func handleAuthCodeExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	// Validate PKCE
+	// Validate PKCE (mandatory for public clients and whenever code_challenge was bound)
+	if isPublicClient && strings.TrimSpace(codeChallenge) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE required for public client"})
+		return
+	}
 	if codeChallenge != "" {
 		if !verifyPKCE(codeVerifier, codeChallenge, codeChallengeMethod) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 			return
 		}
+	} else if codeVerifier != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "unexpected code_verifier"})
+		return
 	}
 
 	// Phase 16: Wrap code-use + token-issue in a transaction to prevent replay attacks.
@@ -643,15 +730,6 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 	}, nil
 }
 
-func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope, nonce string) {
-	payload, err := prepareOIDCTokenPayload(c, db.DB, clientID, userID, scope, nonce)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
-	}
-	c.JSON(http.StatusOK, payload)
-}
-
 // ---- UserInfo ----
 
 // OIDCUserInfo returns standard OIDC claims for the authenticated user.
@@ -688,8 +766,21 @@ func OIDCUserInfo(c *gin.Context) {
 		return
 	}
 
+	tokenIss, _ := claims["iss"].(string)
+	if !isAcceptedOIDCIssuer(c, tokenIss) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "invalid issuer"})
+		return
+	}
+
 	sub, _ := claims["sub"].(string)
 	scope, _ := claims["scope"].(string)
+	if !hasOIDCScope(scope, "openid") {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":             "insufficient_scope",
+			"error_description": "openid scope required",
+		})
+		return
+	}
 	var username, email, avatarURL, role string
 	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", sub).
 		Scan(&username, &email, &avatarURL, &role); err != nil {
@@ -733,16 +824,24 @@ func OIDCRevoke(c *gin.Context) {
 	}
 
 	var storedSecretHash string
-	err := db.DB.QueryRow("SELECT client_secret_hash FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
+	err := db.DB.QueryRow("SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
 
-	secretHash := sha256.Sum256([]byte(clientSecret))
-	if hex.EncodeToString(secretHash[:]) != storedSecretHash {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
-		return
+	if strings.TrimSpace(storedSecretHash) == "" {
+		if clientSecret != "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+			return
+		}
+	} else {
+		secretHash := sha256.Sum256([]byte(clientSecret))
+		computed := hex.EncodeToString(secretHash[:])
+		if subtle.ConstantTimeCompare([]byte(computed), []byte(storedSecretHash)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+			return
+		}
 	}
 
 	token := c.PostForm("token")
@@ -785,14 +884,15 @@ func OIDCIntrospect(c *gin.Context) {
 	}
 
 	var storedSecretHash string
-	err := db.DB.QueryRow("SELECT client_secret_hash FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
-	if err != nil {
+	err := db.DB.QueryRow("SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
+	if err != nil || strings.TrimSpace(storedSecretHash) == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
 
 	secretHash := sha256.Sum256([]byte(clientSecret))
-	if hex.EncodeToString(secretHash[:]) != storedSecretHash {
+	computed := hex.EncodeToString(secretHash[:])
+	if subtle.ConstantTimeCompare([]byte(computed), []byte(storedSecretHash)) != 1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
@@ -808,7 +908,7 @@ func OIDCIntrospect(c *gin.Context) {
 
 	// ── Try access_token (JWT) first, unless hinted otherwise ──
 	if tokenTypeHint != "refresh_token" {
-		if result := introspectAccessToken(tokenStr, clientID); result != nil {
+		if result := introspectAccessToken(c, tokenStr, clientID); result != nil {
 			c.JSON(http.StatusOK, result)
 			return
 		}
@@ -827,7 +927,7 @@ func OIDCIntrospect(c *gin.Context) {
 }
 
 // introspectAccessToken validates a JWT access token and returns its claims.
-func introspectAccessToken(tokenStr, clientID string) gin.H {
+func introspectAccessToken(c *gin.Context, tokenStr, clientID string) gin.H {
 	if oidcPrivateKey == nil {
 		return nil
 	}
@@ -848,6 +948,11 @@ func introspectAccessToken(tokenStr, clientID string) gin.H {
 		return nil
 	}
 
+	iss, _ := claims["iss"].(string)
+	if !isAcceptedOIDCIssuer(c, iss) {
+		return nil
+	}
+
 	// Verify the token was issued for this client
 	aud, _ := claims["aud"].(string)
 	if aud != clientID {
@@ -855,6 +960,14 @@ func introspectAccessToken(tokenStr, clientID string) gin.H {
 	}
 
 	sub, _ := claims["sub"].(string)
+	subID, convErr := strconv.Atoi(sub)
+	if convErr != nil || subID <= 0 {
+		return nil
+	}
+	var exists int
+	if err := db.DB.QueryRow("SELECT 1 FROM users WHERE id = ?", subID).Scan(&exists); err != nil {
+		return nil
+	}
 	scope, _ := claims["scope"].(string)
 	exp, _ := claims["exp"].(float64)
 	iat, _ := claims["iat"].(float64)
@@ -890,9 +1003,14 @@ func introspectRefreshToken(tokenStr, clientID string) gin.H {
 		return gin.H{"active": false}
 	}
 
-	// Check expiration
+	// Check expiration (fail closed on malformed timestamps)
 	expTime, err := time.Parse(time.RFC3339, expiresAt)
-	if err == nil && time.Now().After(expTime) {
+	if err != nil || time.Now().After(expTime) {
+		return gin.H{"active": false}
+	}
+
+	var exists int
+	if err := db.DB.QueryRow("SELECT 1 FROM users WHERE id = ?", userID).Scan(&exists); err != nil {
 		return gin.H{"active": false}
 	}
 
@@ -906,32 +1024,6 @@ func introspectRefreshToken(tokenStr, clientID string) gin.H {
 }
 
 // ---- Helpers ----
-
-// extractUserIDFromJWT parses a JWT and returns the user_id claim.
-func extractUserIDFromJWT(tokenString string) (int, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return getJWTSecret(), nil
-	})
-
-	if err != nil || !token.Valid {
-		return 0, fmt.Errorf("invalid token")
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return 0, fmt.Errorf("invalid claims")
-	}
-
-	userIdFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		return 0, fmt.Errorf("no user_id in claims")
-	}
-
-	return int(userIdFloat), nil
-}
 
 func isSafeRedirectURI(raw string) bool {
 	u, err := url.Parse(raw)
@@ -966,22 +1058,14 @@ func isAllowedRedirectURI(uri, storedURIs string) bool {
 	return false
 }
 
-// verifyPKCE validates the PKCE code_verifier against the stored challenge.
+// verifyPKCE validates the PKCE code_verifier against the stored S256 challenge.
 func verifyPKCE(verifier, challenge, method string) bool {
-	if verifier == "" {
+	if verifier == "" || challenge == "" || method != "S256" {
 		return false
 	}
-
-	switch method {
-	case "S256":
-		hash := sha256.Sum256([]byte(verifier))
-		computed := base64.RawURLEncoding.EncodeToString(hash[:])
-		return computed == challenge
-	case "plain", "":
-		return verifier == challenge
-	default:
-		return false
-	}
+	hash := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(hash[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
 // createStandardJWT creates a JWT with a unique jti, short-lived expiry, and
@@ -1082,14 +1166,11 @@ func generateUserCode() string {
 
 func OIDCDeviceAuthorize(c *gin.Context) {
 	clientID := c.PostForm("client_id")
-	scope := c.PostForm("scope")
-	if scope == "" {
-		scope = "openid profile email"
-	}
+	scope := validateOIDCScopes(c.PostForm("scope"))
 
 	var storedSecretHash string
-	err := db.DB.QueryRow("SELECT client_secret_hash FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
-	if err != nil {
+	err := db.DB.QueryRow("SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
+	if err != nil || strings.TrimSpace(storedSecretHash) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client"})
 		return
 	}
@@ -1161,8 +1242,37 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
-		db.DB.Exec("DELETE FROM oidc_device_codes WHERE device_code = ?", deviceCode)
-		issueOIDCTokens(c, clientID, int(userIDErr.Int64), scope, "")
+		tx, txErr := db.DB.Begin()
+		if txErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		res, delErr := tx.Exec(
+			"DELETE FROM oidc_device_codes WHERE device_code = ? AND client_id = ? AND status = 'approved'",
+			deviceCode, clientID,
+		)
+		if delErr != nil {
+			_ = tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			_ = tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
+			return
+		}
+		payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, int(userIDErr.Int64), validateOIDCScopes(scope), "")
+		if issueErr != nil {
+			_ = tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		c.JSON(http.StatusOK, payload)
 		return
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})

@@ -241,7 +241,66 @@ fn is_valid_host_authority(raw_host: &str) -> bool {
         })
 }
 
-pub fn get_base_url(headers: &HeaderMap) -> String {
+fn is_loopback_authority(authority: &str) -> bool {
+    let trimmed = authority.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let host_only = if let Some(rest) = trimmed.strip_prefix('[') {
+        let Some((v6, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !after.is_empty() && !after.strip_prefix(':').is_some_and(|p| p.parse::<u16>().is_ok()) {
+            return false;
+        }
+        v6
+    } else if let Some((h, port)) = trimmed.rsplit_once(':') {
+        if trimmed.matches(':').count() == 1 && port.parse::<u16>().is_ok() {
+            h
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    host_only.eq_ignore_ascii_case("localhost") || host_only == "127.0.0.1" || host_only == "::1"
+}
+
+fn configured_allowed_hosts() -> Vec<String> {
+    env::var("ALLOWED_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_allowed_forwarded_host(host: &str) -> bool {
+    if !is_valid_host_authority(host) {
+        return false;
+    }
+    let allowed = configured_allowed_hosts();
+    if allowed.is_empty() {
+        return is_loopback_authority(host);
+    }
+    let lower = host.trim().to_ascii_lowercase();
+    allowed.iter().any(|entry| entry == &lower)
+}
+
+fn is_allowed_direct_host(host: &str) -> bool {
+    if !is_valid_host_authority(host) {
+        return false;
+    }
+    let allowed = configured_allowed_hosts();
+    if allowed.is_empty() {
+        return true;
+    }
+    let lower = host.trim().to_ascii_lowercase();
+    allowed.iter().any(|entry| entry == &lower) || is_loopback_authority(host)
+}
+
+pub fn get_base_url_for_peer(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
     if let Ok(public_url) = env::var("PUBLIC_URL") {
         let trimmed = public_url.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
@@ -250,9 +309,32 @@ pub fn get_base_url(headers: &HeaderMap) -> String {
     }
     let trust_forwarded = env::var("TRUST_PROXY_HEADERS")
         .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && peer_ip.is_none_or(crate::ws::is_trusted_proxy_peer);
 
-    let proto = if trust_forwarded {
+    let forwarded_host = if trust_forwarded {
+        headers
+            .get("X-Forwarded-Host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|raw| raw.split(',').next())
+            .map(str::trim)
+            .filter(|h| is_allowed_forwarded_host(h))
+    } else {
+        None
+    };
+
+    let host = forwarded_host
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|h| is_allowed_direct_host(h))
+        })
+        .unwrap_or("localhost:8080");
+
+    let has_forwarded_host = headers.contains_key("X-Forwarded-Host");
+    let proto = if trust_forwarded && (forwarded_host.is_some() || !has_forwarded_host) {
         headers
             .get("X-Forwarded-Proto")
             .and_then(|v| v.to_str().ok())
@@ -272,42 +354,112 @@ pub fn get_base_url(headers: &HeaderMap) -> String {
         "https"
     };
 
-    let host = if trust_forwarded {
-        headers
-            .get("X-Forwarded-Host")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|raw| raw.split(',').next())
-            .map(str::trim)
-            .filter(|h| is_valid_host_authority(h))
-    } else {
-        None
-    }
-    .or_else(|| {
-        headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|h| is_valid_host_authority(h))
-    })
-    .unwrap_or("localhost:8080");
     format!("{}://{}", proto, host)
 }
 
-pub fn get_oidc_issuer(headers: &HeaderMap) -> String {
+pub fn get_base_url(headers: &HeaderMap) -> String {
+    get_base_url_for_peer(headers, None)
+}
+
+pub fn get_oidc_issuer_for_peer(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
     if let Ok(issuer) = env::var("OIDC_ISSUER") {
         if !issuer.trim().is_empty() {
             return issuer.trim().trim_end_matches('/').to_string();
         }
     }
-    get_base_url(headers)
+    get_base_url_for_peer(headers, peer_ip)
+}
+
+pub fn get_oidc_issuer(headers: &HeaderMap) -> String {
+    get_oidc_issuer_for_peer(headers, None)
+}
+
+fn is_accepted_oidc_issuer(
+    token_iss: &str,
+    headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> bool {
+    let normalized = token_iss.trim().trim_end_matches('/');
+    if normalized.is_empty() {
+        return false;
+    }
+    if let Ok(cfg_iss) = env::var("OIDC_ISSUER") {
+        let cfg_trimmed = cfg_iss.trim().trim_end_matches('/');
+        if !cfg_trimmed.is_empty() {
+            return af_services::cluster_daemon::constant_time_eq(
+                normalized.as_bytes(),
+                cfg_trimmed.as_bytes(),
+            );
+        }
+    }
+    if normalized == get_oidc_issuer_for_peer(headers, peer_ip) {
+        return true;
+    }
+    if let Ok(pub_url) = env::var("PUBLIC_URL") {
+        let pub_trimmed = pub_url.trim().trim_end_matches('/');
+        if !pub_trimmed.is_empty() && normalized == pub_trimmed {
+            return true;
+        }
+    }
+    let Ok(parsed) = url::Url::parse(normalized) else {
+        return false;
+    };
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return false;
+    }
+    let Some(host_str) = parsed.host_str() else {
+        return false;
+    };
+    let authority = match parsed.port() {
+        Some(p) => format!("{}:{}", host_str, p),
+        None => host_str.to_string(),
+    };
+    match parsed.scheme() {
+        "https" => is_allowed_forwarded_host(&authority),
+        "http" => {
+            is_loopback_authority(&authority)
+                && (configured_allowed_hosts().is_empty() || is_allowed_forwarded_host(&authority))
+        }
+        _ => false,
+    }
+}
+
+fn validate_pkce_request_params(
+    code_challenge: &str,
+    code_challenge_method: &str,
+    is_public_client: bool,
+) -> Result<(), &'static str> {
+    let challenge = code_challenge.trim();
+    let method = code_challenge_method.trim();
+    if is_public_client && challenge.is_empty() {
+        return Err("PKCE S256 code_challenge is required for public clients");
+    }
+    if challenge.is_empty() {
+        if !method.is_empty() {
+            return Err("code_challenge is required when code_challenge_method is specified");
+        }
+        return Ok(());
+    }
+    if method != "S256" {
+        return Err("code_challenge_method must be S256");
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OIDC Discovery & JWKS
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn oidc_discovery(headers: HeaderMap) -> Response {
-    let issuer = get_oidc_issuer(&headers);
+pub async fn oidc_discovery(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
+    headers: HeaderMap,
+) -> Response {
+    let issuer = get_oidc_issuer_for_peer(&headers, peer_ip);
     Json(serde_json::json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{}/api/v1/public/oidc/authorize", issuer),
@@ -320,9 +472,9 @@ pub async fn oidc_discovery(headers: HeaderMap) -> Response {
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["openid", "profile", "email"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "name", "email", "picture", "role"],
-        "code_challenge_methods_supported": ["S256", "plain"]
+        "code_challenge_methods_supported": ["S256"]
     }))
     .into_response()
 }
@@ -362,10 +514,6 @@ fn is_safe_redirect_uri(uri: &str) -> bool {
     let Ok(parsed) = url::Url::parse(trimmed) else {
         return false;
     };
-    let scheme = parsed.scheme();
-    if scheme != "https" && scheme != "http" {
-        return false;
-    }
     if parsed.host_str().is_none_or(|h| h.is_empty())
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -373,7 +521,17 @@ fn is_safe_redirect_uri(uri: &str) -> bool {
     {
         return false;
     }
-    true
+    match parsed.scheme() {
+        "https" => true,
+        "http" => match parsed.host_str() {
+            Some(h) => {
+                let clean = h.trim_matches(['[', ']']);
+                clean.eq_ignore_ascii_case("localhost") || clean == "127.0.0.1" || clean == "::1"
+            }
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 fn is_allowed_redirect_uri(uri: &str, stored_uris_json: &str) -> bool {
@@ -507,10 +665,10 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
             .into_response();
     };
 
-    let Ok(stored_redirect_uris) = conn.query_row(
-        "SELECT redirect_uris FROM oidc_clients WHERE id = ?1",
+    let Ok((stored_redirect_uris, stored_secret_hash)) = conn.query_row(
+        "SELECT redirect_uris, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
         params![q.client_id],
-        |r| r.get::<_, String>(0),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
     ) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -523,6 +681,21 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid_redirect_uri" })),
+        )
+            .into_response();
+    }
+
+    if let Err(desc) = validate_pkce_request_params(
+        &q.code_challenge,
+        &q.code_challenge_method,
+        stored_secret_hash.trim().is_empty(),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": desc,
+            })),
         )
             .into_response();
     }
@@ -543,16 +716,24 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
     };
 
+    let user_exists = conn
+        .query_row("SELECT 1 FROM users WHERE id = ?1", params![claims.user_id], |_| Ok(()))
+        .is_ok();
     drop(conn);
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
     let user_agent = req
         .headers()
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if af_db::is_token_revoked(&claims.jti)
+    if !user_exists
+        || af_db::is_token_revoked(&claims.jti)
         || !crate::auth::matches_client_fingerprint(
             &claims.cfp,
-            &extract_client_ip(req.headers()),
+            &crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip),
             user_agent,
         )
     {
@@ -712,10 +893,10 @@ fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
             .into_response();
     };
 
-    let Ok(stored_uris) = conn.query_row(
-        "SELECT redirect_uris FROM oidc_clients WHERE id = ?1",
+    let Ok((stored_uris, stored_secret_hash)) = conn.query_row(
+        "SELECT redirect_uris, COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
         params![payload.client_id],
-        |r| r.get::<_, String>(0),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
     ) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -728,6 +909,21 @@ fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid_client_or_redirect_uri" })),
+        )
+            .into_response();
+    }
+
+    if let Err(desc) = validate_pkce_request_params(
+        &payload.code_challenge,
+        &payload.code_challenge_method,
+        stored_secret_hash.trim().is_empty(),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": desc,
+            })),
         )
             .into_response();
     }
@@ -782,40 +978,48 @@ fn extract_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((id.to_string(), secret.to_string()))
 }
 
-fn verify_client_credentials(client_id: &str, client_secret: &str) -> bool {
+fn authenticate_oidc_client(
+    client_id: &str,
+    client_secret: &str,
+    allow_public: bool,
+) -> Result<bool, ()> {
     if client_id.is_empty() {
-        return false;
+        return Err(());
     }
     let Ok(conn) = af_db::get_read_conn() else {
-        return false;
+        return Err(());
     };
     let Ok(stored_hash) = conn.query_row(
-        "SELECT client_secret_hash FROM oidc_clients WHERE id = ?1",
+        "SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
         params![client_id],
         |r| r.get::<_, String>(0),
     ) else {
-        return false;
+        return Err(());
     };
+    if stored_hash.trim().is_empty() {
+        if allow_public && client_secret.is_empty() {
+            return Ok(true);
+        }
+        return Err(());
+    }
     let mut hasher = Sha256::new();
     hasher.update(client_secret.as_bytes());
     let computed = hex::encode(hasher.finalize());
-    af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), stored_hash.as_bytes())
+    if af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), stored_hash.as_bytes()) {
+        Ok(false)
+    } else {
+        Err(())
+    }
 }
 
 fn verify_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
-    if verifier.is_empty() {
+    if verifier.is_empty() || challenge.is_empty() || method != "S256" {
         return false;
     }
-    match method {
-        "S256" => {
-            let mut hasher = Sha256::new();
-            hasher.update(verifier.as_bytes());
-            let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
-            computed == challenge
-        }
-        "plain" | "" => verifier == challenge,
-        _ => false,
-    }
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), challenge.as_bytes())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -847,27 +1051,22 @@ struct AccessTokenClaims {
     scope: String,
 }
 
-fn issue_oidc_tokens(
+#[allow(clippy::result_large_err)]
+fn issue_oidc_tokens_in_tx(
+    conn: &rusqlite::Connection,
     headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
     client_id: &str,
     user_id: i64,
     scope: &str,
     nonce: Option<&str>,
-) -> Response {
+) -> Result<serde_json::Value, Response> {
     let Some(keys) = OIDC_KEYS.as_ref() else {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
-            .into_response();
-    };
-
-    let Ok(conn) = af_db::get_conn() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "server_error" })),
-        )
-            .into_response();
+            .into_response());
     };
 
     let Ok((username, email, avatar_url, role)) = conn.query_row(
@@ -875,14 +1074,14 @@ fn issue_oidc_tokens(
         params![user_id],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
     ) else {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
-            .into_response();
+            .into_response());
     };
 
-    let issuer = get_oidc_issuer(headers);
+    let issuer = get_oidc_issuer_for_peer(headers, peer_ip);
     let now = Utc::now().timestamp();
     let exp = now + 3600;
 
@@ -917,19 +1116,19 @@ fn issue_oidc_tokens(
     };
 
     let Ok(id_token) = encode(&jwt_header, &id_claims, &keys.encoding_key) else {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
-            .into_response();
+            .into_response());
     };
 
     let Ok(access_token) = encode(&jwt_header, &access_claims, &keys.encoding_key) else {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
-            .into_response();
+            .into_response());
     };
 
     let mut refresh_bytes = [0u8; 32];
@@ -937,12 +1136,21 @@ fn issue_oidc_tokens(
     let refresh_token = hex::encode(refresh_bytes);
     let refresh_exp = (Utc::now() + Duration::days(30)).to_rfc3339();
 
-    if conn.execute(
-        "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![refresh_token, client_id, user_id, validated_scope, refresh_exp],
-    ).is_err() { return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to persist OIDC refresh token"); }
+    if conn
+        .execute(
+            "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![refresh_token, client_id, user_id, validated_scope, refresh_exp],
+        )
+        .is_err()
+    {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to persist OIDC refresh token",
+        ));
+    }
 
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": 3600,
@@ -950,7 +1158,6 @@ fn issue_oidc_tokens(
         "id_token": id_token,
         "scope": validated_scope,
     }))
-    .into_response()
 }
 
 fn consume_device_code(
@@ -962,11 +1169,19 @@ fn consume_device_code(
         params![code, client_id, Utc::now().to_rfc3339()], |r| Ok((r.get(0)?, r.get(1)?))).optional()
 }
 
-pub async fn oidc_token(headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> Response {
-    blocking_response(move || oidc_token_blocking(headers, form)).await
+pub async fn oidc_token(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    blocking_response(move || oidc_token_blocking(headers, peer_ip, form)).await
 }
 
-fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
+fn oidc_token_blocking(
+    headers: HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    form: HashMap<String, String>,
+) -> Response {
     let grant_type = form.get("grant_type").cloned().unwrap_or_default();
     let mut client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
@@ -978,13 +1193,13 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
         }
     }
 
-    if !verify_client_credentials(&client_id, &client_secret) {
+    let Ok(is_public_client) = authenticate_oidc_client(&client_id, &client_secret, true) else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_client" })),
         )
             .into_response();
-    }
+    };
 
     match grant_type.as_str() {
         "authorization_code" => {
@@ -1002,7 +1217,7 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
 
             let Ok((stored_client, user_id, stored_redirect, scope, challenge, challenge_method, expires_at, used, nonce)) =
                 conn.query_row(
-                    "SELECT client_id, user_id, redirect_uri, scope, COALESCE(code_challenge, ''), COALESCE(code_challenge_method, ''), expires_at, used, nonce \
+                    "SELECT client_id, user_id, redirect_uri, scope, COALESCE(code_challenge, ''), COALESCE(code_challenge_method, ''), expires_at, used, COALESCE(nonce, '') \
                      FROM oidc_auth_codes WHERE code = ?1",
                     params![code],
                     |r| {
@@ -1067,13 +1282,33 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                     .into_response();
             }
 
-            if !challenge.is_empty() && !verify_pkce(&code_verifier, &challenge, &challenge_method)
-            {
+            if is_public_client && challenge.trim().is_empty() {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": "invalid_grant",
-                        "error_description": "PKCE verification failed"
+                        "error_description": "PKCE required for public client"
+                    })),
+                )
+                    .into_response();
+            }
+            if !challenge.is_empty() {
+                if !verify_pkce(&code_verifier, &challenge, &challenge_method) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_grant",
+                            "error_description": "PKCE verification failed"
+                        })),
+                    )
+                        .into_response();
+                }
+            } else if !code_verifier.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_grant",
+                        "error_description": "unexpected code_verifier"
                     })),
                 )
                     .into_response();
@@ -1092,7 +1327,7 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                     params![code],
                 )
                 .unwrap_or(0);
-            if affected == 0 || tx.commit().is_err() {
+            if affected == 0 {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1103,8 +1338,26 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                     .into_response();
             }
 
-            drop(conn);
-            issue_oidc_tokens(&headers, &client_id, user_id, &scope, Some(&nonce))
+            let payload = match issue_oidc_tokens_in_tx(
+                &tx,
+                &headers,
+                peer_ip,
+                &client_id,
+                user_id,
+                &scope,
+                Some(&nonce),
+            ) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            if tx.commit().is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "server_error" })),
+                )
+                    .into_response();
+            }
+            Json(payload).into_response()
         }
         "refresh_token" => {
             let refresh_token = form.get("refresh_token").cloned().unwrap_or_default();
@@ -1178,7 +1431,7 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                     params![refresh_token],
                 )
                 .unwrap_or(0);
-            if affected == 0 || tx.commit().is_err() {
+            if affected == 0 {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1189,12 +1442,37 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                     .into_response();
             }
 
-            drop(conn);
-            issue_oidc_tokens(&headers, &client_id, user_id, &scope, None)
+            let payload = match issue_oidc_tokens_in_tx(
+                &tx,
+                &headers,
+                peer_ip,
+                &client_id,
+                user_id,
+                &scope,
+                None,
+            ) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            if tx.commit().is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "server_error" })),
+                )
+                    .into_response();
+            }
+            Json(payload).into_response()
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
+            if is_public_client {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "invalid_client" })),
+                )
+                    .into_response();
+            }
             let device_code = form.get("device_code").cloned().unwrap_or_default();
-            let Ok(conn) = af_db::get_conn() else {
+            let Ok(mut conn) = af_db::get_conn() else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": "server_error" })),
@@ -1264,7 +1542,14 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                         )
                             .into_response();
                     };
-                    if !matches!(consume_device_code(&conn, &device_code, &client_id), Ok(Some((consumed_uid, _))) if consumed_uid == uid)
+                    let Ok(tx) = conn.transaction() else {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({ "error": "server_error" })),
+                        )
+                            .into_response();
+                    };
+                    if !matches!(consume_device_code(&tx, &device_code, &client_id), Ok(Some((consumed_uid, _))) if consumed_uid == uid)
                     {
                         return (
                             StatusCode::BAD_REQUEST,
@@ -1272,9 +1557,27 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                         )
                             .into_response();
                     }
-                    drop(conn);
                     let granted_scope = validate_oidc_scopes(&scope);
-                    issue_oidc_tokens(&headers, &client_id, uid, &granted_scope, None)
+                    let payload = match issue_oidc_tokens_in_tx(
+                        &tx,
+                        &headers,
+                        peer_ip,
+                        &client_id,
+                        uid,
+                        &granted_scope,
+                        None,
+                    ) {
+                        Ok(v) => v,
+                        Err(resp) => return resp,
+                    };
+                    if tx.commit().is_err() {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({ "error": "server_error" })),
+                        )
+                            .into_response();
+                    }
+                    Json(payload).into_response()
                 }
                 _ => (
                     StatusCode::BAD_REQUEST,
@@ -1291,11 +1594,14 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
     }
 }
 
-pub async fn oidc_userinfo(headers: HeaderMap) -> Response {
-    blocking_response(move || oidc_userinfo_blocking(headers)).await
+pub async fn oidc_userinfo(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
+    headers: HeaderMap,
+) -> Response {
+    blocking_response(move || oidc_userinfo_blocking(headers, peer_ip)).await
 }
 
-fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
+fn oidc_userinfo_blocking(headers: HeaderMap, peer_ip: Option<std::net::IpAddr>) -> Response {
     let Some(auth) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1321,10 +1627,8 @@ fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
             .into_response();
     };
 
-    let expected_iss = get_oidc_issuer(&headers);
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_aud = false;
-    validation.set_issuer(&[expected_iss.as_str()]);
     let Ok(token_data) =
         decode::<AccessTokenClaims>(token_str.trim(), &keys.decoding_key, &validation)
     else {
@@ -1334,6 +1638,13 @@ fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
         )
             .into_response();
     };
+    if !is_accepted_oidc_issuer(&token_data.claims.iss, &headers, peer_ip) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid_token" })),
+        )
+            .into_response();
+    }
 
     let granted_scopes: HashSet<&str> = token_data.claims.scope.split_whitespace().collect();
     if !granted_scopes.contains("openid") {
@@ -1410,7 +1721,7 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
         )
             .into_response();
     }
-    if !verify_client_credentials(&client_id, &client_secret) {
+    if authenticate_oidc_client(&client_id, &client_secret, true).is_err() {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_client" })),
@@ -1487,13 +1798,18 @@ mod lifecycle_tests {
 }
 
 pub async fn oidc_introspect(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    blocking_response(move || oidc_introspect_blocking(headers, form)).await
+    blocking_response(move || oidc_introspect_blocking(headers, peer_ip, form)).await
 }
 
-fn oidc_introspect_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
+fn oidc_introspect_blocking(
+    headers: HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    form: HashMap<String, String>,
+) -> Response {
     let mut client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
     if client_id.is_empty() {
@@ -1512,7 +1828,7 @@ fn oidc_introspect_blocking(headers: HeaderMap, form: HashMap<String, String>) -
         )
             .into_response();
     }
-    if !verify_client_credentials(&client_id, &client_secret) {
+    if authenticate_oidc_client(&client_id, &client_secret, false).is_err() {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_client" })),
@@ -1543,7 +1859,10 @@ fn oidc_introspect_blocking(headers: HeaderMap, form: HashMap<String, String>) -
                 let subject_exists = af_db::get_read_conn().ok().is_some_and(|connection| {
                     access_token_subject_exists(&connection, &data.claims.sub)
                 });
-                if data.claims.aud == client_id && subject_exists {
+                if data.claims.aud == client_id
+                    && is_accepted_oidc_issuer(&data.claims.iss, &headers, peer_ip)
+                    && subject_exists
+                {
                     return Json(serde_json::json!({
                         "active": true,
                         "sub": data.claims.sub,
@@ -1616,13 +1935,18 @@ fn generate_user_code() -> String {
 }
 
 pub async fn oidc_device_authorize(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    blocking_response(move || oidc_device_authorize_blocking(headers, form)).await
+    blocking_response(move || oidc_device_authorize_blocking(headers, peer_ip, form)).await
 }
 
-fn oidc_device_authorize_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
+fn oidc_device_authorize_blocking(
+    headers: HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    form: HashMap<String, String>,
+) -> Response {
     let client_id = form.get("client_id").cloned().unwrap_or_default();
     let scope = validate_oidc_scopes(form.get("scope").map(String::as_str).unwrap_or(""));
 
@@ -1634,14 +1958,15 @@ fn oidc_device_authorize_blocking(headers: HeaderMap, form: HashMap<String, Stri
             .into_response();
     };
 
-    let client_exists = conn
+    let confidential_client = conn
         .query_row(
-            "SELECT client_secret_hash FROM oidc_clients WHERE id = ?1",
+            "SELECT COALESCE(client_secret_hash, '') FROM oidc_clients WHERE id = ?1",
             params![client_id],
             |r| r.get::<_, String>(0),
         )
-        .is_ok();
-    if !client_exists {
+        .ok()
+        .is_some_and(|h| !h.trim().is_empty());
+    if !confidential_client {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid_client" })),
@@ -1670,7 +1995,7 @@ fn oidc_device_authorize_blocking(headers: HeaderMap, form: HashMap<String, Stri
             .into_response();
     }
 
-    let issuer = get_oidc_issuer(&headers);
+    let issuer = get_oidc_issuer_for_peer(&headers, peer_ip);
     let verification_uri = format!("{}/oauth/device", issuer);
 
     Json(serde_json::json!({
@@ -1914,16 +2239,28 @@ fn create_oidc_client_blocking(
         );
     }
 
-    let mut id_bytes = [0u8; 16];
-    let mut secret_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut id_bytes);
-    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
-    let client_id = hex::encode(id_bytes);
-    let client_secret = hex::encode(secret_bytes);
+    let is_public = body
+        .get("public")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || body
+            .get("token_endpoint_auth_method")
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("none"));
 
-    let mut hasher = Sha256::new();
-    hasher.update(client_secret.as_bytes());
-    let secret_hash_hex = hex::encode(hasher.finalize());
+    let mut id_bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut id_bytes);
+    let client_id = hex::encode(id_bytes);
+    let (client_secret, secret_hash_hex) = if is_public {
+        (String::new(), String::new())
+    } else {
+        let mut secret_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+        let secret = hex::encode(secret_bytes);
+        let mut hasher = Sha256::new();
+        hasher.update(secret.as_bytes());
+        (secret, hex::encode(hasher.finalize()))
+    };
     let uris_json = serde_json::to_string(&redirect_uris).unwrap_or_else(|_| "[]".to_string());
 
     let Ok(conn) = af_db::get_conn() else {
@@ -2781,7 +3118,7 @@ mod hardening_tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        let response = oidc_token(HeaderMap::new(), Form(form.clone())).await;
+        let response = oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(form.clone())).await;
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), 32768)
             .await
@@ -2797,15 +3134,22 @@ mod hardening_tests {
         .unwrap();
         assert_eq!(decoded.claims.nonce.as_deref(), Some("nonce-value&?"));
         assert_eq!(
-            oidc_token(HeaderMap::new(), Form(form)).await.status(),
+            oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(form))
+                .await
+                .status(),
             StatusCode::BAD_REQUEST
         );
     }
 
     #[test]
     fn base_url_ignores_forwarded_headers_unless_trusted() {
+        let prev_public = env::var("PUBLIC_URL").ok();
+        let prev_trust = env::var("TRUST_PROXY_HEADERS").ok();
+        let prev_hosts = env::var("ALLOWED_HOSTS").ok();
         env::remove_var("PUBLIC_URL");
         env::remove_var("TRUST_PROXY_HEADERS");
+        env::set_var("ALLOWED_HOSTS", "panel.example.com,proxy.example.com");
+
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("panel.example.com"));
         headers.insert("X-Forwarded-Proto", HeaderValue::from_static("http"));
@@ -2815,12 +3159,44 @@ mod hardening_tests {
         );
         assert_eq!(get_base_url(&headers), "https://panel.example.com");
 
-        let previous = env::var("TRUST_PROXY_HEADERS").ok();
         env::set_var("TRUST_PROXY_HEADERS", "true");
-        assert_eq!(get_base_url(&headers), "http://evil.attacker.test");
-        match previous {
+        // Untrusted public peer IP or unallowed X-Forwarded-Host must never spoof base_url.
+        let public_peer: std::net::IpAddr = "203.0.113.10".parse().unwrap();
+        let loopback_peer: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            get_base_url_for_peer(&headers, Some(public_peer)),
+            "https://panel.example.com"
+        );
+        assert_eq!(
+            get_base_url_for_peer(&headers, Some(loopback_peer)),
+            "https://panel.example.com"
+        );
+
+        headers.insert(
+            "X-Forwarded-Host",
+            HeaderValue::from_static("proxy.example.com"),
+        );
+        headers.insert("X-Forwarded-Proto", HeaderValue::from_static("https"));
+        assert_eq!(
+            get_base_url_for_peer(&headers, Some(public_peer)),
+            "https://panel.example.com"
+        );
+        assert_eq!(
+            get_base_url_for_peer(&headers, Some(loopback_peer)),
+            "https://proxy.example.com"
+        );
+
+        match prev_public {
+            Some(v) => env::set_var("PUBLIC_URL", v),
+            None => env::remove_var("PUBLIC_URL"),
+        }
+        match prev_trust {
             Some(v) => env::set_var("TRUST_PROXY_HEADERS", v),
             None => env::remove_var("TRUST_PROXY_HEADERS"),
+        }
+        match prev_hosts {
+            Some(v) => env::set_var("ALLOWED_HOSTS", v),
+            None => env::remove_var("ALLOWED_HOSTS"),
         }
     }
 
@@ -2830,6 +3206,7 @@ mod hardening_tests {
         assert!(is_safe_redirect_uri("http://127.0.0.1:8080/cb"));
         assert!(is_safe_redirect_uri("http://localhost:3000/cb"));
         for bad in [
+            "http://app.example.com/cb",
             "javascript:alert(1)",
             "data:text/html,<script>alert(1)</script>",
             "ftp://files.example.com/cb",
@@ -2839,6 +3216,20 @@ mod hardening_tests {
         ] {
             assert!(!is_safe_redirect_uri(bad), "expected reject for {bad}");
         }
+    }
+
+    #[test]
+    fn pkce_rejects_plain_and_requires_s256_for_public_clients() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        assert!(verify_pkce(verifier, &challenge, "S256"));
+        assert!(!verify_pkce(verifier, verifier, "plain"));
+        assert!(!verify_pkce(verifier, verifier, ""));
+        assert!(!verify_pkce(verifier, &challenge, "plain"));
+        assert!(validate_pkce_request_params("", "", true).is_err());
+        assert!(validate_pkce_request_params(&challenge, "plain", false).is_err());
+        assert!(validate_pkce_request_params(&challenge, "", false).is_err());
+        assert!(validate_pkce_request_params(&challenge, "S256", true).is_ok());
     }
 
     #[test]

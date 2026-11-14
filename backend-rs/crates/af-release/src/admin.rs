@@ -227,8 +227,7 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
 
     if let Some(parent) = shared_lock_path.parent() {
         if !parent.as_os_str().is_empty() {
-            let parent_mode = if is_runtime_anchor { 0o1770 } else { 0o750 };
-            crate::fs_security::create_dir_all_no_symlinks(parent, parent_mode)?;
+            crate::fs_security::create_dir_all_no_symlinks(parent, 0o750)?;
         }
     }
 
@@ -305,7 +304,7 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
                         if let Some((_, target_gid)) = target_owner {
                             let _ = unsafe { libc::fchown(pfd, 0, target_gid) };
                         }
-                        let _ = unsafe { libc::fchmod(pfd, 0o1770) };
+                        let _ = unsafe { libc::fchmod(pfd, 0o750) };
                     }
                 }
             }

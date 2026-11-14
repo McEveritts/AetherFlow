@@ -481,3 +481,30 @@ pub fn apply_data_dir_ownership_and_mode(data_dir: &Path) -> ReleaseResult<()> {
     }
     Ok(())
 }
+
+/// Ensures `dir` exists without symlinks, has mode `0750`, and when running as `root`
+/// (`euid == 0`) with an `aetherflow` account present, owns `dir` as `root:aetherflow`.
+pub fn apply_root_aetherflow_dir_ownership_and_mode(dir: &Path) -> ReleaseResult<()> {
+    create_dir_all_no_symlinks(dir, 0o750)?;
+    set_dir_mode(dir, 0o750)?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        if unsafe { libc::geteuid() } == 0 {
+            if let Some((_, gid)) = lookup_aetherflow_ugid() {
+                if let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) {
+                    let rc = unsafe { libc::lchown(c_path.as_ptr(), 0, gid) };
+                    if rc != 0 {
+                        let err = std::io::Error::last_os_error();
+                        return Err(ReleaseError::io(
+                            format!("chown root:aetherflow on {}", dir.display()),
+                            err,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

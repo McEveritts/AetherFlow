@@ -279,7 +279,7 @@ _stage_prebuilt_release_archive() {
     fi
 
     if [[ -f "${af_root}/deploy/release-manager.sh" ]]; then
-        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" ]]; then
+        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" || -L "${release_dir}/deploy/verify-provenance.py" ]]; then
             echo "[ERROR] Refusing to stage release-manager into symlinked deploy path." >&2
             rm -rf "${release_dir}"
             return 1
@@ -288,6 +288,11 @@ _stage_prebuilt_release_archive() {
         rm -f "${release_dir}/deploy/release-manager.sh"
         cp -f "${af_root}/deploy/release-manager.sh" "${release_dir}/deploy/release-manager.sh"
         chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        if [[ -f "${af_root}/deploy/verify-provenance.py" ]]; then
+            rm -f "${release_dir}/deploy/verify-provenance.py"
+            cp -f "${af_root}/deploy/verify-provenance.py" "${release_dir}/deploy/verify-provenance.py"
+            chmod 0755 "${release_dir}/deploy/verify-provenance.py"
+        fi
         if [[ -f "${af_root}/deploy/release-manager.conf" ]]; then
             rm -f "${release_dir}/deploy/release-manager.conf"
             cp -f "${af_root}/deploy/release-manager.conf" "${release_dir}/deploy/release-manager.conf"
@@ -424,6 +429,16 @@ except Exception:
         echo "[ERROR] Failed to download SHA-256 manifest ${base_url}/${checksum_name}. Refusing unverified binary." >&2
         rm -rf "${dl_dir}"
         return 1
+    fi
+
+    if [[ -z "${AETHERFLOW_RELEASE_BASE_URL:-}" && "${AF_OFFLINE:-0}" != "1" && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        local dl_sha=""
+        dl_sha="$(sha256sum "${dl_dir}/${artifact_name}" | awk '{print tolower($1)}')"
+        if [[ ! -f "${af_root}/deploy/verify-provenance.py" ]] || ! python3 -B "${af_root}/deploy/verify-provenance.py" --repo "${github_repo}" --digest "${dl_sha}" --artifact-name "${artifact_name}"; then
+            echo "[ERROR] Sigstore provenance verification failed for ${target_tag} (${artifact_name}). Refusing unverified binary." >&2
+            rm -rf "${dl_dir}"
+            return 1
+        fi
     fi
 
     if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}"; then
@@ -616,12 +631,12 @@ _build_modern_stack() {
         rm -f /etc/sudoers.d/aether* 2>/dev/null || true
     fi
 
-    # Ensure FHS data dir and legacy backend data dir exist
-    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" 2>/dev/null || true
+    # Ensure FHS data dir, log dir, and legacy backend data dir exist
+    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" /var/log/aetherflow 2>/dev/null || true
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
         chown -R aetherflow:aetherflow "${data_dir}" "${af_root}/backend/data" 2>/dev/null || true
-        chown root:aetherflow "${run_dir}" 2>/dev/null || true
-        chmod 1770 "${run_dir}" 2>/dev/null || true
+        chown root:aetherflow "${run_dir}" /var/log/aetherflow 2>/dev/null || true
+        chmod 0750 "${run_dir}" /var/log/aetherflow 2>/dev/null || true
     fi
     chmod 0700 "${data_dir}" 2>/dev/null || true
 

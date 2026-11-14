@@ -268,8 +268,26 @@ chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 KASMVNC_DISPLAY=""
 if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
     EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
-    if [[ -n "$EXISTING_DISPLAY" && ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
-        KASMVNC_DISPLAY="$EXISTING_DISPLAY"
+    if [[ -n "$EXISTING_DISPLAY" ]]; then
+        systemctl stop af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
+        python3 - "$EXISTING_DISPLAY" <<'PYEOF' >> "$LOGFILE" 2>&1 || true
+import os, pwd, stat, sys
+disp = sys.argv[1]
+try:
+    uid = pwd.getpwnam("af-kasmvnc").pw_uid
+except KeyError:
+    raise SystemExit(0)
+for path in (f"/tmp/.X{disp}-lock", f"/tmp/.X11-unix/X{disp}"):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
+        os.unlink(path)
+PYEOF
+        if [[ ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
+            KASMVNC_DISPLAY="$EXISTING_DISPLAY"
+        fi
     fi
 fi
 if [[ -z "$KASMVNC_DISPLAY" ]]; then

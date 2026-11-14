@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -263,7 +264,16 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 					peerIP = ip.String()
 				}
 				parsedPeer := net.ParseIP(peerIP)
-				trustForwarded := parsedPeer != nil && parsedPeer.IsLoopback()
+				trustForwarded := false
+				if parsedPeer != nil {
+					if strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) != "" {
+						trustForwarded = isConfiguredTrustedProxyIP(parsedPeer)
+					} else if strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "false") {
+						trustForwarded = false
+					} else {
+						trustForwarded = parsedPeer.IsLoopback() || (strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "true") && (parsedPeer.IsPrivate() || parsedPeer.IsLinkLocalUnicast()))
+					}
+				}
 				if !trustForwarded {
 					for _, hdr := range []string{
 						"Forwarded",

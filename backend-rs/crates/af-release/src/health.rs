@@ -89,6 +89,25 @@ pub fn install_packaged_unit_if_missing(
     Ok(true)
 }
 
+const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\n";
+const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\n";
+
+/// Atomically installs vendor-managed systemd hardening drop-ins without modifying
+/// existing base `.service` files (preserving custom operator `ReadWritePaths`/`BindPaths`).
+pub fn install_systemd_hardening_dropins(systemd_units_dst: &Path) -> ReleaseResult<()> {
+    crate::fs_security::create_dir_all_no_symlinks(systemd_units_dst, 0o755)?;
+    for (dropin_dir_name, content) in [
+        ("aetherflow-runner.service.d", RUNNER_HARDENING_DROPIN),
+        ("aetherflow-api.service.d", API_HARDENING_DROPIN),
+    ] {
+        let dropin_dir = systemd_units_dst.join(dropin_dir_name);
+        crate::fs_security::create_dir_all_no_symlinks(&dropin_dir, 0o755)?;
+        let conf_path = dropin_dir.join("10-aetherflow-hardening.conf");
+        crate::fs_security::atomic_write_bytes_with_mode(&conf_path, content, 0o644)?;
+    }
+    Ok(())
+}
+
 /// Verifies that live systemd or PM2 lifecycle mutations are explicitly authorized
 /// when running under an isolated release root (`--root` / `AETHERFLOW_RELEASE_ROOT`).
 pub fn verify_isolated_systemd_lifecycle_authorized(config: &ReleaseConfig) -> ReleaseResult<()> {
@@ -364,6 +383,10 @@ impl LifecycleController for SystemdLifecycleController {
     fn restart_systemd_units(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
         verify_isolated_systemd_lifecycle_authorized(config)?;
         let packaged_systemd_dir = packaged_systemd_directory(config)?;
+        let has_log_retention = packaged_systemd_dir
+            .parent()
+            .map(|deploy_dir| deploy_dir.join("log-retention.py").is_file())
+            .unwrap_or(false);
         if packaged_systemd_dir.is_dir() {
             let _ = install_packaged_unit_if_missing(
                 &packaged_systemd_dir.join("aetherflow-runner.service"),
@@ -373,9 +396,34 @@ impl LifecycleController for SystemdLifecycleController {
                 &packaged_systemd_dir.join("aetherflow-api.service"),
                 &config.systemd_units_dst,
             )?;
+            if has_log_retention {
+                let _ = install_packaged_unit_if_missing(
+                    &packaged_systemd_dir.join("aetherflow-log-retention.service"),
+                    &config.systemd_units_dst,
+                )?;
+                let _ = install_packaged_unit_if_missing(
+                    &packaged_systemd_dir.join("aetherflow-log-retention.timer"),
+                    &config.systemd_units_dst,
+                )?;
+            }
+            install_systemd_hardening_dropins(&config.systemd_units_dst)?;
+        }
+
+        if config.isolated_root.is_none() {
+            crate::fs_security::apply_root_aetherflow_dir_ownership_and_mode(Path::new(
+                "/var/log/aetherflow",
+            ))?;
+            crate::fs_security::apply_root_aetherflow_dir_ownership_and_mode(Path::new(
+                "/run/aetherflow",
+            ))?;
         }
 
         run_systemctl(&["daemon-reload"], true)?;
+
+        if has_log_retention {
+            run_systemctl(&["start", "aetherflow-log-retention.service"], true)?;
+            run_systemctl(&["enable", "--now", "aetherflow-log-retention.timer"], true)?;
+        }
 
         let _ = run_systemctl(&["stop", "aetherflow-frontend.service"], false);
         let _ = run_systemctl(&["disable", "aetherflow-frontend.service"], false);
@@ -567,6 +615,10 @@ impl LifecycleController for NoopLifecycleController {
 
     fn restart_systemd_units(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
         let packaged_systemd_dir = packaged_systemd_directory(config)?;
+        let has_log_retention = packaged_systemd_dir
+            .parent()
+            .map(|deploy_dir| deploy_dir.join("log-retention.py").is_file())
+            .unwrap_or(false);
         if packaged_systemd_dir.is_dir() {
             let _ = install_packaged_unit_if_missing(
                 &packaged_systemd_dir.join("aetherflow-runner.service"),
@@ -576,6 +628,17 @@ impl LifecycleController for NoopLifecycleController {
                 &packaged_systemd_dir.join("aetherflow-api.service"),
                 &config.systemd_units_dst,
             )?;
+            if has_log_retention {
+                let _ = install_packaged_unit_if_missing(
+                    &packaged_systemd_dir.join("aetherflow-log-retention.service"),
+                    &config.systemd_units_dst,
+                )?;
+                let _ = install_packaged_unit_if_missing(
+                    &packaged_systemd_dir.join("aetherflow-log-retention.timer"),
+                    &config.systemd_units_dst,
+                )?;
+            }
+            install_systemd_hardening_dropins(&config.systemd_units_dst)?;
         }
         Ok(())
     }

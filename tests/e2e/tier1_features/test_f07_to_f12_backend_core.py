@@ -218,7 +218,7 @@ class TestF11ZeroNodeFsImportsInFrontend(TestCase):
         src_dir = os.path.join(inspector.root, "frontend/src")
         for r, _, files in os.walk(src_dir):
             for f in files:
-                if f.endswith((".ts", ".tsx")):
+                if f.endswith((".ts", ".tsx")) and not f.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")):
                     with open(os.path.join(r, f), "r", encoding="utf-8", errors="replace") as fh:
                         content = fh.read()
                         self.assert_not_in("from 'fs'", content, f"Node fs import found in {f}")

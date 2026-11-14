@@ -39,7 +39,7 @@ pub use artifact::{
     parse_stable_tag_from_redirect_url, prepare_release_permissions,
     resolve_stable_tag_from_latest_redirect, select_release_tag_from_json,
     simulate_offline_artifact, stage_running_release_manager, verify_artifact_checksum,
-    ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
+    verify_release_provenance, ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
 };
 pub use config::{
     decode_quoted_or_raw_conf_value, escape_conf_value, parse_conf_file, parse_conf_str,
@@ -53,14 +53,15 @@ pub use engine::{
 };
 pub use error::{ExitCode, ReleaseError, ReleaseResult};
 pub use fs_security::{
-    apply_data_dir_ownership_and_mode, apply_service_ownership, atomic_copy_file_with_mode,
-    atomic_write_bytes_with_mode, create_dir_all_no_symlinks, create_new_dir_exclusive,
-    ensure_no_symlink_ancestors, ensure_no_symlink_in_relative_chain, open_exclusive_private_file,
-    set_dir_mode, set_file_mode, OwnershipMetadata,
+    apply_data_dir_ownership_and_mode, apply_root_aetherflow_dir_ownership_and_mode,
+    apply_service_ownership, atomic_copy_file_with_mode, atomic_write_bytes_with_mode,
+    create_dir_all_no_symlinks, create_new_dir_exclusive, ensure_no_symlink_ancestors,
+    ensure_no_symlink_in_relative_chain, open_exclusive_private_file, set_dir_mode, set_file_mode,
+    OwnershipMetadata,
 };
 pub use health::{
-    install_packaged_unit_if_missing, is_healthy_status, parse_endpoint_socket_addr,
-    parse_health_status, poll_readiness_probe, sync_cli_entrypoints,
+    install_packaged_unit_if_missing, install_systemd_hardening_dropins, is_healthy_status,
+    parse_endpoint_socket_addr, parse_health_status, poll_readiness_probe, sync_cli_entrypoints,
     verify_isolated_systemd_lifecycle_authorized, wait_for_listener_stopped, HealthCheckAttempt,
     HealthProber, LifecycleController, NoopLifecycleController, ReqwestHealthProber,
     SystemdLifecycleController,

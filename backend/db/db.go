@@ -686,20 +686,39 @@ func InitDB() {
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);")
 
-	// v20: Durable token revocation table and OIDC auth code nonce
-	var nonceColumnCount int
+	// Clean up legacy colliding v20 stamp if Go previously recorded revocation under version 20
+	// without applying Rust's canonical 020_streaming_history.sql tables.
+	var streamingPoliciesExists int
+	_ = DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'streaming_tracking_policies'").Scan(&streamingPoliciesExists)
+	if streamingPoliciesExists == 0 {
+		_, _ = DB.Exec("DELETE FROM schema_versions WHERE version = 20 AND description = 'Durable token revocation table and OIDC auth code nonce'")
+	}
+
+	// v22: Align with Rust schema_versions v22 (MFA replay guards, OIDC nonces, durable token revocation)
+	var totpStepColumnCount, nonceColumnCount int
+	_ = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'last_totp_step'").Scan(&totpStepColumnCount)
 	_ = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('oidc_auth_codes') WHERE name = 'nonce'").Scan(&nonceColumnCount)
-	m20Stmts := []string{
+	m22Stmts := []string{
+		`CREATE TABLE IF NOT EXISTS mfa_challenges (
+			token TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			expires_at INTEGER NOT NULL
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expiry ON mfa_challenges(expires_at);",
 		`CREATE TABLE IF NOT EXISTS revoked_tokens (
 			jti TEXT PRIMARY KEY,
-			expires_at DATETIME NOT NULL
+			expires_at TEXT NOT NULL
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);",
 	}
-	if nonceColumnCount == 0 {
-		m20Stmts = append(m20Stmts, "ALTER TABLE oidc_auth_codes ADD COLUMN nonce TEXT DEFAULT '';")
+	if totpStepColumnCount == 0 {
+		m22Stmts = append(m22Stmts, "ALTER TABLE users ADD COLUMN last_totp_step INTEGER NOT NULL DEFAULT -1;")
 	}
-	migrate(20, "Durable token revocation table and OIDC auth code nonce", m20Stmts...)
+	if nonceColumnCount == 0 {
+		m22Stmts = append(m22Stmts, "ALTER TABLE oidc_auth_codes ADD COLUMN nonce TEXT NOT NULL DEFAULT '';")
+	}
+	migrate(22, "Persist MFA replay guards and OIDC nonces", m22Stmts...)
 
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
@@ -767,7 +786,7 @@ func PruneExpiredData() {
 		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ? OR used = 1"},
 		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
 		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ? OR revoked = 1"},
-		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at < datetime('now')"},
+		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')"},
 		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
 		// Keep 90 days of metrics history
 		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},

@@ -272,6 +272,19 @@ pub fn cleanup_old_releases(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(".staging.") {
+            let is_stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
+                .map(|age| age >= std::time::Duration::from_secs(120 * 60))
+                .unwrap_or(false);
+            if is_stale {
+                let _ = fs::remove_dir_all(&path);
+            }
+            continue;
+        }
         if name.starts_with('.') {
             continue;
         }

@@ -76,8 +76,35 @@ struct RotatedTokenGraceEntry {
 static ROTATED_TOKEN_GRACE: Lazy<Mutex<HashMap<String, RotatedTokenGraceEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static ROTATED_SESSION_SUCCESSOR: Lazy<Mutex<HashMap<String, (String, Instant)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 const SESSION_COOKIE_MAX_AGE: i64 = 86400;
 const SESSION_ABSOLUTE_LIFETIME: i64 = 30 * 86400;
+const MIN_REVOCATION_TTL: Duration = Duration::from_secs(8160);
+
+pub(crate) fn resolve_current_session_jti(jti: &str) -> String {
+    if jti.is_empty() {
+        return String::new();
+    }
+    let Ok(mut map) = ROTATED_SESSION_SUCCESSOR.lock() else {
+        return jti.to_string();
+    };
+    let now = Instant::now();
+    if map.len() > 4096 {
+        map.retain(|_, (_, exp)| *exp > now);
+    }
+    let mut current = jti.to_string();
+    for _ in 0..32 {
+        match map.get(&current) {
+            Some((next, exp)) if *exp > now && next != &current => {
+                current = next.clone();
+            }
+            _ => break,
+        }
+    }
+    current
+}
 
 static AUTH_BLOCKING_LIMIT: Lazy<tokio::sync::Semaphore> =
     Lazy::new(|| tokio::sync::Semaphore::new(16));
@@ -1017,8 +1044,17 @@ pub async fn logout(req: Request) -> Response {
 
 fn logout_blocking(req: Request) -> Response {
     if let Some(auth_user) = req.extensions().get::<AuthUser>() {
-        // Keep revocation entry across the entire 15m JWT lifetime + 2h refresh grace window (8100s)
-        af_db::revoke_token(&auth_user.jti, Duration::from_secs(8100));
+        // Keep revocation entry across the entire 15m JWT lifetime + 2h refresh grace window + skew (8160s)
+        if af_db::revoke_token(&auth_user.jti, MIN_REVOCATION_TTL).is_err() {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke session",
+            );
+        }
+        if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+            succ.remove(&auth_user.jti);
+        }
         if let Ok(conn) = af_db::get_conn() {
             let _ = conn.execute(
                 "DELETE FROM active_sessions WHERE jti = ?1",
@@ -1196,6 +1232,31 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     };
 
+    if af_db::revoke_token(&claims.jti, MIN_REVOCATION_TTL).is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to revoke rotated session",
+        );
+    }
+
+    if let Ok(conn) = af_db::get_conn() {
+        let _ = conn.execute(
+            "DELETE FROM active_sessions WHERE jti = ?1",
+            params![claims.jti],
+        );
+    }
+
+    if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+        succ.insert(
+            claims.jti.clone(),
+            (
+                new_claims.jti.clone(),
+                Instant::now() + Duration::from_secs(86400),
+            ),
+        );
+    }
+
     if let Ok(mut grace) = ROTATED_TOKEN_GRACE.lock() {
         grace.insert(
             claims.jti.clone(),
@@ -1206,8 +1267,6 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
             },
         );
     }
-
-    af_db::revoke_token(&claims.jti, Duration::from_secs(900));
 
     let cookie = build_set_cookie(
         "aetherflow_session",
@@ -1280,7 +1339,7 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
             .into_response();
     };
     let Ok(username) = conn.query_row(
-        "SELECT username FROM users WHERE id = ?1",
+        "SELECT username FROM users WHERE id = ?1 AND username NOT LIKE 'plugin:%'",
         params![claims.user_id],
         |r| r.get::<_, String>(0),
     ) else {
@@ -1290,6 +1349,20 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         )
             .into_response();
     };
+    if let Ok(status) = conn.query_row(
+        "SELECT COALESCE(status, '') FROM user_quotas WHERE user_id = ?1",
+        params![claims.user_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        let trimmed = status.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("active") {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Account is not active" })),
+            )
+                .into_response();
+        }
+    }
 
     let mut resp = StatusCode::OK.into_response();
     if let Ok(hv) = HeaderValue::from_str(&username) {
@@ -1399,10 +1472,25 @@ fn revoke_session_blocking(jti_param: String, req: Request) -> Response {
     };
 
     drop(conn);
+    if af_db::revoke_token(&full_jti, MIN_REVOCATION_TTL).is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to revoke session",
+        );
+    }
+    if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+        succ.remove(&full_jti);
+    }
     if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
         map.remove(&full_jti);
     }
-    af_db::revoke_token(&full_jti, Duration::from_secs(900));
+    if let Ok(conn) = af_db::get_conn() {
+        let _ = conn.execute(
+            "DELETE FROM active_sessions WHERE jti = ?1",
+            params![full_jti],
+        );
+    }
     Json(serde_json::json!({ "message": "Session revoked" })).into_response()
 }
 
@@ -2385,6 +2473,19 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_auth_rejects_revocation_and_fingerprint_mismatch() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO users (id, username, password_hash, role) VALUES (1, 'proxy-test-user', 'hash', 'user')",
+                [],
+            )
+            .unwrap();
+        }
         for revoked in [false, true] {
             let now = Utc::now().timestamp();
             let claims = SessionClaims {
@@ -2419,7 +2520,7 @@ mod tests {
                 }),
             );
             if revoked {
-                af_db::revoke_token(&claims.jti, Duration::from_secs(900));
+                af_db::revoke_token(&claims.jti, MIN_REVOCATION_TTL).unwrap();
             }
             assert_eq!(
                 verify_proxy_auth(headers).await.status(),

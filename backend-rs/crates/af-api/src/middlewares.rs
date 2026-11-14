@@ -230,14 +230,7 @@ static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 });
 
 fn is_trusted_proxy_ip(ip: IpAddr) -> bool {
-    ip.is_loopback()
-        || (trust_proxy_headers_enabled() && is_private_or_loopback_ip(&ip.to_string()))
-}
-
-fn trust_proxy_headers_enabled() -> bool {
-    env::var("TRUST_PROXY_HEADERS")
-        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-        .unwrap_or(false)
+    crate::ws::is_trusted_proxy_peer(ip)
 }
 
 fn is_forwarded_header_name(name: &str) -> bool {
@@ -1103,20 +1096,11 @@ fn rate_limited_response() -> Response {
 }
 
 fn extract_request_ip(req: &Request) -> String {
-    if let Some(ConnectInfo(peer_addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        let trust_proxy = peer_addr.ip().is_loopback()
-            || env::var("TRUST_PROXY_HEADERS")
-                .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-                .unwrap_or(false);
-        if trust_proxy
-            && (req.headers().contains_key("X-Forwarded-For")
-                || req.headers().contains_key("X-Real-IP"))
-        {
-            return extract_client_ip(req.headers());
-        }
-        return peer_addr.ip().to_string();
-    }
-    extract_client_ip(req.headers())
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer_addr)| peer_addr.ip());
+    crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip)
 }
 
 pub async fn auth_rate_limit_middleware(req: Request, next: Next) -> Response {

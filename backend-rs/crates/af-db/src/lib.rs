@@ -1572,34 +1572,32 @@ fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
     .is_ok()
 }
 
-pub fn revoke_token(jti: &str, ttl: Duration) {
+pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
     if jti.is_empty() {
-        return;
+        return Ok(());
     }
-    // Refresh still accepts a token for 7200s after exp, and exp itself is 900s.
-    let ttl = ttl.max(Duration::from_secs(8100));
+    // Refresh accepts a token for 7200s after exp (900s), plus 60s clock skew tolerance = 8160s.
+    let ttl = ttl.max(Duration::from_secs(8160));
+    let conn = get_conn()?;
+    if !ensure_revoked_tokens_table(&conn) {
+        anyhow::bail!("failed to ensure revoked_tokens table");
+    }
+    let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
+        params![jti, exp_rfc3339],
+    )?;
+    let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
+    let _ = conn.execute(
+        "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')",
+        [],
+    );
     let exp = Instant::now() + ttl;
     if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
         map.retain(|_, v| *v > Instant::now());
         map.insert(jti.to_string(), exp);
     }
-    if let Ok(conn) = get_conn() {
-        if !ensure_revoked_tokens_table(&conn) {
-            let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
-            return;
-        }
-        let exp_rfc3339 =
-            (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
-            params![jti, exp_rfc3339],
-        );
-        let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
-        let _ = conn.execute(
-            "DELETE FROM revoked_tokens WHERE expires_at < ?1",
-            params![Utc::now().to_rfc3339()],
-        );
-    }
+    Ok(())
 }
 
 /// Errors are distinct from a confirmed revocation so rotation grace cannot mask a DB failure.
@@ -1619,7 +1617,18 @@ pub fn token_revocation_status(jti: &str) -> anyhow::Result<bool> {
     token_revocation_status_with_conn(&conn, jti)
 }
 
-fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Result<bool> {
+fn parse_revocation_expiry_utc(raw: &str) -> anyhow::Result<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Ok(naive.and_utc());
+    }
+    anyhow::bail!("invalid revoked_tokens.expires_at timestamp: {}", trimmed)
+}
+
+pub fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Result<bool> {
     let expiry: Option<String> = conn
         .query_row(
             "SELECT expires_at FROM revoked_tokens WHERE jti = ?1",
@@ -1629,7 +1638,7 @@ fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Re
         .optional()?;
     match expiry {
         None => Ok(false),
-        Some(expiry) => Ok(DateTime::parse_from_rfc3339(&expiry)?.with_timezone(&Utc) > Utc::now()),
+        Some(expiry) => Ok(parse_revocation_expiry_utc(&expiry)? > Utc::now()),
     }
 }
 

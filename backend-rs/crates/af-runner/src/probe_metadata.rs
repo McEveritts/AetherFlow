@@ -7,7 +7,6 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -38,7 +37,7 @@ static ABS_APP_PATH_RE: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 static DLL_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^v?([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)$").unwrap());
+    Lazy::new(|| Regex::new(r"^v?([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.+_-]+)?$").unwrap());
 
 #[derive(Debug, Clone, Default)]
 pub struct ProbeSandboxSpec {
@@ -520,7 +519,7 @@ fn scan_utf16le_and_ascii_versions(bytes: &[u8]) -> (Option<String>, Vec<String>
                 }
             }
             current.clear();
-            i += 2;
+            i += 1;
         }
     }
     if current.len() >= 4 {
@@ -820,6 +819,13 @@ pub fn extract_static_package_version(
             return Some(Err("unable to resolve organizr static version".to_string()));
         }
         "seedcross" => {
+            let receipt = rebase_path("/opt/seedcross/.af-version");
+            if let Ok(Some(text)) = read_text_nofollow(&receipt, 4096) {
+                let ver = normalize_stripped_v(text.lines().next().unwrap_or("").to_string());
+                if !ver.is_empty() {
+                    return Some(Ok(ver));
+                }
+            }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/opt/seedcross"]) {
                 return Some(resolve_git_head_commit_nofollow(&git_dir));
             }
@@ -927,17 +933,39 @@ fn lookup_user_uid_gid(username: &str) -> Option<NonRootOwner> {
         return None;
     }
     let c_name = std::ffi::CString::new(trimmed).ok()?;
-    let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
-    if pw.is_null() {
+    let mut buf_len = 1024usize;
+    while buf_len <= 65536 {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut res: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0 as libc::c_char; buf_len];
+        let rc = unsafe {
+            libc::getpwnam_r(
+                c_name.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut res,
+            )
+        };
+        if rc == 0 {
+            if res.is_null() {
+                return None;
+            }
+            let uid = pwd.pw_uid as u32;
+            let gid = pwd.pw_gid as u32;
+            return if uid == 0 {
+                None
+            } else {
+                Some(NonRootOwner { uid, gid })
+            };
+        }
+        if rc == libc::ERANGE {
+            buf_len *= 2;
+            continue;
+        }
         return None;
     }
-    let uid = unsafe { (*pw).pw_uid as u32 };
-    let gid = unsafe { (*pw).pw_gid as u32 };
-    if uid == 0 {
-        None
-    } else {
-        Some(NonRootOwner { uid, gid })
-    }
+    None
 }
 
 #[cfg(unix)]
@@ -945,7 +973,7 @@ fn inspect_ancestors_trust(
     path: &Path,
     fs_root: Option<&Path>,
     current_euid: u32,
-    non_root_owners: &mut HashSet<(u32, u32)>,
+    non_root_owners: &mut std::collections::BTreeMap<u32, u32>,
 ) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -989,7 +1017,7 @@ fn inspect_ancestors_trust(
                     ));
                 }
                 if uid != 0 && !(fs_root.is_some() && uid == current_euid) {
-                    non_root_owners.insert((uid, gid));
+                    non_root_owners.entry(uid).or_insert(gid);
                 }
             }
             _ => {}
@@ -1021,7 +1049,7 @@ fn inspect_path_trust(
                 || path.starts_with(r.join("var/www"))
         });
 
-    let mut non_root_owners: HashSet<(u32, u32)> = HashSet::new();
+    let mut non_root_owners: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
     inspect_ancestors_trust(path, fs_root, current_euid, &mut non_root_owners)?;
 
     if let Ok(canon) = fs::canonicalize(path) {
@@ -1039,7 +1067,7 @@ fn inspect_path_trust(
                 ));
             }
             if uid != 0 && !(fs_root.is_some() && uid == current_euid) {
-                non_root_owners.insert((uid, gid));
+                non_root_owners.insert(uid, gid);
             }
         }
     }
@@ -1050,7 +1078,7 @@ fn inspect_path_trust(
             path.display()
         ));
     }
-    if let Some(&(uid, gid)) = non_root_owners.iter().next() {
+    if let Some((&uid, &gid)) = non_root_owners.iter().next() {
         return Ok(Some(NonRootOwner { uid, gid }));
     }
     if is_in_app_tree && fs_root.is_none() && current_euid != 0 {
@@ -1118,6 +1146,34 @@ fn collect_probe_path_references(prog: &Path, args: &[String], fs_root: Option<&
     paths
 }
 
+fn probe_requires_root_daemon_access(prog: &Path, args: &[String]) -> bool {
+    let prog_name = prog.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if prog_name == "docker" {
+        return true;
+    }
+    args.iter().any(|arg| {
+        arg == "docker"
+            || arg.starts_with("docker ")
+            || arg.contains(" docker ")
+            || arg.contains("/docker ")
+    })
+}
+
+/// Normalizes login-shell probe invocations (`bash -lc ...`) into `--noprofile --norc -c ...`
+/// so startup profiles (such as `/etc/profile` or `$HOME/.bash_profile`) are never sourced.
+pub fn sanitize_probe_shell_args(prog: &Path, args: &[String]) -> Vec<String> {
+    let prog_name = prog.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if prog_name == "bash" && args.first().map(String::as_str) == Some("-lc") {
+        let mut out = Vec::with_capacity(args.len() + 2);
+        out.push("--noprofile".to_string());
+        out.push("--norc".to_string());
+        out.push("-c".to_string());
+        out.extend(args[1..].iter().cloned());
+        return out;
+    }
+    args.to_vec()
+}
+
 #[cfg(unix)]
 pub fn validate_and_resolve_probe_sandbox(
     prog: &Path,
@@ -1132,7 +1188,7 @@ pub fn validate_and_resolve_probe_sandbox(
     for p in &refs {
         if let Some(owner) = inspect_path_trust(p, fs_root, euid)? {
             match detected_owner {
-                Some(prev) if prev != owner => {
+                Some(prev) if prev.uid != owner.uid => {
                     return Err(format!(
                         "probe references multiple non-root owners (uid={} vs uid={})",
                         prev.uid, owner.uid
@@ -1144,20 +1200,25 @@ pub fn validate_and_resolve_probe_sandbox(
         }
     }
 
-    if detected_owner.is_none() {
+    if detected_owner.is_none() && fs_root.is_none() {
         let touches_app_tree = refs.iter().any(|p| {
             p.starts_with("/opt")
                 || p.starts_with("/srv")
                 || p.starts_with("/var/www")
         });
-        if touches_app_tree && fs_root.is_none() {
+        if touches_app_tree || (euid == 0 && spec.drop_to_path_owner) {
             if let Some(ref svc_user) = spec.package_user {
                 if let Some(owner) = lookup_user_uid_gid(svc_user) {
                     detected_owner = Some(owner);
                 }
             }
-            if detected_owner.is_none() && euid == 0 && spec.drop_to_path_owner {
-                detected_owner = lookup_user_uid_gid("nobody");
+            if detected_owner.is_none()
+                && euid == 0
+                && spec.drop_to_path_owner
+                && !probe_requires_root_daemon_access(prog, args)
+            {
+                detected_owner = lookup_user_uid_gid("nobody")
+                    .or(Some(NonRootOwner { uid: 65534, gid: 65534 }));
             }
         }
     }
@@ -1217,7 +1278,7 @@ fn apply_sanitized_env_std(cmd: &mut StdCommand, fs_root: Option<&Path>) {
     cmd.env("PATH", sandbox_path_for_root(fs_root));
     cmd.env("LANG", "C.UTF-8");
     cmd.env("LC_ALL", "C.UTF-8");
-    cmd.env("HOME", "/tmp");
+    cmd.env("HOME", "/nonexistent");
     if let Some(root) = fs_root {
         cmd.env("AETHERFLOW_FS_ROOT", root);
         cmd.env("AETHERFLOW_INSTALL_ROOT", root);
@@ -1229,7 +1290,7 @@ fn apply_sanitized_env_tokio(cmd: &mut TokioCommand, fs_root: Option<&Path>) {
     cmd.env("PATH", sandbox_path_for_root(fs_root));
     cmd.env("LANG", "C.UTF-8");
     cmd.env("LC_ALL", "C.UTF-8");
-    cmd.env("HOME", "/tmp");
+    cmd.env("HOME", "/nonexistent");
     if let Some(root) = fs_root {
         cmd.env("AETHERFLOW_FS_ROOT", root);
         cmd.env("AETHERFLOW_INSTALL_ROOT", root);
@@ -1238,6 +1299,9 @@ fn apply_sanitized_env_tokio(cmd: &mut TokioCommand, fs_root: Option<&Path>) {
 
 #[cfg(unix)]
 unsafe fn install_unix_isolation(drop_ugid: Option<(u32, u32)>) -> std::io::Result<()> {
+    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     if let Some((uid, gid)) = drop_ugid {
         let gids = [gid as libc::gid_t];
         if libc::setgroups(1, gids.as_ptr()) != 0 {
@@ -1253,7 +1317,6 @@ unsafe fn install_unix_isolation(drop_ugid: Option<(u32, u32)>) -> std::io::Resu
             return Err(std::io::Error::other("privilege drop left root uid/gid active"));
         }
     }
-    let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     Ok(())
 }
 

@@ -210,7 +210,8 @@ open("/var/lib/aetherflow/.master.creds", "w", encoding="utf-8").write(json.dump
 ' "${username}" "${passwd}" 2>/dev/null || true
 			chmod 600 /var/lib/aetherflow/.master.creds 2>/dev/null || true
 		fi
-		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow 2>/dev/null || true
+		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow 2>/dev/null || true
+		chown root:aetherflow /var/log/aetherflow 2>/dev/null || true
 		chmod 750 "${af_root}/backend/data" /var/log/aetherflow 2>/dev/null || true
 		chmod 700 /var/lib/aetherflow 2>/dev/null || true
 		if [[ -d "${af_root}/dashboard/db" ]]; then

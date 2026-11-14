@@ -28,28 +28,42 @@ af_prepare_logfile_path() {
         return 1
     fi
     if [[ "${EUID:-$(id -u)}" -eq 0 && ( "$parent_dir" == /var/log/aetherflow || "$parent_dir" == */var/log/aetherflow ) ]]; then
-        install -d -m 0750 -o root -g root "$parent_dir" || return 1
+        local log_group="root"
+        if getent group aetherflow >/dev/null 2>&1; then
+            log_group="aetherflow"
+        fi
+        install -d -m 0750 -o root -g "$log_group" "$parent_dir" || return 1
     else
         mkdir -p -m 0750 -- "$parent_dir" || return 1
     fi
     python3 - "$target" "$parent_dir" <<'PYEOF'
-import os, stat, sys
+import grp, os, stat, sys
 
 target, parent_dir = sys.argv[1], sys.argv[2]
 parent_st = os.lstat(parent_dir)
 if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
     raise SystemExit(f"Unsafe log directory: {parent_dir}")
+target_gid = 0
 if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
-    if parent_st.st_uid != 0 or parent_st.st_gid != 0:
-        os.chown(parent_dir, 0, 0)
+    try:
+        target_gid = grp.getgrnam("aetherflow").gr_gid
+    except KeyError:
+        target_gid = 0
+    if parent_st.st_uid != 0 or parent_st.st_gid != target_gid:
+        os.chown(parent_dir, 0, target_gid)
     if stat.S_IMODE(parent_st.st_mode) != 0o750:
         os.chmod(parent_dir, 0o750)
 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
 fd = os.open(target, flags, 0o640)
 try:
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-        raise SystemExit(f"Refusing non-regular logfile target: {target}")
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise SystemExit(f"Refusing non-regular or hardlinked logfile target: {target}")
+    if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+        if st.st_uid != 0 or st.st_gid != target_gid:
+            os.fchown(fd, 0, target_gid)
+        if stat.S_IMODE(st.st_mode) != 0o640:
+            os.fchmod(fd, 0o640)
 finally:
     os.close(fd)
 PYEOF
@@ -64,18 +78,39 @@ timestamp() {
 
 log() {
     local target="${LOGFILE:-/dev/null}"
-    if [[ "$target" != "/dev/null" ]]; then
-        local parent_dir="."
-        if [[ "$target" == */* ]]; then
-            parent_dir="${target%/*}"
-            [[ -n "$parent_dir" ]] || parent_dir="/"
-        fi
-        if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) || -L "$parent_dir" ]]; then
-            printf 'Refusing unsafe logfile target: %s\n' "$target" >&2
-            return 1
-        fi
-    fi
-    printf '[%s] %s\n' "$(timestamp)" "$*" >>"$target"
+    [[ "$target" != "/dev/null" ]] || return 0
+    local line
+    line="$(printf '[%s] %s\n' "$(timestamp)" "$*")"
+    python3 - "$target" "$line" <<'PYEOF'
+import os, stat, sys
+
+target, line = sys.argv[1], sys.argv[2]
+parent_dir = os.path.dirname(target) or "."
+parent_st = os.lstat(parent_dir)
+if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+    raise SystemExit(1)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+        raise SystemExit(1)
+    data = line.encode("utf-8", errors="replace")
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+finally:
+    os.close(fd)
+PYEOF
 }
 
 log_info() {

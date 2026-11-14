@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"aetherflow/db"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -106,6 +108,9 @@ func TestOIDCDiscovery_PKCESupported(t *testing.T) {
 		if m == "S256" {
 			hasS256 = true
 		}
+		if m == "plain" {
+			t.Error("plain PKCE downgrade method must not be advertised")
+		}
 	}
 	if !hasS256 {
 		t.Error("S256 PKCE method must be supported")
@@ -197,10 +202,13 @@ func TestVerifyPKCE_S256_Invalid(t *testing.T) {
 	}
 }
 
-func TestVerifyPKCE_Plain_Valid(t *testing.T) {
+func TestVerifyPKCE_Plain_Rejected(t *testing.T) {
 	verifier := "my-plain-challenge-code"
-	if !verifyPKCE(verifier, verifier, "plain") {
-		t.Error("Expected matching plain PKCE to pass")
+	if verifyPKCE(verifier, verifier, "plain") {
+		t.Error("Expected plain PKCE downgrade method to be rejected")
+	}
+	if verifyPKCE(verifier, verifier, "") {
+		t.Error("Expected empty PKCE method to be rejected")
 	}
 }
 
@@ -322,30 +330,50 @@ func TestComputeKeyID_UniquePerKey(t *testing.T) {
 
 // --- Token Introspection (RFC 7662) ---
 
+func makeOIDCTestContext(host, remoteAddr string) *gin.Context {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest("POST", "http://"+host+"/api/v1/oidc/introspect", nil)
+	req.Host = host
+	req.RemoteAddr = remoteAddr
+	c.Request = req
+	return c
+}
+
 func TestIntrospectAccessToken_InvalidJWT(t *testing.T) {
-	result := introspectAccessToken("not-a-valid-jwt", "test-client")
+	c := makeOIDCTestContext("localhost:8080", "127.0.0.1:40000")
+	result := introspectAccessToken(c, "not-a-valid-jwt", "test-client")
 	if result != nil {
 		t.Error("Expected nil for invalid JWT")
 	}
 }
 
 func TestIntrospectAccessToken_WrongSigningMethod(t *testing.T) {
+	c := makeOIDCTestContext("localhost:8080", "127.0.0.1:40000")
 	// Create an HMAC-signed token (wrong method — introspect expects RSA)
 	hmacToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss": "http://localhost:8080",
 		"sub": "1",
 		"aud": "test-client",
 	})
 	signed, _ := hmacToken.SignedString([]byte("secret"))
 
-	result := introspectAccessToken(signed, "test-client")
+	result := introspectAccessToken(c, signed, "test-client")
 	if result != nil {
 		t.Error("Expected nil for HMAC-signed token (RSA expected)")
 	}
 }
 
-func TestIntrospectAccessToken_ValidRSA(t *testing.T) {
+func TestIntrospectAccessToken_ValidRSAAndRevokedUserCheck(t *testing.T) {
+	setupTestDB(t)
+	if _, err := db.DB.Exec("INSERT INTO users (id, username, role, password_hash) VALUES (?, ?, ?, ?)", 42, "oidc_user", "user", "mock_hash"); err != nil {
+		t.Fatalf("failed to seed user 42: %v", err)
+	}
+	c := makeOIDCTestContext("localhost:8080", "127.0.0.1:40000")
+
 	// Create a valid RSA-signed token using the loaded OIDC key
 	claims := jwt.MapClaims{
+		"iss":   "http://localhost:8080",
 		"sub":   "42",
 		"aud":   "my-client",
 		"scope": "openid profile",
@@ -359,7 +387,7 @@ func TestIntrospectAccessToken_ValidRSA(t *testing.T) {
 		t.Fatalf("Failed to sign token: %v", err)
 	}
 
-	result := introspectAccessToken(signed, "my-client")
+	result := introspectAccessToken(c, signed, "my-client")
 	if result == nil {
 		t.Fatal("Expected non-nil result for valid RSA token")
 	}
@@ -374,10 +402,23 @@ func TestIntrospectAccessToken_ValidRSA(t *testing.T) {
 	if result["token_type"] != "Bearer" {
 		t.Errorf("Expected token_type=Bearer, got %v", result["token_type"])
 	}
+
+	// Deleting the user must immediately invalidate introspection
+	if _, err := db.DB.Exec("DELETE FROM users WHERE id = 42"); err != nil {
+		t.Fatalf("failed to delete user 42: %v", err)
+	}
+	if afterDelete := introspectAccessToken(c, signed, "my-client"); afterDelete != nil {
+		t.Error("Expected nil introspection after user deletion")
+	}
 }
 
-func TestIntrospectAccessToken_WrongAudience(t *testing.T) {
+func TestIntrospectAccessToken_WrongAudienceOrIssuer(t *testing.T) {
+	setupTestDB(t)
+	_, _ = db.DB.Exec("INSERT INTO users (id, username, role, password_hash) VALUES (?, ?, ?, ?)", 42, "oidc_user", "user", "mock_hash")
+	c := makeOIDCTestContext("localhost:8080", "127.0.0.1:40000")
+
 	claims := jwt.MapClaims{
+		"iss": "http://localhost:8080",
 		"sub": "42",
 		"aud": "different-client",
 		"exp": float64(time.Now().Add(time.Hour).Unix()),
@@ -386,8 +427,44 @@ func TestIntrospectAccessToken_WrongAudience(t *testing.T) {
 	signed, _ := token.SignedString(oidcPrivateKey)
 
 	// Introspecting with a different client_id should return nil
-	result := introspectAccessToken(signed, "my-client")
-	if result != nil {
+	if result := introspectAccessToken(c, signed, "my-client"); result != nil {
 		t.Error("Expected nil when audience doesn't match client_id")
+	}
+
+	badIssClaims := jwt.MapClaims{
+		"iss": "https://evil.example.org",
+		"sub": "42",
+		"aud": "my-client",
+		"exp": float64(time.Now().Add(time.Hour).Unix()),
+	}
+	badIssToken := jwt.NewWithClaims(jwt.SigningMethodRS256, badIssClaims)
+	badIssSigned, _ := badIssToken.SignedString(oidcPrivateKey)
+	if result := introspectAccessToken(c, badIssSigned, "my-client"); result != nil {
+		t.Error("Expected nil when issuer does not match accepted OIDC issuer")
+	}
+}
+
+func TestOIDCDiscovery_IgnoresUntrustedForwardedHost(t *testing.T) {
+	t.Setenv("ALLOWED_HOSTS", "localhost:8080,127.0.0.1:8080")
+	r := gin.New()
+	r.GET("/.well-known/openid-configuration", OIDCDiscovery)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
+	req.Host = "localhost:8080"
+	req.RemoteAddr = "203.0.113.77:51234"
+	req.Header.Set("X-Forwarded-Host", "evil.attacker.tld")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("Invalid JSON: %v", err)
+	}
+	if doc["issuer"] != "http://localhost:8080" {
+		t.Fatalf("Expected untrusted X-Forwarded-Host to be ignored, got issuer=%v", doc["issuer"])
 	}
 }

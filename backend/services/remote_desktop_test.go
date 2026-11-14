@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -95,7 +96,20 @@ func TestRunnerRejectsInvalidApplicationPort(t *testing.T) {
 }
 
 func TestDispatchPackageStreamAllocatedPort(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	sockDir := t.TempDir()
+	if len(sockDir) > 60 {
+		shortBase := ""
+		if info, err := os.Stat("/tmp"); err == nil && info.IsDir() {
+			shortBase = "/tmp"
+		}
+		shortDir, err := os.MkdirTemp(shortBase, "af-rd-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(shortDir) })
+		sockDir = shortDir
+	}
+	socketPath := filepath.Join(sockDir, "runner.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)

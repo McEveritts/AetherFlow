@@ -12,9 +12,32 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, oneshot, watch, Notify};
 use tokio::time::MissedTickBehavior;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PeerIp(pub Option<std::net::IpAddr>);
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for PeerIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+        Ok(Self(ip))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WsTicketEntry {
     user_id: i64,
+    session_jti: String,
     client_ip: String,
     expires_at: Instant,
     diagnostics_allowed: bool,
@@ -753,7 +776,7 @@ mod telemetry_tests {
     }
 }
 
-pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
+pub fn issue_ws_ticket_for_session(user_id: i64, session_jti: &str, client_ip: &str) -> String {
     let mut b = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut b);
     let ticket = hex::encode(b);
@@ -764,6 +787,7 @@ pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
             ticket.clone(),
             WsTicketEntry {
                 user_id,
+                session_jti: session_jti.to_string(),
                 client_ip: client_ip.to_string(),
                 expires_at: Instant::now() + Duration::from_secs(90),
                 diagnostics_allowed: false,
@@ -771,6 +795,10 @@ pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
         );
     }
     ticket
+}
+
+pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
+    issue_ws_ticket_for_session(user_id, "", client_ip)
 }
 
 fn is_loopback_ip(ip: &str) -> bool {
@@ -791,6 +819,13 @@ fn consume_live_ws_ticket(
         map.retain(|_, value| value.expires_at > Instant::now());
         map.remove(ticket)
     })?;
+    if !entry.session_jti.is_empty() {
+        let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
+        match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
+            Ok(false) => entry.session_jti = resolved_jti,
+            Ok(true) | Err(_) => return None,
+        }
+    }
     let role: String = connection
         .query_row(
             "SELECT role FROM users WHERE id = ?1",
@@ -979,6 +1014,7 @@ mod lifecycle_tests {
 
 pub async fn handle_websocket(
     Query(q): Query<WsTicketQuery>,
+    PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -1009,7 +1045,7 @@ pub async fn handle_websocket(
             .into_response();
     };
 
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip_for_peer(&headers, peer_ip);
     if !entry.client_ip.is_empty()
         && !client_ip.is_empty()
         && entry.client_ip != client_ip
@@ -1029,11 +1065,18 @@ pub async fn handle_websocket(
 }
 
 // A ticket authorizes the upgrade only. Existing sockets must not keep a stale
-// administrative capability after the account is demoted or removed.
+// administrative capability after the account is demoted, removed, or logged out.
 fn refresh_ws_authorization(
     connection: &rusqlite::Connection,
     entry: &mut WsTicketEntry,
 ) -> Option<bool> {
+    if !entry.session_jti.is_empty() {
+        let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
+        match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
+            Ok(false) => entry.session_jti = resolved_jti,
+            Ok(true) | Err(_) => return None,
+        }
+    }
     let role: String = connection
         .query_row(
             "SELECT role FROM users WHERE id = ?1",
@@ -1047,13 +1090,15 @@ fn refresh_ws_authorization(
 
 async fn current_ws_authorization(entry: &mut WsTicketEntry) -> Option<bool> {
     let mut checked = entry.clone();
-    let allowed = tokio::task::spawn_blocking(move || {
+    let (allowed, updated_jti) = tokio::task::spawn_blocking(move || {
         let connection = af_db::get_read_conn().ok()?;
-        refresh_ws_authorization(&connection, &mut checked)
+        let allowed = refresh_ws_authorization(&connection, &mut checked)?;
+        Some((allowed, checked.session_jti))
     })
     .await
     .ok()??;
     entry.diagnostics_allowed = allowed;
+    entry.session_jti = updated_jti;
     Some(allowed)
 }
 
@@ -1076,6 +1121,9 @@ async fn handle_ws_socket(socket: WebSocket, mut entry: WsTicketEntry) {
 
     let mut write_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
+        let mut auth_interval = tokio::time::interval(Duration::from_secs(5));
+        auth_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        auth_interval.tick().await;
         loop {
             tokio::select! {
                 Ok(msg) = rx.recv() => {
@@ -1087,6 +1135,12 @@ async fn handle_ws_socket(socket: WebSocket, mut entry: WsTicketEntry) {
                         if sender.send(Message::Text(message)).await.is_err() {
                             break;
                         }
+                    }
+                }
+                _ = auth_interval.tick() => {
+                    if current_ws_authorization(&mut entry).await.is_none() {
+                        let _ = sender.send(Message::Close(None)).await;
+                        break;
                     }
                 }
                 _ = ping_interval.tick() => {
@@ -1230,6 +1284,7 @@ fn websocket_origin_matches_host(headers: &HeaderMap) -> bool {
 
 pub async fn handle_log_websocket(
     axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+    PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -1245,7 +1300,8 @@ pub async fn handle_log_websocket(
     }
     let mut authorization = WsTicketEntry {
         user_id: user.user_id,
-        client_ip: extract_client_ip(&headers),
+        session_jti: user.jti.clone(),
+        client_ip: extract_client_ip_for_peer(&headers, peer_ip),
         expires_at: Instant::now(),
         diagnostics_allowed: true,
     };
@@ -1336,6 +1392,9 @@ pub async fn handle_log_websocket(
         let mut filter = WsLogFilter::default();
         let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
         ping_interval.tick().await;
+        let mut auth_interval = tokio::time::interval(Duration::from_secs(5));
+        auth_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        auth_interval.tick().await;
 
         loop {
             tokio::select! {
@@ -1350,6 +1409,12 @@ pub async fn handle_log_websocket(
                             break;
                         }
                         _ => {}
+                    }
+                }
+                _ = auth_interval.tick() => {
+                    if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
                     }
                 }
                 Some(entry) = rx.recv() => {
@@ -1387,7 +1452,81 @@ pub async fn handle_log_websocket(
     })
 }
 
+fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
+    let trimmed = raw_entry.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some((net_part, mask_part)) = trimmed.split_once('/') {
+        let Ok(prefix_len) = mask_part.trim().parse::<u32>() else {
+            return false;
+        };
+        let Ok(net_ip) = net_part.trim().trim_matches(['[', ']']).parse::<std::net::IpAddr>() else {
+            return false;
+        };
+        match (ip, net_ip) {
+            (std::net::IpAddr::V4(v4), std::net::IpAddr::V4(net_v4)) if prefix_len <= 32 => {
+                if prefix_len == 0 {
+                    return true;
+                }
+                let mask = u32::MAX << (32 - prefix_len);
+                (u32::from(v4) & mask) == (u32::from(net_v4) & mask)
+            }
+            (std::net::IpAddr::V6(v6), std::net::IpAddr::V6(net_v6)) if prefix_len <= 128 => {
+                if prefix_len == 0 {
+                    return true;
+                }
+                let mask = u128::MAX << (128 - prefix_len);
+                (u128::from(v6) & mask) == (u128::from(net_v6) & mask)
+            }
+            _ => false,
+        }
+    } else if let Ok(exact_ip) = trimmed.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        ip == exact_ip
+    } else {
+        false
+    }
+}
+
+fn is_private_or_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+pub fn is_trusted_proxy_peer(ip: std::net::IpAddr) -> bool {
+    if let Ok(raw) = std::env::var("TRUSTED_PROXIES") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed
+                .split(',')
+                .any(|entry| ip_matches_cidr_or_host(ip, entry));
+        }
+    }
+    if let Ok(flag) = std::env::var("TRUST_PROXY_HEADERS") {
+        let f = flag.trim();
+        if f.eq_ignore_ascii_case("false") || f == "0" {
+            return false;
+        }
+        if f.eq_ignore_ascii_case("true") || f == "1" {
+            return ip.is_loopback() || is_private_or_link_local(&ip);
+        }
+    }
+    ip.is_loopback()
+}
+
 fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
+    if let Ok(raw) = std::env::var("TRUSTED_PROXIES") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed
+                .split(',')
+                .any(|entry| ip_matches_cidr_or_host(*ip, entry));
+        }
+    }
     if ip.is_loopback() || ip.is_unspecified() {
         return true;
     }
@@ -1397,15 +1536,10 @@ fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
     if !trust_private {
         return false;
     }
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => {
-            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
+    is_private_or_link_local(ip)
 }
 
-pub fn extract_client_ip(headers: &HeaderMap) -> String {
+fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std::net::IpAddr> {
     if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
         // Walk right-to-left: skip trailing trusted proxy hops added locally, then pick the
         // rightmost untrusted client hop rather than any client-spoofable leftmost value.
@@ -1419,20 +1553,73 @@ pub fn extract_client_ip(headers: &HeaderMap) -> String {
                 rightmost_valid = Some(ip);
             }
             if !is_trusted_proxy_hop(&ip) {
-                return ip.to_string();
+                return Some(ip);
             }
         }
         if let Some(fallback_ip) = rightmost_valid {
-            return fallback_ip.to_string();
+            return Some(fallback_ip);
         }
     }
     if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
         let trimmed = real_ip.trim().trim_matches(['[', ']']);
         if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-            return ip.to_string();
+            return Some(ip);
         }
     }
-    "127.0.0.1".to_string()
+    None
+}
+
+pub fn extract_client_ip(headers: &HeaderMap) -> String {
+    extract_forwarded_ip_from_trusted_headers(headers)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+pub fn extract_client_ip_for_peer(
+    headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> String {
+    let Some(peer) = peer_ip else {
+        return extract_client_ip(headers);
+    };
+    if !is_trusted_proxy_peer(peer) {
+        return peer.to_string();
+    }
+    extract_forwarded_ip_from_trusted_headers(headers)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| peer.to_string())
+}
+
+pub fn normalize_request_forwarding_for_peer(req: &mut axum::extract::Request) {
+    let Some(peer) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip())
+    else {
+        return;
+    };
+    let trusted = is_trusted_proxy_peer(peer);
+    let headers = req.headers_mut();
+    if !trusted {
+        for name in [
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-forwarded-port",
+            "x-forwarded-server",
+            "x-real-ip",
+        ] {
+            headers.remove(name);
+        }
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&peer.to_string()) {
+            headers.insert(axum::http::header::HeaderName::from_static("x-real-ip"), hv);
+        }
+    } else if extract_forwarded_ip_from_trusted_headers(headers).is_none() {
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&peer.to_string()) {
+            headers.insert(axum::http::header::HeaderName::from_static("x-real-ip"), hv);
+        }
+    }
 }
 
 pub fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
