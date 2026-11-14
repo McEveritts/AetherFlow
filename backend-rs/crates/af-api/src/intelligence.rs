@@ -973,6 +973,30 @@ pub fn get_system_metrics_context() -> String {
     sb
 }
 
+const MAX_AI_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+async fn read_bounded_ai_response_bytes(mut resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_AI_RESPONSE_BYTES as u64 {
+            anyhow::bail!(
+                "AI response payload exceeds {} byte limit",
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len().saturating_add(chunk.len()) > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response payload exceeds {} byte limit",
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 async fn call_gemini_api(
     api_key: &str,
     model_name: &str,
@@ -983,7 +1007,7 @@ async fn call_gemini_api(
     if api_key.trim().is_empty() {
         anyhow::bail!("gemini API key not configured. Set it in Settings → FlowAI Engine");
     }
-    let client = reqwest::Client::builder()
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()?;
 
@@ -1013,10 +1037,14 @@ async fn call_gemini_api(
 
     let send_for_model = |m: &str| {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            m, api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            m
         );
-        client.post(url).json(&body).send()
+        client
+            .post(url)
+            .header("x-goog-api-key", api_key.trim())
+            .json(&body)
+            .send()
     };
 
     let mut resp = send_for_model(model_name).await?;
@@ -1024,13 +1052,14 @@ async fn call_gemini_api(
         resp = send_for_model("gemini-2.5-pro").await?;
     }
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("gemini API error ({}): {}", status, text);
     }
 
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let mut out = String::new();
     if let Some(parts) = val
         .pointer("/candidates/0/content/parts")
@@ -1059,8 +1088,7 @@ async fn call_openai_compatible_api(
             model_name.trim()
         );
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -1084,12 +1112,13 @@ async fn call_openai_compatible_api(
         req = req.bearer_auth(api_key);
     }
     let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("openai API error ({}): {}", status, text);
     }
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let content = val
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
@@ -1124,8 +1153,7 @@ async fn call_anthropic_api(
             "anthropic API key not configured. Set it in Settings \u{2192} FlowAI Engine"
         );
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -1154,13 +1182,13 @@ async fn call_anthropic_api(
     }
 
     let resp = req.send().await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("anthropic API error ({}): {}", status, text);
     }
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let mut out = String::new();
     if let Some(arr) = val.get("content").and_then(|v| v.as_array()) {
         for block in arr {
@@ -2559,6 +2587,8 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
         .unwrap_or(0);
 
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_default();

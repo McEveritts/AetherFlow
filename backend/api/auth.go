@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"aetherflow/config"
 	"aetherflow/db"
 	"aetherflow/models"
 	"aetherflow/services"
@@ -116,7 +118,7 @@ func resolveLatestGraceToken(jti string, userID int, callerStrictFP string) (str
 			break
 		}
 		if nextEntry.strictFP != "" && nextEntry.strictFP != callerStrictFP {
-			break
+			return "", "", 0, false
 		}
 		latestToken = nextEntry.newToken
 		if nextEntry.successorExp > 0 {
@@ -564,10 +566,11 @@ func finalizeUserCredentialRevocation(userID int, revokedJTIs []string) {
 
 func getJWTSecret() []byte {
 	jwtSecretOnce.Do(func() {
-		jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-		if len(jwtSecret) == 0 {
-			log.Fatal("FATAL: JWT_SECRET environment variable is not set. Refusing to start with an insecure default.")
+		rawSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+		if err := config.ValidateJWTSecret(rawSecret); err != nil {
+			log.Fatalf("FATAL: insecure JWT_SECRET configuration (%v). Refusing to start.", err)
 		}
+		jwtSecret = []byte(rawSecret)
 	})
 	return jwtSecret
 }
@@ -1607,6 +1610,11 @@ func GetSession(c *gin.Context) {
 // @Success      200  {object}  map[string]interface{}
 // @Router       /auth/logout [post]
 func Logout(c *gin.Context) {
+	// Always expire the browser session cookie upfront so even a transient DB error
+	// clears the client-side HttpOnly session cookie immediately.
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("aetherflow_session", "", -1, "/", "", secureCookie(), true)
+
 	if _, claims, err := resolveSessionToken(c); err == nil {
 		uid64, _ := claimInt64(claims, "user_id")
 		userID := int(uid64)
@@ -2622,6 +2630,61 @@ func UpdatePassword(c *gin.Context) {
 	ChangePassword(c)
 }
 
+func validateAvatarURI(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("avatar image or URL is required")
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New("invalid avatar URI characters")
+		}
+	}
+
+	// 1. Single-slash relative path (/uploads/... or /avatars/...), disallowing // and ..
+	if strings.HasPrefix(trimmed, "/") {
+		if strings.HasPrefix(trimmed, "//") || strings.Contains(trimmed, "\\") || strings.Contains(trimmed, "..") {
+			return "", errors.New("invalid relative avatar path")
+		}
+		return trimmed, nil
+	}
+
+	lower := strings.ToLower(trimmed)
+
+	// 2. HTTPS external image URL without embedded credentials
+	if strings.HasPrefix(lower, "https://") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil || parsed.Scheme != "https" || strings.TrimSpace(parsed.Hostname()) == "" || parsed.User != nil {
+			return "", errors.New("invalid HTTPS avatar URL")
+		}
+		return trimmed, nil
+	}
+
+	// 3. Strictly raster base64 data URIs (blocks data:image/svg+xml and data:text/html)
+	allowedDataPrefixes := []string{
+		"data:image/png;base64,",
+		"data:image/jpeg;base64,",
+		"data:image/jpg;base64,",
+		"data:image/webp;base64,",
+		"data:image/gif;base64,",
+	}
+	for _, prefix := range allowedDataPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			b64Payload := strings.TrimSpace(trimmed[len(prefix):])
+			if b64Payload == "" {
+				return "", errors.New("empty avatar image payload")
+			}
+			decoded, err := base64.StdEncoding.DecodeString(b64Payload)
+			if err != nil || len(decoded) == 0 {
+				return "", errors.New("invalid base64 avatar payload")
+			}
+			return prefix + b64Payload, nil
+		}
+	}
+
+	return "", errors.New("invalid avatar URI scheme: only https://, relative / paths, or raster data:image/{png,jpeg,webp,gif};base64 URIs are permitted")
+}
+
 // UpdateAvatar godoc
 // @Summary      Update user avatar
 // @Description  Updates the avatar URL or base64 image string for the authenticated user.
@@ -2664,19 +2727,19 @@ func UpdateAvatar(c *gin.Context) {
 		return
 	}
 
-	// Validate scheme - disallow javascript: and file: schemes
-	lowerVal := strings.ToLower(avatarVal)
-	if strings.HasPrefix(lowerVal, "javascript:") || strings.HasPrefix(lowerVal, "file:") {
-		BadRequest(c, "Invalid avatar URI scheme")
-		return
-	}
-
-	// Enforce 2MB size limit on base64 payload or URL length
+	// Enforce 2MB size limit on base64 payload or URL length before decoding
 	const maxAvatarSize = 2 * 1024 * 1024
 	if len(avatarVal) > maxAvatarSize {
 		RespondError(c, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "Avatar payload exceeds maximum 2MB size limit")
 		return
 	}
+
+	validatedAvatar, avatarErr := validateAvatarURI(avatarVal)
+	if avatarErr != nil {
+		BadRequest(c, avatarErr.Error())
+		return
+	}
+	avatarVal = validatedAvatar
 
 	var username string
 	_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)

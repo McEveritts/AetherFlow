@@ -245,6 +245,8 @@ _stage_prebuilt_release_archive() {
             echo "[ERROR] Sigstore provenance verification failed for ${release_tag} (${artifact_name}). Refusing unverified binary." >&2
             return 1
         fi
+    else
+        echo "[WARN] AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set; bypassing Sigstore build provenance verification for ${release_tag}." >&2
     fi
 
     if ! _validate_prebuilt_tarball "${archive_path}"; then

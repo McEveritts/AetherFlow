@@ -1,9 +1,8 @@
 package api
 
 import (
+	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 )
@@ -20,12 +19,17 @@ const (
 	retentionDays      = 7
 )
 
-// PruneOldBackups enforces the backup retention policy.
+// PruneOldBackups enforces the backup retention policy inside os.Root confinement.
 // Call this after every successful backup creation.
 func PruneOldBackups() {
-	backupDir := getBackupDir()
+	root, _, err := openConfinedBackupRoot(false)
+	if err != nil {
+		slog.Info("[backup-retention] Failed to open confined backup directory", "error", err)
+		return
+	}
+	defer root.Close()
 
-	entries, err := os.ReadDir(backupDir)
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		slog.Info("[backup-retention] Failed to read backup directory", "error", err)
 		return
@@ -35,12 +39,11 @@ func PruneOldBackups() {
 	type backupEntry struct {
 		name    string
 		modTime time.Time
-		path    string
 	}
 
 	var backups []backupEntry
 	for _, entry := range entries {
-		if entry.IsDir() || !isValidBackupFilename(entry.Name()) {
+		if entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 || !isValidBackupFilename(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -50,7 +53,6 @@ func PruneOldBackups() {
 		backups = append(backups, backupEntry{
 			name:    entry.Name(),
 			modTime: info.ModTime(),
-			path:    filepath.Join(backupDir, entry.Name()),
 		})
 	}
 
@@ -72,13 +74,13 @@ func PruneOldBackups() {
 			continue
 		}
 
-		// Remove backup file and its checksum
-		if err := os.Remove(backups[i].path); err != nil {
+		// Remove backup file and its checksum inside os.Root
+		if err := root.Remove(backups[i].name); err != nil {
 			slog.Error("failed to remove backup", "name", backups[i].name, "error", err)
 			continue
 		}
 		// Also remove checksum file if exists
-		os.Remove(backups[i].path + ".sha256")
+		_ = root.Remove(backups[i].name + ".sha256")
 
 		slog.Info("pruned old backup", "name", backups[i].name,
 			"age", time.Since(backups[i].modTime).Truncate(time.Hour))

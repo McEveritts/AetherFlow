@@ -1186,7 +1186,15 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
 
         let verified_digest =
             verify_artifact_checksum(&archive_dest, &manifest_content, &config.artifact_name)?;
-        if std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() != Ok("1") {
+        if std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() == Ok("1") {
+            tracing::warn!(
+                tag = %tag,
+                artifact = %config.artifact_name,
+                digest = %verified_digest,
+                provenance_bypassed = true,
+                "AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set; bypassing Sigstore build provenance verification"
+            );
+        } else {
             let mut bundle_override = std::env::var_os("AETHERFLOW_PROVENANCE_BUNDLE_FILE")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);

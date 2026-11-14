@@ -3965,12 +3965,59 @@ async fn cleanup_deploy_channel(_app_name: &str) {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
+fn deploy_sse_session_still_authorized(
+    auth_user: &AuthUser,
+    initial_revoked_after: Option<i64>,
+) -> bool {
+    if auth_user.plugin_id.is_some() || auth_user.role != "admin" {
+        return false;
+    }
+    let Ok(conn) = af_db::get_conn() else {
+        return false;
+    };
+    if !crate::auth::table_exists(&conn, "users").unwrap_or(false) {
+        return true;
+    }
+    if !auth_user.jti.is_empty()
+        && crate::auth::is_session_token_revoked_beyond_grace_with_conn(
+            &conn,
+            &auth_user.jti,
+            auth_user.user_id,
+        )
+    {
+        return false;
+    }
+    let Ok(subj) = crate::auth::load_active_human_subject(&conn, auth_user.user_id) else {
+        return false;
+    };
+    if subj.role != "admin" {
+        return false;
+    }
+    if let Some(issued_ver) = initial_revoked_after {
+        if subj.sessions_revoked_after > issued_ver {
+            return false;
+        }
+    }
+    true
+}
+
 pub async fn handle_deploy_stream(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = require_admin(&auth_user) {
         return resp;
+    }
+    let initial_revoked_after = af_db::get_conn()
+        .ok()
+        .and_then(|c| crate::auth::load_active_human_subject(&c, auth_user.user_id).ok())
+        .map(|s| s.sessions_revoked_after);
+    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Administrative session is no longer active",
+        );
     }
     let Some(app_name) = q.get("appName").filter(|s| !s.is_empty()) else {
         return (
@@ -3996,11 +4043,29 @@ pub async fn handle_deploy_stream(
     };
 
     let stream = async_stream::stream! {
-        while let Ok(msg) = rx.recv().await {
-            let safe_msg = af_common::redact::redact_secrets(&msg);
-            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
-            if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
-                break;
+        let mut revalidate_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        revalidate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = revalidate_tick.tick().await;
+        loop {
+            tokio::select! {
+                _ = revalidate_tick.tick() => {
+                    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+                        break;
+                    }
+                }
+                recv_res = rx.recv() => {
+                    let Ok(msg) = recv_res else {
+                        break;
+                    };
+                    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+                        break;
+                    }
+                    let safe_msg = af_common::redact::redact_secrets(&msg);
+                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+                    if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
+                        break;
+                    }
+                }
             }
         }
     };

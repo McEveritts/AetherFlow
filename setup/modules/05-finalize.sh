@@ -133,13 +133,24 @@ _harden_permissions() {
 
 	# Ownership: root:aetherflow for immutable code, releases, and scripts; only mutable data dirs are writable by aetherflow
 	if [[ -d "${af_root}" ]]; then
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${OUTTO}" 2>&1
 
-		# Directories: 755 (rwxr-xr-x), pruning sensitive mutable/snapshot directories
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
+		# Directories: 755 (rwxr-xr-x), pruning sensitive mutable/snapshot/credential directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
 
-		# Regular files: 644 (rw-r--r--), pruning sensitive mutable/snapshot directories
-		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+		# Regular files: 644 (rw-r--r--), pruning sensitive mutable/snapshot/credential directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+
+		# Enforce root-only 0700/0600 confinement on /opt/AetherFlow/logs bootstrap credential receipts
+		if [[ -L "${af_root}/logs" ]]; then
+			echo "[ERROR] Refusing symlinked ${af_root}/logs directory" >>"${OUTTO}"
+			return 1
+		elif [[ -d "${af_root}/logs" ]]; then
+			chown -h root:root "${af_root}/logs" >>"${OUTTO}" 2>&1
+			chmod 700 "${af_root}/logs" >>"${OUTTO}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type d -exec chown -h root:root {} + -exec chmod 700 {} + >>"${OUTTO}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type f -exec chown -h root:root {} + -exec chmod 600 {} + >>"${OUTTO}" 2>&1
+		fi
 
 		# Executables: restore execute permission on known binaries
 		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then

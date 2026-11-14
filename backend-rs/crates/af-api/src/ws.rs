@@ -820,7 +820,7 @@ pub fn issue_ws_ticket_for_session(user_id: i64, session_jti: &str, client_ip: &
                 session_jti: effective_jti,
                 session_ver: initial_ver,
                 client_ip: client_ip.to_string(),
-                expires_at: Instant::now() + Duration::from_secs(90),
+                expires_at: Instant::now() + Duration::from_secs(30),
                 diagnostics_allowed: false,
             },
         );
@@ -1591,29 +1591,6 @@ pub async fn handle_log_websocket(
                 }
             }
 
-            if spawned.is_none() {
-                let fallback_files = [
-                    ("/var/log/aetherflow/deploy.log", "deploy"),
-                    ("/var/log/aetherflow-deploy.log", "deploy"),
-                    ("/var/log/syslog", "syslog"),
-                    ("/var/log/messages", "syslog"),
-                ];
-                for (path, source_name) in fallback_files {
-                    if std::path::Path::new(path).exists() {
-                        if let Ok(child) = Command::new("tail")
-                            .args(["-f", "-n", "50", path])
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .kill_on_drop(true)
-                            .spawn()
-                        {
-                            spawned = Some((child, source_name));
-                            break;
-                        }
-                    }
-                }
-            }
-
             if let Some((mut child, source_name)) = spawned {
                 if let Some(stdout) = child.stdout.take() {
                     let mut lines = BufReader::new(stdout).lines();
@@ -1629,8 +1606,26 @@ pub async fn handle_log_websocket(
                 }
                 let _ = child.kill().await;
             } else {
-                // Keep channel alive if no external log source binary is available
-                std::future::pending::<()>().await;
+                let fallback_files = [
+                    ("/var/log/aetherflow/deploy.log", "deploy"),
+                    ("/var/log/aetherflow-deploy.log", "deploy"),
+                    ("/var/log/syslog", "syslog"),
+                    ("/var/log/messages", "syslog"),
+                ];
+                let mut opened_fallback: Option<(std::fs::File, &'static str)> = None;
+                for (path_str, source_name) in fallback_files {
+                    if let Some(file) = open_confined_live_log_file(std::path::Path::new(path_str))
+                    {
+                        opened_fallback = Some((file, source_name));
+                        break;
+                    }
+                }
+                if let Some((std_file, source_name)) = opened_fallback {
+                    tail_open_log_file_to_channel(std_file, source_name, &tx).await;
+                } else {
+                    // Keep channel alive if no external log source binary or confined log file is available
+                    std::future::pending::<()>().await;
+                }
             }
         });
 
@@ -1695,6 +1690,113 @@ pub async fn handle_log_websocket(
         reader_task.abort();
         let _ = reader_task.await;
     })
+}
+
+fn open_confined_live_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    let mut current = std::path::PathBuf::new();
+    for component in path.parent()?.components() {
+        current.push(component);
+        let meta = std::fs::symlink_metadata(&current).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return None;
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return None;
+        }
+        unsafe {
+            let flags = libc::fcntl(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::F_GETFL);
+            if flags >= 0 {
+                let _ = libc::fcntl(
+                    std::os::unix::io::AsRawFd::as_raw_fd(&file),
+                    libc::F_SETFL,
+                    flags & !libc::O_NONBLOCK,
+                );
+            }
+        }
+    }
+    Some(file)
+}
+
+async fn tail_open_log_file_to_channel(
+    std_file: std::fs::File,
+    source_name: &'static str,
+    tx: &tokio::sync::mpsc::Sender<serde_json::Value>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+    let mut file = tokio::fs::File::from_std(std_file);
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let start_offset = len.saturating_sub(64 * 1024);
+    let _ = file.seek(std::io::SeekFrom::Start(start_offset)).await;
+    let mut initial_buf = Vec::new();
+    let _ = file.read_to_end(&mut initial_buf).await;
+    let mut pos = start_offset + initial_buf.len() as u64;
+    let initial_text = String::from_utf8_lossy(&initial_buf);
+    let mut initial_lines: Vec<&str> = initial_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if start_offset > 0 && !initial_lines.is_empty() {
+        initial_lines.remove(0);
+    }
+    let skip = initial_lines.len().saturating_sub(50);
+    for line in initial_lines.into_iter().skip(skip) {
+        if tx
+            .send(parse_live_log_line(line, source_name))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let mut reader = BufReader::new(file);
+    let mut line_buf = String::new();
+    let mut poll = tokio::time::interval(Duration::from_millis(250));
+    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = tx.closed() => break,
+            _ = poll.tick() => {
+                if let Ok(meta) = reader.get_ref().metadata().await {
+                    if meta.len() < pos {
+                        let _ = reader.seek(std::io::SeekFrom::Start(0)).await;
+                        pos = 0;
+                    }
+                }
+                loop {
+                    line_buf.clear();
+                    match reader.read_line(&mut line_buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            pos = pos.saturating_add(n as u64);
+                            let trimmed = line_buf.trim_end_matches(['\r', '\n']);
+                            if !trimmed.trim().is_empty()
+                                && tx.send(parse_live_log_line(trimmed, source_name)).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
@@ -2004,5 +2106,29 @@ mod client_ip_tests {
             Some("203.0.113.99".parse().unwrap()),
             true
         ));
+    }
+
+    #[test]
+    fn open_confined_live_log_file_rejects_symlinks_and_hardlinks() {
+        let dir = std::env::temp_dir().join(format!("af-ws-log-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_log = dir.join("syslog.log");
+        std::fs::write(&real_log, b"line1\n").unwrap();
+        assert!(super::open_confined_live_log_file(&real_log).is_some());
+
+        let sym_log = dir.join("sym.log");
+        std::os::unix::fs::symlink(&real_log, &sym_log).unwrap();
+        assert!(
+            super::open_confined_live_log_file(&sym_log).is_none(),
+            "symlinked log file must be rejected by O_NOFOLLOW"
+        );
+
+        let hard_log = dir.join("hard.log");
+        std::fs::hard_link(&real_log, &hard_log).unwrap();
+        assert!(
+            super::open_confined_live_log_file(&hard_log).is_none(),
+            "hardlinked log file (nlink > 1) must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

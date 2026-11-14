@@ -493,7 +493,7 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
 
     def test_shipped_unit_references_delivered_helper_and_explicit_policy(self):
         service = (self.current / "deploy/systemd/aetherflow-log-retention.service").read_text()
-        self.assertIn("ExecStart=/usr/bin/python3 -B /opt/AetherFlow/current/deploy/log-retention.py", service)
+        self.assertIn("ExecStart=/usr/bin/python3 -I -B /opt/AetherFlow/current/deploy/log-retention.py", service)
         self.assertTrue((self.current / "deploy/log-retention.py").is_file())
         self.assertIn("Environment=AF_LOG_RETENTION_MAX_BYTES=10485760", service)
         self.assertIn("Environment=AF_LOG_RETENTION_KEEP=3", service)

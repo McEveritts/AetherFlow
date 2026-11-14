@@ -56,7 +56,7 @@ function OverviewTelemetrySection() {
               ? 'Lost connection to AetherFlow backend. Attempting to reconnect automatically.'
               : isFallback
                 ? 'Live connection unavailable. Polling for system data...'
-                : 'Unable to connect to the AetherFlow backend API. Make sure the Go service is running.'}
+                : 'Unable to connect to the AetherFlow backend API. Make sure the AetherFlow API service is running.'}
           </p>
           <p className={`text-xs font-mono px-2 py-1 rounded truncate max-w-full ${isReconnecting ? 'text-amber-400/80 bg-amber-500/10' : isFallback ? 'text-blue-400/80 bg-blue-500/10' : 'text-red-400/80 bg-red-500/10'}`}>
             {isReconnecting ? `Attempt ${connectionState === 'RECONNECTING' ? 'in progress' : 'pending'}` : isFallback ? 'Waiting for data...' : 'Connection refused'}
@@ -138,7 +138,7 @@ export default function Dashboard() {
 
       <Sidebar />
 
-      <main ref={mainRef} data-dashboard-main="true" data-scroller="main" className="flex-1 min-w-0 max-w-full relative z-10 h-[calc(100dvh-var(--obs-shell-bottom-dock-height,4rem))] md:h-screen overflow-y-auto no-scrollbar">
+      <main id="main-content" tabIndex={-1} ref={mainRef} data-dashboard-main="true" data-scroller="main" className="flex-1 min-w-0 max-w-full relative z-10 h-[calc(100dvh-var(--obs-shell-bottom-dock-height,4rem))] md:h-screen overflow-y-auto no-scrollbar focus:outline-none">
         <Header />
 
         <div className={activeTab === 'overview' ? undefined : 'mt-4'}>

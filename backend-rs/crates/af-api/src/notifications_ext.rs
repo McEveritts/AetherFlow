@@ -371,6 +371,55 @@ pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
 // 6–8. Notification Channels CRUD & Test (`/notifications/channels`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn validate_notification_channel_config(
+    channel_type: &str,
+    cfg: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(obj) = cfg.as_object() else {
+        return Err("Channel config must be a JSON object".to_string());
+    };
+    let url_str = obj
+        .get("url")
+        .or_else(|| obj.get("webhook_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    match channel_type {
+        "telegram" => {
+            let bot_token = obj
+                .get("bot_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let chat_id = obj
+                .get("chat_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if bot_token.is_empty() || chat_id.is_empty() {
+                return Err("Telegram channel requires non-empty bot_token and chat_id".to_string());
+            }
+            if bot_token.bytes().any(|b| b <= 0x20 || b >= 0x7f || b == b'/' || b == b'?') {
+                return Err("Invalid Telegram bot_token format".to_string());
+            }
+            Ok(())
+        }
+        "discord" | "slack" | "gotify" | "webhook" | "custom" | "email" => {
+            if url_str.is_empty() {
+                return Err(format!(
+                    "{channel_type} channel requires a non-empty webhook url"
+                ));
+            }
+            parse_webhook_url(url_str).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        _ => Err(
+            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email, telegram, custom"
+                .to_string(),
+        ),
+    }
+}
+
 pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> Response {
     if req.name.trim().is_empty() || req.channel_type.trim().is_empty() || req.config.is_null() {
         return api_error(
@@ -387,14 +436,29 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email",
+            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email, telegram, custom",
         );
     }
 
-    let config_str = match &req.config {
-        serde_json::Value::String(s) => s.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    let parsed_cfg: serde_json::Value = match &req.config {
+        serde_json::Value::String(s) => match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Channel config must be valid JSON",
+                );
+            }
+        },
+        other => other.clone(),
     };
+
+    if let Err(msg) = validate_notification_channel_config(&req.channel_type, &parsed_cfg) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", &msg);
+    }
+
+    let config_str = serde_json::to_string(&parsed_cfg).unwrap_or_else(|_| "{}".to_string());
 
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
@@ -800,11 +864,11 @@ pub async fn dispatch_to_channel(
                     channel.id,
                     &channel.channel_type,
                     notification_id,
-                    "delivered",
-                    1,
-                    "",
+                    "failed",
+                    0,
+                    "missing email webhook url",
                 );
-                return Ok(());
+                anyhow::bail!("missing email webhook url");
             }
             let body = serde_json::json!({
                 "level": level,
@@ -1277,5 +1341,20 @@ mod tests {
         }
         assert!(parse_webhook_url("https://example.com/hook").is_ok());
         assert!(parse_webhook_url("https://8.8.8.8/hook").is_ok());
+    }
+
+    #[test]
+    fn channel_config_validation_blocks_ssrf_and_empty_email_relay() {
+        assert!(validate_notification_channel_config(
+            "discord",
+            &serde_json::json!({"url": "http://169.254.169.254/latest/meta-data/"})
+        )
+        .is_err());
+        assert!(validate_notification_channel_config("email", &serde_json::json!({})).is_err());
+        assert!(validate_notification_channel_config(
+            "discord",
+            &serde_json::json!({"url": "https://8.8.8.8/webhook"})
+        )
+        .is_ok());
     }
 }

@@ -360,7 +360,7 @@ if [[ -n "$NC_VER" ]]; then
 fi
 
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
-(umask 077; write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
+(umask 077; install -d -m 0700 /opt/AetherFlow/logs && chmod 0700 /opt/AetherFlow/logs && write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
 Nextcloud Admin User: ${ADMIN_USER}
 Nextcloud Admin Pass: ${ADMIN_PASS}
 Database Name: nextcloud
@@ -373,23 +373,21 @@ fi
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+validate_config_paths /etc/apache2/sites-available/nextcloud.conf
 if [[ -s /etc/apache2/sites-available/nextcloud.conf ]]; then
-    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/nextcloud.conf
+    safe_config_python /etc/apache2/sites-available/nextcloud.conf "${APP_PORT}" <<'NC_VHOST_PYEOF'
+import re, sys
+path, port = sys.argv[1], sys.argv[2]
+existing = safe_read_text(path)
+updated = re.sub(r"(<VirtualHost [^:>]+:)[0-9]+>", rf"\g<1>{port}>", existing)
+if updated != existing:
+    safe_write_text(path, updated, 0o644)
+NC_VHOST_PYEOF
 else
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
-Alias /nextcloud "/var/www/nextcloud/"
-
-<Directory /var/www/nextcloud/>
-    Require all granted
-    AllowOverride All
-    Options FollowSymLinks MultiViews
-    <IfModule mod_dav.c>
-        Dav off
-    </IfModule>
-</Directory>
-
-<VirtualHost *:@AF_APP_PORT@>
+    write_config_file /etc/apache2/sites-available/nextcloud.conf 0644 <<EOF
+<VirtualHost 127.0.0.1:${APP_PORT}>
     DocumentRoot /var/www/nextcloud
+    Alias /nextcloud "/var/www/nextcloud/"
     <Directory /var/www/nextcloud/>
         Require all granted
         AllowOverride All

@@ -266,7 +266,7 @@ func CreateNotificationChannel(c *gin.Context) {
 		Name    string          `json:"name" binding:"required"`
 		Type    string          `json:"type" binding:"required"`
 		Config  json.RawMessage `json:"config" binding:"required"`
-		Enabled bool            `json:"enabled"`
+		Enabled *bool           `json:"enabled"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -274,16 +274,34 @@ func CreateNotificationChannel(c *gin.Context) {
 		return
 	}
 
-	// Validate type
-	validTypes := map[string]bool{"discord": true, "telegram": true, "slack": true, "custom": true}
+	// Validate type (parity with Rust control-plane)
+	validTypes := map[string]bool{
+		"discord":  true,
+		"telegram": true,
+		"slack":    true,
+		"custom":   true,
+		"webhook":  true,
+		"gotify":   true,
+		"email":    true,
+	}
 	if !validTypes[req.Type] {
-		BadRequest(c, "Invalid channel type. Allowed: discord, telegram, slack, custom")
+		BadRequest(c, "Invalid channel type. Allowed: discord, telegram, slack, custom, webhook, gotify, email")
 		return
+	}
+
+	if err := services.ValidateNotificationChannelConfig(req.Type, req.Config); err != nil {
+		BadRequest(c, err.Error())
+		return
+	}
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
 	}
 
 	result, err := db.DB.Exec(
 		"INSERT INTO notification_channels (name, type, config, enabled) VALUES (?, ?, ?, ?)",
-		req.Name, req.Type, string(req.Config), true,
+		req.Name, req.Type, string(req.Config), enabled,
 	)
 	if err != nil {
 		slog.Error("failed to create notification channel", "error", err)

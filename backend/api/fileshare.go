@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -84,22 +86,116 @@ func resolveUploadSubdir(rawSubPath string) (string, error) {
 	return target, nil
 }
 
+// openConfinedUploadSubdir opens an os.Root anchored at getUploadDir() and returns
+// the clean relative subdirectory inside that root, rejecting path traversal and symlinks.
+func openConfinedUploadSubdir(rawSubPath string, createSubdir bool) (*os.Root, string, error) {
+	baseDir, err := filepath.Abs(getUploadDir())
+	if err != nil {
+		return nil, "", err
+	}
+	if err := os.MkdirAll(baseDir, 0750); err != nil {
+		return nil, "", err
+	}
+	baseInfo, err := os.Lstat(baseDir)
+	if err != nil || baseInfo.Mode()&os.ModeSymlink != 0 || !baseInfo.IsDir() {
+		return nil, "", &uploadError{"Invalid base upload directory"}
+	}
+	root, err := os.OpenRoot(baseDir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	targetAbs, err := resolveUploadSubdir(rawSubPath)
+	if err != nil {
+		_ = root.Close()
+		return nil, "", err
+	}
+	relDir, err := filepath.Rel(baseDir, targetAbs)
+	if err != nil || strings.HasPrefix(relDir, "..") {
+		_ = root.Close()
+		return nil, "", &uploadError{"Invalid directory path"}
+	}
+	relDir = filepath.ToSlash(filepath.Clean(relDir))
+	if relDir == "" {
+		relDir = "."
+	}
+
+	if relDir != "." {
+		// Verify no existing path segment along relDir is a symlink.
+		parts := strings.Split(relDir, "/")
+		accum := ""
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." {
+				_ = root.Close()
+				return nil, "", &uploadError{"Invalid directory path"}
+			}
+			if accum == "" {
+				accum = part
+			} else {
+				accum = accum + "/" + part
+			}
+			if linfo, lErr := root.Lstat(accum); lErr == nil {
+				if linfo.Mode()&os.ModeSymlink != 0 || !linfo.IsDir() {
+					_ = root.Close()
+					return nil, "", &uploadError{"Symlink or non-directory component not allowed"}
+				}
+			}
+		}
+		if createSubdir {
+			if mkErr := root.MkdirAll(relDir, 0750); mkErr != nil {
+				_ = root.Close()
+				return nil, "", mkErr
+			}
+		}
+	}
+
+	return root, relDir, nil
+}
+
+func isBlockedMagicBytes(sniff []byte) (string, bool) {
+	if len(sniff) == 0 {
+		return "", false
+	}
+	detectedType := http.DetectContentType(sniff)
+	if blockedContentTypes[detectedType] {
+		return detectedType, true
+	}
+	// Explicit binary/script header magic checks (handles short chunks < 512 bytes)
+	if bytes.HasPrefix(sniff, []byte{0x7f, 'E', 'L', 'F'}) {
+		return "application/x-elf", true
+	}
+	if bytes.HasPrefix(sniff, []byte{'M', 'Z'}) {
+		return "application/x-dosexec", true
+	}
+	if bytes.HasPrefix(sniff, []byte{'#', '!'}) {
+		return "application/x-shellscript", true
+	}
+	if len(sniff) >= 4 {
+		magic := sniff[:4]
+		if bytes.Equal(magic, []byte{0xfe, 0xed, 0xfa, 0xce}) ||
+			bytes.Equal(magic, []byte{0xfe, 0xed, 0xfa, 0xcf}) ||
+			bytes.Equal(magic, []byte{0xce, 0xfa, 0xed, 0xfe}) ||
+			bytes.Equal(magic, []byte{0xcf, 0xfa, 0xed, 0xfe}) {
+			return "application/x-mach-binary", true
+		}
+	}
+	return "", false
+}
+
 func GetFilesList(c *gin.Context) {
-	targetDir, err := resolveUploadSubdir(c.Query("path"))
+	root, relDir, err := openConfinedUploadSubdir(c.Query("path"), true)
 	if err != nil {
 		BadRequest(c, err.Error())
 		return
 	}
+	defer root.Close()
 
-	if _, statErr := os.Stat(targetDir); os.IsNotExist(statErr) {
-		if mkErr := os.MkdirAll(targetDir, 0755); mkErr != nil {
+	files, err := fs.ReadDir(root.FS(), relDir)
+	if err != nil {
+		if os.IsNotExist(err) {
 			c.JSON(http.StatusOK, []FileInfo{})
 			return
 		}
-	}
-
-	files, err := os.ReadDir(targetDir)
-	if err != nil {
 		slog.Error("reading upload directory", "error", err)
 		InternalError(c, "Failed to read files directory")
 		return
@@ -107,6 +203,9 @@ func GetFilesList(c *gin.Context) {
 
 	fileList := make([]FileInfo, 0, len(files))
 	for _, f := range files {
+		if f.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
 		info, err := f.Info()
 		if err != nil {
 			continue
@@ -231,10 +330,8 @@ func UploadFile(c *gin.Context) {
 
 	sniffBuf := make([]byte, 512)
 	n, _ := src.Read(sniffBuf)
-	detectedType := http.DetectContentType(sniffBuf[:n])
-
-	if blockedContentTypes[detectedType] {
-		BadRequest(c, "File content type not allowed: "+detectedType)
+	if blockedType, blocked := isBlockedMagicBytes(sniffBuf[:n]); blocked {
+		BadRequest(c, "File content type not allowed: "+blockedType)
 		return
 	}
 
@@ -243,19 +340,30 @@ func UploadFile(c *gin.Context) {
 		return
 	}
 
-	uploadDir, dirErr := resolveUploadSubdir(c.GetHeader("X-Target-Path"))
+	root, relDir, dirErr := openConfinedUploadSubdir(c.GetHeader("X-Target-Path"), true)
 	if dirErr != nil {
 		BadRequest(c, dirErr.Error())
 		return
 	}
-	if mkErr := os.MkdirAll(uploadDir, 0755); mkErr != nil {
-		InternalError(c, "Failed to prepare target directory")
-		return
+	defer root.Close()
+
+	relTarget := safeName
+	if relDir != "." {
+		relTarget = relDir + "/" + safeName
 	}
 
-	dst := filepath.Join(uploadDir, safeName)
+	if linfo, lErr := root.Lstat(relTarget); lErr == nil {
+		if linfo.Mode()&os.ModeSymlink != 0 || linfo.IsDir() {
+			BadRequest(c, "Refusing to overwrite symlink or directory")
+			return
+		}
+	}
 
 	chunkIdx, _ := strconv.Atoi(c.GetHeader("X-Chunk-Index"))
+	if chunkIdx < 0 {
+		BadRequest(c, "Invalid chunk index")
+		return
+	}
 	openFlags := os.O_CREATE | os.O_WRONLY
 	if chunkIdx > 0 {
 		openFlags |= os.O_APPEND
@@ -263,18 +371,36 @@ func UploadFile(c *gin.Context) {
 		openFlags |= os.O_TRUNC
 	}
 
-	out, openErr := os.OpenFile(dst, openFlags, 0640)
+	out, openErr := root.OpenFile(relTarget, openFlags, 0640)
 	if openErr != nil {
 		slog.Error("failed to open target file for upload", "error", openErr)
 		InternalError(c, "Failed to save file securely")
 		return
 	}
-	defer out.Close()
 
 	if _, copyErr := io.Copy(out, src); copyErr != nil {
+		_ = out.Close()
 		slog.Error("failed to write uploaded file chunk", "error", copyErr)
 		InternalError(c, "Failed to save file securely")
 		return
+	}
+	if closeErr := out.Close(); closeErr != nil {
+		InternalError(c, "Failed to finalize uploaded chunk")
+		return
+	}
+
+	// Re-validate magic bytes on the assembled file prefix so split-chunk magic headers cannot bypass sniffing.
+	if chunkIdx > 0 {
+		if verifyFile, vErr := root.Open(relTarget); vErr == nil {
+			assembledHead := make([]byte, 512)
+			vn, _ := verifyFile.Read(assembledHead)
+			_ = verifyFile.Close()
+			if blockedType, blocked := isBlockedMagicBytes(assembledHead[:vn]); blocked {
+				_ = root.Remove(relTarget)
+				BadRequest(c, "File content type not allowed: "+blockedType)
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -283,7 +409,7 @@ func UploadFile(c *gin.Context) {
 	})
 }
 
-// HandleDownloadFile securely serves a fileshare download using paths validated by sanitizeFilename.
+// HandleDownloadFile securely serves a fileshare download from an os.Root-confined descriptor.
 func HandleDownloadFile(c *gin.Context) {
 	filename := c.Param("filename")
 
@@ -294,23 +420,49 @@ func HandleDownloadFile(c *gin.Context) {
 		return
 	}
 
-	uploadDir, dirErr := resolveUploadSubdir(c.Query("path"))
+	root, relDir, dirErr := openConfinedUploadSubdir(c.Query("path"), false)
 	if dirErr != nil {
 		BadRequest(c, dirErr.Error())
 		return
 	}
-	filePath := filepath.Join(uploadDir, safeName)
+	defer root.Close()
 
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	relTarget := safeName
+	if relDir != "." {
+		relTarget = relDir + "/" + safeName
+	}
+
+	linfo, statErr := root.Lstat(relTarget)
+	if os.IsNotExist(statErr) {
 		NotFoundError(c, "File not found")
 		return
 	}
+	if statErr != nil {
+		InternalError(c, "Failed to inspect file")
+		return
+	}
+	if linfo.Mode()&os.ModeSymlink != 0 || linfo.IsDir() {
+		BadRequest(c, "Refusing to serve symlink or directory")
+		return
+	}
 
+	f, openErr := root.Open(relTarget)
+	if openErr != nil {
+		if os.IsNotExist(openErr) {
+			NotFoundError(c, "File not found")
+			return
+		}
+		InternalError(c, "Failed to open file")
+		return
+	}
+	defer f.Close()
+
+	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
-	c.File(filePath)
+	http.ServeContent(c.Writer, c.Request, safeName, linfo.ModTime(), f)
 }
 
-// DeleteSharedFile deletes a file from the fileshare directory.
+// DeleteSharedFile deletes a file from the fileshare directory inside os.Root confinement.
 func DeleteSharedFile(c *gin.Context) {
 	filename := c.Param("filename")
 	safeName, err := sanitizeFilename(filename)
@@ -319,14 +471,19 @@ func DeleteSharedFile(c *gin.Context) {
 		return
 	}
 
-	uploadDir, dirErr := resolveUploadSubdir(c.Query("path"))
+	root, relDir, dirErr := openConfinedUploadSubdir(c.Query("path"), false)
 	if dirErr != nil {
 		BadRequest(c, dirErr.Error())
 		return
 	}
-	filePath := filepath.Join(uploadDir, safeName)
+	defer root.Close()
 
-	info, statErr := os.Stat(filePath)
+	relTarget := safeName
+	if relDir != "." {
+		relTarget = relDir + "/" + safeName
+	}
+
+	info, statErr := root.Lstat(relTarget)
 	if os.IsNotExist(statErr) {
 		NotFoundError(c, "File not found")
 		return
@@ -339,9 +496,13 @@ func DeleteSharedFile(c *gin.Context) {
 		BadRequest(c, "Cannot delete directory via file endpoint")
 		return
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		BadRequest(c, "Refusing to delete symlink via file endpoint")
+		return
+	}
 
-	if rmErr := os.Remove(filePath); rmErr != nil {
-		slog.Error("failed to delete shared file", "path", filePath, "error", rmErr)
+	if rmErr := root.Remove(relTarget); rmErr != nil {
+		slog.Error("failed to delete shared file", "name", relTarget, "error", rmErr)
 		InternalError(c, "Failed to delete file")
 		return
 	}

@@ -12,6 +12,9 @@ import (
 // TestSendWebhookWithRetry_Success verifies that a webhook is delivered
 // on the first attempt against a healthy endpoint.
 func TestSendWebhookWithRetry_Success(t *testing.T) {
+	allowLoopbackWebhookTargetsForTest.Store(true)
+	defer allowLoopbackWebhookTargetsForTest.Store(false)
+
 	var received []byte
 	var mu sync.Mutex
 
@@ -52,6 +55,9 @@ func TestSendWebhookWithRetry_Success(t *testing.T) {
 // TestSendWebhookWithRetry_RetryOnServerError verifies exponential backoff retry
 // when the server returns 500 errors, eventually failing after maxRetries.
 func TestSendWebhookWithRetry_RetryOnServerError(t *testing.T) {
+	allowLoopbackWebhookTargetsForTest.Store(true)
+	defer allowLoopbackWebhookTargetsForTest.Store(false)
+
 	var hitCount int
 	var mu sync.Mutex
 
@@ -82,6 +88,9 @@ func TestSendWebhookWithRetry_RetryOnServerError(t *testing.T) {
 // TestSendWebhookWithRetry_RetryThenSucceed verifies that the retry mechanism
 // succeeds after transient failures.
 func TestSendWebhookWithRetry_RetryThenSucceed(t *testing.T) {
+	allowLoopbackWebhookTargetsForTest.Store(true)
+	defer allowLoopbackWebhookTargetsForTest.Store(false)
+
 	var hitCount int
 	var mu sync.Mutex
 
@@ -167,5 +176,78 @@ func TestBuildCustomPayload(t *testing.T) {
 	}
 	if payload["level"] != "warning" {
 		t.Errorf("Expected level=warning, got %v", payload["level"])
+	}
+}
+
+func TestValidatePublicWebhookURL_BlocksSSRF(t *testing.T) {
+	blocked := []string{
+		"http://127.0.0.1:8080/hook",
+		"http://localhost:8080/hook",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::ffff:169.254.169.254]/latest/meta-data/",
+		"http://168.63.129.16/metadata",
+		"http://10.0.0.5/hook",
+		"http://192.168.1.10/hook",
+		"http://100.64.0.10/hook",
+		"http://[fd00:ec2::254]/latest",
+		"https://user:pass@8.8.8.8/hook",
+		"file:///etc/passwd",
+	}
+	for _, u := range blocked {
+		if _, err := ValidatePublicWebhookURL(u); err == nil {
+			t.Errorf("expected ValidatePublicWebhookURL(%q) to fail, but succeeded", u)
+		}
+	}
+	if _, err := ValidatePublicWebhookURL("https://8.8.8.8/webhook"); err != nil {
+		t.Fatalf("expected public IP webhook URL to succeed, got: %v", err)
+	}
+}
+
+func TestSendWebhookWithRetry_BlocksRedirects(t *testing.T) {
+	allowLoopbackWebhookTargetsForTest.Store(true)
+	defer allowLoopbackWebhookTargetsForTest.Store(false)
+
+	var redirectedHit bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	attempts, err := sendWebhookWithRetry(redirector.URL, map[string]string{"hello": "world"})
+	if err == nil {
+		t.Fatal("expected 302 redirect from webhook endpoint to be rejected")
+	}
+	if attempts != 1 {
+		t.Errorf("expected redirect rejection without retry amplification, got %d attempts", attempts)
+	}
+	if redirectedHit {
+		t.Fatal("webhook client must never follow 3xx redirects")
+	}
+}
+
+func TestValidateServerURL_BlocksIPv4MappedMetadata(t *testing.T) {
+	blocked := []string{
+		"http://169.254.169.254:80",
+		"http://[::ffff:169.254.169.254]:80",
+		"http://[::ffff:0.0.0.0]:8096",
+		"http://168.63.129.16:80",
+		"http://[fd00:ec2::254]:80",
+		"http://metadata.google.internal:80",
+	}
+	for _, u := range blocked {
+		if _, err := ValidateServerURL(u); err == nil {
+			t.Errorf("expected ValidateServerURL(%q) to reject metadata/unspecified target", u)
+		}
+	}
+	for _, allowed := range []string{"http://127.0.0.1:8096", "http://192.168.1.20:8096"} {
+		if _, err := ValidateServerURL(allowed); err != nil {
+			t.Errorf("expected ValidateServerURL(%q) to allow LAN/loopback Jellyfin, got: %v", allowed, err)
+		}
 	}
 }

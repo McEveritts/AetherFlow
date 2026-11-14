@@ -1368,6 +1368,8 @@ pull_prebuilt_artifact() {
         fi
         [[ -n "${prov_out}" ]] && log_info "Provenance verifier: ${prov_out}"
         log_info "Sigstore build provenance OK for ${tag}"
+    else
+        log_warn "AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set; bypassing Sigstore build provenance verification for ${tag}."
     fi
 
     if ! validate_release_tarball "${tmp_dir}/${ARTIFACT_NAME}"; then
@@ -1712,10 +1714,15 @@ state_snapshot() {
     fi
     log_info "Snapshot integrity check PASSED: ${bak_path}"
 
-    (
-        cd "${snapshot_dir}"
-        sha256sum -- *.bak > MANIFEST.sha256
-    ) || log_warn "Could not write snapshot SHA-256 manifest."
+    if ! (
+        umask 077
+        cd "${snapshot_dir}" &&
+        sha256sum -- *.bak > MANIFEST.sha256 &&
+        [[ -s MANIFEST.sha256 ]]
+    ); then
+        log_error "Failed to write snapshot SHA-256 manifest in ${snapshot_dir}. Aborting before symlink swap."
+        return 1
+    fi
 
     log_info "=== STAGE 1.5 COMPLETE: State snapshot captured ==="
 }

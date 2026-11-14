@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -412,6 +414,33 @@ func SaveStreamingServerConfig(provider, name, serverURL, encryptedOrRawKey stri
 	return err
 }
 
+func isForbiddenStreamingAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	u := addr.Unmap()
+	if u.IsUnspecified() ||
+		u.IsMulticast() ||
+		u.IsLinkLocalUnicast() ||
+		u.IsLinkLocalMulticast() {
+		return true
+	}
+	if u.Is4() {
+		b := u.As4()
+		// 0.0.0.0/8, 169.254.0.0/16 (IMDS / link-local), 168.63.129.16 (Azure WireServer), 240.0.0.0/4 + broadcast
+		if b[0] == 0 || (b[0] == 169 && b[1] == 254) || b == [4]byte{168, 63, 129, 16} || b[0] >= 240 {
+			return true
+		}
+		return false
+	}
+	b := u.As16()
+	// fd00:ec2::/32 AWS IPv6 IMDS
+	if b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2 {
+		return true
+	}
+	return false
+}
+
 // ValidateServerURL ensures the configured media server URL uses http or https and blocks SSRF/path-hijack vectors.
 func ValidateServerURL(rawURL string) (string, error) {
 	trimmed := strings.TrimRight(strings.TrimSpace(rawURL), "/")
@@ -439,26 +468,75 @@ func ValidateServerURL(rawURL string) (string, error) {
 	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host == "" ||
-		host == "0.0.0.0" ||
-		host == "::" ||
-		host == "0:0:0:0:0:0:0:0" ||
 		host == "metadata.google.internal" ||
 		host == "metadata.goog" ||
 		host == "instance-data" ||
-		strings.HasSuffix(host, ".metadata.google.internal") ||
-		strings.HasPrefix(host, "169.254.") ||
-		strings.HasPrefix(host, "fe80:") ||
-		strings.HasPrefix(host, "fd00:ec2:") ||
-		strings.HasPrefix(host, "255.") {
+		strings.HasSuffix(host, ".metadata.google.internal") {
 		return "", fmt.Errorf("server URL host %q is not permitted", host)
+	}
+	if ip, ipErr := netip.ParseAddr(host); ipErr == nil {
+		if isForbiddenStreamingAddr(ip) {
+			return "", fmt.Errorf("server URL host %q is not permitted", host)
+		}
 	}
 	return trimmed, nil
 }
 
+var jellyfinDialer = &net.Dialer{Timeout: 8 * time.Second}
+
 var jellyfinHTTPTransport = &http.Transport{
+	Proxy:               nil,
 	MaxIdleConns:        32,
 	MaxIdleConnsPerHost: 16,
 	IdleConnTimeout:     90 * time.Second,
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid media server address: %w", err)
+		}
+		portNum, err := net.DefaultResolver.LookupPort(ctx, network, port)
+		if err != nil || portNum <= 0 || portNum > 65535 {
+			return nil, fmt.Errorf("invalid media server port: %q", port)
+		}
+		lowerHost := strings.ToLower(strings.TrimSpace(host))
+		if lowerHost == "metadata.google.internal" ||
+			lowerHost == "metadata.goog" ||
+			lowerHost == "instance-data" ||
+			strings.HasSuffix(lowerHost, ".metadata.google.internal") {
+			return nil, fmt.Errorf("blocked metadata hostname %q", host)
+		}
+		var verified []netip.Addr
+		if literal, pErr := netip.ParseAddr(host); pErr == nil {
+			if isForbiddenStreamingAddr(literal) {
+				return nil, fmt.Errorf("blocked forbidden media server IP %s", literal)
+			}
+			verified = append(verified, literal.Unmap())
+		} else {
+			resolved, lErr := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			if lErr != nil || len(resolved) == 0 {
+				return nil, fmt.Errorf("failed to resolve media server host %q", host)
+			}
+			for _, ip := range resolved {
+				if isForbiddenStreamingAddr(ip) {
+					return nil, fmt.Errorf("media server host %q resolved to forbidden IP %s", host, ip)
+				}
+				verified = append(verified, ip.Unmap())
+			}
+		}
+		var lastErr error
+		for _, ip := range verified {
+			target := netip.AddrPortFrom(ip, uint16(portNum)).String()
+			conn, dErr := jellyfinDialer.DialContext(ctx, network, target)
+			if dErr == nil {
+				return conn, nil
+			}
+			lastErr = dErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no valid address for media server %q", host)
+	},
 }
 
 func newJellyfinHTTPClient(timeout time.Duration) *http.Client {

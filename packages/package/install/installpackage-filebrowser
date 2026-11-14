@@ -147,7 +147,7 @@ safe_write_text(sys.argv[1], json.dumps([{'id': 0, 'username': os.environ['AF_SE
 PYEOF
 af_logged /usr/local/bin/filebrowser users import "$FB_USERS_FILE" --database /opt/filebrowser/filebrowser.db
 rm -f -- "$FB_USERS_FILE"
-(umask 077; printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" | write_config_file /opt/AetherFlow/logs/filebrowser_credentials.txt 0600)
+(umask 077; install -d -m 0700 /opt/AetherFlow/logs && chmod 0700 /opt/AetherFlow/logs && printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" | write_config_file /opt/AetherFlow/logs/filebrowser_credentials.txt 0600)
 fi
 
 chown -hRP filebrowser:filebrowser /opt/filebrowser

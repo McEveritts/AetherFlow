@@ -181,20 +181,45 @@ func (ne *NotificationEngine) sendToChannel(ch NotificationChannel, n Notificati
 	var attempts int
 	var deliveryErr error
 
+	channelURL := config["url"]
+	if channelURL == "" {
+		channelURL = config["webhook_url"]
+	}
+
 	switch ch.Type {
 	case "discord":
-		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildDiscordPayload(n))
+		attempts, deliveryErr = sendWebhookWithRetry(channelURL, buildDiscordPayload(n))
 	case "telegram":
-		if config["bot_token"] == "" || config["chat_id"] == "" {
-			recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "missing bot_token or chat_id")
+		if config["bot_token"] == "" || config["chat_id"] == "" || !telegramBotTokenRe.MatchString(config["bot_token"]) {
+			recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "missing or invalid bot_token or chat_id")
 			return
 		}
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", config["bot_token"])
 		attempts, deliveryErr = sendWebhookWithRetry(url, buildTelegramPayload(config["chat_id"], n))
 	case "slack":
-		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildSlackPayload(n))
-	case "custom":
-		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildCustomPayload(n))
+		attempts, deliveryErr = sendWebhookWithRetry(channelURL, buildSlackPayload(n))
+	case "custom", "webhook":
+		attempts, deliveryErr = sendWebhookWithRetry(channelURL, buildCustomPayload(n))
+	case "gotify":
+		gotifyBase := channelURL
+		if gotifyBase == "" {
+			gotifyBase = config["server_url"]
+		}
+		token := config["token"]
+		if token == "" {
+			token = config["app_token"]
+		}
+		if gotifyBase == "" || token == "" {
+			recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "missing gotify server url or token")
+			return
+		}
+		attempts, deliveryErr = sendGotifyWebhook(gotifyBase, token, n)
+	case "email":
+		if channelURL == "" {
+			recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "email channel missing HTTP relay url")
+			return
+		}
+		attempts, deliveryErr = sendWebhookWithRetry(channelURL, buildCustomPayload(n))
 	default:
 		notifLog.Warn("unknown channel type", "channel", ch.Name, "type", ch.Type)
 		recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "unknown channel type: "+ch.Type)

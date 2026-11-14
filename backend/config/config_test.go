@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,9 +72,10 @@ func TestParseDurationOr(t *testing.T) {
 }
 
 func TestLoadAndValidate(t *testing.T) {
-	// Set minimum required env vars
-	os.Setenv("JWT_SECRET", "test-secret")
-	os.Setenv("AES_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	// Set minimum required env vars (>= 32-byte JWT_SECRET)
+	strongSecret := strings.Repeat("ab", 16)
+	os.Setenv("JWT_SECRET", strongSecret)
+	os.Setenv("AES_MASTER_KEY", strings.Repeat("cd", 16))
 	os.Unsetenv("DB_PATH")
 	os.Unsetenv("AETHERFLOW_DB_PATH")
 	defer os.Unsetenv("JWT_SECRET")
@@ -86,8 +88,8 @@ func TestLoadAndValidate(t *testing.T) {
 	if Cfg == nil {
 		t.Fatal("Cfg should not be nil after Load()")
 	}
-	if Cfg.JWTSecret != "test-secret" {
-		t.Errorf("expected JWT_SECRET=test-secret, got %s", Cfg.JWTSecret)
+	if Cfg.JWTSecret != strongSecret {
+		t.Errorf("expected JWT_SECRET=%s, got %s", strongSecret, Cfg.JWTSecret)
 	}
 	if Cfg.Port != "8443" {
 		// Default port
@@ -112,5 +114,16 @@ func TestLoadAndValidate(t *testing.T) {
 	err := Validate()
 	if err != nil {
 		t.Errorf("Validate() should not return fatal error: %v", err)
+	}
+}
+
+func TestValidateRejectsWeakJWTSecret(t *testing.T) {
+	defer os.Unsetenv("JWT_SECRET")
+	for _, weak := range []string{"", "short-secret", strings.Repeat("0", 32), "aetherflow-default-" + "jwt-secret-change-me"} {
+		os.Setenv("JWT_SECRET", weak)
+		Load()
+		if err := Validate(); err == nil {
+			t.Fatalf("expected Validate() to reject weak JWT_SECRET %q", weak)
+		}
 	}
 }

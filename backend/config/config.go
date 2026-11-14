@@ -130,6 +130,33 @@ func Load() {
 	logConfigSummary(cfg)
 }
 
+// ValidateJWTSecret checks that JWT_SECRET has at least 32 bytes of non-placeholder entropy.
+func ValidateJWTSecret(secret string) error {
+	trimmed := strings.TrimSpace(secret)
+	if len(trimmed) < 32 {
+		return fmt.Errorf("JWT_SECRET must be at least 32 bytes (got %d bytes)", len(trimmed))
+	}
+	lower := strings.ToLower(trimmed)
+	placeholders := []string{
+		"changeme",
+		"secret",
+		"jwt_secret",
+		"default",
+		"password",
+		"your-jwt-secret",
+		"replace-me",
+		"insecure",
+		"aetherflow-default-jwt-secret-change-me",
+		"00000000000000000000000000000000",
+	}
+	for _, p := range placeholders {
+		if lower == p {
+			return fmt.Errorf("JWT_SECRET uses a forbidden placeholder value")
+		}
+	}
+	return nil
+}
+
 // Validate checks for critical misconfigurations and logs warnings.
 // Returns an error only for truly fatal issues.
 func Validate() error {
@@ -137,11 +164,11 @@ func Validate() error {
 		return fmt.Errorf("config.Load() must be called before config.Validate()")
 	}
 
-	var warnings []string
-
-	if Cfg.JWTSecret == "" {
-		warnings = append(warnings, "JWT_SECRET is empty — sessions will use an insecure default key")
+	if err := ValidateJWTSecret(Cfg.JWTSecret); err != nil {
+		return err
 	}
+
+	var warnings []string
 
 	if Cfg.AESMasterKey == "" {
 		warnings = append(warnings, "AES_MASTER_KEY is empty — API keys stored in plaintext")

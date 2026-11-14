@@ -95,6 +95,19 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     let is_legacy_api =
         req.uri().path().starts_with("/api/") && !req.uri().path().starts_with("/api/v1/");
     let req_path = req.uri().path().to_string();
+    let req_host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 255
+                && s.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+                })
+        })
+        .map(str::to_string);
 
     req.headers_mut().insert(
         "X-Request-ID",
@@ -102,6 +115,10 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     );
 
     let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
+    let is_api_non_ui = req_path.starts_with("/api/")
+        && !is_plugin_ui
+        && !req_path.starts_with("/api/swagger")
+        && !req_path.starts_with("/api/docs");
 
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
@@ -123,12 +140,25 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         HeaderValue::from_static("1; mode=block"),
     );
     if !is_plugin_ui {
-        h.insert(
-            "Content-Security-Policy",
-            HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'",
-            ),
-        );
+        if is_api_non_ui {
+            h.insert(
+                "Content-Security-Policy",
+                HeaderValue::from_static(
+                    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+                ),
+            );
+        } else {
+            let connect_src = match req_host.as_deref() {
+                Some(host) => format!("'self' ws://{host} wss://{host}"),
+                None => "'self'".to_string(),
+            };
+            let csp = format!(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src {connect_src}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+            );
+            if let Ok(hv) = HeaderValue::from_str(&csp) {
+                h.insert("Content-Security-Policy", hv);
+            }
+        }
     }
     h.insert(
         "Referrer-Policy",
@@ -5350,11 +5380,70 @@ struct AvatarReq {
     avatar_url: String,
 }
 
+fn validate_avatar_uri(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Avatar image or URL is required");
+    }
+    if trimmed.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("Avatar URI must not contain control characters");
+    }
+    if trimmed.starts_with('/') {
+        if trimmed.starts_with("//") || trimmed.starts_with("/\\") || trimmed.contains("..") {
+            return Err("Disallowed avatar URI path");
+        }
+        return Ok(trimmed.to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    const ALLOWED_RASTER_PREFIXES: &[&str] = &[
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/jpg;base64,",
+        "data:image/webp;base64,",
+        "data:image/gif;base64,",
+    ];
+    if let Some(prefix) = ALLOWED_RASTER_PREFIXES
+        .iter()
+        .find(|p| lower.starts_with(**p))
+    {
+        let b64_payload = &trimmed[prefix.len()..];
+        if b64_payload.is_empty()
+            || !b64_payload
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            return Err("Invalid base64 raster avatar payload");
+        }
+        use base64::Engine as _;
+        if base64::engine::general_purpose::STANDARD
+            .decode(b64_payload)
+            .is_err()
+        {
+            return Err("Malformed base64 raster avatar payload");
+        }
+        return Ok(trimmed.to_string());
+    }
+    if lower.starts_with("https://") {
+        let Ok(parsed) = reqwest::Url::parse(trimmed) else {
+            return Err("Invalid avatar HTTPS URL");
+        };
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err("Invalid avatar HTTPS URL");
+        }
+        return Ok(trimmed.to_string());
+    }
+    Err("Disallowed avatar URI scheme; use https://, a root-relative path, or a base64 PNG/JPEG/WEBP/GIF data URI")
+}
+
 async fn update_avatar(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<AvatarReq>,
 ) -> Response {
-    let val = if !req.avatar.is_empty() {
+    let val = if !req.avatar.trim().is_empty() {
         req.avatar
     } else {
         req.avatar_url
@@ -5366,24 +5455,36 @@ async fn update_avatar(
             "Avatar payload exceeds maximum 2MB size limit",
         );
     }
-    let lower = val.trim().to_lowercase();
-    if lower.starts_with("javascript:") || lower.starts_with("file:") {
+    let validated = match validate_avatar_uri(&val) {
+        Ok(uri) => uri,
+        Err(msg) => {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", msg);
+        }
+    };
+    let Ok(conn) = af_db::get_conn() else {
         return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Disallowed avatar URI scheme",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to update avatar",
         );
-    }
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
+    };
+    if conn
+        .execute(
             "UPDATE users SET avatar_url = ?1 WHERE id = ?2",
-            params![val, auth_user.user_id],
+            params![validated, auth_user.user_id],
+        )
+        .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to update avatar",
         );
     }
     Json(serde_json::json!({
         "status": "success",
         "message": "Avatar updated successfully",
-        "avatar_url": val,
+        "avatar_url": validated,
     }))
     .into_response()
 }
@@ -11774,6 +11875,37 @@ mod hillclimb_tests {
         if let Some(item) = items.first() {
             assert_eq!(item["inventory_known"], false);
             assert!(!item["inventory_authenticated"].as_bool().unwrap_or(false));
+        }
+    }
+
+    #[test]
+    fn avatar_uri_allowlist_blocks_svg_html_and_unsafe_schemes() {
+        for rejected in [
+            "",
+            "javascript:alert(1)",
+            "data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+            "http://insecure.example.com/avatar.png",
+            "https://user:pass@example.com/avatar.png",
+            "//evil.example.com/avatar.png",
+            "/uploads/../../etc/passwd",
+            "data:image/png;base64,not-valid-base64!!!",
+        ] {
+            assert!(
+                validate_avatar_uri(rejected).is_err(),
+                "expected {rejected} to be rejected"
+            );
+        }
+        for accepted in [
+            "https://cdn.example.com/avatars/u1.png",
+            "/uploads/avatars/u1.webp",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "data:image/webp;base64,UklGRg==",
+        ] {
+            assert!(
+                validate_avatar_uri(accepted).is_ok(),
+                "expected {accepted} to be accepted"
+            );
         }
     }
 }

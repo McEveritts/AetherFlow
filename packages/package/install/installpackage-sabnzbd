@@ -111,9 +111,19 @@ cleanup() {
     set +e
     if [[ "$SUCCESS" -ne 1 ]]; then
         if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$VENV_MOVED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
-            quiesce_services_for_rollback sabnzbd || restore_failed=true
+            if ! quiesce_services_for_rollback sabnzbd; then
+                restore_failed=true
+                [[ -z "$BUILD_DIR" || ! -d "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"
+                print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
+                exit 1
+            fi
             if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
-                restore_app_state "$BACKUP_DIR" || restore_failed=true
+                restore_app_state "$BACKUP_DIR" || {
+                    restore_failed=true
+                    [[ -z "$BUILD_DIR" || ! -d "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"
+                    print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${RUNTIME_BACKUP:-unknown}}"
+                    exit 1
+                }
             fi
         fi
         if [[ "$APP_ACTIVATED" -eq 1 ]]; then

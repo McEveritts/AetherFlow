@@ -27,8 +27,12 @@ func HandleDeployProcess(c *gin.Context) {
 		return
 	}
 
-	// 1. Establish the Event Stream Logging specific to this target
-	statusChan := services.StreamHub.RegisterStream(appBlueprint.AppName)
+	// 1. Atomically claim the deployment stream for this target; reject overlapping deploys.
+	statusChan, registered := services.StreamHub.TryRegisterStream(appBlueprint.AppName)
+	if !registered {
+		RespondError(c, http.StatusConflict, "DEPLOYMENT_IN_PROGRESS", fmt.Sprintf("Deployment already in progress for %s", appBlueprint.AppName))
+		return
+	}
 
 	targetPort := appBlueprint.DefaultPort
 	if resolvedPort, _, err := services.ResolveDynamicAppPort(appBlueprint.AppName, false); err == nil && resolvedPort > 0 {
@@ -54,21 +58,23 @@ func HandleDeployProcess(c *gin.Context) {
 		StatusChan:      statusChan,
 	}
 
-	// 2. Fire the deployment routine asynchronously
+	// 2. Fire the deployment routine asynchronously with panic-safe channel cleanup.
 	go func(cfg services.DeployConfig) {
+		defer func() {
+			_ = recover()
+			services.StreamHub.DeregisterStreamIfMatch(cfg.AppName, cfg.StatusChan)
+		}()
+
 		// Log start to trigger matching logic in SSE UI component
-		cfg.StatusChan <- "[STEP 0] Deployment sequence queued asynchronously."
+		services.SendStreamMessage(cfg.StatusChan, "[STEP 0] Deployment sequence queued asynchronously.")
 
 		if err := globalOrchestrator.ExecuteAtomicDeploy(cfg); err != nil {
 			// Catch failure explicitly and push ROLLBACK standard string.
-			cfg.StatusChan <- fmt.Sprintf("[ROLLBACK] Engine failure detected: %v", err)
+			services.SendStreamMessage(cfg.StatusChan, fmt.Sprintf("[ROLLBACK] Engine failure detected: %v", err))
 		} else {
 			// Match our defined exact String parameter so SSE react hook closes
-			cfg.StatusChan <- "[SUCCESS] Atomic deployment verified and live."
+			services.SendStreamMessage(cfg.StatusChan, "[SUCCESS] Atomic deployment verified and live.")
 		}
-
-		// Sequence is totally terminal. Wait slightly to ensure buffers empty, then close natively.
-		services.StreamHub.DeregisterStream(cfg.AppName)
 	}(deployConfig)
 
 	// 3. Inform the client that the background job fired.

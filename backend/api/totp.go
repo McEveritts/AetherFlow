@@ -32,6 +32,19 @@ const recoveryCodeCount = 8
 
 // recoveryCodePattern matches the XXXX-XXXX format used by recovery codes.
 var recoveryCodePattern = regexp.MustCompile(`^[A-Z0-9]{4}-[A-Z0-9]{4}$`)
+var compactRecoveryCodePattern = regexp.MustCompile(`^[A-Z0-9]{8}$`)
+
+// normalizeRecoveryCodeInput accepts both XXXX-XXXX and compact 8-char XXXXXXXX recovery codes.
+func normalizeRecoveryCodeInput(raw string) (string, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(raw))
+	if recoveryCodePattern.MatchString(upper) {
+		return upper, true
+	}
+	if compactRecoveryCodePattern.MatchString(upper) {
+		return upper[:4] + "-" + upper[4:], true
+	}
+	return upper, false
+}
 
 // ── Recovery Code & TOTP Step Anti-Replay Helpers ─────────────────────────
 
@@ -486,7 +499,7 @@ func Disable2FA(c *gin.Context) {
 		}
 	}
 
-	isRecovery := recoveryCodePattern.MatchString(strings.ToUpper(code))
+	normalizedRecovery, isRecovery := normalizeRecoveryCodeInput(code)
 	var decryptedSecret string
 	if !isRecovery {
 		var decErr error
@@ -507,7 +520,7 @@ func Disable2FA(c *gin.Context) {
 
 	var verified bool
 	if isRecovery {
-		verified = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
+		verified = validateRecoveryCodeInTx(tx, userID, normalizedRecovery)
 	} else {
 		verified = validateAndRecordTOTPStepInTx(tx, userID, code, decryptedSecret)
 	}
@@ -649,11 +662,11 @@ func MFALoginVerify(c *gin.Context) {
 
 	// Determine if this is a TOTP code or a recovery code
 	code := strings.TrimSpace(req.Code)
-	isRecoveryCode := recoveryCodePattern.MatchString(strings.ToUpper(code))
+	normalizedRecovery, isRecoveryCode := normalizeRecoveryCodeInput(code)
 	codeValid := false
 
 	if isRecoveryCode {
-		codeValid = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
+		codeValid = validateRecoveryCodeInTx(tx, userID, normalizedRecovery)
 	} else {
 		if encryptedSecret == "" {
 			_ = db.CommitWriteTx(tx, release)
@@ -758,7 +771,7 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 		return
 	}
 
-	isRecovery := recoveryCodePattern.MatchString(strings.ToUpper(code))
+	normalizedRecovery, isRecovery := normalizeRecoveryCodeInput(code)
 	var secret string
 	if !isRecovery {
 		var decErr error
@@ -792,7 +805,7 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 
 	var verified bool
 	if isRecovery {
-		verified = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
+		verified = validateRecoveryCodeInTx(tx, userID, normalizedRecovery)
 	} else {
 		verified = validateAndRecordTOTPStepInTx(tx, userID, code, secret)
 	}

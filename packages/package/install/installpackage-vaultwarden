@@ -184,6 +184,8 @@ INVITATIONS_ALLOWED=true
 SHOW_PASSWORD_HINT=false
 ADMIN_TOKEN=${ADMIN_TOKEN}
 EOF
+    install -d -m 0700 /opt/AetherFlow/logs
+    chmod 0700 /opt/AetherFlow/logs
     printf 'Vaultwarden Admin Token: %s\n' "$ADMIN_TOKEN" | write_config_file /opt/AetherFlow/logs/vaultwarden_admin_token.txt 0600
     )
 fi

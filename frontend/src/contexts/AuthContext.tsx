@@ -7,6 +7,7 @@ import { navigateBrowser } from '@/lib/browser-navigation';
 import { loginReturnToFromLocation, navigateToLoginDestination } from '@/lib/login-navigation';
 import { mutate as globalMutate } from 'swr';
 import { useConnectionStore } from '@/store/useConnectionStore';
+import { useOptionalToast } from '@/contexts/ToastContext';
 
 export interface User {
     id: number;
@@ -43,6 +44,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const [isLoading, setIsLoading] = useState(true);
     const [user, setUser] = useState<User | null>(null);
     const router = useRouter();
+    const toast = useOptionalToast();
     const sessionCheckGenRef = useRef(0);
     const lastAuthenticatedAtRef = useRef(0);
 
@@ -181,10 +183,35 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const logout = async () => {
         sessionCheckGenRef.current++;
         lastAuthenticatedAtRef.current = 0;
-        try {
-            await apiFetch('/api/v1/auth/logout', { method: 'POST' });
-        } catch (err) {
-            console.error("Logout failed:", err);
+
+        let revoked = false;
+        for (let attempt = 0; attempt < 2 && !revoked; attempt++) {
+            try {
+                const res = await apiFetch('/api/v1/auth/logout', { method: 'POST' });
+                if (res.ok || res.status === 401) {
+                    revoked = true;
+                }
+            } catch (err) {
+                console.error("Logout attempt failed:", err);
+            }
+        }
+
+        if (!revoked) {
+            // Probe whether the HttpOnly cookie is still accepted by the server.
+            try {
+                const sessionProbe = await apiFetch('/api/v1/auth/session');
+                if (sessionProbe.ok) {
+                    const liveUser = await sessionProbe.json();
+                    lastAuthenticatedAtRef.current = Date.now();
+                    setUser(liveUser);
+                    setIsAuthenticated(true);
+                    toast?.addToast('Sign-out failed: server could not revoke your session. Please retry.', 'error');
+                    return;
+                }
+            } catch {
+                // Network unreachable or cookie already cleared via Set-Cookie Max-Age=-1
+            }
+            toast?.addToast('Warning: server could not confirm session revocation. Close your browser if on a shared device.', 'error');
         }
 
         window.localStorage.setItem('af_logout_sync', String(Date.now()));

@@ -1689,13 +1689,27 @@ fn logout_blocking(req: Request) -> Response {
             }
             Some((claims.user_id, claims.jti))
         });
+    let clear_cookie = build_set_cookie(
+        "aetherflow_session",
+        "",
+        -1,
+        "Lax",
+        secure_cookie_enabled(),
+        true,
+    );
+    let attach_clear_cookie = |mut resp: Response| -> Response {
+        if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+            resp.headers_mut().insert(header::SET_COOKIE, hv);
+        }
+        resp
+    };
     if let Some((user_id, session_jti)) = resolved_subject {
         let Ok(mut conn) = af_db::get_conn() else {
-            return api_error(
+            return attach_clear_cookie(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 "Failed to revoke session",
-            );
+            ));
         };
         let tx_res = (|| -> anyhow::Result<(String, Vec<String>)> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1704,11 +1718,11 @@ fn logout_blocking(req: Request) -> Response {
             Ok(res)
         })();
         let Ok((family_id, revoked_jtis)) = tx_res else {
-            return api_error(
+            return attach_clear_cookie(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 "Failed to revoke session",
-            );
+            ));
         };
         for jti in &revoked_jtis {
             af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
@@ -1717,19 +1731,7 @@ fn logout_blocking(req: Request) -> Response {
         evict_rotation_grace_for_family(&family_id, &session_jti);
         drop(conn);
     }
-    let cookie = build_set_cookie(
-        "aetherflow_session",
-        "",
-        -1,
-        "Lax",
-        secure_cookie_enabled(),
-        true,
-    );
-    let mut resp = Json(serde_json::json!({ "message": "Logged out" })).into_response();
-    if let Ok(hv) = HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, hv);
-    }
-    resp
+    attach_clear_cookie(Json(serde_json::json!({ "message": "Logged out" })).into_response())
 }
 
 pub async fn refresh_session_with_peer(

@@ -653,6 +653,73 @@ af_logged my_shell_fn
                 self.assertNotIn("/tmp/rutorrent-git-$$", txt, msg=str(p))
                 self.assertNotIn(">>", txt, msg=str(p))
 
+    def test_round9_logs_confinement_manifest_fail_closed_and_nextcloud_vhost_scope(self) -> None:
+        fin_src = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
+        self.assertIn('-path "${af_root}/logs"', fin_src)
+        self.assertIn('chmod 700 "${af_root}/logs"', fin_src)
+        self.assertIn('-exec chmod 600 {} +', fin_src)
+
+        for pkg in ("filebrowser", "vaultwarden", "nextcloud"):
+            pkg_src = (ROOT / f"packages/package/install/installpackage-{pkg}").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("install -d -m 0700 /opt/AetherFlow/logs", pkg_src)
+
+        nc_src = (ROOT / "packages/package/install/installpackage-nextcloud").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('sed -i', nc_src)
+        self.assertIn("safe_config_python", nc_src)
+        self.assertIn("write_config_file /etc/apache2/sites-available/nextcloud.conf 0644", nc_src)
+
+        rm_src = (ROOT / "deploy/release-manager.sh").read_text(encoding="utf-8")
+        self.assertIn("Failed to write snapshot SHA-256 manifest", rm_src)
+        self.assertIn("AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set", rm_src)
+
+        # Functional test: state_snapshot fails closed if sha256sum fails
+        snippet = rm_src[
+            rm_src.index("state_snapshot() {") : rm_src.index("\nsync_legacy_package_paths()")
+        ]
+        with tempfile.TemporaryDirectory(prefix="af-r9-snap-") as tmp:
+            tmp_path = Path(tmp)
+            db_dir = tmp_path / "data"
+            db_dir.mkdir()
+            db_file = db_dir / "aetherflow.sqlite"
+            import sqlite3
+
+            conn = sqlite3.connect(db_file)
+            conn.executescript("CREATE TABLE t (id INT); INSERT INTO t VALUES (1);")
+            conn.commit()
+            conn.close()
+
+            bin_dir = tmp_path / "fakebin"
+            bin_dir.mkdir()
+            fake_sha = bin_dir / "sha256sum"
+            fake_sha.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            fake_sha.chmod(0o755)
+
+            probe = f"""
+set -euo pipefail
+export PATH="{bin_dir}:$PATH"
+DRY_RUN=false
+RESOLVED_DB_PATH={str(db_file)!r}
+RESOLVED_DB_SOURCE="env"
+RELEASE_DIR={str(tmp_path / 'rel')!r}
+DATA_DIR={str(db_dir)!r}
+SQLITE_DB="aetherflow.sqlite"
+SNAPSHOT_TIMEOUT=5
+sqlite_online_backup() {{ cp "$1" "$2"; }}
+sqlite_integrity() {{ echo "ok"; }}
+log_info() {{ :; }}
+log_warn() {{ :; }}
+log_error() {{ echo "ERR:$*" >&2; }}
+{snippet}
+state_snapshot
+"""
+            proc = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("Failed to write snapshot SHA-256 manifest", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
