@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -809,21 +810,31 @@ BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1;
 	)
 
 	// ─── Auth/OIDC family & revocation floor schema parity (no schema_versions bump) ───
-	ensureColumnIfMissing("users", "sessions_revoked_after",
-		"ALTER TABLE users ADD COLUMN sessions_revoked_after INTEGER NOT NULL DEFAULT 0;")
-	ensureColumnIfMissing("active_sessions", "family_id",
-		"ALTER TABLE active_sessions ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
-	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_active_sessions_family ON active_sessions(family_id) WHERE family_id != '';")
-	ensureColumnIfMissing("oidc_refresh_tokens", "family_id",
-		"ALTER TABLE oidc_refresh_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
-	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_oidc_refresh_tokens_family ON oidc_refresh_tokens(family_id) WHERE family_id != '';")
-	ensureColumnIfMissing("mfa_challenges", "credential_ver",
-		"ALTER TABLE mfa_challenges ADD COLUMN credential_ver INTEGER NOT NULL DEFAULT 0;")
-	ensureColumnIfMissing("revoked_tokens", "family_id",
-		"ALTER TABLE revoked_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
-	ensureColumnIfMissing("revoked_tokens", "user_id",
-		"ALTER TABLE revoked_tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;")
-	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_revoked_tokens_family ON revoked_tokens(family_id) WHERE family_id != '';")
+	for _, colSpec := range []struct {
+		table  string
+		column string
+		alter  string
+	}{
+		{"users", "sessions_revoked_after", "ALTER TABLE users ADD COLUMN sessions_revoked_after INTEGER NOT NULL DEFAULT 0;"},
+		{"active_sessions", "family_id", "ALTER TABLE active_sessions ADD COLUMN family_id TEXT NOT NULL DEFAULT '';"},
+		{"oidc_refresh_tokens", "family_id", "ALTER TABLE oidc_refresh_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';"},
+		{"mfa_challenges", "credential_ver", "ALTER TABLE mfa_challenges ADD COLUMN credential_ver INTEGER NOT NULL DEFAULT 0;"},
+		{"revoked_tokens", "family_id", "ALTER TABLE revoked_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';"},
+		{"revoked_tokens", "user_id", "ALTER TABLE revoked_tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;"},
+	} {
+		if err := ensureColumnIfMissing(colSpec.table, colSpec.column, colSpec.alter); err != nil {
+			log.Fatalf("Failed to ensure schema column %s.%s: %v", colSpec.table, colSpec.column, err)
+		}
+	}
+	if _, err := DB.Exec("CREATE INDEX IF NOT EXISTS idx_active_sessions_family ON active_sessions(family_id) WHERE family_id != '';"); err != nil {
+		log.Fatalf("Failed to ensure idx_active_sessions_family: %v", err)
+	}
+	if _, err := DB.Exec("CREATE INDEX IF NOT EXISTS idx_oidc_refresh_tokens_family ON oidc_refresh_tokens(family_id) WHERE family_id != '';"); err != nil {
+		log.Fatalf("Failed to ensure idx_oidc_refresh_tokens_family: %v", err)
+	}
+	if _, err := DB.Exec("CREATE INDEX IF NOT EXISTS idx_revoked_tokens_family ON revoked_tokens(family_id) WHERE family_id != '';"); err != nil {
+		log.Fatalf("Failed to ensure idx_revoked_tokens_family: %v", err)
+	}
 
 	// Enforce RFC 8628 unique user_code index after cleaning any historical duplicates
 	_, _ = DB.Exec(`DELETE FROM oidc_device_codes WHERE rowid NOT IN (SELECT MAX(rowid) FROM oidc_device_codes GROUP BY user_code);`)
@@ -887,17 +898,23 @@ func DBHealthCheck() (map[string]interface{}, error) {
 }
 
 // ensureColumnIfMissing adds a column to an existing SQLite table without bumping schema_versions.
-func ensureColumnIfMissing(table, column, alterStmt string) {
+func ensureColumnIfMissing(table, column, alterStmt string) error {
 	var count int
-	if err := DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('"+table+"') WHERE name = ?", column).Scan(&count); err != nil { // #nosec G202 -- hardcoded internal table name
-		slog.Warn("schema column check failed", "table", table, "column", column, "error", err)
-		return
+	if err := DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", table, column).Scan(&count); err != nil {
+		return fmt.Errorf("schema column check failed for %s.%s: %w", table, column, err)
 	}
 	if count == 0 {
 		if _, err := DB.Exec(alterStmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			slog.Warn("schema column addition failed", "table", table, "column", column, "error", err)
+			return fmt.Errorf("schema column addition failed for %s.%s: %w", table, column, err)
+		}
+		if err := DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", table, column).Scan(&count); err != nil {
+			return fmt.Errorf("schema column verification failed for %s.%s: %w", table, column, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("schema column %s.%s still missing after migration", table, column)
 		}
 	}
+	return nil
 }
 
 // PruneExpiredData removes stale records across all tables with TTL semantics.

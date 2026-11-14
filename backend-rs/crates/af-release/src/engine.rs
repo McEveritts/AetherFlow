@@ -74,24 +74,50 @@ pub fn append_jsonl_log(log_file: &Path, level: &str, msg: &str) {
         msg: msg.to_string(),
     };
     if let Ok(serialized) = serde_json::to_string(&entry) {
-        if let Some(parent) = log_file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
+        let path_safe = if let Some(parent) = log_file.parent() {
+            create_dir_all_no_symlinks(parent, 0o750).is_ok()
+                && ensure_no_symlink_ancestors(log_file).is_ok()
+        } else {
+            ensure_no_symlink_ancestors(log_file).is_ok()
+        };
+        let target_is_symlink = fs::symlink_metadata(log_file)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if path_safe && !target_is_symlink {
+            let mut opts = OpenOptions::new();
+            opts.create(true).append(true);
             #[cfg(unix)]
             {
-                use std::os::unix::io::AsRawFd;
-                unsafe {
-                    let _ = libc::flock(file.as_raw_fd(), libc::LOCK_SH);
-                }
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o640).custom_flags(libc::O_NOFOLLOW);
             }
-            let _ = writeln!(file, "{}", serialized);
-            let _ = file.flush();
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                unsafe {
-                    let _ = libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            if let Ok(mut file) = opts.open(log_file) {
+                #[cfg(unix)]
+                let fd_ok = {
+                    use std::os::unix::fs::MetadataExt;
+                    file.metadata()
+                        .map(|m| m.is_file() && m.nlink() == 1)
+                        .unwrap_or(false)
+                };
+                #[cfg(not(unix))]
+                let fd_ok = file.metadata().map(|m| m.is_file()).unwrap_or(false);
+                if fd_ok {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        unsafe {
+                            let _ = libc::flock(file.as_raw_fd(), libc::LOCK_SH);
+                        }
+                    }
+                    let _ = writeln!(file, "{}", serialized);
+                    let _ = file.flush();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        unsafe {
+                            let _ = libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                        }
+                    }
                 }
             }
         }

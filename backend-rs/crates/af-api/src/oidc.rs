@@ -1499,21 +1499,42 @@ fn oidc_token_blocking(
                     .into_response();
             }
 
-            let affected = tx
-                .execute(
-                    "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND revoked = 0",
-                    params![refresh_token],
-                )
-                .unwrap_or(0);
-            if affected == 0 {
-                if has_family {
-                    let _ = tx.execute(
-                        "UPDATE oidc_refresh_tokens SET revoked = 1 \
-                         WHERE user_id = ?1 AND client_id = ?2 AND (family_id = ?3 OR token = ?3)",
-                        params![user_id, client_id, effective_family],
-                    );
+            let affected = match tx.execute(
+                "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND revoked = 0",
+                params![refresh_token],
+            ) {
+                Ok(n) => n,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                        .into_response();
                 }
-                let _ = tx.commit();
+            };
+            if affected == 0 {
+                if has_family
+                    && tx
+                        .execute(
+                            "UPDATE oidc_refresh_tokens SET revoked = 1 \
+                             WHERE user_id = ?1 AND client_id = ?2 AND (family_id = ?3 OR token = ?3)",
+                            params![user_id, client_id, effective_family],
+                        )
+                        .is_err()
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                        .into_response();
+                }
+                if tx.commit().is_err() {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                        .into_response();
+                }
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1841,8 +1862,16 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
         validation.validate_aud = false;
         if let Ok(data) = decode::<AccessTokenClaims>(token.trim(), &keys.decoding_key, &validation)
         {
-            if data.claims.aud == client_id && !data.claims.jti.is_empty() {
-                let _ = af_db::revoke_token(&data.claims.jti, std::time::Duration::from_secs(8160));
+            if data.claims.aud == client_id
+                && !data.claims.jti.is_empty()
+                && af_db::revoke_token(&data.claims.jti, std::time::Duration::from_secs(8160))
+                    .is_err()
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "server_error" })),
+                )
+                    .into_response();
             }
         }
     }

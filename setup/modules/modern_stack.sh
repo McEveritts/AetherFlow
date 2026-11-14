@@ -228,6 +228,8 @@ _stage_prebuilt_release_archive() {
 
     if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
         local prov_channel="${5:-$(_af_resolve_release_channel)}"
+        local staged_bundle="${6:-}"
+        local effective_bundle="${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-${staged_bundle}}"
         local github_repo="${GITHUB_REPO:-McEveritts/AetherFlow}"
         local -a prov_args=(
             --repo "${github_repo}"
@@ -236,8 +238,8 @@ _stage_prebuilt_release_archive() {
             --tag "${release_tag}"
             --channel "${prov_channel}"
         )
-        if [[ -n "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" ]]; then
-            prov_args+=(--bundle-file "${AETHERFLOW_PROVENANCE_BUNDLE_FILE}")
+        if [[ -n "${effective_bundle}" ]]; then
+            prov_args+=(--bundle-file "${effective_bundle}")
         fi
         if [[ ! -f "${af_root}/deploy/verify-provenance.py" ]] || ! python3 -I -B "${af_root}/deploy/verify-provenance.py" "${prov_args[@]}"; then
             echo "[ERROR] Sigstore provenance verification failed for ${release_tag} (${artifact_name}). Refusing unverified binary." >&2
@@ -378,7 +380,7 @@ _pull_prebuilt_v4_release() {
     if [[ -z "${target_tag}" ]]; then
         local api_url="https://api.github.com/repos/${github_repo}/releases"
         local releases_json=""
-        releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null || true)"
+        releases_json="$(curl --proto '=https' --proto-redir '=https' --max-filesize 16777216 -sfL --max-time 15 "${api_url}" 2>/dev/null || true)"
 
         if [[ "${channel}" == "nightly" ]]; then
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
@@ -423,7 +425,7 @@ except Exception:
             fi
             if [[ -z "${target_tag}" ]]; then
                 local latest_url
-                latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${github_repo}/releases/latest" 2>/dev/null || true)"
+                latest_url="$(curl --proto '=https' --proto-redir '=https' --max-filesize 1048576 -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${github_repo}/releases/latest" 2>/dev/null || true)"
                 local candidate_tag="${latest_url##*/}"
                 if [[ "${latest_url}" == "https://github.com/${github_repo}/releases/tag/"* && "${candidate_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
                     target_tag="${candidate_tag}"
@@ -443,19 +445,32 @@ except Exception:
     local dl_dir
     dl_dir="$(mktemp -d "${tmp_base}/af-prebuilt-XXXXXX")"
 
-    if ! curl -fsSL --retry 3 --max-time 180 -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}"; then
+    local -a proto_flags=()
+    if [[ "${base_url,,}" == https://* ]]; then
+        proto_flags=(--proto '=https' --proto-redir '=https')
+    fi
+
+    if ! curl "${proto_flags[@]}" --max-filesize 536870912 -fsSL --retry 3 --max-time 180 -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}"; then
         echo "[ERROR] Failed to download prebuilt v4 release ${base_url}/${artifact_name}. Refusing implicit source-build fallback." >&2
         rm -rf "${dl_dir}"
         return 1
     fi
 
-    if ! curl -fsSL --retry 3 --max-time 30 -o "${dl_dir}/${checksum_name}" "${base_url}/${checksum_name}"; then
+    if ! curl "${proto_flags[@]}" --max-filesize 4194304 -fsSL --retry 3 --max-time 30 -o "${dl_dir}/${checksum_name}" "${base_url}/${checksum_name}"; then
         echo "[ERROR] Failed to download SHA-256 manifest ${base_url}/${checksum_name}. Refusing unverified binary." >&2
         rm -rf "${dl_dir}"
         return 1
     fi
 
-    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}" "${channel}"; then
+    local downloaded_bundle=""
+    if [[ -z "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        local candidate_bundle="${dl_dir}/${artifact_name}.sigstore.json"
+        if curl "${proto_flags[@]}" --max-filesize 8388608 -fsSL --max-time 30 -o "${candidate_bundle}" "${base_url}/${artifact_name}.sigstore.json" 2>/dev/null && [[ -s "${candidate_bundle}" ]]; then
+            downloaded_bundle="${candidate_bundle}"
+        fi
+    fi
+
+    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}" "${channel}" "${downloaded_bundle}"; then
         rm -rf "${dl_dir}"
         return 1
     fi

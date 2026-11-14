@@ -497,25 +497,77 @@ fn check_rotation_grace(jti: &str) -> Option<RotatedTokenGraceEntry> {
     map.get(jti).cloned()
 }
 
+fn resolve_latest_grace_token(
+    jti: &str,
+    user_id: i64,
+) -> Option<(RotatedTokenGraceEntry, String, String)> {
+    let grace = check_rotation_grace(jti).filter(|g| g.user_id == user_id)?;
+    if grace.successor_jti.is_empty() || grace.new_token.is_empty() {
+        return None;
+    }
+    let mut latest_token = grace.new_token.clone();
+    if let Ok(map) = ROTATED_TOKEN_GRACE.lock() {
+        let now = Instant::now();
+        let mut cur_succ = grace.successor_jti.clone();
+        for _ in 0..32 {
+            let Some(next) = map.get(&cur_succ) else {
+                break;
+            };
+            if next.user_id != user_id
+                || next.expires_at <= now
+                || next.new_token.is_empty()
+                || next.successor_jti == cur_succ
+            {
+                break;
+            }
+            latest_token = next.new_token.clone();
+            if next.successor_jti.is_empty() {
+                break;
+            }
+            cur_succ = next.successor_jti.clone();
+        }
+    }
+    let leaf_jti = resolve_current_session_jti(&grace.successor_jti);
+    if leaf_jti.is_empty() {
+        return None;
+    }
+    Some((grace, latest_token, leaf_jti))
+}
+
+pub(crate) fn is_session_token_revoked_beyond_grace_with_conn(
+    conn: &rusqlite::Connection,
+    jti: &str,
+    user_id: i64,
+) -> bool {
+    match af_db::token_revocation_status_with_conn(conn, jti) {
+        Ok(false) => false,
+        Err(_) => true,
+        Ok(true) => {
+            let Some((grace, _, leaf_jti)) = resolve_latest_grace_token(jti, user_id) else {
+                return true;
+            };
+            if matches!(
+                af_db::token_revocation_status_with_conn(conn, &leaf_jti),
+                Ok(false)
+            ) {
+                false
+            } else {
+                evict_rotation_grace_for_family(&grace.family_id, jti);
+                true
+            }
+        }
+    }
+}
+
 pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> bool {
     match af_db::token_revocation_status(jti) {
         Ok(false) => false,
         Err(_) => true,
         Ok(true) => {
-            let Some(grace) = check_rotation_grace(jti).filter(|g| g.user_id == user_id) else {
+            let Some((grace, _, leaf_jti)) = resolve_latest_grace_token(jti, user_id) else {
                 return true;
             };
-            let leaf_jti = resolve_current_session_jti(&grace.successor_jti);
-            if grace.successor_jti.is_empty() || leaf_jti.is_empty() {
-                return true;
-            }
-            let direct_ok = matches!(
-                af_db::token_revocation_status(&grace.successor_jti),
-                Ok(false)
-            );
-            let leaf_ok = leaf_jti == grace.successor_jti
-                || matches!(af_db::token_revocation_status(&leaf_jti), Ok(false));
-            if direct_ok && leaf_ok {
+            if matches!(af_db::token_revocation_status(&leaf_jti), Ok(false)) {
                 false
             } else {
                 evict_rotation_grace_for_family(&grace.family_id, jti);
@@ -526,23 +578,58 @@ pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> 
 }
 
 pub(crate) fn evict_rotation_grace_for_family(family_id: &str, target_jti: &str) {
+    let mut evicted_jtis = std::collections::HashSet::new();
+    if !target_jti.is_empty() {
+        evicted_jtis.insert(target_jti.to_string());
+    }
     if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
         map.retain(|old_jti, entry| {
             let leaf = resolve_current_session_jti(&entry.successor_jti);
-            old_jti != target_jti
+            let keep = old_jti != target_jti
                 && entry.successor_jti != target_jti
                 && (target_jti.is_empty() || leaf != target_jti)
-                && (family_id.is_empty() || entry.family_id != family_id)
+                && (family_id.is_empty() || entry.family_id != family_id);
+            if !keep {
+                evicted_jtis.insert(old_jti.clone());
+                if !entry.successor_jti.is_empty() {
+                    evicted_jtis.insert(entry.successor_jti.clone());
+                }
+                if !leaf.is_empty() {
+                    evicted_jtis.insert(leaf);
+                }
+            }
+            keep
         });
     }
-    if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
-        succ.retain(|old_jti, (next_jti, _)| old_jti != target_jti && next_jti != target_jti);
+    if !evicted_jtis.is_empty() {
+        if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+            succ.retain(|old_jti, (next_jti, _)| {
+                !evicted_jtis.contains(old_jti) && !evicted_jtis.contains(next_jti)
+            });
+        }
     }
 }
 
 pub(crate) fn evict_rotation_grace_for_user(user_id: i64) {
+    let mut evicted_jtis = std::collections::HashSet::new();
     if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
-        map.retain(|_, entry| entry.user_id != user_id);
+        map.retain(|old_jti, entry| {
+            let keep = entry.user_id != user_id;
+            if !keep {
+                evicted_jtis.insert(old_jti.clone());
+                if !entry.successor_jti.is_empty() {
+                    evicted_jtis.insert(entry.successor_jti.clone());
+                }
+            }
+            keep
+        });
+    }
+    if !evicted_jtis.is_empty() {
+        if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+            succ.retain(|old_jti, (next_jti, _)| {
+                !evicted_jtis.contains(old_jti) && !evicted_jtis.contains(next_jti)
+            });
+        }
     }
 }
 
@@ -1613,19 +1700,38 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     }
 
-    let has_family = column_exists(&tx, "active_sessions", "family_id").unwrap_or(false);
-    let existing_family_opt: Option<String> = if table_exists(&tx, "active_sessions")
-        .unwrap_or(false)
-    {
-        if has_family {
+    let has_sessions_table = match table_exists(&tx, "active_sessions") {
+        Ok(v) => v,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to inspect active sessions",
+            );
+        }
+    };
+    let has_family = if has_sessions_table {
+        match column_exists(&tx, "active_sessions", "family_id") {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to inspect session schema",
+                );
+            }
+        }
+    } else {
+        false
+    };
+    let existing_family_opt: Option<String> = if has_sessions_table {
+        let query_res = if has_family {
             tx.query_row(
                 "SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
                 params![claims.jti, subj.user_id],
                 |r| r.get(0),
             )
             .optional()
-            .ok()
-            .flatten()
         } else {
             tx.query_row(
                 "SELECT jti FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
@@ -1633,8 +1739,16 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
                 |r| r.get(0),
             )
             .optional()
-            .ok()
-            .flatten()
+        };
+        match query_res {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to query session family",
+                );
+            }
         }
     } else {
         None
@@ -1650,16 +1764,12 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
     };
 
     if !consumed {
-        if let Some(grace_entry) =
-            check_rotation_grace(&claims.jti).filter(|g| g.user_id == subj.user_id)
+        if let Some((_, latest_token, leaf_succ)) =
+            resolve_latest_grace_token(&claims.jti, subj.user_id)
         {
-            let leaf_succ = resolve_current_session_jti(&grace_entry.successor_jti);
             let successor_revoked = leaf_succ.is_empty()
-                || af_db::token_revocation_status_with_conn(&tx, &grace_entry.successor_jti)
-                    .unwrap_or(true)
-                || (leaf_succ != grace_entry.successor_jti
-                    && af_db::token_revocation_status_with_conn(&tx, &leaf_succ).unwrap_or(true));
-            let successor_active = table_exists(&tx, "active_sessions").unwrap_or(false)
+                || af_db::token_revocation_status_with_conn(&tx, &leaf_succ).unwrap_or(true);
+            let successor_active = has_sessions_table
                 && tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2)",
@@ -1670,7 +1780,7 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
             if !successor_revoked && successor_active {
                 let cookie = build_set_cookie(
                     "aetherflow_session",
-                    &grace_entry.new_token,
+                    &latest_token,
                     SESSION_COOKIE_MAX_AGE,
                     "Lax",
                     secure_cookie_enabled(),
@@ -1678,7 +1788,7 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
                 );
                 let mut resp = Json(serde_json::json!({
                     "status": "success",
-                    "token": grace_entry.new_token,
+                    "token": latest_token,
                     "expires_at": now + 900,
                     "user": { "id": subj.user_id, "username": subj.username, "role": subj.role }
                 }))
@@ -2361,7 +2471,13 @@ pub async fn verify_2fa(req: Request) -> Response {
         );
     };
 
-    let enc_secret = af_db::encrypt_key(&secret).unwrap_or(secret);
+    let Ok(enc_secret) = af_db::encrypt_key(&secret) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CRYPTO_ERROR",
+            "Failed to encrypt two-factor secret",
+        );
+    };
     let recovery_codes = generate_recovery_codes();
     let result = (|| -> anyhow::Result<()> {
         let conn = af_db::get_conn()?;
@@ -3730,5 +3846,65 @@ mod tests {
         )
         .await;
         assert_eq!(epoch_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn round6_chained_normal_rotation_preserves_grace_and_post_grace_replay_wipes_family() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, sessions_revoked_after) \
+                 VALUES (996, 'r6-chain-user', 'hash', 'user', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut base_headers = HeaderMap::new();
+        base_headers.insert(header::USER_AGENT, HeaderValue::from_static("r6-chain-ua"));
+        let (s0, s0_claims) = create_standard_jwt(996, &base_headers).unwrap();
+
+        let do_refresh = |tok: String| async move {
+            let mut h = HeaderMap::new();
+            h.insert(header::USER_AGENT, HeaderValue::from_static("r6-chain-ua"));
+            h.insert(
+                header::COOKIE,
+                format!("aetherflow_session={tok}").parse().unwrap(),
+            );
+            let resp = refresh_session(h).await;
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let next_tok = val["token"].as_str().unwrap_or("").to_string();
+            (status, next_tok)
+        };
+
+        let (st1, s1) = do_refresh(s0.clone()).await;
+        assert_eq!(st1, StatusCode::OK);
+        assert!(!s1.is_empty());
+
+        let (st2, s2) = do_refresh(s1.clone()).await;
+        assert_eq!(st2, StatusCode::OK);
+        assert!(!s2.is_empty());
+        let s2_claims = decode_session_claims(&s2, false).unwrap();
+
+        // In-flight refresh using ancestor s0 within 15s grace MUST return active leaf s2 (not wipe family)
+        let (st_grace, s_grace) = do_refresh(s0.clone()).await;
+        assert_eq!(st_grace, StatusCode::OK);
+        assert_eq!(s_grace, s2);
+        assert!(!is_session_token_revoked_beyond_grace(&s0_claims.jti, 996));
+        assert!(!af_db::is_token_revoked(&s2_claims.jti));
+
+        // Simulate restart / expired grace: replaying s0 MUST return 401 and wipe leaf s2
+        ROTATED_TOKEN_GRACE.lock().unwrap().clear();
+        ROTATED_SESSION_SUCCESSOR.lock().unwrap().clear();
+        let (st_replay, _) = do_refresh(s0).await;
+        assert_eq!(st_replay, StatusCode::UNAUTHORIZED);
+        assert!(af_db::is_token_revoked(&s2_claims.jti));
     }
 }

@@ -98,6 +98,7 @@ jobs:
 
       - name: Rust Static Analysis (workspace + strict restore/release core)
         run: |
+          cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
 
@@ -157,6 +158,13 @@ jobs:
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           TMPDIR: /tmp
         run: go test -v -count=1 -race ./...
+
+      - name: Hex AES_MASTER_KEY parity tests
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          TMPDIR: /tmp
+        run: AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
 
       - name: Build verification
         run: go build ./...

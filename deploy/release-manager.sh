@@ -1020,7 +1020,7 @@ github_https_curl() {
         fi
     fi
     local rc=0
-    curl --proto '=https' --max-filesize "${max_bytes}" "${extra_args[@]}" || rc=$?
+    curl --proto '=https' --proto-redir '=https' --max-filesize "${max_bytes}" "${extra_args[@]}" || rc=$?
     [[ -n "${hdr_file}" ]] && rm -f "${hdr_file}"
     return "${rc}"
 }
@@ -1755,7 +1755,7 @@ restart_systemd_units() {
         done
     fi
 
-    systemctl daemon-reload
+    systemctl daemon-reload || return 1
 
     if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
         systemctl start aetherflow-log-retention.service || return 1
@@ -1769,8 +1769,8 @@ restart_systemd_units() {
     fi
 
     systemctl enable aetherflow-runner.service aetherflow-api.service >/dev/null 2>&1 || true
-    systemctl restart aetherflow-runner.service
-    systemctl restart aetherflow-api.service
+    systemctl restart aetherflow-runner.service || return 1
+    systemctl restart aetherflow-api.service || return 1
 }
 
 # Top-level "status" from a /health/ready body. Key order and whitespace do not matter.
@@ -1812,7 +1812,10 @@ health_probe() {
         return 0
     fi
 
-    restart_systemd_units
+    if ! restart_systemd_units; then
+        log_error "Failed to restart required AetherFlow systemd services."
+        return 1
+    fi
 
     log_info "Polling ${HEALTH_ENDPOINT} (${HEALTH_RETRIES} attempts, ${HEALTH_INTERVAL}s interval)..."
     local attempt=1
@@ -1827,6 +1830,12 @@ health_probe() {
             status="$(parse_health_status "${body}" || true)"
             if [[ "${status}" == "ready" || "${status}" == "ok" ]]; then
                 if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" && -L "${CURRENT_LINK}" ]]; then
+                    if [[ -f "${SYSTEMD_UNITS_DST}/aetherflow-runner.service" ]] && ! systemctl is-active --quiet aetherflow-runner.service 2>/dev/null; then
+                        log_warn "Health probe HTTP 200 but aetherflow-runner.service is not active; retrying."
+                        sleep "${HEALTH_INTERVAL}"
+                        attempt=$((attempt + 1))
+                        continue
+                    fi
                     local expected_release_dir main_pid proc_exe
                     expected_release_dir="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
                     main_pid="$(systemctl show -p MainPID --value aetherflow-api.service 2>/dev/null | tr -d '[:space:]' || true)"

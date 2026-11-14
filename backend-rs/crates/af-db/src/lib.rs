@@ -81,33 +81,72 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
             }
         }
     }
+    if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() == Ok("1") {
+        return None;
+    }
     let env_file = env::var("AETHERFLOW_ENV_FILE")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/etc/aetherflow/aetherflow.env".to_string());
-    if let Ok(contents) = fs::read_to_string(env_file) {
-        let mut last_raw: Option<String> = None;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
-            if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
-                let clean = val.trim().trim_matches('"').trim_matches('\'');
-                if !clean.is_empty() {
-                    last_raw = Some(clean.to_string());
-                }
-            }
-        }
-        if let Some(clean) = last_raw {
-            if let Ok(key) = parse_aes_key_bytes(&clean) {
-                return Some(key);
-            }
+    if let Some(clean) = read_last_aes_key_from_env_file(Path::new(&env_file)) {
+        if let Ok(key) = parse_aes_key_bytes(&clean) {
+            return Some(key);
         }
     }
     None
+}
+
+fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Some(parent) = path.parent() {
+        let pmeta = fs::symlink_metadata(parent).ok()?;
+        if pmeta.file_type().is_symlink() || !pmeta.is_dir() {
+            return None;
+        }
+    }
+    let lmeta = fs::symlink_metadata(path).ok()?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return None;
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(0o0400000); // O_NOFOLLOW on Linux
+    }
+    let mut file = opts.open(path).ok()?;
+    let fmeta = file.metadata().ok()?;
+    if !fmeta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if lmeta.dev() != fmeta.dev() || lmeta.ino() != fmeta.ino() {
+            return None;
+        }
+    }
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents).ok()?;
+    let mut last_raw: Option<String> = None;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
+            let clean = val.trim().trim_matches('"').trim_matches('\'');
+            if !clean.is_empty() {
+                last_raw = Some(clean.to_string());
+            }
+        }
+    }
+    last_raw
 }
 
 fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> anyhow::Result<String> {
@@ -163,9 +202,22 @@ pub fn decrypt_secret_if_needed(value: &str) -> anyhow::Result<String> {
     Ok(value.to_string())
 }
 
-/// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (32 raw bytes or Base64).
+/// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (or `AETHERFLOW_ENV_FILE`).
 pub fn init_aes_key() -> anyhow::Result<()> {
-    let raw = env::var("AES_MASTER_KEY").unwrap_or_default();
+    let mut raw = env::var("AES_MASTER_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if raw.is_empty() && env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() != Ok("1") {
+        if let Ok(explicit) = env::var("AETHERFLOW_ENV_FILE") {
+            let trimmed_path = explicit.trim();
+            if !trimmed_path.is_empty() {
+                if let Some(from_file) = read_last_aes_key_from_env_file(Path::new(trimmed_path)) {
+                    raw = from_file;
+                }
+            }
+        }
+    }
     if raw.is_empty() {
         let mode = env::var("GIN_MODE").unwrap_or_default();
         if mode == "release" {

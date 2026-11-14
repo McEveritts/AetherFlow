@@ -671,14 +671,24 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	rowsAffected, _ := result.RowsAffected()
+	rowsAffected, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 	if rowsAffected == 0 {
 		slog.Warn("OIDC: concurrent refresh token replay detected; revoking family", "client_id", clientID)
-		_, _ = tx.Exec(
-			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
-			clientID, effFamily, refreshToken,
-		)
-		_ = tx.Commit()
+		if _, famErr := tx.Exec(
+			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ? AND client_id = ? AND (family_id = ? OR token = ?)",
+			userID, clientID, effFamily, refreshToken,
+		); famErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		if cErr := tx.Commit(); cErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}

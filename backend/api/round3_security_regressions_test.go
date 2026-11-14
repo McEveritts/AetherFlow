@@ -143,6 +143,7 @@ func TestRound3_IngressAndAdminRBACAndCSRFAndSchema24(t *testing.T) {
 
 func TestRound3_HostValidationSettingsBaseDomainAndSettingsRedaction(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Setenv("ALLOWED_HOSTS", "")
 	setupTestDB(t)
 	db.RedisClient = nil
 	t.Cleanup(func() {
@@ -470,8 +471,16 @@ func TestRound3_RefreshSessionLineageSurvivesRestartAndWipesFamily(t *testing.T)
 		t.Fatalf("rotate s2->s3 failed (%d)", code3)
 	}
 
-	// Simulate process restart wiping in-memory localBlacklist
+	// Simulate process restart wiping all in-memory auth caches (localBlacklist, grace window, successor chain)
 	db.ClearLocalBlacklist()
+	rotatedTokenGrace.Range(func(k, _ interface{}) bool {
+		rotatedTokenGrace.Delete(k)
+		return true
+	})
+	rotatedSessionSuccessor.Range(func(k, _ interface{}) bool {
+		rotatedSessionSuccessor.Delete(k)
+		return true
+	})
 
 	// Replaying ancestor s1 MUST return 401 AND revoke the entire session family so descendant s3 is invalidated!
 	replayCode, _ := rotate(s1)
@@ -769,4 +778,96 @@ func TestRound5_RotationGraceRevokesImmediatelyWhenSuccessorLogsOut(t *testing.T
 	if wGrace.Code != http.StatusUnauthorized {
 		t.Fatalf("expected predecessor s1 to be rejected (401) after successor s2 logged out, got %d", wGrace.Code)
 	}
+}
+
+func TestRound6_ChainedNormalRotationPreservesGraceAndOIDCWriteFailureRollsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTestDB(t)
+	db.RedisClient = nil
+	t.Cleanup(func() {
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+
+	_, err := db.DB.Exec(
+		"INSERT INTO users (id, username, password_hash, role, sessions_revoked_after) VALUES (996, 'r6user', 'hash', 'user', 0)",
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	r := gin.New()
+	r.POST("/refresh", RefreshSession)
+	r.GET("/protected", AuthMiddleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	// Rotate s0 -> s1 -> s2 within 15s grace window
+	s0 := mintSessionTokenForTest(t, 996, "127.0.0.1:46002", "GraceUA/2.0")
+
+	doRefresh := func(tok string) (int, string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+		req.RemoteAddr = "127.0.0.1:46002"
+		req.Header.Set("User-Agent", "GraceUA/2.0")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		r.ServeHTTP(w, req)
+		var resp map[string]interface{}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		nextTok, _ := resp["token"].(string)
+		return w.Code, nextTok
+	}
+
+	code1, s1 := doRefresh(s0)
+	if code1 != http.StatusOK || s1 == "" {
+		t.Fatalf("s0 -> s1 failed: code=%d", code1)
+	}
+	code2, s2 := doRefresh(s1)
+	if code2 != http.StatusOK || s2 == "" {
+		t.Fatalf("s1 -> s2 failed: code=%d", code2)
+	}
+
+	// Overlapping request with s0 during 15s grace must succeed (not wipe active family!)
+	codeGrace, sGrace := doRefresh(s0)
+	if codeGrace != http.StatusOK || sGrace != s2 {
+		t.Fatalf("expected overlapping s0 refresh during grace to return latest token s2 (200), got code=%d", codeGrace)
+	}
+
+	// Verify active session s2 remains authorized
+	wProt := httptest.NewRecorder()
+	reqProt := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	reqProt.RemoteAddr = "127.0.0.1:46002"
+	reqProt.Header.Set("User-Agent", "GraceUA/2.0")
+	reqProt.Header.Set("Authorization", "Bearer "+s2)
+	r.ServeHTTP(wProt, reqProt)
+	if wProt.Code != http.StatusOK {
+		t.Fatalf("expected active leaf s2 to remain valid (200), got %d", wProt.Code)
+	}
+
+	// Verify revokeAllUserCredentialsInTx aborts when oidc_refresh_tokens write fails
+	if _, err := db.DB.Exec(
+		`INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) VALUES ('c-r6', 'h', 'App', '["https://example.com/cb"]')`,
+	); err != nil {
+		t.Fatalf("insert oidc client: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at, revoked) VALUES ('rt-r6', 'c-r6', 996, 'openid', datetime('now', '+1 hour'), 0)`,
+	); err != nil {
+		t.Fatalf("insert oidc refresh token: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`CREATE TRIGGER fail_oidc_rt_revoke BEFORE UPDATE ON oidc_refresh_tokens BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;`,
+	); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		t.Fatalf("begin tx: %v", txErr)
+	}
+	if _, _, revErr := revokeAllUserCredentialsInTx(tx, 996); revErr == nil {
+		_ = tx.Rollback()
+		t.Fatalf("expected revokeAllUserCredentialsInTx to fail closed when OIDC revocation fails")
+	}
+	_ = tx.Rollback()
 }

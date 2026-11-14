@@ -363,6 +363,86 @@ class Round3SecurityRegressionTests(unittest.TestCase):
         self.assertNotIn("Authorization", redirected.headers)
         self.assertNotIn("Authorization", redirected.unredirected_hdrs)
 
+    def test_sabnzbd_partial_venv_rollback_does_not_nest_and_runner_restart_checked(self) -> None:
+        sab_src = (ROOT / "packages/package/install/installpackage-sabnzbd").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('elif [[ "$VENV_ACTIVATED" -eq 1 || "$VENV_MOVED" -eq 1 ]]; then', sab_src)
+        self.assertNotIn('>> "$LOGFILE" 2>&1', sab_src)
+
+        with tempfile.TemporaryDirectory(prefix="af-r6-sab-") as tmp:
+            root = Path(tmp)
+            app_dir = root / "SABnzbd"
+            app_dir.mkdir()
+            partial_venv = app_dir / ".venv"
+            partial_venv.mkdir()
+            (partial_venv / "broken.txt").write_text("partial", encoding="utf-8")
+            backup_dir = root / "backup"
+            backup_dir.mkdir()
+            orig_venv = backup_dir / "venv"
+            orig_venv.mkdir()
+            (orig_venv / "python3").write_text("healthy-runtime", encoding="utf-8")
+
+            rebased_cleanup = sab_src[sab_src.index("cleanup() {") : sab_src.index("\ntrap cleanup EXIT")]
+            rebased_cleanup = rebased_cleanup.replace("/opt/SABnzbd", str(app_dir))
+            probe = f"""
+set -euo pipefail
+SUCCESS=0
+APP_ACTIVATED=0
+VENV_ACTIVATED=0
+VENV_MOVED=1
+APP_MOVED=0
+SERVICE_STOPPED=0
+UNIT_WRITTEN=0
+WAS_RUNNABLE=0
+BUILD_DIR=""
+BACKUP_DIR={str(backup_dir)!r}
+quiesce_services_for_rollback() {{ return 0; }}
+restore_app_state() {{ return 0; }}
+af_logged() {{ "$@"; }}
+print_warn() {{ :; }}
+{rebased_cleanup}
+false || cleanup
+"""
+            proc = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertTrue((app_dir / ".venv/python3").is_file())
+            self.assertFalse((app_dir / ".venv/venv").exists())
+
+        rm_src = (ROOT / "deploy/release-manager.sh").read_text(encoding="utf-8")
+        self.assertIn("systemctl restart aetherflow-runner.service || return 1", rm_src)
+        self.assertIn("if ! restart_systemd_units; then", rm_src)
+
+    def test_log_retention_skips_active_flock_holder_from_common_sh(self) -> None:
+        import fcntl
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "af_log_retention_r6", ROOT / "deploy/log-retention.py"
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory(prefix="af-r6-loglock-") as tmp:
+            log_dir = Path(tmp)
+            os.chmod(log_dir, 0o750)
+            log_path = log_dir / "install-sabnzbd.log"
+            log_path.write_bytes(b"X" * 1024 + b"\nACTIVE_INSTALL_LINE\n")
+            os.chmod(log_path, 0o640)
+
+            with open(log_path, "rb") as active_holder:
+                fcntl.flock(active_holder.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                try:
+                    self.assertEqual(mod.retain_logs(str(log_dir), max_bytes=256, keep=2), (0, []))
+                    self.assertIn(b"ACTIVE_INSTALL_LINE\n", log_path.read_bytes())
+                finally:
+                    fcntl.flock(active_holder.fileno(), fcntl.LOCK_UN)
+
+            self.assertEqual(mod.retain_logs(str(log_dir), max_bytes=256, keep=2), (1, []))
+            archive_bytes = (log_dir / "install-sabnzbd.log.af-retention.1").read_bytes()
+            self.assertIn(b"ACTIVE_INSTALL_LINE\n", archive_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()

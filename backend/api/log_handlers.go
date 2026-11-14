@@ -108,6 +108,23 @@ func BookmarkLog(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Log bookmarked"})
 }
 
+// isLogWSAuthorized re-validates session JTI revocation, credential epoch, and admin role.
+func isLogWSAuthorized(userID int, sessionJTI string, sessionVer int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	if sessionJTI != "" && isTokenRevokedBeyondGraceForUser(sessionJTI, userID) {
+		return false
+	}
+	if db.DB != nil {
+		subj, err := loadActiveHumanSubject(db.DB, userID)
+		if err != nil || sessionVer < subj.sessionsRevokedAfter || subj.role != "admin" {
+			return false
+		}
+	}
+	return true
+}
+
 // HandleLogWebSocket provides real-time log streaming over WebSocket.
 func HandleLogWebSocket(c *gin.Context) {
 	if services.Logs == nil {
@@ -115,8 +132,25 @@ func HandleLogWebSocket(c *gin.Context) {
 		return
 	}
 
-	if _, exists := c.Get("user_id"); !exists {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
 		Unauthorized(c, "WebSocket requires authentication")
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok || userID <= 0 {
+		Unauthorized(c, "WebSocket requires authentication")
+		return
+	}
+	sessionJTI := c.GetString("session_jti")
+	var sessionVer int64
+	if rawVer, hasVer := c.Get("session_ver"); hasVer {
+		if v, vOK := rawVer.(int64); vOK {
+			sessionVer = v
+		}
+	}
+	if !isLogWSAuthorized(userID, sessionJTI, sessionVer) {
+		RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Admin access required")
 		return
 	}
 
@@ -132,42 +166,73 @@ func HandleLogWebSocket(c *gin.Context) {
 	logCh := services.Logs.Subscribe()
 	defer services.Logs.Unsubscribe(logCh)
 
-	// Read filter preferences from client (optional first message)
+	// Read filter preferences from client asynchronously while monitoring disconnects
+	filterCh := make(chan services.LogFilter, 4)
+	closedCh := make(chan struct{})
+	go func() {
+		defer close(closedCh)
+		for {
+			_, msg, readErr := conn.ReadMessage()
+			if readErr != nil {
+				return
+			}
+			var nextFilter services.LogFilter
+			if json.Unmarshal(msg, &nextFilter) == nil {
+				select {
+				case filterCh <- nextFilter:
+				default:
+				}
+			}
+		}
+	}()
+
 	var filter services.LogFilter
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, msg, err := conn.ReadMessage()
-	if err == nil {
-		json.Unmarshal(msg, &filter)
-	}
-	conn.SetReadDeadline(time.Time{}) // Reset deadline
+	authTicker := time.NewTicker(5 * time.Second)
+	defer authTicker.Stop()
 
-	// Stream logs to client
-	for entry := range logCh {
-		// Apply client-side filter
-		if filter.Source != "" && entry.Source != filter.Source {
-			continue
-		}
-		if filter.Unit != "" && !services.MatchesUnitFilter(entry.Unit, filter.Unit) {
-			continue
-		}
-		if filter.Priority != "" && entry.Priority != filter.Priority {
-
-			continue
-		}
-
-		payload := map[string]interface{}{
-			"type": "LOG_ENTRY",
-			"data": entry,
-		}
-
-		message, err := json.Marshal(payload)
-		if err != nil {
-			continue
-		}
-
-		conn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+	for {
+		select {
+		case <-closedCh:
 			return
+		case nextFilter := <-filterCh:
+			filter = nextFilter
+		case <-authTicker.C:
+			if !isLogWSAuthorized(userID, sessionJTI, sessionVer) {
+				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session revoked"), time.Now().Add(writeWait))
+				return
+			}
+		case entry, chOpen := <-logCh:
+			if !chOpen {
+				return
+			}
+			if !isLogWSAuthorized(userID, sessionJTI, sessionVer) {
+				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session revoked"), time.Now().Add(writeWait))
+				return
+			}
+			if filter.Source != "" && entry.Source != filter.Source {
+				continue
+			}
+			if filter.Unit != "" && !services.MatchesUnitFilter(entry.Unit, filter.Unit) {
+				continue
+			}
+			if filter.Priority != "" && entry.Priority != filter.Priority {
+				continue
+			}
+
+			payload := map[string]interface{}{
+				"type": "LOG_ENTRY",
+				"data": entry,
+			}
+
+			message, mErr := json.Marshal(payload)
+			if mErr != nil {
+				continue
+			}
+
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
 		}
 	}
 }

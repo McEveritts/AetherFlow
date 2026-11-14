@@ -628,6 +628,10 @@ func GetMFAChallenge(token string) (int, error) {
 		if err == sql.ErrNoRows {
 			return 0, fmt.Errorf("MFA challenge expired or not found")
 		}
+		if err != nil {
+			return 0, fmt.Errorf("MFA challenge lookup failed: %w", err)
+		}
+		return 0, fmt.Errorf("MFA challenge expired or not found")
 	}
 
 	key := "mfa_challenge:" + token

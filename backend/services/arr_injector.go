@@ -69,7 +69,7 @@ func (ai *ArrInjector) HijackDownloadClient(ctx AppContext, currentHost string, 
 }
 
 func (ai *ArrInjector) injectSQLite(dbPath string, currentHost, newHost string, targetPort int) error {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}

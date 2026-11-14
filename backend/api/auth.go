@@ -71,9 +71,7 @@ func lookupRotationGraceCached(jti string) (rotatedTokenGraceEntry, bool) {
 		return rotatedTokenGraceEntry{}, false
 	}
 	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
-	if entry.successorJTI == "" || leafSucc == "" ||
-		db.IsTokenRevokedCached(entry.successorJTI) ||
-		(leafSucc != entry.successorJTI && db.IsTokenRevokedCached(leafSucc)) {
+	if entry.successorJTI == "" || leafSucc == "" || db.IsTokenRevokedCached(leafSucc) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -86,13 +84,38 @@ func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
 		return rotatedTokenGraceEntry{}, false
 	}
 	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
-	if entry.successorJTI == "" || leafSucc == "" ||
-		db.IsTokenRevoked(entry.successorJTI) ||
-		(leafSucc != entry.successorJTI && db.IsTokenRevoked(leafSucc)) {
+	if entry.successorJTI == "" || leafSucc == "" || db.IsTokenRevoked(leafSucc) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
 	return entry, true
+}
+
+func resolveLatestGraceToken(jti string, userID int) (string, string, bool) {
+	entry, ok := lookupRotationGraceCached(jti)
+	if !ok || entry.userID != userID || entry.newToken == "" {
+		return "", "", false
+	}
+	latestToken := entry.newToken
+	curSucc := entry.successorJTI
+	now := time.Now()
+	for i := 0; i < 32 && curSucc != ""; i++ {
+		raw, nextOK := rotatedTokenGrace.Load(curSucc)
+		if !nextOK {
+			break
+		}
+		nextEntry, valid := raw.(rotatedTokenGraceEntry)
+		if !valid || nextEntry.userID != userID || now.After(nextEntry.expiresAt) || nextEntry.newToken == "" || nextEntry.successorJTI == curSucc {
+			break
+		}
+		latestToken = nextEntry.newToken
+		curSucc = nextEntry.successorJTI
+	}
+	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
+	if leafSucc == "" {
+		return "", "", false
+	}
+	return latestToken, leafSucc, true
 }
 
 func resolveCurrentSessionJTI(jti string) string {
@@ -119,6 +142,10 @@ func resolveCurrentSessionJTI(jti string) string {
 }
 
 func evictRotationGraceForFamily(familyID, targetJTI string) {
+	evictedJTIs := map[string]struct{}{}
+	if targetJTI != "" {
+		evictedJTIs[targetJTI] = struct{}{}
+	}
 	rotatedTokenGrace.Range(func(key, val interface{}) bool {
 		oldJTI, _ := key.(string)
 		entry, ok := val.(rotatedTokenGraceEntry)
@@ -129,15 +156,26 @@ func evictRotationGraceForFamily(familyID, targetJTI string) {
 		if !ok || oldJTI == targetJTI || entry.successorJTI == targetJTI ||
 			(targetJTI != "" && leafSucc == targetJTI) ||
 			(familyID != "" && entry.familyID == familyID) {
+			if oldJTI != "" {
+				evictedJTIs[oldJTI] = struct{}{}
+			}
+			if ok && entry.successorJTI != "" {
+				evictedJTIs[entry.successorJTI] = struct{}{}
+			}
+			if leafSucc != "" {
+				evictedJTIs[leafSucc] = struct{}{}
+			}
 			rotatedTokenGrace.Delete(key)
 		}
 		return true
 	})
-	if targetJTI != "" {
+	if len(evictedJTIs) > 0 {
 		rotatedSessionSuccessor.Range(func(key, val interface{}) bool {
 			oldJTI, _ := key.(string)
 			entry, ok := val.(rotatedSuccessorEntry)
-			if !ok || oldJTI == targetJTI || entry.nextJTI == targetJTI {
+			_, oldEvicted := evictedJTIs[oldJTI]
+			_, nextEvicted := evictedJTIs[entry.nextJTI]
+			if !ok || oldEvicted || nextEvicted {
 				rotatedSessionSuccessor.Delete(key)
 			}
 			return true
@@ -146,13 +184,56 @@ func evictRotationGraceForFamily(familyID, targetJTI string) {
 }
 
 func evictRotationGraceForUser(userID int) {
+	evictedJTIs := map[string]struct{}{}
 	rotatedTokenGrace.Range(func(key, val interface{}) bool {
+		oldJTI, _ := key.(string)
 		entry, ok := val.(rotatedTokenGraceEntry)
 		if !ok || entry.userID == userID {
+			if oldJTI != "" {
+				evictedJTIs[oldJTI] = struct{}{}
+			}
+			if ok && entry.successorJTI != "" {
+				evictedJTIs[entry.successorJTI] = struct{}{}
+			}
 			rotatedTokenGrace.Delete(key)
 		}
 		return true
 	})
+	if len(evictedJTIs) > 0 {
+		rotatedSessionSuccessor.Range(func(key, val interface{}) bool {
+			oldJTI, _ := key.(string)
+			entry, ok := val.(rotatedSuccessorEntry)
+			_, oldEvicted := evictedJTIs[oldJTI]
+			_, nextEvicted := evictedJTIs[entry.nextJTI]
+			if !ok || oldEvicted || nextEvicted {
+				rotatedSessionSuccessor.Delete(key)
+			}
+			return true
+		})
+	}
+}
+
+func dbTableExists(execer oidcDBExecer, table string) (bool, error) {
+	var count int
+	if err := execer.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+		table,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func dbColumnExists(execer oidcDBExecer, table, column string) (bool, error) {
+	var count int
+	if err := execer.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 type activeHumanSubject struct {
@@ -166,12 +247,18 @@ func loadActiveHumanSubject(execer oidcDBExecer, userID int) (activeHumanSubject
 	if execer == nil || userID <= 0 {
 		return activeHumanSubject{}, errUnauthorizedSession
 	}
+	hasEpochCol, colErr := dbColumnExists(execer, "users", "sessions_revoked_after")
+	if colErr != nil {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
 	var subj activeHumanSubject
-	err := execer.QueryRow(
-		"SELECT id, username, COALESCE(role, 'user'), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?",
-		userID,
-	).Scan(&subj.userID, &subj.username, &subj.role, &subj.sessionsRevokedAfter)
-	if err != nil && strings.Contains(err.Error(), "no such column") {
+	var err error
+	if hasEpochCol {
+		err = execer.QueryRow(
+			"SELECT id, username, COALESCE(role, 'user'), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?",
+			userID,
+		).Scan(&subj.userID, &subj.username, &subj.role, &subj.sessionsRevokedAfter)
+	} else {
 		err = execer.QueryRow(
 			"SELECT id, username, COALESCE(role, 'user') FROM users WHERE id = ?",
 			userID,
@@ -184,15 +271,21 @@ func loadActiveHumanSubject(execer oidcDBExecer, userID int) (activeHumanSubject
 		return activeHumanSubject{}, errUnauthorizedSession
 	}
 
-	var quotaStatus string
-	qErr := execer.QueryRow("SELECT COALESCE(status, '') FROM user_quotas WHERE user_id = ?", userID).Scan(&quotaStatus)
-	if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) && !strings.Contains(qErr.Error(), "no such table") {
+	hasQuotas, qTblErr := dbTableExists(execer, "user_quotas")
+	if qTblErr != nil {
 		return activeHumanSubject{}, errUnauthorizedSession
 	}
-	if qErr == nil {
-		trimmed := strings.TrimSpace(quotaStatus)
-		if trimmed != "" && !strings.EqualFold(trimmed, "active") {
-			return activeHumanSubject{}, errSubjectSuspended
+	if hasQuotas {
+		var quotaStatus string
+		qErr := execer.QueryRow("SELECT COALESCE(status, '') FROM user_quotas WHERE user_id = ?", userID).Scan(&quotaStatus)
+		if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
+			return activeHumanSubject{}, errUnauthorizedSession
+		}
+		if qErr == nil {
+			trimmed := strings.TrimSpace(quotaStatus)
+			if trimmed != "" && !strings.EqualFold(trimmed, "active") {
+				return activeHumanSubject{}, errSubjectSuspended
+			}
 		}
 	}
 	return subj, nil
@@ -287,38 +380,101 @@ func sessionWithinAbsoluteLifetime(claims jwt.MapClaims, nowUnix int64) bool {
 
 func revokeAllUserCredentialsInTx(tx *sql.Tx, userID int) (int64, []string, error) {
 	var newVer int64 = 1
-	err := tx.QueryRow(
-		"UPDATE users SET sessions_revoked_after = COALESCE(sessions_revoked_after, 0) + 1 WHERE id = ? RETURNING sessions_revoked_after",
-		userID,
-	).Scan(&newVer)
-	if err != nil && !strings.Contains(err.Error(), "no such column") {
-		return 0, nil, err
+	hasEpochCol, colErr := dbColumnExists(tx, "users", "sessions_revoked_after")
+	if colErr != nil {
+		return 0, nil, colErr
+	}
+	if hasEpochCol {
+		if err := tx.QueryRow(
+			"UPDATE users SET sessions_revoked_after = COALESCE(sessions_revoked_after, 0) + 1 WHERE id = ? RETURNING sessions_revoked_after",
+			userID,
+		).Scan(&newVer); err != nil {
+			return 0, nil, err
+		}
 	}
 
 	var revokedJTIs []string
-	rows, qErr := tx.Query("SELECT jti FROM active_sessions WHERE user_id = ?", userID)
-	if qErr == nil {
+	hasSessions, sTblErr := dbTableExists(tx, "active_sessions")
+	if sTblErr != nil {
+		return 0, nil, sTblErr
+	}
+	if hasSessions {
+		rows, qErr := tx.Query("SELECT jti FROM active_sessions WHERE user_id = ?", userID)
+		if qErr != nil {
+			return 0, nil, qErr
+		}
 		for rows.Next() {
 			var jti string
-			if scanErr := rows.Scan(&jti); scanErr == nil && jti != "" {
+			if scanErr := rows.Scan(&jti); scanErr != nil {
+				_ = rows.Close()
+				return 0, nil, scanErr
+			}
+			if jti != "" {
 				revokedJTIs = append(revokedJTIs, jti)
 			}
 		}
-		_ = rows.Close()
-		for _, jti := range revokedJTIs {
-			if rErr := db.RevokeTokenInTx(tx, jti, minRevocationTTL); rErr != nil && !strings.Contains(rErr.Error(), "no such table") {
-				return 0, nil, rErr
+		if rErr := rows.Err(); rErr != nil {
+			_ = rows.Close()
+			return 0, nil, rErr
+		}
+		if cErr := rows.Close(); cErr != nil {
+			return 0, nil, cErr
+		}
+		hasRevokedTbl, rTblErr := dbTableExists(tx, "revoked_tokens")
+		if rTblErr != nil {
+			return 0, nil, rTblErr
+		}
+		if hasRevokedTbl {
+			for _, jti := range revokedJTIs {
+				if rErr := db.RevokeTokenInTx(tx, jti, minRevocationTTL); rErr != nil {
+					return 0, nil, rErr
+				}
 			}
 		}
-		if _, dErr := tx.Exec("DELETE FROM active_sessions WHERE user_id = ?", userID); dErr != nil && !strings.Contains(dErr.Error(), "no such table") {
+		if _, dErr := tx.Exec("DELETE FROM active_sessions WHERE user_id = ?", userID); dErr != nil {
 			return 0, nil, dErr
 		}
 	}
 
-	_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
-	_, _ = tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE user_id = ?", userID)
-	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE user_id = ?", userID)
-	_ = db.DeleteUserMFAChallengesInTx(tx, userID)
+	hasOIDCRefresh, rErr := dbTableExists(tx, "oidc_refresh_tokens")
+	if rErr != nil {
+		return 0, nil, rErr
+	}
+	if hasOIDCRefresh {
+		if _, err := tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	hasOIDCCodes, cErr := dbTableExists(tx, "oidc_auth_codes")
+	if cErr != nil {
+		return 0, nil, cErr
+	}
+	if hasOIDCCodes {
+		if _, err := tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE user_id = ?", userID); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	hasOIDCDevice, dErr := dbTableExists(tx, "oidc_device_codes")
+	if dErr != nil {
+		return 0, nil, dErr
+	}
+	if hasOIDCDevice {
+		if _, err := tx.Exec("DELETE FROM oidc_device_codes WHERE user_id = ?", userID); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	hasMFAChallenges, mErr := dbTableExists(tx, "mfa_challenges")
+	if mErr != nil {
+		return 0, nil, mErr
+	}
+	if hasMFAChallenges {
+		if err := db.DeleteUserMFAChallengesInTx(tx, userID); err != nil {
+			return 0, nil, err
+		}
+	}
 
 	return newVer, revokedJTIs, nil
 }
@@ -1532,11 +1688,35 @@ func RefreshSession(c *gin.Context) {
 	}
 
 	var existingFamily string
-	_ = tx.QueryRow(
-		"SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ? AND user_id = ?",
-		jti, subj.userID,
-	).Scan(&existingFamily)
-	existingFamily = strings.TrimSpace(existingFamily)
+	hasSessions, sTblErr := dbTableExists(tx, "active_sessions")
+	if sTblErr != nil {
+		InternalError(c, "Failed to validate session")
+		return
+	}
+	if hasSessions {
+		hasFamilyCol, fColErr := dbColumnExists(tx, "active_sessions", "family_id")
+		if fColErr != nil {
+			InternalError(c, "Failed to validate session")
+			return
+		}
+		var famErr error
+		if hasFamilyCol {
+			famErr = tx.QueryRow(
+				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ? AND user_id = ?",
+				jti, subj.userID,
+			).Scan(&existingFamily)
+		} else {
+			famErr = tx.QueryRow(
+				"SELECT jti FROM active_sessions WHERE jti = ? AND user_id = ?",
+				jti, subj.userID,
+			).Scan(&existingFamily)
+		}
+		if famErr != nil && !errors.Is(famErr, sql.ErrNoRows) {
+			InternalError(c, "Failed to validate session")
+			return
+		}
+		existingFamily = strings.TrimSpace(existingFamily)
+	}
 
 	ttl := revocationTTLForClaims(claims)
 	consumed := !db.IsTokenRevokedCached(jti)
@@ -1550,10 +1730,8 @@ func RefreshSession(c *gin.Context) {
 	}
 
 	if !consumed {
-		if graceEntry, ok := lookupRotationGraceCached(jti); ok && graceEntry.userID == subj.userID && graceEntry.newToken != "" {
-			leafSucc := resolveCurrentSessionJTI(graceEntry.successorJTI)
-			succRevoked := db.IsTokenRevokedInTx(tx, graceEntry.successorJTI) ||
-				(leafSucc != graceEntry.successorJTI && db.IsTokenRevokedInTx(tx, leafSucc))
+		if latestToken, leafSucc, ok := resolveLatestGraceToken(jti, subj.userID); ok {
+			succRevoked := leafSucc == "" || db.IsTokenRevokedInTx(tx, leafSucc)
 			var succActive int
 			actErr := tx.QueryRow(
 				"SELECT 1 FROM active_sessions WHERE jti = ? AND user_id = ? LIMIT 1",
@@ -1562,10 +1740,10 @@ func RefreshSession(c *gin.Context) {
 			if !succRevoked && actErr == nil && succActive == 1 {
 				_ = tx.Rollback()
 				c.SetSameSite(http.SameSiteLaxMode)
-				c.SetCookie("aetherflow_session", graceEntry.newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
+				c.SetCookie("aetherflow_session", latestToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
 				c.JSON(http.StatusOK, gin.H{
 					"status":     "success",
-					"token":      graceEntry.newToken,
+					"token":      latestToken,
 					"expires_at": time.Now().Add(15 * time.Minute).Unix(),
 					"user": gin.H{
 						"id":       subj.userID,

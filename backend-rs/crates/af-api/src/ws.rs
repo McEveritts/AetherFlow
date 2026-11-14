@@ -851,14 +851,11 @@ fn check_ws_jti_revocation(connection: &rusqlite::Connection, entry: &mut WsTick
     {
         return true;
     }
-    let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
-    match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
-        Ok(false) => {
-            entry.session_jti = resolved_jti;
-            true
-        }
-        Ok(true) | Err(_) => false,
-    }
+    !crate::auth::is_session_token_revoked_beyond_grace_with_conn(
+        connection,
+        &entry.session_jti,
+        entry.user_id,
+    )
 }
 
 fn consume_live_ws_ticket(
@@ -1062,6 +1059,31 @@ mod lifecycle_tests {
         connection.execute("DROP TABLE users", []).unwrap();
         let unavailable_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
         assert!(consume_live_ws_ticket(&connection, &unavailable_ticket).is_none());
+    }
+
+    #[test]
+    fn websocket_jti_revocation_does_not_rebind_after_grace_expires() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT 'admin', role TEXT NOT NULL, sessions_revoked_after INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
+                 INSERT INTO users VALUES (1, 'admin', 'admin', 0);
+                 INSERT INTO revoked_tokens VALUES ('jti-rotated-old', datetime('now', '+1 hour'));",
+            )
+            .unwrap();
+        let mut entry = super::WsTicketEntry {
+            user_id: 1,
+            client_ip: "127.0.0.1".to_string(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            diagnostics_allowed: true,
+            session_jti: "jti-rotated-old".to_string(),
+            session_ver: Some(0),
+        };
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            None
+        );
     }
 }
 

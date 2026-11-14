@@ -88,7 +88,7 @@ func ParseAESKeyBytes(raw string) ([]byte, error) {
 func InitAESKey() {
 	aesMasterKey = nil
 	raw := strings.TrimSpace(os.Getenv("AES_MASTER_KEY"))
-	if raw == "" {
+	if raw == "" && os.Getenv("AETHERFLOW_SKIP_ENV_FILES") != "1" {
 		if envFile := strings.TrimSpace(os.Getenv("AETHERFLOW_ENV_FILE")); envFile != "" {
 			raw = readLastAESKeyFromEnvFile(envFile)
 		}

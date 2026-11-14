@@ -67,6 +67,21 @@ try:
 finally:
     os.close(fd)
 PYEOF
+    if [[ -n "${AF_LOGFILE_LOCK_FD:-}" ]]; then
+        flock -u "$AF_LOGFILE_LOCK_FD" 2>/dev/null || true
+        eval "exec ${AF_LOGFILE_LOCK_FD}<&-" 2>/dev/null || true
+        unset AF_LOGFILE_LOCK_FD
+    fi
+    if command -v flock >/dev/null 2>&1 && [[ ! -L "$target" && -f "$target" ]]; then
+        local _af_lfd=""
+        if exec {_af_lfd}<"$target" 2>/dev/null; then
+            if flock -s -n "$_af_lfd" 2>/dev/null; then
+                AF_LOGFILE_LOCK_FD="$_af_lfd"
+            else
+                exec {_af_lfd}<&- 2>/dev/null || true
+            fi
+        fi
+    fi
 }
 
 mkdir -p "$LOCK_DIR"
@@ -117,6 +132,39 @@ try:
 finally:
     os.close(fd)
 PYEOF
+}
+
+af_logged() {
+    local target="${LOGFILE:-/dev/null}"
+    if [[ "$target" == "/dev/null" ]]; then
+        "$@" >/dev/null 2>&1
+        return $?
+    fi
+    local parent_dir="."
+    if [[ "$target" == */* ]]; then
+        parent_dir="${target%/*}"
+        [[ -n "$parent_dir" ]] || parent_dir="/"
+    fi
+    if [[ -L "$parent_dir" || -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+        printf 'Refusing unsafe logfile target: %s\n' "$target" >&2
+        return 1
+    fi
+    local lock_fd=""
+    exec {lock_fd}>>"$target" || return 1
+    if [[ -L "$target" ]]; then
+        exec {lock_fd}>&-
+        printf 'Refusing symlinked logfile target: %s\n' "$target" >&2
+        return 1
+    fi
+    flock -s "$lock_fd" || {
+        exec {lock_fd}>&-
+        return 1
+    }
+    local rc=0
+    "$@" >&"$lock_fd" 2>&1 || rc=$?
+    flock -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
 }
 
 af_validate_tar_archive() {
@@ -4413,30 +4461,48 @@ load_master_credentials() {
         return 0
     fi
     for creds_json in "$primary_creds_file" /opt/AetherFlow/backend/data/.master.creds; do
-        if [[ -f "$creds_json" ]]; then
+        if [[ -f "$creds_json" && ! -L "$creds_json" ]]; then
             local parsed_creds=""
             parsed_creds="$(python3 - "$creds_json" "$primary_creds_file" 2>/dev/null <<'PYEOF' || true
-import base64, ctypes, ctypes.util, json, os, sys
+import base64, ctypes, ctypes.util, json, os, stat, sys
+
+def _read_regular_file_nofollow(target):
+    parent = os.path.dirname(os.path.abspath(target)) or "."
+    pst = os.lstat(parent)
+    if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+        raise OSError(f"Unsafe parent directory for {target}")
+    lst = os.lstat(target)
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        raise OSError(f"Refusing non-regular or symlinked file {target}")
+    fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+            raise OSError(f"File identity changed during open for {target}")
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
 
 def load_aes_key():
     raw = os.environ.get("AES_MASTER_KEY", "").strip()
-    if not raw:
+    if not raw and os.environ.get("AETHERFLOW_SKIP_ENV_FILES") != "1":
         env_path = os.environ.get("AETHERFLOW_ENV_FILE", "/etc/aetherflow/aetherflow.env")
-        if os.path.isfile(env_path):
-            try:
-                with open(env_path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        s = line.strip()
-                        if not s or s.startswith("#"):
-                            continue
-                        if s.startswith("export "):
-                            s = s[7:].strip()
-                        if s.startswith("AES_MASTER_KEY="):
-                            candidate = s.split("=", 1)[1].strip().strip("\"'")
-                            if candidate:
-                                raw = candidate
-            except OSError:
-                pass
+        try:
+            for line in _read_regular_file_nofollow(env_path).splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("export "):
+                    s = s[7:].strip()
+                if s.startswith("AES_MASTER_KEY="):
+                    candidate = s.split("=", 1)[1].strip().strip("\"'")
+                    if candidate:
+                        raw = candidate
+        except FileNotFoundError:
+            raw = ""
+        except OSError as exc:
+            sys.stderr.write(f"Skipping unreadable env file {env_path}: {exc}\n")
     if not raw:
         return "", None
     if len(raw) == 64:
@@ -4536,8 +4602,12 @@ def decrypt_field(val, key):
     return aes_gcm_decrypt(key, blob[:12], blob[12:]).decode("utf-8")
 
 path, primary_path = sys.argv[1], sys.argv[2]
-with open(path, "r", encoding="utf-8") as fh:
-    raw_text = fh.read()
+try:
+    raw_text = _read_regular_file_nofollow(path)
+except OSError:
+    if os.path.abspath(path) == os.path.abspath(primary_path):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
 try:
     d = json.loads(raw_text)
 except Exception:
@@ -4616,39 +4686,70 @@ PYEOF
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then
         python3 - "$primary_creds_file" <<'PYEOF'
-import base64, ctypes, ctypes.util, errno, json, os, sys, tempfile
+import base64, ctypes, ctypes.util, errno, json, os, stat, sys, tempfile
 username, password, ha1 = (os.environ[name] for name in ('MASTER_USER', 'MASTER_PASS', 'MASTER_HA1'))
 destination = sys.argv[1]
-directory = os.path.dirname(destination)
+directory = os.path.dirname(destination) or '.'
 
-if os.path.isfile(destination):
+def _ensure_no_symlink_ancestors(target_dir):
+    abs_dir = os.path.abspath(target_dir)
+    probe = abs_dir
+    while True:
+        if os.path.lexists(probe):
+            st = os.lstat(probe)
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f'Refusing symlinked credentials ancestor: {probe}')
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+
+def _read_regular_file_nofollow(target):
+    parent = os.path.dirname(os.path.abspath(target)) or '.'
+    pst = os.lstat(parent)
+    if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+        raise OSError(f'Unsafe parent directory for {target}')
+    lst = os.lstat(target)
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        raise OSError(f'Refusing non-regular or symlinked file {target}')
+    fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     try:
-        with open(destination, 'r', encoding='utf-8') as existing_fh:
-            existing_raw = existing_fh.read()
-        if 'enc:v1:' in existing_raw:
-            raise RuntimeError(f'Refusing to overwrite encrypted master credentials at {destination}')
-    except OSError:
-        pass
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+            raise OSError(f'File identity changed during open for {target}')
+        with os.fdopen(fd, 'r', encoding='utf-8', closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
+
+_ensure_no_symlink_ancestors(directory)
+if os.path.lexists(destination):
+    dst_st = os.lstat(destination)
+    if stat.S_ISLNK(dst_st.st_mode) or not stat.S_ISREG(dst_st.st_mode):
+        raise RuntimeError(f'Refusing symlinked or non-regular master credentials path at {destination}')
+    existing_raw = _read_regular_file_nofollow(destination)
+    if 'enc:v1:' in existing_raw:
+        raise RuntimeError(f'Refusing to overwrite encrypted master credentials at {destination}')
 
 def resolve_aes_key():
     raw = os.environ.get('AES_MASTER_KEY', '').strip()
-    if not raw:
+    if not raw and os.environ.get('AETHERFLOW_SKIP_ENV_FILES') != '1':
         env_path = os.environ.get('AETHERFLOW_ENV_FILE', '/etc/aetherflow/aetherflow.env')
-        if os.path.isfile(env_path):
-            try:
-                with open(env_path, 'r', encoding='utf-8') as fh:
-                    for line in fh:
-                        s = line.strip()
-                        if not s or s.startswith('#'):
-                            continue
-                        if s.startswith('export '):
-                            s = s[7:].strip()
-                        if s.startswith('AES_MASTER_KEY='):
-                            candidate = s.split('=', 1)[1].strip().strip("\"'")
-                            if candidate:
-                                raw = candidate
-            except OSError:
-                pass
+        try:
+            for line in _read_regular_file_nofollow(env_path).splitlines():
+                s = line.strip()
+                if not s or s.startswith('#'):
+                    continue
+                if s.startswith('export '):
+                    s = s[7:].strip()
+                if s.startswith('AES_MASTER_KEY='):
+                    candidate = s.split('=', 1)[1].strip().strip("\"'")
+                    if candidate:
+                        raw = candidate
+        except FileNotFoundError:
+            raw = ''
+        except OSError as exc:
+            sys.stderr.write(f'Skipping unreadable env file {env_path}: {exc}\n')
     if not raw:
         return '', None
     if len(raw) == 64:
@@ -4745,8 +4846,15 @@ stored_password = maybe_encrypt(password, raw_key, key)
 stored_ha1 = maybe_encrypt(ha1, raw_key, key)
 temporary = None
 try:
+    _ensure_no_symlink_ancestors(directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        os.fchmod(dir_fd, 0o700)
+    finally:
+        os.close(dir_fd)
+    if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
+        raise RuntimeError(f'Refusing symlinked master credentials destination: {destination}')
     descriptor, temporary = tempfile.mkstemp(prefix='.master.creds.', dir=directory)
     with os.fdopen(descriptor, 'w') as output:
         os.fchmod(output.fileno(), 0o600)
@@ -4754,9 +4862,11 @@ try:
         output.write('\n')
         output.flush()
         os.fsync(output.fileno())
+    if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
+        raise RuntimeError(f'Refusing symlinked master credentials destination: {destination}')
     os.replace(temporary, destination)
     temporary = None
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
     try:
         os.fsync(descriptor)
     finally:

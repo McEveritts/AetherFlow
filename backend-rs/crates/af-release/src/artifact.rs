@@ -1121,9 +1121,29 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         let verified_digest =
             verify_artifact_checksum(&archive_dest, &manifest_content, &config.artifact_name)?;
         if std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() != Ok("1") {
-            let bundle_override = std::env::var_os("AETHERFLOW_PROVENANCE_BUNDLE_FILE")
+            let mut bundle_override = std::env::var_os("AETHERFLOW_PROVENANCE_BUNDLE_FILE")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
+            if bundle_override.is_none() {
+                let bundle_name = format!("{}.sigstore.json", config.artifact_name);
+                let bundle_url = format!("{}/{}", release_base, bundle_name);
+                let bundle_dest = staging_dir.join(&bundle_name);
+                if run_blocking_http_download_to_file(
+                    &bundle_url,
+                    &bundle_dest,
+                    0o600,
+                    Duration::from_secs(30),
+                    8 * 1024 * 1024,
+                )
+                .is_ok()
+                {
+                    if let Ok(meta) = std::fs::symlink_metadata(&bundle_dest) {
+                        if meta.is_file() && meta.len() > 0 {
+                            bundle_override = Some(bundle_dest);
+                        }
+                    }
+                }
+            }
             verify_release_provenance(
                 &config.github_repo,
                 &verified_digest,
@@ -1182,6 +1202,35 @@ fn resolve_github_auth_token_for_url(url: &str) -> Option<String> {
     None
 }
 
+fn build_release_http_client(
+    initial_url: &str,
+    timeout: Duration,
+) -> ReleaseResult<reqwest::Client> {
+    let require_https = initial_url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://");
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many HTTP redirects");
+        }
+        if require_https && attempt.url().scheme() != "https" {
+            return attempt.error("refusing downgrade redirect from HTTPS to non-HTTPS URL");
+        }
+        attempt.follow()
+    });
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(redirect_policy)
+        .user_agent("AetherFlow-ReleaseEngine/4.0");
+    if require_https {
+        builder = builder.https_only(true);
+    }
+    builder
+        .build()
+        .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))
+}
+
 fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResult<String> {
     let url_owned = url.to_string();
     let token_opt = resolve_github_auth_token_for_url(&url_owned);
@@ -1193,13 +1242,7 @@ fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResul
                 ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
             })?;
         rt.block_on(async move {
-            let client = reqwest::Client::builder()
-                .timeout(timeout)
-                .user_agent("AetherFlow-ReleaseEngine/4.0")
-                .build()
-                .map_err(|e| {
-                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
-                })?;
+            let client = build_release_http_client(&url_owned, timeout)?;
             let mut req = client.get(&url_owned);
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
@@ -1243,13 +1286,7 @@ fn run_blocking_http_get_bytes_capped(
                 ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
             })?;
         rt.block_on(async move {
-            let client = reqwest::Client::builder()
-                .timeout(timeout)
-                .user_agent("AetherFlow-ReleaseEngine/4.0")
-                .build()
-                .map_err(|e| {
-                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
-                })?;
+            let client = build_release_http_client(&url_owned, timeout)?;
             let mut req = client.get(&url_owned);
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
@@ -1312,13 +1349,7 @@ fn run_blocking_http_download_to_file(
                 ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
             })?;
         rt.block_on(async move {
-            let client = reqwest::Client::builder()
-                .timeout(timeout)
-                .user_agent("AetherFlow-ReleaseEngine/4.0")
-                .build()
-                .map_err(|e| {
-                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
-                })?;
+            let client = build_release_http_client(&url_owned, timeout)?;
             let mut req = client.get(&url_owned);
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
