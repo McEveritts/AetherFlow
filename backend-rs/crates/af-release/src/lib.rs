@@ -470,15 +470,13 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "v4.0.1-nightly.20261031"
         );
 
-        // Fallback behavior when JSON is empty: nightly and legacy experimental -> "nightly", stable -> Err
-        assert_eq!(
-            select_release_tag_from_json(ReleaseChannel::Nightly, "").unwrap(),
-            "nightly"
-        );
-        assert_eq!(
-            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), "").unwrap(),
-            "nightly"
-        );
+        // Fail-closed behavior when JSON is empty: all channels reject unverified fallback tags
+        assert!(select_release_tag_from_json(ReleaseChannel::Nightly, "").is_err());
+        assert!(select_release_tag_from_json(
+            "experimental".parse::<ReleaseChannel>().unwrap(),
+            ""
+        )
+        .is_err());
         assert!(select_release_tag_from_json(ReleaseChannel::Stable, "").is_err());
     }
 
@@ -1499,35 +1497,54 @@ AETHERFLOW_DB_PATH=fallback.sqlite
     fn test_select_release_tag_from_json_channel_isolation() {
         let payload = r#"[
             {"tag_name": "v4.0.0-experimental", "target_commitish": "experimental", "prerelease": true, "draft": false},
-            {"tag_name": "v3.3.0-nightly.1", "target_commitish": "nightly", "prerelease": true, "draft": false},
-            {"tag_name": "v3.2.7", "target_commitish": "master", "prerelease": false, "draft": false}
+            {"tag_name": "v3.99.0-nightly.1", "target_commitish": "nightly", "prerelease": true, "draft": false},
+            {"tag_name": "v4.0.0-nightly.110.1", "target_commitish": "nightly", "prerelease": true, "draft": false},
+            {"tag_name": "v3.2.7", "target_commitish": "master", "prerelease": false, "draft": false},
+            {"tag_name": "v4.0.0", "target_commitish": "master", "prerelease": false, "draft": false}
         ]"#;
 
         assert_eq!(
             select_release_tag_from_json(ReleaseChannel::Stable, payload).unwrap(),
-            "v3.2.7"
+            "v4.0.0"
         );
-        // Nightly must ignore v4.0.0-experimental and select v3.3.0-nightly.1
+        // Nightly must ignore v4.0.0-experimental and pre-v4 v3.99.0-nightly.1, selecting v4.0.0-nightly.110.1
         assert_eq!(
             select_release_tag_from_json(ReleaseChannel::Nightly, payload).unwrap(),
-            "v3.3.0-nightly.1"
+            "v4.0.0-nightly.110.1"
         );
         assert_eq!(
             select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), payload).unwrap(),
-            "v3.3.0-nightly.1"
+            "v4.0.0-nightly.110.1"
         );
+
+        // Pre-v4 only payload must fail closed on both channels (no implicit v3 downgrade or "nightly" fallback)
+        let v3_only = r#"[
+            {"tag_name": "v3.3.0-nightly.1", "target_commitish": "nightly", "prerelease": true, "draft": false},
+            {"tag_name": "v3.2.7", "target_commitish": "master", "prerelease": false, "draft": false}
+        ]"#;
+        assert!(select_release_tag_from_json(ReleaseChannel::Stable, v3_only).is_err());
+        assert!(select_release_tag_from_json(ReleaseChannel::Nightly, v3_only).is_err());
     }
 
     #[test]
     fn test_parse_stable_tag_from_redirect_url_validation() {
         assert_eq!(
             parse_stable_tag_from_redirect_url(
-                "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7",
+                "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0",
                 "https://github.com",
                 "McEveritts/AetherFlow"
             )
             .unwrap(),
-            "v3.2.7"
+            "v4.0.0"
+        );
+        // Pre-v4 stable tags must be rejected (no v3 downgrade)
+        assert!(
+            parse_stable_tag_from_redirect_url(
+                "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7",
+                "https://github.com",
+                "McEveritts/AetherFlow"
+            )
+            .is_err()
         );
         // Prerelease / hyphenated tags must be rejected by stable redirect parser
         assert!(

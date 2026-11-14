@@ -117,8 +117,26 @@ def _copy_tail(directory, descriptor, pending, max_bytes, group_id):
             offset += len(chunk)
             remaining -= len(chunk)
         os.fsync(destination)
+        return size
     finally:
         os.close(destination)
+
+
+def _read_bounded_live_tail(descriptor, archived_end, current_size, max_bytes):
+    if current_size <= archived_end:
+        return b""
+    tail_len = min(current_size - archived_end, max_bytes)
+    start_offset = current_size - tail_len
+    os.lseek(descriptor, start_offset, os.SEEK_SET)
+    chunks = []
+    remaining = tail_len
+    while remaining > 0:
+        piece = os.read(descriptor, min(65536, remaining))
+        if not piece:
+            break
+        chunks.append(piece)
+        remaining -= len(piece)
+    return b"".join(chunks)
 
 
 def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
@@ -146,7 +164,7 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
                 os.replace(pending, entry, src_dir_fd=directory, dst_dir_fd=directory)
         if os.fstat(descriptor).st_size <= max_bytes:
             return False
-        _copy_tail(directory, descriptor, pending, max_bytes, group_id)
+        archived_end = _copy_tail(directory, descriptor, pending, max_bytes, group_id)
         for index in range(keep - 1, 0, -1):
             source = f"{name}.af-retention.{index}"
             try:
@@ -162,8 +180,19 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
         os.replace(pending, name + ".af-retention.1", src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
         _same_entry(directory, name, metadata)
-        _validate_file(descriptor, {os.geteuid()})
-        os.ftruncate(descriptor, 0)
+        post_metadata = _validate_file(descriptor, {os.geteuid()})
+        trailing = _read_bounded_live_tail(
+            descriptor, archived_end, post_metadata.st_size, max_bytes
+        )
+        if trailing:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            unwritten = memoryview(trailing)
+            while unwritten:
+                written = os.write(descriptor, unwritten)
+                if written <= 0:
+                    raise OSError("zero-length trailing restore write")
+                unwritten = unwritten[written:]
+        os.ftruncate(descriptor, len(trailing))
         os.fsync(descriptor)
         return True
     finally:

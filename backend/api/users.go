@@ -34,6 +34,27 @@ func GetUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, users)
 }
 
+func countOtherUsableHumanAdmins(execer oidcDBExecer, excludeUserID int) int {
+	var count int
+	err := execer.QueryRow(
+		`SELECT COUNT(*) FROM users u
+		 LEFT JOIN user_quotas uq ON uq.user_id = u.id
+		 WHERE u.role = 'admin'
+		   AND u.id != ?
+		   AND LOWER(TRIM(u.username)) NOT LIKE 'plugin:%'
+		   AND COALESCE(LOWER(TRIM(uq.status)), '') IN ('', 'active')`,
+		excludeUserID,
+	).Scan(&count)
+	if err != nil {
+		_ = execer.QueryRow(
+			`SELECT COUNT(*) FROM users
+			 WHERE role = 'admin' AND id != ? AND LOWER(TRIM(username)) NOT LIKE 'plugin:%'`,
+			excludeUserID,
+		).Scan(&count)
+	}
+	return count
+}
+
 func UpdateUserRole(c *gin.Context) {
 	idStr := c.Param("id")
 	userId, err := strconv.Atoi(idStr)
@@ -56,26 +77,56 @@ func UpdateUserRole(c *gin.Context) {
 		return
 	}
 
-	// Prevent demoting the last admin
-	if req.Role == "user" {
-		var count int
-		db.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
-		if count <= 1 {
-			// Check if we're trying to demote the one remaining admin
-			var currentRole string
-			db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
-			if currentRole == "admin" {
-				BadRequest(c, "Cannot demote the last remaining admin.")
-				return
-			}
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var currentRole string
+	if err := tx.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole); err != nil {
+		if err == sql.ErrNoRows {
+			NotFoundError(c, "User not found")
+			return
+		}
+		InternalError(c, "Failed to query user")
+		return
+	}
+
+	// Prevent demoting the last usable human admin
+	if req.Role == "user" && currentRole == "admin" {
+		if countOtherUsableHumanAdmins(tx, userId) < 1 {
+			BadRequest(c, "Cannot demote the last remaining admin.")
+			return
 		}
 	}
 
-	_, err = db.DB.Exec("UPDATE users SET role = ? WHERE id = ?", req.Role, userId)
-	if err != nil {
+	if _, err := tx.Exec("UPDATE users SET role = ? WHERE id = ?", req.Role, userId); err != nil {
 		slog.Error("updating user role", "error", err)
 		InternalError(c, "Failed to update role")
 		return
+	}
+
+	var revokedJTIs []string
+	if req.Role == "user" && currentRole == "admin" {
+		var revErr error
+		_, revokedJTIs, revErr = revokeAllUserCredentialsInTx(tx, userId)
+		if revErr != nil {
+			InternalError(c, "Failed to revoke elevated credentials")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit role update")
+		return
+	}
+
+	if len(revokedJTIs) > 0 || (req.Role == "user" && currentRole == "admin") {
+		finalizeUserCredentialRevocation(userId, revokedJTIs)
 	}
 
 	actorID, _ := c.Get("user_id")
@@ -95,29 +146,56 @@ func DeleteUser(c *gin.Context) {
 		return
 	}
 
-	// Prevent deleting the last admin
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
 	var currentRole string
-	err = db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
+	err = tx.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
 	if err == sql.ErrNoRows {
 		NotFoundError(c, "User not found")
 		return
 	}
-
-	if currentRole == "admin" {
-		var count int
-		db.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
-		if count <= 1 {
-			BadRequest(c, "Cannot delete the last remaining admin.")
-			return
-		}
+	if err != nil {
+		InternalError(c, "Failed to query user")
+		return
 	}
 
-	_, err = db.DB.Exec("DELETE FROM users WHERE id = ?", userId)
-	if err != nil {
+	if currentRole == "admin" && countOtherUsableHumanAdmins(tx, userId) < 1 {
+		BadRequest(c, "Cannot delete the last remaining admin.")
+		return
+	}
+
+	_, revokedJTIs, revErr := revokeAllUserCredentialsInTx(tx, userId)
+	if revErr != nil {
+		InternalError(c, "Failed to revoke user sessions")
+		return
+	}
+
+	_, _ = tx.Exec("DELETE FROM oidc_consents WHERE user_id = ?", userId)
+	_, _ = tx.Exec("DELETE FROM oidc_refresh_tokens WHERE user_id = ?", userId)
+	_, _ = tx.Exec("DELETE FROM oidc_auth_codes WHERE user_id = ?", userId)
+	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE user_id = ?", userId)
+	_, _ = tx.Exec("DELETE FROM recovery_codes WHERE user_id = ?", userId)
+	_, _ = tx.Exec("DELETE FROM user_quotas WHERE user_id = ?", userId)
+
+	if _, err := tx.Exec("DELETE FROM users WHERE id = ?", userId); err != nil {
 		slog.Error("deleting user", "error", err)
 		InternalError(c, "Failed to delete user")
 		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit user deletion")
+		return
+	}
+
+	finalizeUserCredentialRevocation(userId, revokedJTIs)
 
 	actorID, _ := c.Get("user_id")
 	actorName, _ := c.Get("username")

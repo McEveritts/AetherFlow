@@ -180,9 +180,8 @@ pub fn build_router() -> Router {
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
-    let public_well_known = Router::new()
-        .route("/.well-known/openid-configuration", get(oidc_discovery))
-        .layer(middleware::from_fn(host_validation_middleware));
+    let public_well_known =
+        Router::new().route("/.well-known/openid-configuration", get(oidc_discovery));
 
     Router::new()
         .nest("/api/v1", v1)
@@ -194,6 +193,7 @@ pub fn build_router() -> Router {
         .route("/health/ready", get(health_ready))
         .route("/metrics", get(prometheus_metrics))
         .fallback(spa_fallback_handler)
+        .layer(middleware::from_fn(host_validation_middleware))
         .layer(middleware::from_fn(security_headers_middleware))
 }
 
@@ -5039,36 +5039,41 @@ async fn update_password(
             );
         }
     };
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Database error",
-        );
-    };
-    let changed = conn
-        .execute(
+    let tx_outcome = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
+        let mut conn = af_db::get_conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE users SET password_hash = ?1 WHERE id = ?2",
             params![new_hash, auth_user.user_id],
-        )
-        .unwrap_or(0);
-    drop(conn);
-    if changed == 0 {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to update password",
-        );
-    }
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let (new_ver, revoked_jtis) =
+            crate::auth::revoke_all_user_credentials_in_tx(&tx, auth_user.user_id)?;
+        let (new_token, _) = crate::auth::create_session_jwt_in_conn(
+            &tx,
+            auth_user.user_id,
+            &headers,
+            Utc::now().timestamp(),
+            None,
+            new_ver,
+        )?;
+        tx.commit()?;
+        Ok(Some((new_token, revoked_jtis)))
+    })();
 
-    if auth_user.role == "admin" {
-        let _ =
-            af_services::mutators::save_master_credentials(&auth_user.username, &req.new_password);
-        af_services::mutators::sync_master_credentials_to_installed_apps(
-            &auth_user.username,
-            &req.new_password,
-        );
-    }
+    let (new_token, revoked_jtis) = match tx_outcome {
+        Ok(Some(pair)) => pair,
+        Ok(None) | Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to update password",
+            );
+        }
+    };
+    crate::auth::finalize_user_credential_revocation(auth_user.user_id, &revoked_jtis);
 
     let ip = extract_client_ip(&headers);
     let ua = headers
@@ -5086,11 +5091,13 @@ async fn update_password(
         ua,
     );
 
-    Json(serde_json::json!({
+    let mut resp = Json(serde_json::json!({
         "status": "success",
         "message": "Password updated successfully",
     }))
-    .into_response()
+    .into_response();
+    crate::auth::set_session_cookie(&mut resp, &new_token);
+    resp
 }
 
 #[derive(Deserialize)]

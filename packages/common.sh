@@ -101,6 +101,8 @@ try:
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
         raise SystemExit(1)
+    if not line.endswith("\n"):
+        line += "\n"
     data = line.encode("utf-8", errors="replace")
     view = memoryview(data)
     while view:
@@ -4369,17 +4371,80 @@ purge_system_user() {
 }
 
 load_master_credentials() {
-    local u="" p="" h="" creds_json generated=false
+    local u="" p="" h="" creds_json generated=false primary_creds_file="/var/lib/aetherflow/.master.creds"
+    primary_creds_file="${AETHERFLOW_MASTER_CREDS_FILE:-$primary_creds_file}"
     if [[ -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" && "$MASTER_PASS" != adminadmin ]]; then
         export MASTER_USER MASTER_PASS
         export MASTER_HA1="${MASTER_HA1:-$(printf '%s' "$MASTER_PASS" | md5sum | awk '{print $1}')}"
         return 0
     fi
-    for creds_json in /var/lib/aetherflow/.master.creds /opt/AetherFlow/backend/data/.master.creds; do
+    for creds_json in "$primary_creds_file" /opt/AetherFlow/backend/data/.master.creds; do
         if [[ -f "$creds_json" ]]; then
-            u="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("username",""))' "$creds_json" 2>/dev/null || true)"
-            p="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("password",""))' "$creds_json" 2>/dev/null || true)"
-            h="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("ha1",""))' "$creds_json" 2>/dev/null || true)"
+            local parsed_creds=""
+            parsed_creds="$(python3 - "$creds_json" 2>/dev/null <<'PYEOF' || true
+import base64, json, os, sys
+
+def load_aes_key():
+    raw = os.environ.get("AES_MASTER_KEY", "").strip()
+    if not raw:
+        env_path = os.environ.get("AETHERFLOW_ENV_FILE", "/etc/aetherflow/aetherflow.env")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        s = line.strip()
+                        if not s or s.startswith("#"):
+                            continue
+                        if s.startswith("export "):
+                            s = s[7:].strip()
+                        if s.startswith("AES_MASTER_KEY="):
+                            raw = s.split("=", 1)[1].strip().strip("\"'")
+                            break
+            except OSError:
+                pass
+    if not raw:
+        return None
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return dec
+    except Exception:
+        pass
+    raw_bytes = raw.encode("utf-8")
+    return raw_bytes if len(raw_bytes) == 32 else None
+
+def maybe_decrypt(val, key):
+    if not isinstance(val, str):
+        return ""
+    val = val.strip()
+    if not val.startswith("enc:v1:"):
+        return val
+    if key is None:
+        return ""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    blob = base64.b64decode(val[len("enc:v1:"):])
+    if len(blob) < 12:
+        return ""
+    return AESGCM(key).decrypt(blob[:12], blob[12:], None).decode("utf-8")
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    d = json.load(fh)
+key = load_aes_key()
+u = (d.get("username") or "").strip()
+p = maybe_decrypt(d.get("password") or "", key)
+h = maybe_decrypt(d.get("ha1") or "", key)
+if p == "adminadmin":
+    p = ""
+print(u)
+print(p)
+print(h)
+PYEOF
+)"
+            if [[ -n "$parsed_creds" ]]; then
+                u="$(printf '%s\n' "$parsed_creds" | sed -n '1p')"
+                p="$(printf '%s\n' "$parsed_creds" | sed -n '2p')"
+                h="$(printf '%s\n' "$parsed_creds" | sed -n '3p')"
+            fi
             [[ -n "$u" && -n "$p" ]] && break
         fi
     done
@@ -4418,11 +4483,55 @@ load_master_credentials() {
     fi
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then
-        python3 - /var/lib/aetherflow/.master.creds <<'PYEOF'
-import errno, json, os, sys, tempfile
+        python3 - "$primary_creds_file" <<'PYEOF'
+import base64, errno, json, os, sys, tempfile
 username, password, ha1 = (os.environ[name] for name in ('MASTER_USER', 'MASTER_PASS', 'MASTER_HA1'))
 destination = sys.argv[1]
 directory = os.path.dirname(destination)
+
+def resolve_aes_key():
+    raw = os.environ.get('AES_MASTER_KEY', '').strip()
+    if not raw:
+        env_path = os.environ.get('AETHERFLOW_ENV_FILE', '/etc/aetherflow/aetherflow.env')
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, 'r', encoding='utf-8') as fh:
+                    for line in fh:
+                        s = line.strip()
+                        if not s or s.startswith('#'):
+                            continue
+                        if s.startswith('export '):
+                            s = s[7:].strip()
+                        if s.startswith('AES_MASTER_KEY='):
+                            raw = s.split('=', 1)[1].strip().strip("\"'")
+                            break
+            except OSError:
+                pass
+    if not raw:
+        return None
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return dec
+    except Exception:
+        pass
+    raw_bytes = raw.encode('utf-8')
+    return raw_bytes if len(raw_bytes) == 32 else None
+
+def maybe_encrypt(plaintext, key):
+    if key is None:
+        return plaintext
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        nonce = os.urandom(12)
+        ct = AESGCM(key).encrypt(nonce, plaintext.encode('utf-8'), None)
+        return 'enc:v1:' + base64.b64encode(nonce + ct).decode('ascii')
+    except Exception:
+        return plaintext
+
+key = resolve_aes_key()
+stored_password = maybe_encrypt(password, key)
+stored_ha1 = maybe_encrypt(ha1, key)
 temporary = None
 try:
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -4430,7 +4539,7 @@ try:
     descriptor, temporary = tempfile.mkstemp(prefix='.master.creds.', dir=directory)
     with os.fdopen(descriptor, 'w') as output:
         os.fchmod(output.fileno(), 0o600)
-        json.dump({'username': username, 'password': password, 'ha1': ha1}, output)
+        json.dump({'username': username, 'password': stored_password, 'ha1': stored_ha1}, output)
         output.write('\n')
         output.flush()
         os.fsync(output.fileno())
@@ -4442,7 +4551,14 @@ try:
     finally:
         os.close(descriptor)
 except OSError as error:
-    if error.errno not in (errno.EROFS, errno.ENODEV, errno.ENXIO):
+    if (
+        error.errno in (errno.EACCES, errno.EPERM)
+        and os.geteuid() != 0
+        and 'AETHERFLOW_MASTER_CREDS_FILE' not in os.environ
+        and destination == '/var/lib/aetherflow/.master.creds'
+    ):
+        pass
+    elif error.errno not in (errno.EROFS, errno.ENODEV, errno.ENXIO):
         raise
 finally:
     if temporary is not None:

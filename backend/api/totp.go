@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -280,19 +281,25 @@ func Disable2FA(c *gin.Context) {
 	userID := rawUserID.(int)
 
 	var req struct {
-		Code string `json:"code" binding:"required"`
+		Code     string `json:"code"`
+		Password string `json:"password"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A 6-digit code is required")
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A verification code or current password is required")
+		return
+	}
+	code := strings.TrimSpace(req.Code)
+	password := req.Password
+	if code == "" && password == "" {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A verification code or current password is required")
 		return
 	}
 
-	// Fetch the encrypted TOTP secret from the database
-	var encryptedSecret string
+	var encryptedSecret, passwordHash string
 	var totpEnabled bool
 	if err := db.DB.QueryRow(
-		"SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?", userID,
-	).Scan(&encryptedSecret, &totpEnabled); err != nil {
+		"SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?", userID,
+	).Scan(&encryptedSecret, &totpEnabled, &passwordHash); err != nil {
 		InternalError(c, "Failed to query user")
 		return
 	}
@@ -302,22 +309,38 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 
-	// Decrypt the secret
-	secret, err := DecryptKey(encryptedSecret)
-	if err != nil {
-		slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", err)
-		InternalError(c, "Failed to verify TOTP secret")
+	verified := false
+	if code != "" {
+		if recoveryCodePattern.MatchString(strings.ToUpper(code)) {
+			verified = validateRecoveryCode(userID, strings.ToUpper(code))
+		} else {
+			secret, err := DecryptKey(encryptedSecret)
+			if err != nil {
+				slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", err)
+				InternalError(c, "Failed to verify TOTP secret")
+				return
+			}
+			verified = totp.Validate(code, secret)
+		}
+	} else if password != "" && passwordHash != "" {
+		verified = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) == nil
+	}
+
+	if !verified {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification factor")
 		return
 	}
 
-	// Validate the code
-	if !totp.Validate(req.Code, secret) {
-		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
 		return
 	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
-	// Clear the secret and disable 2FA
-	if _, err := db.DB.Exec(
+	if _, err := tx.Exec(
 		"UPDATE users SET totp_secret = '', totp_enabled = 0 WHERE id = ?", userID,
 	); err != nil {
 		slog.Error("failed to disable TOTP", "user_id", userID, "error", err)
@@ -325,8 +348,28 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 
-	// Delete all recovery codes
-	db.DB.Exec("DELETE FROM recovery_codes WHERE user_id = ?", userID)
+	_, _ = tx.Exec("DELETE FROM recovery_codes WHERE user_id = ?", userID)
+
+	newVer, revokedJTIs, revErr := revokeAllUserCredentialsInTx(tx, userID)
+	if revErr != nil {
+		InternalError(c, "Failed to revoke concurrent credentials")
+		return
+	}
+
+	rotatedToken, _, tokErr := createSessionJWTInTx(tx, userID, c, time.Now().UTC().Unix(), "", newVer)
+	if tokErr != nil {
+		InternalError(c, "Failed to rotate session")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit two-factor disablement")
+		return
+	}
+
+	finalizeUserCredentialRevocation(userID, revokedJTIs)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("aetherflow_session", rotatedToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
 
 	// Audit trail
 	username, _ := c.Get("username")
@@ -369,6 +412,16 @@ func MFALoginVerify(c *gin.Context) {
 	userID, err := db.GetMFAChallenge(req.MFAToken)
 	if err != nil {
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
+		return
+	}
+
+	if _, subErr := loadActiveHumanSubject(db.DB, userID); subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			db.DeleteMFAChallenge(req.MFAToken)
+			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
+			return
+		}
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "User not found")
 		return
 	}
 

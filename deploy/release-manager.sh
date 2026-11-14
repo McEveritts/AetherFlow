@@ -944,6 +944,11 @@ ensure_fhs_layout() {
 ###############################################################################
 # STAGE 1: Release Scaffold (Pull Pre-Built Signed Artifact or Source Fallback)
 ###############################################################################
+is_v4_or_newer_release_tag() {
+    local tag="${1:-}"
+    [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
+}
+
 resolve_release_tag() {
     local channel="$1"
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
@@ -953,62 +958,72 @@ resolve_release_tag() {
     if [[ "${channel}" == "nightly" ]]; then
         if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
             local nightly_tag=""
-            nightly_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+            nightly_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft"):
+        if not isinstance(r, dict) or r.get("draft"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
+        if (
+            tag_re.fullmatch(tag)
+            and target != "experimental"
+            and "experimental" not in tag.lower()
+            and (target == "nightly" or bool(r.get("prerelease")) or "nightly" in tag.lower())
+        ):
             print(tag)
             break
 except Exception:
     pass
 ' 2>/dev/null)"
-            if [[ -n "${nightly_tag}" ]]; then
-                echo "${nightly_tag}"
+            if [[ -n "${nightly_tag}" ]] && is_v4_or_newer_release_tag "${nightly_tag}"; then
+                printf '%s\n' "${nightly_tag}"
                 return 0
             fi
         fi
-        echo "nightly"
-        return 0
+        return 1
     fi
 
     if [[ -z "${releases_json}" ]]; then
         local latest_url latest_tag
         latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
         latest_tag="${latest_url##*/}"
-        [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+        [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]] || return 1
         printf '%s\n' "${latest_tag}"
         return 0
     fi
 
     if command -v python3 &>/dev/null; then
         local stable_tag=""
-        stable_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+        stable_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft") or r.get("prerelease"):
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and "-" not in tag and target != "nightly":
+        if tag_re.fullmatch(tag) and target not in ("nightly", "experimental"):
             print(tag)
             break
 except Exception:
     pass
 ' 2>/dev/null)"
         if [[ -n "${stable_tag}" ]]; then
-            echo "${stable_tag}"
+            printf '%s\n' "${stable_tag}"
             return 0
         fi
+        return 1
     fi
 
-    # Fallback: first release without a pre-release hyphen in tag_name
-    echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+    # Fallback: first v4+ release without a pre-release hyphen in tag_name
+    local fallback_tag=""
+    fallback_tag="$(printf '%s\n' "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$' | head -1 || true)"
+    [[ -n "${fallback_tag}" ]] || return 1
+    printf '%s\n' "${fallback_tag}"
 }
 
 validate_release_tarball() {
@@ -1090,6 +1105,10 @@ stage_running_release_manager() {
 
 pull_prebuilt_artifact() {
     local tag="$1"
+    if ! is_v4_or_newer_release_tag "${tag}"; then
+        log_error "Refusing unsupported pre-v4 or malformed release tag '${tag}'."
+        return 1
+    fi
     local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/af-release-XXXXXX")" || return 1
@@ -1118,17 +1137,19 @@ pull_prebuilt_artifact() {
     fi
     log_info "SHA-256 OK ${actual_hash}"
 
-    if [[ "${tag}" == v4* && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
         log_info "Verifying Sigstore + SLSA v1 GitHub Actions build provenance for ${tag}..."
         local -a prov_args=(
             --repo "${GITHUB_REPO}"
             --digest "${actual_hash}"
             --artifact-name "${ARTIFACT_NAME}"
+            --tag "${tag}"
+            --channel "${CHANNEL}"
         )
         if [[ -n "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" ]]; then
             prov_args+=(--bundle-file "${AETHERFLOW_PROVENANCE_BUNDLE_FILE}")
         fi
-        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! python3 -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" >> "${LOG_FILE}" 2>&1; then
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" >> "${LOG_FILE}" 2>&1; then
             log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
             rm -rf "${tmp_dir}"
             return 1
@@ -1158,8 +1179,16 @@ pull_prebuilt_artifact() {
         rm -rf "${tmp_dir}"
         return 1
     fi
-    if [[ ! -s "${RELEASE_DIR}/.version" ]]; then
-        echo "${tag}" > "${RELEASE_DIR}/.version"
+    if [[ -s "${RELEASE_DIR}/.version" ]]; then
+        local archive_version
+        archive_version="$(tr -d '[:space:]' < "${RELEASE_DIR}/.version")"
+        if [[ "${archive_version}" != "${tag}" ]]; then
+            log_error "Release archive .version mismatch: expected '${tag}', got '${archive_version}'."
+            rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+            return 1
+        fi
+    else
+        printf '%s\n' "${tag}" > "${RELEASE_DIR}/.version"
     fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
     if [[ -f "${RELEASE_DIR}/af" && ! -L "${RELEASE_DIR}/af" ]]; then
@@ -1579,9 +1608,11 @@ restart_systemd_units() {
     if [[ -d "${CURRENT_LINK}/deploy/systemd" ]]; then
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-runner.service"
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-api.service"
+        local -a dropin_units=(aetherflow-runner.service aetherflow-api.service)
         if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.service"
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.timer"
+            dropin_units+=(aetherflow-log-retention.service)
         fi
         if [[ -L "${SYSTEMD_UNITS_DST}" ]]; then
             printf 'Refusing symlinked systemd destination: %s\n' "${SYSTEMD_UNITS_DST}" >&2
@@ -1589,7 +1620,7 @@ restart_systemd_units() {
         fi
         mkdir -p "${SYSTEMD_UNITS_DST}"
         local dropin_unit dropin_dir dropin_dest tmp_dropin dropin_payload
-        for dropin_unit in aetherflow-runner.service aetherflow-api.service; do
+        for dropin_unit in "${dropin_units[@]}"; do
             dropin_dir="${SYSTEMD_UNITS_DST}/${dropin_unit}.d"
             dropin_dest="${dropin_dir}/10-aetherflow-hardening.conf"
             if [[ -L "${dropin_dir}" || -L "${dropin_dest}" ]]; then
@@ -1600,8 +1631,10 @@ restart_systemd_units() {
             chmod 0755 "${dropin_dir}"
             if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
                 dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\n'
+            elif [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
+                dropin_payload=$'[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n'
             else
-                dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\n'
+                dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'
             fi
             tmp_dropin="$(mktemp "${dropin_dir}/.10-aetherflow-hardening.conf.tmp.XXXXXX")" || return 1
             if ! printf '%s' "${dropin_payload}" > "${tmp_dropin}" || ! chmod 0644 "${tmp_dropin}" || ! mv -f "${tmp_dropin}" "${dropin_dest}"; then
@@ -1872,7 +1905,7 @@ cleanup_old_releases() {
     log_info "=== STAGE 5: Pruning Old Releases (retaining ${MAX_RELEASES}) ==="
 
     if [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]]; then
-        find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -name '.staging.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+        find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d \( -name '.staging.*' -o -name '.staging-*' \) -mmin +120 -exec rm -rf {} + 2>/dev/null || true
     fi
 
     local current_target=""

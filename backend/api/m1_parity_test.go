@@ -69,6 +69,8 @@ func TestRefreshSession_Lifecycle(t *testing.T) {
 	// 3. Expired beyond grace window (> 2 hours) -> 401
 	{
 		expiredClaims := jwt.MapClaims{
+			"iss":      "aetherflow",
+			"iat":      time.Now().Add(-3*time.Hour - 15*time.Minute).Unix(),
 			"user_id":  float64(101),
 			"username": "refresh_tester",
 			"role":     "admin",
@@ -90,6 +92,8 @@ func TestRefreshSession_Lifecycle(t *testing.T) {
 	// 4. Valid active token -> 200 with rotation
 	{
 		validClaims := jwt.MapClaims{
+			"iss":      "aetherflow",
+			"iat":      time.Now().Add(-5 * time.Minute).Unix(),
 			"user_id":  float64(101),
 			"username": "refresh_tester",
 			"role":     "admin",
@@ -143,6 +147,8 @@ func TestRefreshSession_Lifecycle(t *testing.T) {
 		})
 
 		graceClaims := jwt.MapClaims{
+			"iss":      "aetherflow",
+			"iat":      time.Now().Add(-25 * time.Minute).Unix(),
 			"user_id":  float64(101),
 			"username": "refresh_tester",
 			"role":     "admin",

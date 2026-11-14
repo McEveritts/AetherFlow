@@ -90,7 +90,7 @@ jobs:
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
-          cargo deny --locked check advisories bans sources
+          cargo deny --locked check advisories bans licenses sources
 
       - name: RustSec Vulnerability Scan (cargo-audit)
         run: |

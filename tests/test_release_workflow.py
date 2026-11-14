@@ -236,8 +236,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--latest=false", command)
 
     def test_invalid_base_version_fails_closed(self):
-        (self.root / ".version").write_text("v4.0.0-experimental\n")
-        result = self.run_step("Resolve Release Identity")
+        for bad in ("v4.0.0-experimental\n", "v3.99.0\n"):
+            with self.subTest(bad=bad):
+                (self.root / ".version").write_text(bad)
+                result = self.run_step("Resolve Release Identity")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.env_file.read_text(), "")
+
+    def test_pre_v4_tag_fails_closed(self):
+        result = self.run_step(
+            "Resolve Release Identity",
+            GITHUB_REF="refs/tags/v3.2.8",
+            GITHUB_REF_NAME="v3.2.8",
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.env_file.read_text(), "")
 

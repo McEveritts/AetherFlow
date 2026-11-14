@@ -1,46 +1,27 @@
 package api
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
-	"aetherflow/db"
+
 	"github.com/gin-gonic/gin"
 )
 
 // VerifyProxyAuth handles reverse-proxy forward-auth verification (Apache2 / Subdomain Gateway).
-// If valid session cookie is present, returns 200 OK and injects X-Aetherflow-User.
-// Otherwise, returns 401 Unauthorized to redirect unauthenticated requests to login.
+// If a valid active human session is present, returns 200 OK and injects X-Aetherflow-User.
+// Otherwise, returns 401 Unauthorized (or 403 Forbidden if suspended).
 func VerifyProxyAuth(c *gin.Context) {
-	// Re-use internal secure session parsing logic
-	_, claims, err := resolveSessionToken(c)
+	_, _, subj, err := resolveSessionTokenWithSubject(c)
 	if err != nil {
+		if errors.Is(err, errSubjectSuspended) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Account is not active"})
+			return
+		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized session"})
 		return
 	}
 
-	userIdFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid session token claims"})
-		return
-	}
-
-	userId := int(userIdFloat)
-
-	// Fetch username to pass natively to upstream apps (Jellyseerr etc)
-	var username string
-	err = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", userId).Scan(&username)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "User no longer exists"})
-			return
-		}
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Internal validation error"})
-		return
-	}
-
-	// Session is valid. Inject identity headers into the Response for downstream proxy consumers.
-	c.Header("X-Aetherflow-User", username)
-	c.Header("Remote-User", username) // Included for older app compatibility
-
+	c.Header("X-Aetherflow-User", subj.username)
+	c.Header("Remote-User", subj.username)
 	c.Status(http.StatusOK)
 }

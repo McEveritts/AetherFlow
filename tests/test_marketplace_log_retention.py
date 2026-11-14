@@ -134,7 +134,25 @@ printf 'bash-after\n' >&3
             self.assertEqual(reads.call_count, 1)
             self.assertEqual(self.archive().stat().st_size, 64)
             os.write(descriptor, b"after\n")
-            self.assertEqual(path.read_bytes(), b"after\n")
+            self.assertEqual(path.read_bytes(), (b"concurrent" * 100)[-64:] + b"after\n")
+        finally:
+            os.close(descriptor)
+
+    def test_concurrent_append_during_copy_is_preserved_in_live_inode(self):
+        path = self.write("install-sonarr.log", b"x" * 96)
+        real_read = os.pread
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND)
+
+        def append_small_tail(source, size, offset):
+            os.write(descriptor, b"mid-copy-line\n")
+            return real_read(source, size, offset)
+
+        try:
+            with mock.patch.object(retention.os, "pread", side_effect=append_small_tail):
+                self.assertEqual(self.rotate(), (1, []))
+            self.assertEqual(self.archive().read_bytes(), b"x" * 64)
+            os.write(descriptor, b"after-rotate\n")
+            self.assertEqual(path.read_bytes(), b"mid-copy-line\nafter-rotate\n")
         finally:
             os.close(descriptor)
 
@@ -566,7 +584,7 @@ class CommonShLogSymlinkTests(unittest.TestCase):
                 [
                     "bash",
                     "-c",
-                    'export LOGFILE="$1"; source "$2"; log "hello-hardened"',
+                    'export LOGFILE="$1"; source "$2"; log "hello-hardened"; log "second-line"',
                     "--",
                     str(regular_log),
                     str(ROOT / "packages/common.sh"),
@@ -577,7 +595,10 @@ class CommonShLogSymlinkTests(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
-            self.assertIn("hello-hardened", regular_log.read_text())
+            lines = regular_log.read_text().splitlines(keepends=True)
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(lines[0].endswith("hello-hardened\n"))
+            self.assertTrue(lines[1].endswith("second-line\n"))
 
 
 if __name__ == "__main__":

@@ -16,16 +16,74 @@ use tar::{Archive, EntryType};
 const EMBEDDED_VERIFY_PROVENANCE_PY: &str =
     include_str!("../../../../deploy/verify-provenance.py");
 
+const PROVENANCE_VERIFIER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Returns `true` iff `tag` is a canonical v4+ semver release tag
+/// (`^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$`).
+pub fn is_v4_or_newer_release_tag(tag: &str) -> bool {
+    let Some(rest) = tag.strip_prefix('v') else {
+        return false;
+    };
+    let (core, prerelease) = match rest.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (rest, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    let Ok(major) = parts[0].parse::<u64>() else {
+        return false;
+    };
+    if major < 4 || (parts[0].len() > 1 && parts[0].starts_with('0')) {
+        return false;
+    }
+    if let Some(pre) = prerelease {
+        if pre.is_empty() {
+            return false;
+        }
+        for token in pre.split(['.', '_', '-']) {
+            if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Verifies cryptographic Sigstore + SLSA v1 GitHub Actions build provenance for `expected_digest`
-/// using the embedded zero-PyPI stdlib+OpenSSL verifier (`deploy/verify-provenance.py`).
+/// using the embedded zero-PyPI stdlib+OpenSSL verifier (`deploy/verify-provenance.py`) inside an
+/// isolated (`python3 -I -B`), environment-scrubbed subprocess with a strict 60-second timeout.
 pub fn verify_release_provenance(
     github_repo: &str,
     expected_digest: &str,
     artifact_name: &str,
+    expected_tag: Option<&str>,
+    expected_channel: Option<ReleaseChannel>,
     bundle_file: Option<&Path>,
 ) -> ReleaseResult<()> {
     let mut cmd = Command::new("python3");
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SYSTEMROOT",
+        "AF_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "AETHERFLOW_GITHUB_API_BASE",
+    ] {
+        if let Some(val) = std::env::var_os(key) {
+            cmd.env(key, val);
+        }
+    }
     cmd.args([
+        "-I",
         "-B",
         "-",
         "--repo",
@@ -35,6 +93,12 @@ pub fn verify_release_provenance(
         "--artifact-name",
         artifact_name,
     ]);
+    if let Some(tag) = expected_tag {
+        cmd.args(["--tag", tag]);
+    }
+    if let Some(ch) = expected_channel {
+        cmd.args(["--channel", &ch.to_string()]);
+    }
     if let Some(bf) = bundle_file {
         cmd.arg("--bundle-file").arg(bf);
     }
@@ -49,24 +113,70 @@ pub fn verify_release_provenance(
         ))
     })?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes())
-            .map_err(|e| {
-                ReleaseError::ArtifactVerification(format!(
-                    "failed to feed embedded provenance verifier to python3: {}",
-                    e
-                ))
-            })?;
+        let feed_res = stdin.write_all(EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes());
+        drop(stdin);
+        if let Err(e) = feed_res {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "failed to feed embedded provenance verifier to python3: {}",
+                e
+            )));
+        }
     }
-    let out = child.wait_with_output().map_err(|e| {
-        ReleaseError::ArtifactVerification(format!(
-            "waiting on Sigstore provenance verifier failed: {}",
-            e
-        ))
-    })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if start.elapsed() >= PROVENANCE_VERIFIER_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ReleaseError::ArtifactVerification(format!(
+                        "Sigstore build provenance verifier timed out after {}s for {}",
+                        PROVENANCE_VERIFIER_TIMEOUT.as_secs(),
+                        artifact_name
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ReleaseError::ArtifactVerification(format!(
+                    "waiting on Sigstore provenance verifier failed: {}",
+                    e
+                )));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         return Err(ReleaseError::ArtifactVerification(format!(
             "Sigstore build provenance verification failed for {} (sha256:{}): {}",
@@ -89,24 +199,26 @@ pub struct GitHubReleaseItem {
     pub prerelease: bool,
 }
 
-/// Resolves a release tag from a GitHub Releases JSON payload using the exact rules of
-/// `resolve_release_tag` in `deploy/release-manager.sh`:
-/// - `nightly`: first non-draft release where `tag` is not `"nightly"` or `"experimental"`,
-///   `target_commitish != "experimental"`, `tag` does not contain `"experimental"`, and
-///   (`target_commitish == "nightly"` OR `prerelease == true` OR `tag` contains `"nightly"`).
-///   Falls back to `"nightly"`.
-/// - `stable`: first non-draft, non-prerelease release where `tag` does not contain `'-'`
-///   and `target_commitish != "nightly"`. Returns `Err` if none found or JSON is empty.
+/// Resolves a v4+ release tag from a GitHub Releases JSON payload, failing closed when
+/// the response is empty, malformed, or lacks an eligible v4+ release tag (preventing
+/// implicit v3 downgrades or unverified `"nightly"` literal tag fallbacks).
 pub fn select_release_tag_from_json(
     channel: ReleaseChannel,
     releases_json: &str,
 ) -> ReleaseResult<String> {
     let trimmed = releases_json.trim();
-    let parsed: Vec<GitHubReleaseItem> = if trimmed.is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(trimmed).unwrap_or_default()
-    };
+    if trimmed.is_empty() {
+        return Err(ReleaseError::TagResolution {
+            channel: channel.to_string(),
+            reason: "empty GitHub releases response".to_string(),
+        });
+    }
+    let parsed: Vec<GitHubReleaseItem> = serde_json::from_str(trimmed).map_err(|e| {
+        ReleaseError::TagResolution {
+            channel: channel.to_string(),
+            reason: format!("invalid GitHub releases JSON: {}", e),
+        }
+    })?;
 
     match channel {
         ReleaseChannel::Nightly => {
@@ -117,7 +229,8 @@ pub fn select_release_tag_from_json(
                 let tag = r.tag_name.trim();
                 let tag_lower = tag.to_ascii_lowercase();
                 let target_lower = r.target_commitish.trim().to_ascii_lowercase();
-                if !tag.is_empty()
+                if is_v4_or_newer_release_tag(tag)
+                    && tag.contains('-')
                     && tag_lower != "nightly"
                     && tag_lower != "experimental"
                     && target_lower != "experimental"
@@ -127,28 +240,29 @@ pub fn select_release_tag_from_json(
                     return Ok(tag.to_string());
                 }
             }
-            Ok("nightly".to_string())
+            Err(ReleaseError::TagResolution {
+                channel: channel.to_string(),
+                reason: "no matching v4+ nightly prerelease tag found".to_string(),
+            })
         }
         ReleaseChannel::Stable => {
-            if trimmed.is_empty() {
-                return Err(ReleaseError::TagResolution {
-                    channel: channel.to_string(),
-                    reason: "empty GitHub releases response".to_string(),
-                });
-            }
             for r in &parsed {
                 if r.draft || r.prerelease {
                     continue;
                 }
                 let tag = r.tag_name.trim();
                 let target_lower = r.target_commitish.trim().to_ascii_lowercase();
-                if !tag.is_empty() && !tag.contains('-') && target_lower != "nightly" {
+                if is_v4_or_newer_release_tag(tag)
+                    && !tag.contains('-')
+                    && target_lower != "nightly"
+                    && target_lower != "experimental"
+                {
                     return Ok(tag.to_string());
                 }
             }
             Err(ReleaseError::TagResolution {
                 channel: channel.to_string(),
-                reason: "no matching stable release tag found".to_string(),
+                reason: "no matching v4+ stable release tag found".to_string(),
             })
         }
     }
@@ -400,7 +514,22 @@ pub fn extract_and_validate_release_archive(
     let has_non_empty_version = fs::symlink_metadata(&version_path)
         .map(|m| !m.file_type().is_symlink() && m.is_file() && m.len() > 0)
         .unwrap_or(false);
-    if !has_non_empty_version {
+    if has_non_empty_version {
+        let actual_version = fs::read_to_string(&version_path).map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Failed to read extracted .version at {}: {}",
+                version_path.display(),
+                e
+            ))
+        })?;
+        let trimmed_version = actual_version.trim();
+        if trimmed_version != tag {
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "Extracted release .version {:?} does not match expected tag {:?}",
+                trimmed_version, tag
+            )));
+        }
+    } else {
         crate::fs_security::atomic_write_bytes_with_mode(
             &version_path,
             format!("{}\n", tag).as_bytes(),
@@ -433,10 +562,12 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
         }
     }
 
-    let staged_script = release_dir.join("deploy/release-manager.sh");
-    if let Ok(meta) = fs::symlink_metadata(&staged_script) {
-        if !meta.file_type().is_symlink() && meta.is_file() {
-            crate::fs_security::set_file_mode(&staged_script, 0o755)?;
+    for rel_exec in ["deploy/release-manager.sh", "deploy/verify-provenance.py"] {
+        let staged_exec = release_dir.join(rel_exec);
+        if let Ok(meta) = fs::symlink_metadata(&staged_exec) {
+            if !meta.file_type().is_symlink() && meta.is_file() {
+                crate::fs_security::set_file_mode(&staged_exec, 0o755)?;
+            }
         }
     }
 
@@ -704,8 +835,8 @@ pub fn resolve_managed_current_source_path(
     }
 }
 
-/// Stages the executing `release-manager.sh` and `release-manager.conf` into `${RELEASE_DIR}/deploy`
-/// when configured, matching `stage_running_release_manager` in `deploy/release-manager.sh`.
+/// Stages the executing `release-manager.sh`, embedded `verify-provenance.py`, and `release-manager.conf`
+/// into `${RELEASE_DIR}/deploy` when configured, matching `stage_running_release_manager` in `deploy/release-manager.sh`.
 pub fn stage_running_release_manager(
     release_dir: &Path,
     config: &ReleaseConfig,
@@ -714,6 +845,7 @@ pub fn stage_running_release_manager(
     let deploy_dir = release_dir.join("deploy");
     crate::fs_security::create_dir_all_no_symlinks(&deploy_dir, 0o755)?;
 
+    let mut staged_script = false;
     if let Some(ref script_src) = config.stage_script_path {
         if let Some(resolved_src) = resolve_managed_current_source_path(script_src, config)? {
             let dst = deploy_dir.join("release-manager.sh");
@@ -721,7 +853,25 @@ pub fn stage_running_release_manager(
                 crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o755, None)?;
             }
             set_executable_permission(&dst)?;
+            staged_script = true;
         }
+    }
+    if staged_script || deploy_dir.join("release-manager.sh").is_file() {
+        let verifier_dst = deploy_dir.join("verify-provenance.py");
+        if let Ok(meta) = fs::symlink_metadata(&verifier_dst) {
+            if meta.file_type().is_symlink() {
+                return Err(ReleaseError::PathValidation {
+                    path: verifier_dst,
+                    reason: "refusing to overwrite symlinked verify-provenance.py".to_string(),
+                });
+            }
+        }
+        crate::fs_security::atomic_write_bytes_with_mode(
+            &verifier_dst,
+            EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes(),
+            0o755,
+        )?;
+        set_executable_permission(&verifier_dst)?;
     }
     if let Some(ref conf_src) = config.stage_conf_path {
         if let Some(resolved_src) = resolve_managed_current_source_path(conf_src, config)? {
@@ -811,18 +961,11 @@ pub fn parse_stable_tag_from_redirect_url(
             ),
         });
     };
-    let is_valid_semver = tag.starts_with('v') && {
-        let parts: Vec<&str> = tag[1..].split('.').collect();
-        parts.len() == 3
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-    };
-    if !is_valid_semver {
+    if tag.contains('-') || !is_v4_or_newer_release_tag(tag) {
         return Err(ReleaseError::TagResolution {
             channel: ReleaseChannel::Stable.to_string(),
             reason: format!(
-                "latest release redirect tag {:?} is not a strict stable vX.Y.Z tag",
+                "latest release redirect tag {:?} is not a strict v4+ stable semver tag",
                 tag
             ),
         });
@@ -914,6 +1057,12 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         tag: &str,
         staging_dir: &Path,
     ) -> ReleaseResult<(PathBuf, String)> {
+        if !is_v4_or_newer_release_tag(tag) {
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "Refusing unsupported or pre-v4 release tag {:?} (v4+ semver required).",
+                tag
+            )));
+        }
         crate::fs_security::create_dir_all_no_symlinks(staging_dir, 0o700)?;
         let base = self
             .download_base_url
@@ -950,16 +1099,17 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
 
         let verified_digest =
             verify_artifact_checksum(&archive_dest, &manifest_content, &config.artifact_name)?;
-        if self.download_base_url.is_none()
-            && self.api_base_url.is_none()
-            && tag.starts_with("v4")
-            && std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() != Ok("1")
-        {
+        if std::env::var("AETHERFLOW_SKIP_PROVENANCE_VERIFY").as_deref() != Ok("1") {
+            let bundle_override = std::env::var_os("AETHERFLOW_PROVENANCE_BUNDLE_FILE")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
             verify_release_provenance(
                 &config.github_repo,
                 &verified_digest,
                 &config.artifact_name,
+                Some(tag),
                 None,
+                bundle_override.as_deref(),
             )?;
         }
 
@@ -1126,6 +1276,15 @@ mod tests {
             & 0o777;
         assert_eq!(script_mode & 0o111, 0o111, "staged script must be executable");
 
+        let staged_verifier = next_release.join("deploy/verify-provenance.py");
+        assert!(staged_verifier.is_file(), "verify-provenance.py must be staged alongside release-manager.sh");
+        let verifier_mode = fs::symlink_metadata(&staged_verifier)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(verifier_mode & 0o111, 0o111, "staged verify-provenance.py must be executable");
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1251,8 +1410,36 @@ mod tests {
         stage_running_release_manager(&candidate_release, &cfg)
             .expect("missing optional source files should be a clean no-op");
         assert!(!candidate_release.join("deploy/release-manager.sh").exists());
+        assert!(!candidate_release.join("deploy/verify-provenance.py").exists());
         assert!(!candidate_release.join("deploy/release-manager.conf").exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_verify_release_provenance_accepts_real_sigstore_bundle_and_rejects_tag_replay() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/sigstore_bundle_nightly_109_1.json");
+        let digest = "018a270e2833886b1c59e2f831912c794e2ed66dacf6c2249ab1390fc2d44b26";
+        verify_release_provenance(
+            "McEveritts/AetherFlow",
+            digest,
+            "aetherflow-linux-amd64.tar.gz",
+            Some("v4.0.0-nightly.109.1"),
+            Some(ReleaseChannel::Nightly),
+            Some(&fixture),
+        )
+        .expect("real nightly.109.1 Sigstore bundle must pass verification");
+
+        let replay_err = verify_release_provenance(
+            "McEveritts/AetherFlow",
+            digest,
+            "aetherflow-linux-amd64.tar.gz",
+            Some("v4.0.0"),
+            Some(ReleaseChannel::Stable),
+            Some(&fixture),
+        )
+        .expect_err("replaying nightly bundle under stable v4.0.0 must fail closed");
+        assert!(matches!(replay_err, ReleaseError::ArtifactVerification(_)));
     }
 }

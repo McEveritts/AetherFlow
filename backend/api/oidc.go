@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -144,20 +145,45 @@ func isAcceptedOIDCIssuer(c *gin.Context, tokenIss string) bool {
 	}
 }
 
-func validatePKCERequestParams(codeChallenge, codeChallengeMethod string, isPublicClient bool) (string, bool) {
+func isValidPKCEChallenge(challenge string) bool {
+	if len(challenge) != 43 {
+		return false
+	}
+	for i := 0; i < len(challenge); i++ {
+		ch := challenge[i]
+		isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+		if !isAlphaNum && ch != '-' && ch != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidPKCEVerifier(verifier string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	for i := 0; i < len(verifier); i++ {
+		ch := verifier[i]
+		isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+		if !isAlphaNum && ch != '-' && ch != '.' && ch != '_' && ch != '~' {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePKCERequestParams(codeChallenge, codeChallengeMethod string, _ bool) (string, bool) {
 	challenge := strings.TrimSpace(codeChallenge)
 	method := strings.TrimSpace(codeChallengeMethod)
-	if isPublicClient && challenge == "" {
-		return "PKCE S256 code_challenge is required for public clients", false
-	}
 	if challenge == "" {
-		if method != "" {
-			return "code_challenge is required when code_challenge_method is specified", false
-		}
-		return "", true
+		return "PKCE S256 code_challenge is required for authorization code requests", false
 	}
 	if method != "S256" {
 		return "code_challenge_method must be S256", false
+	}
+	if !isValidPKCEChallenge(challenge) {
+		return "code_challenge must be a 43-character base64url SHA-256 digest", false
 	}
 	return "", true
 }
@@ -252,26 +278,14 @@ func OIDCAuthorize(c *gin.Context) {
 		return
 	}
 
-	// Check session — user must have a non-revoked, fingerprint-matching session and still exist
-	_, claims, err := resolveSessionToken(c)
+	// Check session — user must have a non-revoked, fingerprint-matching active human session
+	_, _, subj, err := resolveSessionTokenWithSubject(c)
 	if err != nil {
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
-	userIDFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
-		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
-		return
-	}
-	userID := int(userIDFloat)
-	var activeUserID int
-	if err := db.DB.QueryRow("SELECT id FROM users WHERE id = ?", userID).Scan(&activeUserID); err != nil {
-		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
-		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
-		return
-	}
+	userID := subj.userID
 
 	// Validate requested scopes against supported scopes
 	validatedScope := validateOIDCScopes(scope)
@@ -359,6 +373,15 @@ func OIDCConsent(c *gin.Context) {
 			redirectURL += "&state=" + url.QueryEscape(req.State)
 		}
 		c.JSON(http.StatusOK, gin.H{"redirect_uri": redirectURL, "redirect_url": redirectURL})
+		return
+	}
+
+	if _, subErr := loadActiveHumanSubject(db.DB, userId.(int)); subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "Account is not active"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
@@ -504,18 +527,9 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 		return
 	}
 
-	// Validate PKCE (mandatory for public clients and whenever code_challenge was bound)
-	if isPublicClient && strings.TrimSpace(codeChallenge) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE required for public client"})
-		return
-	}
-	if codeChallenge != "" {
-		if !verifyPKCE(codeVerifier, codeChallenge, codeChallengeMethod) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE verification failed"})
-			return
-		}
-	} else if codeVerifier != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "unexpected code_verifier"})
+	// Enforce universal RFC 7636 PKCE S256 for all authorization code exchanges (public and confidential)
+	if strings.TrimSpace(codeChallenge) == "" || !verifyPKCE(codeVerifier, codeChallenge, codeChallengeMethod) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 		return
 	}
 
@@ -530,7 +544,7 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 	// Mark code as used within the transaction
 	result, execErr := tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE code = ? AND used = 0", code)
 	if execErr != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -538,14 +552,24 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 	// Check that exactly 1 row was affected (code wasn't already used)
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		tx.Rollback()
+		_ = tx.Rollback()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "code already used"})
 		return
 	}
 
-	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, nonce)
+	if _, subErr := loadActiveHumanSubject(tx, userID); subErr != nil {
+		_ = tx.Rollback()
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "invalid_grant", "error_description": "account suspended"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
+		return
+	}
+
+	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, nonce, "")
 	if issueErr != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -559,7 +583,20 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 }
 
 func handleRefreshTokenExchange(c *gin.Context, clientID string) {
-	refreshToken := c.PostForm("refresh_token")
+	refreshToken := strings.TrimSpace(c.PostForm("refresh_token"))
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
+		return
+	}
+
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	var (
 		storedClientID string
@@ -567,15 +604,38 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		scope          string
 		expiresAt      string
 		revoked        bool
+		familyID       string
 	)
 
-	err := db.DB.QueryRow(
-		`SELECT client_id, user_id, scope, expires_at, revoked FROM oidc_refresh_tokens WHERE token = ?`,
+	err := tx.QueryRow(
+		`SELECT client_id, user_id, scope, expires_at, revoked, COALESCE(family_id, '')
+		 FROM oidc_refresh_tokens WHERE token = ?`,
 		refreshToken,
-	).Scan(&storedClientID, &userID, &scope, &expiresAt, &revoked)
-
-	if err != nil || revoked || storedClientID != clientID {
+	).Scan(&storedClientID, &userID, &scope, &expiresAt, &revoked, &familyID)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		err = tx.QueryRow(
+			`SELECT client_id, user_id, scope, expires_at, revoked FROM oidc_refresh_tokens WHERE token = ?`,
+			refreshToken,
+		).Scan(&storedClientID, &userID, &scope, &expiresAt, &revoked)
+	}
+	if err != nil || storedClientID != clientID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
+		return
+	}
+
+	effFamily := strings.TrimSpace(familyID)
+	if effFamily == "" {
+		effFamily = refreshToken
+	}
+
+	if revoked {
+		slog.Warn("OIDC: refresh token reuse detected; revoking token family", "client_id", clientID, "user_id", userID)
+		_, _ = tx.Exec(
+			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
+			clientID, effFamily, refreshToken,
+		)
+		_ = tx.Commit()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}
 
@@ -590,31 +650,41 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	// Atomic refresh token rotation + new refresh token insertion inside one transaction.
-	tx, txErr := db.DB.Begin()
-	if txErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+	var clientExists int
+	if err := tx.QueryRow("SELECT 1 FROM oidc_clients WHERE id = ?", clientID).Scan(&clientExists); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+		return
+	}
+
+	if _, subErr := loadActiveHumanSubject(tx, userID); subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "invalid_grant", "error_description": "account suspended"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 		return
 	}
 
 	result, execErr := tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND revoked = 0", refreshToken)
 	if execErr != nil {
-		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		tx.Rollback()
-		slog.Warn("OIDC: refresh token replay detected", "client_id", clientID)
+		slog.Warn("OIDC: concurrent refresh token replay detected; revoking family", "client_id", clientID)
+		_, _ = tx.Exec(
+			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
+			clientID, effFamily, refreshToken,
+		)
+		_ = tx.Commit()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}
 
-	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, "")
+	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, "", effFamily)
 	if issueErr != nil {
-		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -641,22 +711,27 @@ func hasOIDCScope(scopeStr, target string) bool {
 	return false
 }
 
-func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID string, userID int, scope, nonce string) (gin.H, error) {
+func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID string, userID int, scope, nonce, familyID string) (gin.H, error) {
 	if oidcPrivateKey == nil {
 		return nil, fmt.Errorf("OIDC private key is uninitialized")
+	}
+
+	subj, subErr := loadActiveHumanSubject(execer, userID)
+	if subErr != nil {
+		return nil, subErr
 	}
 
 	issuer := getOIDCIssuer(c)
 
 	// Fetch user info
 	var username, email, avatarURL, role string
-	if err := execer.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", userID).
+	if err := execer.QueryRow("SELECT username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user') FROM users WHERE id = ?", userID).
 		Scan(&username, &email, &avatarURL, &role); err != nil {
 		slog.Error("OIDC: failed to fetch user info during token issuance", "user_id", userID, "error", err)
 		return nil, err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	// ID Token (short-lived, 1 hour) with scope-gated claims and optional nonce
 	idTokenClaims := jwt.MapClaims{
@@ -665,6 +740,7 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 		"aud": clientID,
 		"exp": now.Add(1 * time.Hour).Unix(),
 		"iat": now.Unix(),
+		"ver": subj.sessionsRevokedAfter,
 	}
 	if nonce != "" {
 		idTokenClaims["nonce"] = nonce
@@ -686,13 +762,16 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 		return nil, err
 	}
 
-	// Access Token (short-lived, 1 hour)
+	// Access Token (short-lived, 1 hour, revocable via jti + ver)
+	accessJTI := uuid.New().String()
 	accessTokenClaims := jwt.MapClaims{
 		"iss":   issuer,
 		"sub":   fmt.Sprintf("%d", userID),
 		"aud":   clientID,
 		"exp":   now.Add(1 * time.Hour).Unix(),
 		"iat":   now.Unix(),
+		"jti":   accessJTI,
+		"ver":   subj.sessionsRevokedAfter,
 		"scope": scope,
 	}
 
@@ -704,18 +783,30 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 		return nil, err
 	}
 
-	// Refresh Token (long-lived, 30 days)
+	// Refresh Token (long-lived, 30 days, family-bound)
 	refreshBytes := make([]byte, 32)
 	if _, err := rand.Read(refreshBytes); err != nil {
 		slog.Error("crypto/rand failure during OIDC refresh token generation", "error", err)
 		return nil, err
 	}
 	refreshToken := hex.EncodeToString(refreshBytes)
+	effFamily := strings.TrimSpace(familyID)
+	if effFamily == "" {
+		effFamily = refreshToken
+	}
+	refreshExpires := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
 
-	if _, err := execer.Exec(
-		`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		refreshToken, clientID, userID, scope, now.Add(30*24*time.Hour).Format(time.RFC3339),
-	); err != nil {
+	_, err = execer.Exec(
+		`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at, family_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		refreshToken, clientID, userID, scope, refreshExpires, effFamily,
+	)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		_, err = execer.Exec(
+			`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?)`,
+			refreshToken, clientID, userID, scope, refreshExpires,
+		)
+	}
+	if err != nil {
 		slog.Error("OIDC: failed to persist refresh token", "client_id", clientID, "error", err)
 		return nil, err
 	}
@@ -772,7 +863,45 @@ func OIDCUserInfo(c *gin.Context) {
 		return
 	}
 
+	jti, _ := claims["jti"].(string)
+	jti = strings.TrimSpace(jti)
+	if jti == "" || db.IsTokenRevoked(jti) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "token revoked"})
+		return
+	}
+
+	aud, _ := claims["aud"].(string)
+	aud = strings.TrimSpace(aud)
+	if aud == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+		return
+	}
+	var clientExists int
+	if err := db.DB.QueryRow("SELECT 1 FROM oidc_clients WHERE id = ?", aud).Scan(&clientExists); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "client revoked"})
+		return
+	}
+
 	sub, _ := claims["sub"].(string)
+	subID, subConvErr := strconv.Atoi(sub)
+	if subConvErr != nil || subID <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+		return
+	}
+	subj, subErr := loadActiveHumanSubject(db.DB, subID)
+	if subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "account suspended"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "user not found"})
+		return
+	}
+	if claimVersion(claims) < subj.sessionsRevokedAfter {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "credentials rotated"})
+		return
+	}
+
 	scope, _ := claims["scope"].(string)
 	if !hasOIDCScope(scope, "openid") {
 		c.JSON(http.StatusForbidden, gin.H{
@@ -782,7 +911,7 @@ func OIDCUserInfo(c *gin.Context) {
 		return
 	}
 	var username, email, avatarURL, role string
-	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", sub).
+	if err := db.DB.QueryRow("SELECT username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user') FROM users WHERE id = ?", subID).
 		Scan(&username, &email, &avatarURL, &role); err != nil {
 		slog.Error("OIDC: failed to fetch user info during userinfo request", "sub", sub, "error", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "user not found"})
@@ -844,16 +973,66 @@ func OIDCRevoke(c *gin.Context) {
 		}
 	}
 
-	token := c.PostForm("token")
+	token := strings.TrimSpace(c.PostForm("token"))
 	if token == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 
-	if _, err := db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID); err != nil {
-		slog.Error("OIDC: failed to revoke refresh token", "client_id", clientID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+	// Revoke RS256 access tokens by JTI when presented by their audience client.
+	if oidcPrivateKey != nil {
+		if parsed, pErr := jwt.Parse(token, func(tok *jwt.Token) (interface{}, error) {
+			if _, ok := tok.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", tok.Header["alg"])
+			}
+			return &oidcPrivateKey.PublicKey, nil
+		}); pErr == nil && parsed != nil && parsed.Valid {
+			if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+				aud, _ := claims["aud"].(string)
+				jti, _ := claims["jti"].(string)
+				jti = strings.TrimSpace(jti)
+				if aud == clientID && jti != "" {
+					ttl := 1 * time.Hour
+					if expUnix, hasExp := claimInt64(claims, "exp"); hasExp {
+						if rem := time.Until(time.Unix(expUnix, 0)); rem > 0 {
+							ttl = rem + time.Minute
+						}
+					}
+					if err := db.RevokeToken(jti, ttl); err != nil {
+						slog.Error("OIDC: failed to revoke access token JTI", "client_id", clientID, "error", err)
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Revoke matching refresh token (and its entire token family).
+	var familyID string
+	fErr := db.DB.QueryRow(
+		"SELECT COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ? AND client_id = ?",
+		token, clientID,
+	).Scan(&familyID)
+	if fErr == nil {
+		effFamily := strings.TrimSpace(familyID)
+		if effFamily == "" {
+			effFamily = token
+		}
+		if _, err := db.DB.Exec(
+			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
+			clientID, effFamily, token,
+		); err != nil {
+			slog.Error("OIDC: failed to revoke refresh token family", "client_id", clientID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+	} else if !errors.Is(fErr, sql.ErrNoRows) {
+		if _, err := db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID); err != nil {
+			slog.Error("OIDC: failed to revoke refresh token", "client_id", clientID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{}) // RFC 7009: 200 even if token doesn't exist
 }
@@ -953,9 +1132,19 @@ func introspectAccessToken(c *gin.Context, tokenStr, clientID string) gin.H {
 		return nil
 	}
 
-	// Verify the token was issued for this client
+	// Verify the token was issued for this client and the client still exists
 	aud, _ := claims["aud"].(string)
 	if aud != clientID {
+		return nil
+	}
+	var clientExists int
+	if err := db.DB.QueryRow("SELECT 1 FROM oidc_clients WHERE id = ?", clientID).Scan(&clientExists); err != nil {
+		return nil
+	}
+
+	jti, _ := claims["jti"].(string)
+	jti = strings.TrimSpace(jti)
+	if jti == "" || db.IsTokenRevoked(jti) {
 		return nil
 	}
 
@@ -964,8 +1153,11 @@ func introspectAccessToken(c *gin.Context, tokenStr, clientID string) gin.H {
 	if convErr != nil || subID <= 0 {
 		return nil
 	}
-	var exists int
-	if err := db.DB.QueryRow("SELECT 1 FROM users WHERE id = ?", subID).Scan(&exists); err != nil {
+	subj, subErr := loadActiveHumanSubject(db.DB, subID)
+	if subErr != nil {
+		return nil
+	}
+	if claimVersion(claims) < subj.sessionsRevokedAfter {
 		return nil
 	}
 	scope, _ := claims["scope"].(string)
@@ -985,6 +1177,11 @@ func introspectAccessToken(c *gin.Context, tokenStr, clientID string) gin.H {
 
 // introspectRefreshToken checks the database for a valid, non-revoked refresh token.
 func introspectRefreshToken(tokenStr, clientID string) gin.H {
+	var clientExists int
+	if err := db.DB.QueryRow("SELECT 1 FROM oidc_clients WHERE id = ?", clientID).Scan(&clientExists); err != nil {
+		return gin.H{"active": false}
+	}
+
 	var userID int
 	var scope string
 	var revoked bool
@@ -1009,8 +1206,7 @@ func introspectRefreshToken(tokenStr, clientID string) gin.H {
 		return gin.H{"active": false}
 	}
 
-	var exists int
-	if err := db.DB.QueryRow("SELECT 1 FROM users WHERE id = ?", userID).Scan(&exists); err != nil {
+	if _, subErr := loadActiveHumanSubject(db.DB, userID); subErr != nil {
 		return gin.H{"active": false}
 	}
 
@@ -1058,9 +1254,9 @@ func isAllowedRedirectURI(uri, storedURIs string) bool {
 	return false
 }
 
-// verifyPKCE validates the PKCE code_verifier against the stored S256 challenge.
+// verifyPKCE validates the PKCE code_verifier against the stored S256 challenge per RFC 7636.
 func verifyPKCE(verifier, challenge, method string) bool {
-	if verifier == "" || challenge == "" || method != "S256" {
+	if method != "S256" || !isValidPKCEVerifier(verifier) || !isValidPKCEChallenge(challenge) {
 		return false
 	}
 	hash := sha256.Sum256([]byte(verifier))
@@ -1068,34 +1264,86 @@ func verifyPKCE(verifier, challenge, method string) bool {
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
-// createStandardJWT creates a JWT with a unique jti, short-lived expiry, and
-// client fingerprint binding. This is the single source of truth for session JWT creation.
-// The fingerprint (cfp claim) is a SHA256 of IP+UserAgent, preventing stolen tokens
-// from being replayed on different devices/networks.
-func createStandardJWT(userID int, c *gin.Context) (string, error) {
+func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authTime int64, familyID string, credentialVer int64) (string, string, error) {
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+	if authTime <= 0 {
+		authTime = nowUnix
+	}
+	absExp := authTime + sessionAbsoluteLifetimeSecs
+	if absExp <= nowUnix {
+		return "", "", fmt.Errorf("absolute session lifetime exceeded")
+	}
+	expUnix := nowUnix + int64((15 * time.Minute).Seconds())
+	if expUnix > absExp {
+		expUnix = absExp
+	}
+
 	jti := uuid.New().String()
+	effFamily := strings.TrimSpace(familyID)
+	if effFamily == "" {
+		effFamily = jti
+	}
 	fp := clientFingerprint(c)
 
 	claims := jwt.MapClaims{
-		"user_id": userID,
-		"sub":     fmt.Sprintf("%d", userID),
-		"iss":     "aetherflow",
-		"iat":     time.Now().Unix(),
-		"exp":     time.Now().Add(15 * time.Minute).Unix(),
-		"jti":     jti,
-		"cfp":     fp,
+		"user_id":   userID,
+		"sub":       fmt.Sprintf("%d", userID),
+		"iss":       "aetherflow",
+		"iat":       nowUnix,
+		"auth_time": authTime,
+		"exp":       expUnix,
+		"jti":       jti,
+		"cfp":       fp,
+		"ver":       credentialVer,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString(getJWTSecret())
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	// Record the session for listing/revocation (best-effort)
-	recordActiveSession(userID, jti, c)
+	if execer != nil {
+		ua := c.Request.UserAgent()
+		ip := c.ClientIP()
+		retainUnix := expUnix + 7200
+		if retainUnix > absExp {
+			retainUnix = absExp
+		}
+		expiresAt := time.Unix(retainUnix, 0).UTC().Format(time.RFC3339)
 
-	return tokenString, nil
+		_, insErr := execer.Exec(
+			`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
+			 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+			jti, userID, ip, ua, expiresAt, effFamily,
+		)
+		if insErr != nil && strings.Contains(insErr.Error(), "no such column") {
+			_, insErr = execer.Exec(
+				`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active)
+				 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+				jti, userID, ip, ua, expiresAt,
+			)
+		}
+		if insErr != nil {
+			slog.Warn("session tracking: failed to record session", "error", insErr)
+		}
+	}
+
+	return tokenString, jti, nil
+}
+
+// createStandardJWT creates a JWT with a unique jti, short-lived expiry, 30-day absolute
+// lifetime ceiling, credential epoch version, and client fingerprint binding.
+func createStandardJWT(userID int, c *gin.Context) (string, error) {
+	var credentialVer int64
+	var execer oidcDBExecer
+	if db.DB != nil {
+		execer = db.DB
+		_ = db.DB.QueryRow("SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?", userID).Scan(&credentialVer)
+	}
+	tokenString, _, err := createSessionJWTInTx(execer, userID, c, time.Now().UTC().Unix(), "", credentialVer)
+	return tokenString, err
 }
 
 // clientFingerprint produces a deterministic fingerprint of the client's User-Agent.
@@ -1124,34 +1372,6 @@ func matchesClientFingerprint(cfp string, c *gin.Context) bool {
 	return cfp == clientFingerprint(c) || cfp == legacyClientFingerprint(c)
 }
 
-// recordActiveSession persists session metadata for the session listing endpoint.
-func recordActiveSession(userID int, jti string, c *gin.Context) {
-	ua := c.Request.UserAgent()
-	ip := c.ClientIP()
-	expiresAt := time.Now().Add(15 * time.Minute).Format(time.RFC3339)
-
-	_, err := db.DB.Exec(
-		`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active)
-		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		jti, userID, ip, ua, expiresAt,
-	)
-	if err != nil {
-		slog.Warn("session tracking: failed to record session", "error", err)
-	}
-}
-
-// lookupOIDCClient retrieves client info from the database.
-/* func lookupOIDCClient(clientID string) (name string, redirectURIs string, err error) {
-	err = db.DB.QueryRow(
-		"SELECT name, redirect_uris FROM oidc_clients WHERE id = ?",
-		clientID,
-	).Scan(&name, &redirectURIs)
-	if err == sql.ErrNoRows {
-		return "", "", fmt.Errorf("client not found")
-	}
-	return
-} */
-
 // ---- Device Code Flow ----
 
 func generateUserCode() string {
@@ -1176,16 +1396,29 @@ func OIDCDeviceAuthorize(c *gin.Context) {
 	}
 
 	deviceCodeBytes := make([]byte, 32)
-	rand.Read(deviceCodeBytes)
+	if _, err := rand.Read(deviceCodeBytes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 	deviceCode := hex.EncodeToString(deviceCodeBytes)
-	userCode := generateUserCode()
-	expiresAt := time.Now().Add(10 * time.Minute)
+	expiresAt := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339)
 
-	_, err = db.DB.Exec(
-		"INSERT INTO oidc_device_codes (device_code, user_code, client_id, scope, expires_at, status) VALUES (?, ?, ?, ?, ?, 'pending')",
-		deviceCode, userCode, clientID, scope, expiresAt.Format(time.RFC3339),
-	)
-	if err != nil {
+	var userCode string
+	var insErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		userCode = generateUserCode()
+		_, insErr = db.DB.Exec(
+			"INSERT INTO oidc_device_codes (device_code, user_code, client_id, scope, expires_at, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+			deviceCode, userCode, clientID, scope, expiresAt,
+		)
+		if insErr == nil {
+			break
+		}
+		if !strings.Contains(strings.ToLower(insErr.Error()), "unique") {
+			break
+		}
+	}
+	if insErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -1262,7 +1495,16 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 			return
 		}
-		payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, int(userIDErr.Int64), validateOIDCScopes(scope), "")
+		if _, subErr := loadActiveHumanSubject(tx, int(userIDErr.Int64)); subErr != nil {
+			_ = tx.Rollback()
+			if errors.Is(subErr, errSubjectSuspended) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "account suspended"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
+			return
+		}
+		payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, int(userIDErr.Int64), validateOIDCScopes(scope), "", "")
 		if issueErr != nil {
 			_ = tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -1289,23 +1531,32 @@ func OIDCDeviceVerify(c *gin.Context) {
 		return
 	}
 
-	var status string
-	var scope string
-	var clientID string
-	err := db.DB.QueryRow("SELECT status, scope, client_id FROM oidc_device_codes WHERE user_code = ?", req.UserCode).Scan(&status, &scope, &clientID)
-	
+	userCode := strings.ToUpper(strings.TrimSpace(req.UserCode))
+	var status, scope, clientID, expiresAt string
+	err := db.DB.QueryRow(
+		"SELECT status, scope, client_id, expires_at FROM oidc_device_codes WHERE user_code = ?",
+		userCode,
+	).Scan(&status, &scope, &clientID, &expiresAt)
 	if err != nil || status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
+		return
+	}
+	expTime, parseErr := time.Parse(time.RFC3339, expiresAt)
+	if parseErr != nil || time.Now().After(expTime) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
 		return
 	}
 
 	var name string
-	db.DB.QueryRow("SELECT name FROM oidc_clients WHERE id = ?", clientID).Scan(&name)
+	if err := db.DB.QueryRow("SELECT name FROM oidc_clients WHERE id = ?", clientID).Scan(&name); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status": status,
-		"scope": scope,
-		"client_id": clientID,
+		"status":      status,
+		"scope":       scope,
+		"client_id":   clientID,
 		"client_name": name,
 	})
 }
@@ -1313,6 +1564,15 @@ func OIDCDeviceVerify(c *gin.Context) {
 func OIDCDeviceConsent(c *gin.Context) {
 	userId, exists := c.Get("user_id")
 	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	callerID := userId.(int)
+	if _, subErr := loadActiveHumanSubject(db.DB, callerID); subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "Account is not active"})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -1326,20 +1586,70 @@ func OIDCDeviceConsent(c *gin.Context) {
 		return
 	}
 
+	userCode := strings.ToUpper(strings.TrimSpace(req.UserCode))
 	status := "denied"
 	if req.Approved {
 		status = "approved"
 	}
 
-	res, err := db.DB.Exec("UPDATE oidc_device_codes SET status = ?, user_id = ? WHERE user_code = ? AND status = 'pending'", status, userId.(int), req.UserCode)
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	rows, qErr := tx.Query(
+		"SELECT device_code, client_id, expires_at FROM oidc_device_codes WHERE user_code = ? AND status = 'pending' LIMIT 2",
+		userCode,
+	)
+	if qErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	var validDeviceCodes []string
+	var targetClientID string
+	now := time.Now()
+	for rows.Next() {
+		var dc, cid, expStr string
+		if rows.Scan(&dc, &cid, &expStr) == nil {
+			if expTime, pErr := time.Parse(time.RFC3339, expStr); pErr == nil && !now.After(expTime) {
+				validDeviceCodes = append(validDeviceCodes, dc)
+				targetClientID = cid
+			}
+		}
+	}
+	_ = rows.Close()
+
+	if len(validDeviceCodes) != 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
+		return
+	}
+	var clientExists int
+	if err := tx.QueryRow("SELECT 1 FROM oidc_clients WHERE id = ?", targetClientID).Scan(&clientExists); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
+		return
+	}
+
+	res, err := tx.Exec(
+		"UPDATE oidc_device_codes SET status = ?, user_id = ? WHERE device_code = ? AND status = 'pending'",
+		status, callerID, validDeviceCodes[0],
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
 	affected, _ := res.RowsAffected()
-	if affected == 0 {
+	if affected != 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_code"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
@@ -1422,7 +1732,7 @@ func generateAndStoreAuthCode(clientID string, userID int, redirectURI, scope, n
 	}
 	code := hex.EncodeToString(codeBytes)
 
-	expiresAt := time.Now().Add(10 * time.Minute)
+	expiresAt := time.Now().UTC().Add(10 * time.Minute)
 	_, err := db.DB.Exec(
 		`INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

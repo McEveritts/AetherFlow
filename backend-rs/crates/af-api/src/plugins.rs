@@ -2344,6 +2344,7 @@ pub(crate) mod tests {
             exp: Utc::now().timestamp() + 900,
             jti: "op-session-1".to_string(),
             cfp: String::new(),
+            ver: 0,
             plugin_id: String::new(),
             plugin_scopes: Vec::new(),
         };

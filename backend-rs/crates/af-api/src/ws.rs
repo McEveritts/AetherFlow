@@ -826,14 +826,8 @@ fn consume_live_ws_ticket(
             Ok(true) | Err(_) => return None,
         }
     }
-    let role: String = connection
-        .query_row(
-            "SELECT role FROM users WHERE id = ?1",
-            [entry.user_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    entry.diagnostics_allowed = role == "admin";
+    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
+    entry.diagnostics_allowed = subj.role == "admin";
     Some(entry)
 }
 
@@ -1018,6 +1012,13 @@ pub async fn handle_websocket(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if !websocket_origin_matches_host(&headers, peer_ip, false) {
+        return crate::auth::api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Cross-origin WebSocket upgrade rejected",
+        );
+    }
     if q.ticket.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -1077,14 +1078,8 @@ fn refresh_ws_authorization(
             Ok(true) | Err(_) => return None,
         }
     }
-    let role: String = connection
-        .query_row(
-            "SELECT role FROM users WHERE id = ?1",
-            [entry.user_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    entry.diagnostics_allowed &= role == "admin";
+    let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
+    entry.diagnostics_allowed &= subj.role == "admin";
     Some(entry.diagnostics_allowed)
 }
 
@@ -1259,27 +1254,174 @@ fn log_entry_matches_filter(entry: &serde_json::Value, filter: &WsLogFilter) -> 
     true
 }
 
-fn websocket_origin_matches_host(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-    else {
-        // Non-browser clients do not send Origin.
-        return true;
+fn is_valid_ws_host_authority(raw_host: &str) -> bool {
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 253
+        || trimmed.bytes().any(|b| b <= 0x20 || b >= 0x7f)
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('@')
+    {
+        return false;
+    }
+    if trimmed.starts_with('[') {
+        let Some((ipv6, rest)) = trimmed.strip_prefix('[').and_then(|s| s.split_once(']')) else {
+            return false;
+        };
+        if ipv6.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        return rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok());
+    }
+    let (host, port) = trimmed
+        .split_once(':')
+        .map_or((trimmed, None), |(h, p)| (h, Some(p)));
+    if let Some(p) = port {
+        if p.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+fn websocket_origin_matches_host(
+    headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    cookie_authenticated: bool,
+) -> bool {
+    let Some(origin_hv) = headers.get(axum::http::header::ORIGIN) else {
+        // Non-browser Bearer/ticket clients do not send Origin; browser cookie upgrades must.
+        return !cookie_authenticated;
     };
-    let origin_host = origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(origin)
-        .trim_end_matches('/');
-    let request_host = headers
-        .get("X-Forwarded-Host")
-        .or_else(|| headers.get(axum::http::header::HOST))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim())
-        .unwrap_or("");
-    !request_host.is_empty() && origin_host.eq_ignore_ascii_case(request_host)
+    let Ok(origin_raw) = origin_hv.to_str() else {
+        return false;
+    };
+    let Ok(origin_url) = url::Url::parse(origin_raw.trim()) else {
+        return false;
+    };
+    if !origin_url.username().is_empty()
+        || origin_url.password().is_some()
+        || origin_url.query().is_some()
+        || origin_url.fragment().is_some()
+        || origin_url.path() != "/"
+    {
+        return false;
+    }
+    let origin_scheme = match origin_url.scheme() {
+        "http" | "ws" => "http",
+        "https" | "wss" => "https",
+        _ => return false,
+    };
+    let Some(origin_host) = origin_url
+        .host_str()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+    else {
+        return false;
+    };
+    let Some(origin_port) = origin_url.port_or_known_default() else {
+        return false;
+    };
+
+    let trust_forwarded = peer_ip.is_none_or(is_trusted_proxy_peer);
+    let expected_scheme = if trust_forwarded {
+        if let Some(proto) = headers
+            .get("X-Forwarded-Proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            if proto.eq_ignore_ascii_case("https") {
+                "https"
+            } else if proto.eq_ignore_ascii_case("http") {
+                "http"
+            } else {
+                return false;
+            }
+        } else if headers
+            .get("X-Forwarded-Port")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .is_some_and(|p| p.trim() == "443")
+        {
+            "https"
+        } else {
+            "http"
+        }
+    } else {
+        "http"
+    };
+
+    let forwarded_host = if trust_forwarded {
+        headers
+            .get("X-Forwarded-Host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    } else {
+        None
+    };
+    let Some(raw_request_host) = forwarded_host.or_else(|| {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }) else {
+        return false;
+    };
+    if !is_valid_ws_host_authority(raw_request_host) {
+        return false;
+    }
+    let Ok(mut expected_url) = url::Url::parse(&format!("{expected_scheme}://{raw_request_host}"))
+    else {
+        return false;
+    };
+    if trust_forwarded && expected_url.port().is_none() {
+        if let Some(xf_port) = headers
+            .get("X-Forwarded-Port")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .filter(|p| *p > 0)
+        {
+            if expected_url.set_port(Some(xf_port)).is_err() {
+                return false;
+            }
+        }
+    }
+    let Some(expected_host) = expected_url
+        .host_str()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+    else {
+        return false;
+    };
+    let Some(expected_port) = expected_url.port_or_known_default() else {
+        return false;
+    };
+
+    origin_scheme == expected_scheme
+        && origin_host == expected_host
+        && origin_port == expected_port
 }
 
 pub async fn handle_log_websocket(
@@ -1291,7 +1433,9 @@ pub async fn handle_log_websocket(
     if !package_diagnostics_allowed(&user) {
         return crate::auth::api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
-    if !websocket_origin_matches_host(&headers) {
+    let cookie_authenticated = headers.contains_key(axum::http::header::COOKIE)
+        && !headers.contains_key(axum::http::header::AUTHORIZATION);
+    if !websocket_origin_matches_host(&headers, peer_ip, cookie_authenticated) {
         return crate::auth::api_error(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
@@ -1692,5 +1836,68 @@ mod client_ip_tests {
         let mut h4 = HeaderMap::new();
         h4.insert("X-Real-IP", HeaderValue::from_static("[2001:db8::5]"));
         assert_eq!(extract_client_ip(&h4), "2001:db8::5");
+    }
+
+    #[test]
+    fn websocket_origin_enforces_scheme_host_port_and_cookie_origin_presence() {
+        use super::websocket_origin_matches_host;
+        use axum::http::header;
+
+        // Cookie-authenticated browser upgrade without Origin must be rejected; non-cookie allowed.
+        let mut h_no_origin = HeaderMap::new();
+        h_no_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(websocket_origin_matches_host(&h_no_origin, None, false));
+        assert!(!websocket_origin_matches_host(&h_no_origin, None, true));
+
+        // Exact http match and port/scheme mismatch rejection.
+        let mut h_http = h_no_origin.clone();
+        h_http.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert!(websocket_origin_matches_host(&h_http, None, true));
+        h_http.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://127.0.0.1:8080"),
+        );
+        assert!(!websocket_origin_matches_host(&h_http, None, true));
+        h_http.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:9999"),
+        );
+        assert!(!websocket_origin_matches_host(&h_http, None, true));
+        h_http.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(!websocket_origin_matches_host(&h_http, None, true));
+
+        // Trusted loopback reverse proxy with X-Forwarded-Proto=https vs untrusted public peer spoofing X-Forwarded-Host.
+        let mut h_tls = HeaderMap::new();
+        h_tls.insert(header::HOST, HeaderValue::from_static("mcflow.stream"));
+        h_tls.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://mcflow.stream"),
+        );
+        h_tls.insert("X-Forwarded-Proto", HeaderValue::from_static("https"));
+        h_tls.insert("X-Forwarded-Port", HeaderValue::from_static("443"));
+        assert!(websocket_origin_matches_host(
+            &h_tls,
+            Some("127.0.0.1".parse().unwrap()),
+            true
+        ));
+
+        let mut h_spoof = HeaderMap::new();
+        h_spoof.insert(header::HOST, HeaderValue::from_static("mcflow.stream"));
+        h_spoof.insert(
+            "X-Forwarded-Host",
+            HeaderValue::from_static("evil.attacker.test"),
+        );
+        h_spoof.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.attacker.test"),
+        );
+        assert!(!websocket_origin_matches_host(
+            &h_spoof,
+            Some("203.0.113.99".parse().unwrap()),
+            true
+        ));
     }
 }

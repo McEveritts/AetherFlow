@@ -187,9 +187,8 @@ os.execvp(inner[0], inner)
         )
         return result.stdout.strip()
 
-    def write_artifact(self):
+    def write_artifact(self, version=b"v4.0.0\n"):
         binary = b"#!/bin/bash\necho aetherflow-api\n"
-        version = b"v4.0.0\n"
         unit = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nFrom=artifact\n"
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
         buffer = io.BytesIO()
@@ -616,6 +615,7 @@ os.execvp(inner[0], inner)
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
         self.env_file.write_text(f"DB_PATH={live_db}\n")
+        self.write_artifact(version=b"v4.0.0-nightly.123.1\n")
         releases_json = (
             '[{"tag_name":"v4.0.0-experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
             '{"tag_name":"v4.0.0-nightly.124.1","draft":true,"prerelease":true,"target_commitish":"ignored"},'
@@ -761,8 +761,22 @@ os.execvp(inner[0], inner)
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
         self.env_file.write_text(f"DB_PATH={live_db}\n")
+        legacy_only_json = (
+            '[{"tag_name":"experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v3.2.6","draft":false,"prerelease":false,"target_commitish":"master"}]'
+        )
+        rejected = self.run_manager(
+            "deploy", "--channel", "experimental", "--dry-run",
+            TEST_RELEASES_JSON=legacy_only_json,
+        )
+        self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+        self.assertNotIn("releases/download/nightly/", self.commands.read_text())
+
+        self.commands.write_text("")
+        self.write_artifact(version=b"v4.0.0-nightly.123.1\n")
         releases_json = (
             '[{"tag_name":"experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v4.0.0-nightly.123.1","draft":false,"prerelease":true,"target_commitish":"nightly"},'
             '{"tag_name":"v3.2.6","draft":false,"prerelease":false,"target_commitish":"master"}]'
         )
         result = self.run_manager(
@@ -770,8 +784,8 @@ os.execvp(inner[0], inner)
             TEST_RELEASES_JSON=releases_json,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Resolved release tag nightly for channel nightly.", result.stdout)
-        self.assertIn("releases/download/nightly/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
+        self.assertIn("Resolved release tag v4.0.0-nightly.123.1 for channel nightly.", result.stdout)
+        self.assertIn("releases/download/v4.0.0-nightly.123.1/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
 
     def test_archive_deploy_symlink_attack_is_rejected_before_extraction(self):
         outside_dir = self.root / "outside-victim"
@@ -1010,15 +1024,34 @@ os.execvp(inner[0], inner)
         self.write_db(self.data / "aetherflow.sqlite", "live-marker")
         missing_bundle = self.root / "empty-attestations.json"
         missing_bundle.write_text('{"attestations": []}\n')
-        result = self.run_manager(
+        for tag, channel, prerelease in (
+            ("v4.0.0", "stable", "false"),
+            ("v5.0.0", "stable", "false"),
+            ("v5.0.0-nightly.1.1", "nightly", "true"),
+        ):
+            with self.subTest(tag=tag):
+                self.write_artifact(version=(tag + "\n").encode())
+                releases_json = f'[{{"tag_name":"{tag}","draft":false,"prerelease":{prerelease},"target_commitish":"main"}}]'
+                result = self.run_manager(
+                    "deploy",
+                    "--channel",
+                    channel,
+                    AETHERFLOW_SKIP_PROVENANCE_VERIFY="0",
+                    AETHERFLOW_PROVENANCE_BUNDLE_FILE=str(missing_bundle),
+                    TEST_RELEASES_JSON=releases_json,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Sigstore build provenance verification FAILED", result.stdout + result.stderr)
+                self.assertFalse(self.current.exists())
+        # Pre-v4 downgrade tags must fail closed before download
+        v3_res = self.run_manager(
             "deploy",
             "--channel",
             "stable",
             AETHERFLOW_SKIP_PROVENANCE_VERIFY="0",
-            AETHERFLOW_PROVENANCE_BUNDLE_FILE=str(missing_bundle),
+            TEST_RELEASES_JSON='[{"tag_name":"v3.99.0","draft":false,"prerelease":false,"target_commitish":"main"}]',
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Sigstore build provenance verification FAILED", result.stdout + result.stderr)
+        self.assertNotEqual(v3_res.returncode, 0)
         self.assertFalse(self.current.exists())
         # Staging directory must be cleaned up on verification failure
         leftover_staging = list(self.releases.glob(".staging.*"))
@@ -1028,16 +1061,24 @@ os.execvp(inner[0], inner)
         stale_stage = self.releases / ".staging.1700000000.abcdef"
         stale_stage.mkdir(parents=True)
         (stale_stage / "partial").write_text("leftover\n")
+        stale_native = self.releases / ".staging-1700000000-abcdef"
+        stale_native.mkdir(parents=True)
+        (stale_native / "partial").write_text("leftover\n")
         old_ts = 1700000000
         os.utime(stale_stage, (old_ts, old_ts))
+        os.utime(stale_native, (old_ts, old_ts))
 
         fresh_stage = self.releases / ".staging.fresh.123456"
         fresh_stage.mkdir(parents=True)
+        fresh_native = self.releases / ".staging-fresh-123456"
+        fresh_native.mkdir(parents=True)
 
         result = self.run_manager("cleanup")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(stale_stage.exists())
+        self.assertFalse(stale_native.exists())
         self.assertTrue(fresh_stage.exists())
+        self.assertTrue(fresh_native.exists())
 
 
 if __name__ == "__main__":

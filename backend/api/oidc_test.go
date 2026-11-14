@@ -369,6 +369,9 @@ func TestIntrospectAccessToken_ValidRSAAndRevokedUserCheck(t *testing.T) {
 	if _, err := db.DB.Exec("INSERT INTO users (id, username, role, password_hash) VALUES (?, ?, ?, ?)", 42, "oidc_user", "user", "mock_hash"); err != nil {
 		t.Fatalf("failed to seed user 42: %v", err)
 	}
+	if _, err := db.DB.Exec("INSERT INTO oidc_clients (id, name, client_secret_hash, redirect_uris) VALUES (?, ?, ?, ?)", "my-client", "My Client", "secret_hash", `["http://localhost:8080/cb"]`); err != nil {
+		t.Fatalf("failed to seed oidc client: %v", err)
+	}
 	c := makeOIDCTestContext("localhost:8080", "127.0.0.1:40000")
 
 	// Create a valid RSA-signed token using the loaded OIDC key
@@ -376,6 +379,7 @@ func TestIntrospectAccessToken_ValidRSAAndRevokedUserCheck(t *testing.T) {
 		"iss":   "http://localhost:8080",
 		"sub":   "42",
 		"aud":   "my-client",
+		"jti":   "oidc-test-jti-42",
 		"scope": "openid profile",
 		"exp":   float64(time.Now().Add(time.Hour).Unix()),
 		"iat":   float64(time.Now().Unix()),

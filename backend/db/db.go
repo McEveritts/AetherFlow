@@ -720,6 +720,23 @@ func InitDB() {
 	}
 	migrate(22, "Persist MFA replay guards and OIDC nonces", m22Stmts...)
 
+	// ─── Auth/OIDC family & revocation floor schema parity (no schema_versions bump) ───
+	ensureColumnIfMissing("users", "sessions_revoked_after",
+		"ALTER TABLE users ADD COLUMN sessions_revoked_after INTEGER NOT NULL DEFAULT 0;")
+	ensureColumnIfMissing("active_sessions", "family_id",
+		"ALTER TABLE active_sessions ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
+	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_active_sessions_family ON active_sessions(family_id) WHERE family_id != '';")
+	ensureColumnIfMissing("oidc_refresh_tokens", "family_id",
+		"ALTER TABLE oidc_refresh_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
+	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_oidc_refresh_tokens_family ON oidc_refresh_tokens(family_id) WHERE family_id != '';")
+
+	// Enforce RFC 8628 unique user_code index after cleaning any historical duplicates
+	_, _ = DB.Exec(`DELETE FROM oidc_device_codes WHERE rowid NOT IN (SELECT MAX(rowid) FROM oidc_device_codes GROUP BY user_code);`)
+	_, _ = DB.Exec(`DROP INDEX IF EXISTS idx_oidc_device_codes_user_code;`)
+	_, _ = DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);`)
+
+	ClearLocalBlacklist()
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 	DB.Exec(`UPDATE settings SET ai_model = 'gemini-4-argon' WHERE id = 1 AND ai_model IN ('gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')`)
@@ -774,10 +791,24 @@ func DBHealthCheck() (map[string]interface{}, error) {
 	}, nil
 }
 
+// ensureColumnIfMissing adds a column to an existing SQLite table without bumping schema_versions.
+func ensureColumnIfMissing(table, column, alterStmt string) {
+	var count int
+	if err := DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('"+table+"') WHERE name = ?", column).Scan(&count); err != nil { // #nosec G202 -- hardcoded internal table name
+		slog.Warn("schema column check failed", "table", table, "column", column, "error", err)
+		return
+	}
+	if count == 0 {
+		if _, err := DB.Exec(alterStmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			slog.Warn("schema column addition failed", "table", table, "column", column, "error", err)
+		}
+	}
+}
+
 // PruneExpiredData removes stale records across all tables with TTL semantics.
 // This should be called periodically (e.g., every 15 minutes from a background goroutine).
 func PruneExpiredData() {
-	now := time.Now().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	pruneTargets := []struct {
 		table string
@@ -785,9 +816,11 @@ func PruneExpiredData() {
 	}{
 		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ? OR used = 1"},
 		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
-		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ? OR revoked = 1"},
+		// Retain revoked = 1 refresh-token tombstones until expires_at for RFC 9700 reuse detection.
+		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?"},
 		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')"},
 		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
+		{"mfa_challenges", "DELETE FROM mfa_challenges WHERE expires_at <= strftime('%s', 'now')"},
 		// Keep 90 days of metrics history
 		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},
 		// Keep 90 days of login history

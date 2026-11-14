@@ -34,6 +34,116 @@ const CIPHERTEXT_PREFIX: &str = "enc:v1:";
 
 static AES_MASTER_KEY: Lazy<RwLock<Option<[u8; 32]>>> = Lazy::new(|| RwLock::new(None));
 
+pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
+    if let Ok(decoded) = BASE64_STD.decode(raw) {
+        if decoded.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&decoded);
+            return Ok(arr);
+        }
+    }
+    if raw.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(raw.as_bytes());
+        return Ok(arr);
+    }
+    anyhow::bail!(
+        "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} bytes.",
+        raw.len()
+    )
+}
+
+pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
+    if let Ok(guard) = AES_MASTER_KEY.read() {
+        if let Some(key) = *guard {
+            return Some(key);
+        }
+    }
+    if let Ok(raw) = env::var("AES_MASTER_KEY") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Ok(key) = parse_aes_key_bytes(trimmed) {
+                return Some(key);
+            }
+        }
+    }
+    let env_file = env::var("AETHERFLOW_ENV_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/etc/aetherflow/aetherflow.env".to_string());
+    if let Ok(contents) = fs::read_to_string(env_file) {
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+            if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
+                let clean = val.trim().trim_matches('"').trim_matches('\'');
+                if !clean.is_empty() {
+                    if let Ok(key) = parse_aes_key_bytes(clean) {
+                        return Some(key);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| anyhow::anyhow!("gcm encryption failed: {}", e))?;
+    let mut combined = Vec::with_capacity(12 + ciphertext.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&ciphertext);
+    Ok(format!(
+        "{}{}",
+        CIPHERTEXT_PREFIX,
+        BASE64_STD.encode(combined)
+    ))
+}
+
+fn decrypt_with_key(payload: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+    let data = BASE64_STD
+        .decode(payload)
+        .map_err(|e| anyhow::anyhow!("versioned ciphertext base64 decode failed: {}", e))?;
+    if data.len() < 12 {
+        anyhow::bail!("ciphertext too short");
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow::anyhow!("gcm decryption failed: {}", e))?;
+    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e))
+}
+
+pub fn encrypt_secret_if_configured(plaintext: &str) -> anyhow::Result<String> {
+    match resolve_runtime_aes_key() {
+        Some(key) => encrypt_with_key(plaintext, &key),
+        None => Ok(plaintext.to_string()),
+    }
+}
+
+pub fn decrypt_secret_if_needed(value: &str) -> anyhow::Result<String> {
+    if let Some(payload) = value.strip_prefix(CIPHERTEXT_PREFIX) {
+        let key = resolve_runtime_aes_key()
+            .ok_or_else(|| anyhow::anyhow!("AES_MASTER_KEY is required to decrypt enc:v1: secret"))?;
+        return decrypt_with_key(payload, &key);
+    }
+    Ok(value.to_string())
+}
+
 /// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (32 raw bytes or Base64).
 pub fn init_aes_key() -> anyhow::Result<()> {
     let raw = env::var("AES_MASTER_KEY").unwrap_or_default();
@@ -54,31 +164,7 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let key_bytes: [u8; 32] = if let Ok(decoded) = BASE64_STD.decode(&raw) {
-        if decoded.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&decoded);
-            arr
-        } else if raw.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(raw.as_bytes());
-            arr
-        } else {
-            anyhow::bail!(
-                "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} bytes.",
-                raw.len()
-            );
-        }
-    } else if raw.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(raw.as_bytes());
-        arr
-    } else {
-        anyhow::bail!(
-            "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} raw bytes.",
-            raw.len()
-        );
-    };
+    let key_bytes = parse_aes_key_bytes(&raw)?;
 
     if let Ok(mut guard) = AES_MASTER_KEY.write() {
         *guard = Some(key_bytes);
@@ -98,26 +184,7 @@ pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
     let Some(key) = key_opt else {
         return Ok(plaintext.to_string());
     };
-
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| anyhow::anyhow!("gcm encryption failed: {}", e))?;
-
-    let mut combined = Vec::with_capacity(12 + ciphertext.len());
-    combined.extend_from_slice(&nonce_bytes);
-    combined.extend_from_slice(&ciphertext);
-
-    Ok(format!(
-        "{}{}",
-        CIPHERTEXT_PREFIX,
-        BASE64_STD.encode(combined)
-    ))
+    encrypt_with_key(plaintext, &key)
 }
 
 /// Decrypts a versioned `"enc:v1:<base64>"` string produced by Go or Rust.
@@ -128,20 +195,7 @@ pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     };
 
     if let Some(payload) = encoded.strip_prefix(CIPHERTEXT_PREFIX) {
-        let data = BASE64_STD
-            .decode(payload)
-            .map_err(|e| anyhow::anyhow!("versioned ciphertext base64 decode failed: {}", e))?;
-        if data.len() < 12 {
-            anyhow::bail!("ciphertext too short");
-        }
-        let (nonce_bytes, ciphertext) = data.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| anyhow::anyhow!("gcm decryption failed: {}", e))?;
-        return String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e));
+        return decrypt_with_key(payload, &key);
     }
 
     anyhow::bail!("ciphertext tampered or missing required version prefix")
@@ -611,7 +665,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_client ON oidc_auth_codes(client_id);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_expires ON oidc_auth_codes(expires_at);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_client ON oidc_refresh_tokens(client_id);",
-            "CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_expires ON oidc_device_codes(expires_at);",
             "CREATE INDEX IF NOT EXISTS idx_cluster_nodes_status ON cluster_nodes(status);",
             "CREATE INDEX IF NOT EXISTS idx_billing_provider_event ON billing_webhook_events(provider, event_id);",
@@ -938,6 +992,8 @@ pub fn init_db() -> anyhow::Result<()> {
         "Local AI settings migration v23 failed"
     );
 
+    ensure_security_schema_invariants(&conn)?;
+
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(
         "UPDATE settings SET ai_model = 'gemini-4-argon' WHERE id = 1 AND ai_model IN ('gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')",
@@ -985,9 +1041,83 @@ pub fn init_db() -> anyhow::Result<()> {
     *DB_PATH_RESOLVED.write().unwrap() = db_path.clone();
     *DB_POOL.write().unwrap() = Some(pool);
     *DB_READ_POOL.write().unwrap() = read_pool;
+    if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
+        map.clear();
+    }
     invalidate_ingress_cache();
 
     tracing::info!(path = %db_path, "SQLite WAL database connected");
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_ddl: &str,
+) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&pragma)?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name.eq_ignore_ascii_case(column));
+    if !exists {
+        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_ddl);
+        conn.execute(&alter, [])?;
+    }
+    Ok(())
+}
+
+fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    ensure_column(
+        conn,
+        "users",
+        "sessions_revoked_after",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "active_sessions",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "oidc_refresh_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    let existing_index_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_oidc_device_codes_user_code'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let needs_unique_index = match existing_index_sql {
+        Some(sql) => !sql.to_ascii_uppercase().contains("UNIQUE"),
+        None => true,
+    };
+    if needs_unique_index {
+        conn.execute_batch(
+            "DELETE FROM oidc_device_codes
+             WHERE rowid NOT IN (
+                 SELECT MAX(rowid) FROM oidc_device_codes GROUP BY user_code
+             );
+             DROP INDEX IF EXISTS idx_oidc_device_codes_user_code;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_active_sessions_family ON active_sessions(family_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_family ON oidc_refresh_tokens(family_id)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1036,7 +1166,7 @@ pub fn prune_expired_data() {
     let param_queries = [
         "DELETE FROM oidc_auth_codes WHERE expires_at < ?1 OR used = 1",
         "DELETE FROM oidc_device_codes WHERE expires_at < ?1",
-        "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1 OR revoked = 1",
+        "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1",
         "DELETE FROM active_sessions WHERE expires_at < ?1",
     ];
     for query_sql in param_queries {
@@ -1127,7 +1257,7 @@ pub fn get_base_domain() -> String {
             }
         }
     }
-    let domain = get_conn()
+    let domain = get_read_conn()
         .ok()
         .and_then(|c| {
             c.query_row(
@@ -1177,7 +1307,7 @@ pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
         }
     }
 
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     let mut stmt = conn.prepare(
         "SELECT app_name, public_domain, external_access_enabled, listen_port, tls_enabled, \
          COALESCE(CAST(created_at AS TEXT), ''), COALESCE(CAST(updated_at AS TEXT), '') \
@@ -1572,14 +1702,24 @@ fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
     .is_ok()
 }
 
-pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
+pub fn cache_revoked_token(jti: &str, ttl: Duration) {
+    if jti.is_empty() {
+        return;
+    }
+    let ttl = ttl.max(Duration::from_secs(8160));
+    let exp = Instant::now() + ttl;
+    if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
+        map.retain(|_, v| *v > Instant::now());
+        map.insert(jti.to_string(), exp);
+    }
+}
+
+pub fn revoke_token_in_tx(conn: &Connection, jti: &str, ttl: Duration) -> anyhow::Result<()> {
     if jti.is_empty() {
         return Ok(());
     }
-    // Refresh accepts a token for 7200s after exp (900s), plus 60s clock skew tolerance = 8160s.
     let ttl = ttl.max(Duration::from_secs(8160));
-    let conn = get_conn()?;
-    if !ensure_revoked_tokens_table(&conn) {
+    if !ensure_revoked_tokens_table(conn) {
         anyhow::bail!("failed to ensure revoked_tokens table");
     }
     let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
@@ -1588,15 +1728,46 @@ pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
         params![jti, exp_rfc3339],
     )?;
     let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
+    Ok(())
+}
+
+/// Atomically marks `jti` as revoked inside an active `BEGIN IMMEDIATE` transaction
+/// ONLY if it is not currently revoked. Returns `Ok(true)` exclusively for the single
+/// winning caller that consumed `jti`.
+pub fn try_consume_session_jti_in_tx(
+    conn: &Connection,
+    jti: &str,
+    ttl: Duration,
+) -> anyhow::Result<bool> {
+    if jti.is_empty() {
+        return Ok(false);
+    }
+    let ttl = ttl.max(Duration::from_secs(8160));
+    if token_revocation_status_with_conn(conn, jti)? {
+        return Ok(false);
+    }
+    let _ = conn.execute("DELETE FROM revoked_tokens WHERE jti = ?1", params![jti]);
+    let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
+        params![jti, exp_rfc3339],
+    )?;
+    Ok(inserted == 1)
+}
+
+pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
+    if jti.is_empty() {
+        return Ok(());
+    }
+    // Refresh accepts a token for 7200s after exp (900s), plus 60s clock skew tolerance = 8160s.
+    let ttl = ttl.max(Duration::from_secs(8160));
+    let conn = get_conn()?;
+    revoke_token_in_tx(&conn, jti, ttl)?;
     let _ = conn.execute(
         "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')",
         [],
     );
-    let exp = Instant::now() + ttl;
-    if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
-        map.retain(|_, v| *v > Instant::now());
-        map.insert(jti.to_string(), exp);
-    }
+    cache_revoked_token(jti, ttl);
     Ok(())
 }
 

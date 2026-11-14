@@ -46,20 +46,7 @@ _af_resolve_release_channel() {
 
 _af_is_v4_release_tag() {
     local tag="${1:-}"
-    case "${tag,,}" in
-        experimental|experimental-*|nightly|nightly-*|v4.*|4.*)
-            return 0
-            ;;
-        v[0-9]*)
-            local major="${tag#v}"
-            major="${major%%.*}"
-            [[ "${major}" =~ ^[0-9]+$ && "${major}" -ge 4 ]]
-            return $?
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
 _install_go() {
@@ -219,7 +206,11 @@ _stage_prebuilt_release_archive() {
     if [[ -z "${expected_sha256}" && -n "${sha256_manifest}" && -f "${sha256_manifest}" ]]; then
         expected_sha256="$(awk -v f="${artifact_name}" '$2 == f || $2 == "*"f {print tolower($1); exit}' "${sha256_manifest}")"
         if [[ -z "${expected_sha256}" ]]; then
-            expected_sha256="$(awk 'NF >= 1 {print tolower($1); exit}' "${sha256_manifest}")"
+            expected_sha256="$(awk '
+                /^[[:space:]]*(#|$)/ { next }
+                { count++; if (NF == 1 && count == 1) digest = tolower($1); else bad = 1 }
+                END { if (count == 1 && !bad && length(digest) == 64) print digest }
+            ' "${sha256_manifest}")"
         fi
     fi
 
@@ -233,6 +224,25 @@ _stage_prebuilt_release_archive() {
     if [[ "${actual_sha256}" != "${expected_sha256,,}" ]]; then
         echo "[ERROR] SHA-256 mismatch for ${archive_path} (expected=${expected_sha256,,}, actual=${actual_sha256}). Refusing unverified binary." >&2
         return 1
+    fi
+
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        local prov_channel="${5:-$(_af_resolve_release_channel)}"
+        local github_repo="${GITHUB_REPO:-McEveritts/AetherFlow}"
+        local -a prov_args=(
+            --repo "${github_repo}"
+            --digest "${actual_sha256}"
+            --artifact-name "${artifact_name}"
+            --tag "${release_tag}"
+            --channel "${prov_channel}"
+        )
+        if [[ -n "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" ]]; then
+            prov_args+=(--bundle-file "${AETHERFLOW_PROVENANCE_BUNDLE_FILE}")
+        fi
+        if [[ ! -f "${af_root}/deploy/verify-provenance.py" ]] || ! python3 -I -B "${af_root}/deploy/verify-provenance.py" "${prov_args[@]}"; then
+            echo "[ERROR] Sigstore provenance verification failed for ${release_tag} (${artifact_name}). Refusing unverified binary." >&2
+            return 1
+        fi
     fi
 
     if ! _validate_prebuilt_tarball "${archive_path}"; then
@@ -274,7 +284,15 @@ _stage_prebuilt_release_archive() {
         chmod 0755 "${release_dir}/af"
     fi
 
-    if [[ ! -s "${release_dir}/.version" ]]; then
+    if [[ -s "${release_dir}/.version" ]]; then
+        local archive_version
+        archive_version="$(tr -d '[:space:]' < "${release_dir}/.version")"
+        if [[ "${archive_version}" != "${release_tag}" ]]; then
+            echo "[ERROR] Extracted release archive .version '${archive_version}' does not match expected tag '${release_tag}'." >&2
+            rm -rf "${release_dir}"
+            return 1
+        fi
+    else
         printf '%s\n' "${release_tag}" > "${release_dir}/.version"
     fi
 
@@ -334,22 +352,25 @@ _pull_prebuilt_v4_release() {
     local checksum_name="${CHECKSUM_NAME:-SHA256SUMS}"
 
     if [[ -n "${AETHERFLOW_PREBUILT_TARBALL:-}" ]]; then
-        local staged_tag="${AETHERFLOW_RELEASE_TAG:-v4.0.0-${channel}}"
+        local default_staged_tag="v4.0.0"
+        [[ "${channel}" == "nightly" ]] && default_staged_tag="v4.0.0-nightly.0.0"
+        local staged_tag="${AETHERFLOW_RELEASE_TAG:-${default_staged_tag}}"
         if ! _af_is_v4_release_tag "${staged_tag}"; then
-            echo "[ERROR] Refusing pre-v4 release tag '${staged_tag}' (implicit v3 downgrade is forbidden)." >&2
+            echo "[ERROR] Refusing pre-v4 or malformed release tag '${staged_tag}' (implicit v3 downgrade is forbidden)." >&2
             return 1
         fi
         _stage_prebuilt_release_archive \
             "${AETHERFLOW_PREBUILT_TARBALL}" \
             "${AETHERFLOW_PREBUILT_SHA256_FILE:-}" \
             "${AETHERFLOW_PREBUILT_SHA256:-}" \
-            "${staged_tag}"
+            "${staged_tag}" \
+            "${channel}"
         return $?
     fi
 
     local target_tag="${AETHERFLOW_RELEASE_TAG:-}"
     if [[ -n "${target_tag}" ]] && ! _af_is_v4_release_tag "${target_tag}"; then
-        echo "[ERROR] Refusing pre-v4 release tag '${target_tag}' (implicit v3 downgrade is forbidden)." >&2
+        echo "[ERROR] Refusing pre-v4 or malformed release tag '${target_tag}' (implicit v3 downgrade is forbidden)." >&2
         return 1
     fi
 
@@ -360,39 +381,42 @@ _pull_prebuilt_v4_release() {
 
         if [[ "${channel}" == "nightly" ]]; then
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
-                target_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+                target_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft"):
+        if not isinstance(r, dict) or r.get("draft"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
-            if tag.startswith("v4.") or "v4" in tag.lower():
-                print(tag)
-                break
+        if (
+            tag_re.fullmatch(tag)
+            and target != "experimental"
+            and "experimental" not in tag.lower()
+            and (target == "nightly" or bool(r.get("prerelease")) or "nightly" in tag.lower())
+        ):
+            print(tag)
+            break
 except Exception:
     pass
 ' 2>/dev/null || true)"
             fi
-            [[ -n "${target_tag}" ]] || target_tag="nightly"
         else
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
-                target_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+                target_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$")
 try:
     releases = json.load(sys.stdin)
     for r in releases:
-        if r.get("draft") or r.get("prerelease"):
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag.startswith("v") and "-" not in tag and target not in ("nightly", "experimental"):
-            major = int(tag.lstrip("v").split(".", 1)[0])
-            if major >= 4:
-                print(tag)
-                sys.exit(0)
+        if tag_re.fullmatch(tag) and target not in ("nightly", "experimental"):
+            print(tag)
+            sys.exit(0)
 except Exception:
     pass
 ' 2>/dev/null || true)"
@@ -401,7 +425,7 @@ except Exception:
                 local latest_url
                 latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${github_repo}/releases/latest" 2>/dev/null || true)"
                 local candidate_tag="${latest_url##*/}"
-                if [[ "${latest_url}" == "https://github.com/${github_repo}/releases/tag/"* ]] && _af_is_v4_release_tag "${candidate_tag}"; then
+                if [[ "${latest_url}" == "https://github.com/${github_repo}/releases/tag/"* && "${candidate_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
                     target_tag="${candidate_tag}"
                 fi
             fi
@@ -431,17 +455,7 @@ except Exception:
         return 1
     fi
 
-    if [[ -z "${AETHERFLOW_RELEASE_BASE_URL:-}" && "${AF_OFFLINE:-0}" != "1" && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
-        local dl_sha=""
-        dl_sha="$(sha256sum "${dl_dir}/${artifact_name}" | awk '{print tolower($1)}')"
-        if [[ ! -f "${af_root}/deploy/verify-provenance.py" ]] || ! python3 -B "${af_root}/deploy/verify-provenance.py" --repo "${github_repo}" --digest "${dl_sha}" --artifact-name "${artifact_name}"; then
-            echo "[ERROR] Sigstore provenance verification failed for ${target_tag} (${artifact_name}). Refusing unverified binary." >&2
-            rm -rf "${dl_dir}"
-            return 1
-        fi
-    fi
-
-    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}"; then
+    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}" "${channel}"; then
         rm -rf "${dl_dir}"
         return 1
     fi

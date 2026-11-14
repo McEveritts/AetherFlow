@@ -218,6 +218,32 @@ bash -c '
 [[ ! -L "${FRESH_ROOT}/opt/AetherFlow/current" ]] || fail "Installer created /opt/AetherFlow/current after SHA-256 failure"
 pass "Fail-closed check passed: bad SHA-256 rejected with zero implicit source-build fallback"
 
+# 2a-prov. Verify AETHERFLOW_PREBUILT_TARBALL fails closed when unattested without AETHERFLOW_SKIP_PROVENANCE_VERIFY=1
+echo '{"attestations":[]}' > "${WORK_DIR}/empty_bundle.json"
+UNATTESTED_PREBUILT_RC=0
+PATH="${FRESH_ROOT}/mock-bin:${PATH}" \
+AF_INSTALL_ROOT="${FRESH_ROOT}/opt/AetherFlow" \
+AF_ENV_DIR="${FRESH_ROOT}/etc/aetherflow" \
+AF_DATA_DIR="${FRESH_ROOT}/var/lib/aetherflow" \
+AF_SYSTEMD_DIR="${FRESH_ROOT}/etc/systemd/system" \
+AF_SKIP_SYSTEMCTL="1" \
+AF_OFFLINE="1" \
+AETHERFLOW_PREBUILT_TARBALL="${WORK_DIR}/artifacts/v4.0.0/aetherflow-linux-amd64.tar.gz" \
+AETHERFLOW_PREBUILT_SHA256_FILE="${WORK_DIR}/artifacts/v4.0.0/SHA256SUMS" \
+AETHERFLOW_PROVENANCE_BUNDLE_FILE="${WORK_DIR}/empty_bundle.json" \
+AETHERFLOW_RELEASE_TAG="v4.0.0" \
+bash -c '
+    source "$1/opt/AetherFlow/setup/modules/00-core.sh"
+    source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
+    _install_go
+    _install_node
+    _build_modern_stack
+' _ "${FRESH_ROOT}" >/dev/null 2>&1 || UNATTESTED_PREBUILT_RC=$?
+
+[[ "${UNATTESTED_PREBUILT_RC}" -ne 0 ]] || fail "Installer accepted an unattested AETHERFLOW_PREBUILT_TARBALL without AETHERFLOW_SKIP_PROVENANCE_VERIFY=1"
+[[ ! -L "${FRESH_ROOT}/opt/AetherFlow/current" ]] || fail "Installer created /opt/AetherFlow/current after provenance failure"
+pass "Fail-closed check passed: unattested AETHERFLOW_PREBUILT_TARBALL rejected without AETHERFLOW_SKIP_PROVENANCE_VERIFY=1"
+
 # 2b. Verify clean prebuilt v4 install succeeds without invoking go/node/npm
 PATH="${FRESH_ROOT}/mock-bin:${PATH}" \
 AF_INSTALL_ROOT="${FRESH_ROOT}/opt/AetherFlow" \
@@ -226,6 +252,7 @@ AF_DATA_DIR="${FRESH_ROOT}/var/lib/aetherflow" \
 AF_SYSTEMD_DIR="${FRESH_ROOT}/etc/systemd/system" \
 AF_SKIP_SYSTEMCTL="1" \
 AF_OFFLINE="1" \
+AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" \
 AETHERFLOW_PREBUILT_TARBALL="${WORK_DIR}/artifacts/v4.0.0/aetherflow-linux-amd64.tar.gz" \
 AETHERFLOW_PREBUILT_SHA256_FILE="${WORK_DIR}/artifacts/v4.0.0/SHA256SUMS" \
 AETHERFLOW_RELEASE_TAG="v4.0.0" \
@@ -323,7 +350,7 @@ case "\${cmd}" in
         fi
         exit 0
         ;;
-    stop|daemon-reload|enable|disable)
+    stop|daemon-reload|enable|disable|start)
         exit 0
         ;;
 esac

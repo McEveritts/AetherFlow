@@ -1,5 +1,5 @@
 # AetherFlow v4 Rust Workspace Security, Advisory & Supply-Chain Policy
-# Enforced in CI via `cargo deny --manifest-path backend-rs/Cargo.toml check advisories bans sources`
+# Enforced in CI via `cargo deny --manifest-path backend-rs/Cargo.toml check advisories bans licenses sources`
 # and `cargo audit --file backend-rs/Cargo.lock`.
 
 [graph]

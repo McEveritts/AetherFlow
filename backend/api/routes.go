@@ -18,6 +18,7 @@ import (
 )
 
 func RegisterRoutes(r *gin.Engine) {
+	ConfigureTrustedProxies(r)
 	// Phase 17: Panic recovery with clean error responses
 	r.Use(RecoveryMiddleware())
 	// Phase 17: Request ID for tracing
@@ -36,7 +37,7 @@ func RegisterRoutes(r *gin.Engine) {
 	registerV1Routes(v1API)
 
 	// OIDC Discovery must remain at the root.
-	r.GET("/.well-known/openid-configuration", OIDCDiscovery)
+	r.GET("/.well-known/openid-configuration", HostValidationMiddleware(), OIDCDiscovery)
 
 	// Phase 23: Health endpoints — unauthenticated, for load balancers / uptime monitors.
 	r.GET("/health", HealthCheck)

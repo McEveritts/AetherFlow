@@ -67,14 +67,87 @@ func InitRedis() {
 // plus 60 seconds of clock-skew tolerance.
 const minRevocationTTL = 136 * time.Minute
 
+// ClearLocalBlacklist resets the in-process revocation cache (used during DB re-initialization in tests).
+func ClearLocalBlacklist() {
+	localBlacklist.Range(func(key, _ interface{}) bool {
+		localBlacklist.Delete(key)
+		return true
+	})
+}
+
+func normalizeRevocationTTL(expiration time.Duration) time.Duration {
+	if expiration < minRevocationTTL {
+		return minRevocationTTL
+	}
+	return expiration
+}
+
+// CacheRevokedToken populates the in-memory and optional Redis revocation caches after a SQLite transaction commits.
+func CacheRevokedToken(jti string, expiration time.Duration) {
+	if jti == "" {
+		return
+	}
+	expiration = normalizeRevocationTTL(expiration)
+	now := time.Now().UTC()
+	localBlacklist.Store(jti, now.Add(expiration).Unix())
+	if RedisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = RedisClient.Set(ctx, "blacklist:"+jti, "true", expiration).Err()
+	}
+}
+
+// RevokeTokenInTx persists a JTI revocation inside an open SQLite transaction without mutating
+// in-memory state prior to commit. Call CacheRevokedToken after tx.Commit() succeeds.
+func RevokeTokenInTx(tx *sql.Tx, jti string, expiration time.Duration) error {
+	if jti == "" || tx == nil {
+		return nil
+	}
+	expiration = normalizeRevocationTTL(expiration)
+	expiresAt := time.Now().UTC().Add(expiration).Format(time.RFC3339)
+	if _, err := tx.Exec(
+		"INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)",
+		jti, expiresAt,
+	); err != nil {
+		return fmt.Errorf("failed to persist revoked token in tx: %w", err)
+	}
+	return nil
+}
+
+// TryConsumeTokenInTx atomically marks a JTI as consumed/revoked inside an open SQLite transaction.
+// Returns (true, nil) exclusively for the single winning caller when the JTI was not already un-expired
+// in revoked_tokens; returns (false, nil) if already consumed/revoked.
+func TryConsumeTokenInTx(tx *sql.Tx, jti string, expiration time.Duration) (bool, error) {
+	if jti == "" || tx == nil {
+		return false, fmt.Errorf("empty jti or nil transaction")
+	}
+	expiration = normalizeRevocationTTL(expiration)
+	expiresAt := time.Now().UTC().Add(expiration).Format(time.RFC3339)
+	res, err := tx.Exec(
+		`INSERT INTO revoked_tokens (jti, expires_at) VALUES (?, ?)
+		 ON CONFLICT(jti) DO UPDATE SET expires_at = excluded.expires_at
+		 WHERE revoked_tokens.expires_at IS NULL
+		    OR TRIM(revoked_tokens.expires_at) = ''
+		    OR datetime(revoked_tokens.expires_at) IS NULL
+		    OR datetime(revoked_tokens.expires_at) <= datetime('now')`,
+		jti, expiresAt,
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to consume token in tx: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	return rows == 1, nil
+}
+
 // RevokeToken adds a token's JTI to the blacklist with a given expiration.
 func RevokeToken(jti string, expiration time.Duration) error {
 	if jti == "" {
 		return nil
 	}
-	if expiration < minRevocationTTL {
-		expiration = minRevocationTTL
-	}
+	expiration = normalizeRevocationTTL(expiration)
 
 	now := time.Now().UTC()
 	expTime := now.Add(expiration).Unix()
@@ -99,28 +172,39 @@ func RevokeToken(jti string, expiration time.Duration) error {
 	return nil
 }
 
-// IsTokenRevoked checks if a JWT was blacklisted
-func IsTokenRevoked(jti string) bool {
+// IsTokenRevokedCached checks only the in-memory and optional Redis revocation caches
+// without acquiring a SQLite connection (safe to call while holding an open *sql.Tx).
+func IsTokenRevokedCached(jti string) bool {
 	if jti == "" {
 		return false
 	}
 
-	// Fast local path
 	if expRaw, ok := localBlacklist.Load(jti); ok {
 		if exp, ok := expRaw.(int64); ok && time.Now().Unix() <= exp {
-			return true // Positively blacklisted locally
-		} else {
-			localBlacklist.Delete(jti) // Cleanup expired
+			return true
 		}
+		localBlacklist.Delete(jti)
 	}
 
 	if RedisClient != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		if RedisClient.Get(ctx, "blacklist:"+jti).Err() == nil {
-			// Found in Redis
 			return true
 		}
+	}
+
+	return false
+}
+
+// IsTokenRevoked checks if a JWT was blacklisted
+func IsTokenRevoked(jti string) bool {
+	if jti == "" {
+		return false
+	}
+
+	if IsTokenRevokedCached(jti) {
+		return true
 	}
 
 	if DB != nil {

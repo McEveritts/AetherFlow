@@ -272,7 +272,7 @@ pub fn cleanup_old_releases(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(".staging.") {
+        if name.starts_with(".staging.") || name.starts_with(".staging-") {
             let is_stale = entry
                 .metadata()
                 .ok()

@@ -131,7 +131,7 @@ func CreateOIDCClient(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
-// DeleteOIDCClient removes a registered OIDC client and revokes its tokens.
+// DeleteOIDCClient removes a registered OIDC client and revokes its tokens, codes, device grants, and consents.
 func DeleteOIDCClient(c *gin.Context) {
 	clientID := c.Param("id")
 	if clientID == "" {
@@ -139,8 +139,16 @@ func DeleteOIDCClient(c *gin.Context) {
 		return
 	}
 
-	// Delete the client
-	result, err := db.DB.Exec("DELETE FROM oidc_clients WHERE id = ?", clientID)
+	tx, err := db.DB.Begin()
+	if err != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	result, err := tx.Exec("DELETE FROM oidc_clients WHERE id = ?", clientID)
 	if err != nil {
 		InternalError(c, "Failed to delete client")
 		return
@@ -152,9 +160,15 @@ func DeleteOIDCClient(c *gin.Context) {
 		return
 	}
 
-	// Revoke all associated tokens
-	db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ?", clientID)
-	db.DB.Exec("DELETE FROM oidc_auth_codes WHERE client_id = ?", clientID)
+	_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ?", clientID)
+	_, _ = tx.Exec("DELETE FROM oidc_auth_codes WHERE client_id = ?", clientID)
+	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE client_id = ?", clientID)
+	_, _ = tx.Exec("DELETE FROM oidc_consents WHERE client_id = ?", clientID)
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit client deletion")
+		return
+	}
 
 	// Audit: OIDC client deletion
 	actorID, _ := c.Get("user_id")

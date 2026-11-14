@@ -8,7 +8,6 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
@@ -77,7 +76,7 @@ fn query_settings_base_domain() -> String {
     if !db_domain.is_empty() {
         return db_domain;
     }
-    if let Ok(conn) = af_db::get_conn() {
+    if let Ok(conn) = af_db::get_read_conn() {
         if let Ok(dom) = conn.query_row(
             "SELECT COALESCE(domain, '') FROM settings WHERE id = 1",
             [],
@@ -449,13 +448,11 @@ fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<Str
         return None;
     }
     let conn = af_db::get_read_conn().ok()?;
-    conn.query_row(
-        "SELECT username FROM users WHERE id = ?1",
-        params![claims.user_id],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
-    .filter(|u| !u.is_empty())
+    let subj = crate::auth::load_active_human_subject(&conn, claims.user_id).ok()?;
+    if claims.ver < subj.sessions_revoked_after {
+        return None;
+    }
+    Some(subj.username).filter(|u| !u.is_empty())
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -952,15 +949,65 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
 // 3. Host Header Validation Middleware (`backend/api/auth.go`)
 // ──────────────────────────────────────────────────────────────────────────────
 
+fn matches_configured_env_host(clean_host: &str) -> bool {
+    for key in ["PUBLIC_URL", "OIDC_ISSUER", "ALLOWED_CORS_ORIGIN"] {
+        if let Ok(raw) = env::var(key) {
+            for item in raw.split(',') {
+                let entry = item.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                if let Ok(parsed) = url::Url::parse(entry) {
+                    if let Some(h) = parsed.host_str() {
+                        let norm = strip_host_port_and_dot(h);
+                        if !norm.is_empty() && clean_host == norm {
+                            return true;
+                        }
+                    }
+                } else {
+                    let norm = strip_host_port_and_dot(entry);
+                    if !norm.is_empty() && clean_host == norm {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    for key in ["AETHERFLOW_BASE_DOMAIN", "AETHERFLOW_DOMAIN"] {
+        if let Ok(raw) = env::var(key) {
+            let norm = af_db::normalize_base_domain(&raw);
+            if !norm.is_empty()
+                && (clean_host == norm || clean_host.ends_with(&format!(".{norm}")))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
-    let trimmed = candidate_raw.trim().to_lowercase();
     let clean = strip_host_port_and_dot(candidate_raw);
     if clean.is_empty() {
         return false;
     }
+    let trimmed = candidate_raw.trim().to_ascii_lowercase();
 
-    if allowed_set.contains(&trimmed) || allowed_set.contains(&clean) {
+    // Loopback authorities are always trusted for local health/CLI/test probes.
+    if clean == "localhost" || clean.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
         return true;
+    }
+
+    if !allowed_set.is_empty() {
+        if allowed_set.contains(&trimmed) || allowed_set.contains(&clean) {
+            return true;
+        }
+    } else {
+        // When ALLOWED_HOSTS is unset, allow direct IP-literal access (pre-domain setup)
+        // and explicitly configured URLs/domains, but reject unconfigured arbitrary hostnames.
+        if clean.parse::<IpAddr>().is_ok() || matches_configured_env_host(&clean) {
+            return true;
+        }
     }
 
     if clean == "aether.local" || clean.ends_with(".aether.local") {
@@ -988,10 +1035,6 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
         .filter(|s| !s.is_empty())
         .collect();
 
-    if allowed_set.is_empty() {
-        return next.run(req).await;
-    }
-
     if let Some(host_val) = req
         .headers()
         .get(header::HOST)
@@ -1006,19 +1049,25 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
         }
     }
 
-    if let Some(xfh_val) = req
-        .headers()
-        .get("X-Forwarded-Host")
-        .and_then(|v| v.to_str().ok())
-    {
-        for hop in xfh_val.split(',') {
-            let h = hop.trim();
-            if !h.is_empty() && !is_host_trusted(h, &allowed_set) {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_HOST",
-                    "Untrusted Host header",
-                );
+    let peer_ip_opt = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    if peer_ip_opt.is_none_or(is_trusted_proxy_ip) {
+        if let Some(xfh_val) = req
+            .headers()
+            .get("X-Forwarded-Host")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(first_hop) = xfh_val.split(',').next().map(str::trim).filter(|h| !h.is_empty())
+            {
+                if !is_host_trusted(first_hop, &allowed_set) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_HOST",
+                        "Untrusted Host header",
+                    );
+                }
             }
         }
     }

@@ -285,14 +285,14 @@ for path in (f"/tmp/.X{disp}-lock", f"/tmp/.X11-unix/X{disp}"):
     if not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
         os.unlink(path)
 PYEOF
-        if [[ ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
+        if [[ ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -L "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" && ! -L "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
             KASMVNC_DISPLAY="$EXISTING_DISPLAY"
         fi
     fi
 fi
 if [[ -z "$KASMVNC_DISPLAY" ]]; then
     for candidate_display in $(seq 20 59); do
-        if [[ ! -e "/tmp/.X${candidate_display}-lock" && ! -e "/tmp/.X11-unix/X${candidate_display}" ]]; then
+        if [[ ! -e "/tmp/.X${candidate_display}-lock" && ! -L "/tmp/.X${candidate_display}-lock" && ! -e "/tmp/.X11-unix/X${candidate_display}" && ! -L "/tmp/.X11-unix/X${candidate_display}" ]]; then
             KASMVNC_DISPLAY="$candidate_display"
             break
         fi

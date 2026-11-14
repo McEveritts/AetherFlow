@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Cryptographic Sigstore + SLSA v1 provenance verifier for AetherFlow v4 releases.
+"""Cryptographic Sigstore + SLSA v1 provenance verifier for AetherFlow v4+ releases.
 
 Zero external PyPI dependencies: uses only Python 3 stdlib + OpenSSL CLI against
-pinned Sigstore Public Good Fulcio Root/Intermediate CAs and Rekor Transparency Log
-public keys.
+pinned Sigstore Public Good Fulcio Root/Intermediate CAs, Rekor v1/v2 Transparency Log
+public keys, and Sigstore RFC 3161 Timestamp Authority (TSA) certificates.
 """
 
 from __future__ import annotations
@@ -26,6 +26,15 @@ import urllib.request
 
 SAFE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SAFE_HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+V4_RELEASE_TAG_RE = re.compile(
+    r"^v(?:[4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?$"
+)
+PROTECTED_WORKFLOW_REF_RE = re.compile(
+    r"^refs/(?:heads/[Nn]ightly|tags/v(?:[4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?)$"
+)
+
+# ASN.1 DER OID 1.3.6.1.4.1.57264.1.11 (Fulcio Runner Environment extension)
+FULCIO_RUNNER_ENV_OID_DER = b"\x06\x0a\x2b\x06\x01\x04\x01\x83\xbf\x30\x01\x0b"
 
 # Pinned Sigstore Public Good Fulcio Root & Intermediate CAs (from sigstore/root-signing trusted_root.json)
 SIGSTORE_FULCIO_ROOTS_B64 = (
@@ -37,15 +46,32 @@ SIGSTORE_FULCIO_INTERMEDIATES_B64 = (
     "MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV77LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjpKFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZIzj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJRnZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsPmygUY7Ii2zbdCdliiow=",
 )
 
-# Pinned Sigstore Public Good Rekor Transparency Log public keys (keyId -> (spki_b64, key_type))
+# Pinned Sigstore Public Good RFC 3161 Timestamp Authority (TSA) Root & Signing Certs (trusted_root.json)
+SIGSTORE_TSA_ROOTS_B64 = (
+    "MIIB9zCCAXygAwIBAgIUV7f0GLDOoEzIh8LXSW80OJiUp14wCgYIKoZIzj0EAwMwOTEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MSAwHgYDVQQDExdzaWdzdG9yZS10c2Etc2VsZnNpZ25lZDAeFw0yNTA0MDgwNjU5NDNaFw0zNTA0MDYwNjU5NDNaMDkxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEgMB4GA1UEAxMXc2lnc3RvcmUtdHNhLXNlbGZzaWduZWQwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQUQNtfRT/ou3YATa6wB/kKTe70cfJwyRIBovMnt8RcJph/COE82uyS6FmppLLL1VBPGcPfpQPYJNXzWwi8icwhKQ6W/Qe2h3oebBb2FHpwNJDqo+TMaC/tdfkv/ElJB72jRTBDMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBSY7AHvf7tR/9SVHm+KiJhTB4nOvzAKBggqhkjOPQQDAwNpADBmAjEAwGEGrfGZR1cen1R8/DTVMI943LssZmJRtDp/i7SfGHmGRP6gRbuj9vOK3b67Z0QQAjEAuT2H673LQEaHTcyQSZrkp4mX7WwkmF+sVbkYY5mXN+RMH13KUEHHOqASaemYWK/E",
+)
+
+SIGSTORE_TSA_LEAVES_B64 = (
+    "MIICEDCCAZagAwIBAgIUOhNULwyQYe68wUMvy4qOiyojiwwwCgYIKoZIzj0EAwMwOTEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MSAwHgYDVQQDExdzaWdzdG9yZS10c2Etc2VsZnNpZ25lZDAeFw0yNTA0MDgwNjU5NDNaFw0zNTA0MDYwNjU5NDNaMC4xFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEVMBMGA1UEAxMMc2lnc3RvcmUtdHNhMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE4ra2Z8hKNig2T9kFjCAToGG30jky+WQv3BzL+mKvh1SKNR/UwuwsfNCg4sryoYAd8E6isovVA3M4aoNdm9QDi50Z8nTEyvqgfDPtTIwXItfiW/AFf1V7uwkbkAoj0xxco2owaDAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0OBBYEFIn9eUOHz9BlRsMCRscsc1t9tOsDMB8GA1UdIwQYMBaAFJjsAe9/u1H/1JUeb4qImFMHic6/MBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMAoGCCqGSM49BAMDA2gAMGUCMDtpsV/6KaO0qyF/UMsX2aSUXKQFdoGTptQGc0ftq1csulHPGG6dsmyMNd3JB+G3EQIxAOajvBcjpJmKb4Nv+2Taoj8Uc5+b6ih6FXCCKraSqupe07zqswMcXJTe1cExvHvvlw==",
+)
+
+# Pinned Sigstore Public Good Rekor v1 & v2 Transparency Log public keys:
+# keyId -> (spki_b64, key_type, expected_origin)
 SIGSTORE_REKOR_KEYS = {
     "wNI9atQGlz+VWfO6LRygH4QUfY/8W4RFwiT5i5WRgB0=": (
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==",
         "PKIX_ECDSA_P256_SHA_256",
+        "rekor.sigstore.dev",
+    ),
+    "zxGZFVvd0FEmjR8WrFwMdcAJ9vtaY/QXf44Y1wUeP6A=": (
+        "MCowBQYDK2VwAyEAt8rlp1knGwjfbcXAYPYAkn0XiLz1x8O4t0YkEhie244=",
+        "PKIX_ED25519",
+        "log2025-1.rekor.sigstore.dev",
     ),
     "tUgTy2PYhZhwpeeFAMxq3P31lyPtrpPujSX68kdaBpA=": (
         "MCowBQYDK2VwAyEAt8rlp1knGwjfbcXAYPYAkn0XiLz1x8O4t0YkEhie244=",
         "PKIX_ED25519",
+        "log2025-1.rekor.sigstore.dev",
     ),
 }
 
@@ -130,12 +156,55 @@ def _extract_bundles(data: object) -> list[dict]:
 
 
 def _parse_openssl_asn1_time(raw: str) -> int:
-    # OpenSSL x509 -dates format: "Nov 11 04:47:11 2026 GMT"
-    parsed = email.utils.parsedate_tz(raw.strip())
+    # Normalize optional fractional seconds: "Nov 14 08:03:25.123456 2026 GMT"
+    cleaned = re.sub(r"(\d{2}:\d{2}:\d{2})\.\d+", r"\1", raw.strip())
+    parsed = email.utils.parsedate_tz(cleaned)
     if parsed is not None:
         return int(email.utils.mktime_tz(parsed))
-    dt = time.strptime(raw.strip(), "%b %d %H:%M:%S %Y %Z")
+    dt = time.strptime(cleaned, "%b %d %H:%M:%S %Y %Z")
     return int(calendar.timegm(dt))
+
+
+def _read_der_length(buf: bytes, idx: int) -> tuple[int, int]:
+    if idx >= len(buf):
+        raise ProvenanceVerificationError("truncated ASN.1 DER length")
+    first = buf[idx]
+    idx += 1
+    if (first & 0x80) == 0:
+        return first, idx
+    num_octets = first & 0x7F
+    if num_octets == 0 or num_octets > 4 or idx + num_octets > len(buf):
+        raise ProvenanceVerificationError("invalid ASN.1 DER long-form length")
+    length = int.from_bytes(buf[idx : idx + num_octets], "big")
+    return length, idx + num_octets
+
+
+def _extract_fulcio_runner_environment(leaf_der: bytes) -> str | None:
+    pos = 0
+    while True:
+        found = leaf_der.find(FULCIO_RUNNER_ENV_OID_DER, pos)
+        if found == -1:
+            return None
+        cursor = found + len(FULCIO_RUNNER_ENV_OID_DER)
+        pos = found + 1
+        try:
+            # Optional BOOLEAN critical flag (0x01 0x01 <bool>)
+            if cursor + 3 <= len(leaf_der) and leaf_der[cursor] == 0x01 and leaf_der[cursor + 1] == 0x01:
+                cursor += 3
+            if cursor >= len(leaf_der) or leaf_der[cursor] != 0x04:
+                continue
+            octet_len, cursor = _read_der_length(leaf_der, cursor + 1)
+            if cursor + octet_len > len(leaf_der):
+                continue
+            ext_val = leaf_der[cursor : cursor + octet_len]
+            # Fulcio v2 wraps value in DER UTF8String (0x0C) or IA5String (0x16); v1 uses raw UTF-8
+            if ext_val and ext_val[0] in (0x0C, 0x16):
+                str_len, inner = _read_der_length(ext_val, 1)
+                if inner + str_len == len(ext_val):
+                    return ext_val[inner : inner + str_len].decode("utf-8", errors="strict")
+            return ext_val.decode("utf-8", errors="strict")
+        except Exception:
+            continue
 
 
 def _verify_signature_with_openssl(
@@ -185,6 +254,90 @@ def _verify_signature_with_openssl(
         )
 
 
+def _verify_rfc3161_timestamps(
+    td: Path,
+    vm: dict,
+    raw_dsse_sig: bytes,
+    tsa_roots_b64: tuple[str, ...] = SIGSTORE_TSA_ROOTS_B64,
+    tsa_leaves_b64: tuple[str, ...] = SIGSTORE_TSA_LEAVES_B64,
+) -> list[int]:
+    ts_data = vm.get("timestampVerificationData")
+    if not isinstance(ts_data, dict):
+        return []
+    rfc_list = ts_data.get("rfc3161Timestamps")
+    if not isinstance(rfc_list, list) or not rfc_list:
+        return []
+
+    tsa_roots_path = td / "tsa-roots.pem"
+    tsa_leaves_path = td / "tsa-leaves.pem"
+    sig_data_path = td / "dsse-raw-sig.bin"
+    tsa_roots_path.write_text(
+        "".join(_wrap_pem("CERTIFICATE", c) for c in tsa_roots_b64),
+        encoding="utf-8",
+    )
+    tsa_leaves_path.write_text(
+        "".join(_wrap_pem("CERTIFICATE", c) for c in tsa_leaves_b64),
+        encoding="utf-8",
+    )
+    sig_data_path.write_bytes(raw_dsse_sig)
+
+    verified_times: list[int] = []
+    for idx, entry in enumerate(rfc_list):
+        if not isinstance(entry, dict) or not isinstance(entry.get("signedTimestamp"), str):
+            raise ProvenanceVerificationError(f"malformed rfc3161Timestamps[{idx}]")
+        ts_bytes = base64.b64decode(entry["signedTimestamp"])
+        ts_path = td / f"rfc3161-{idx}.der"
+        ts_path.write_bytes(ts_bytes)
+
+        matched_mode: list[str] | None = None
+        last_err = ""
+        for token_flags in ([], ["-token_in"]):
+            v_cmd = [
+                "openssl",
+                "ts",
+                "-verify",
+                "-data",
+                str(sig_data_path),
+                "-in",
+                str(ts_path),
+                *token_flags,
+                "-CAfile",
+                str(tsa_roots_path),
+                "-untrusted",
+                str(tsa_leaves_path),
+            ]
+            v_res = subprocess.run(v_cmd, capture_output=True, text=True, timeout=15)
+            if v_res.returncode == 0 and "Verification: OK" in (v_res.stdout + v_res.stderr):
+                matched_mode = token_flags
+                break
+            last_err = (v_res.stderr or v_res.stdout).strip()
+
+        if matched_mode is None:
+            raise ProvenanceVerificationError(
+                f"RFC 3161 TSA verification failed for rfc3161Timestamps[{idx}]: {last_err}"
+            )
+
+        r_cmd = ["openssl", "ts", "-reply", "-in", str(ts_path), *matched_mode, "-text"]
+        r_res = subprocess.run(r_cmd, capture_output=True, text=True, timeout=10)
+        if r_res.returncode != 0:
+            raise ProvenanceVerificationError(
+                f"failed to inspect RFC 3161 timestamp[{idx}]: {r_res.stderr.strip()}"
+            )
+        ts_epoch: int | None = None
+        for line in r_res.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Time stamp:"):
+                ts_epoch = _parse_openssl_asn1_time(stripped.split(":", 1)[1])
+                break
+        if ts_epoch is None or ts_epoch <= 0:
+            raise ProvenanceVerificationError(
+                f"RFC 3161 timestamp[{idx}] missing valid generation time"
+            )
+        verified_times.append(ts_epoch)
+
+    return verified_times
+
+
 def _verify_merkle_inclusion(
     leaf_hash: bytes,
     log_index: int,
@@ -218,8 +371,20 @@ def _verify_merkle_inclusion(
         raise ProvenanceVerificationError("Rekor Merkle inclusion root hash mismatch")
 
 
-def _extract_der_from_verifier(raw_verifier_b64: str) -> bytes:
-    decoded = base64.b64decode(raw_verifier_b64)
+def _extract_der_from_verifier(verifier: object) -> bytes:
+    if isinstance(verifier, dict):
+        x509_obj = verifier.get("x509Certificate")
+        if isinstance(x509_obj, dict) and isinstance(x509_obj.get("rawBytes"), str):
+            return _extract_der_from_verifier(x509_obj["rawBytes"])
+        pub_obj = verifier.get("publicKey")
+        if isinstance(pub_obj, dict) and isinstance(pub_obj.get("rawBytes"), str):
+            return _extract_der_from_verifier(pub_obj["rawBytes"])
+        if isinstance(verifier.get("content"), str):
+            return _extract_der_from_verifier(verifier["content"])
+        raise ProvenanceVerificationError("unsupported Rekor verifier object format")
+    if not isinstance(verifier, str):
+        raise ProvenanceVerificationError("Rekor verifier must be string or object")
+    decoded = base64.b64decode(verifier)
     try:
         text = decoded.decode("ascii")
         if "-----BEGIN " in text:
@@ -234,29 +399,72 @@ def _extract_der_from_verifier(raw_verifier_b64: str) -> bytes:
     return decoded
 
 
+def _normalize_hash_digest_hex(hash_obj: dict) -> tuple[str, str]:
+    alg_raw = str(hash_obj.get("algorithm", "")).strip()
+    alg_norm = alg_raw.upper()
+    if alg_norm in ("SHA2_256", "SHA256", "SHA-256", "1"):
+        alg = "sha256"
+    else:
+        alg = alg_raw.lower()
+
+    if isinstance(hash_obj.get("value"), str) and hash_obj["value"]:
+        val = hash_obj["value"].strip().lower()
+        if SAFE_HEX64_RE.fullmatch(val):
+            return alg, val
+        return alg, base64.b64decode(hash_obj["value"]).hex()
+
+    if isinstance(hash_obj.get("digest"), str) and hash_obj["digest"]:
+        raw_dig = hash_obj["digest"].strip()
+        if SAFE_HEX64_RE.fullmatch(raw_dig):
+            return alg, raw_dig.lower()
+        return alg, base64.b64decode(raw_dig).hex()
+
+    return alg, ""
+
+
+def _compute_allowed_checkpoint_key_hints(
+    key_id_bytes: bytes,
+    spki_der: bytes,
+    key_details: str,
+    note_origin: str,
+) -> set[bytes]:
+    hints = {
+        key_id_bytes[:4],
+        hashlib.sha256(spki_der).digest()[:4],
+    }
+    if key_details == "PKIX_ED25519" and len(spki_der) >= 32:
+        raw_ed25519_pub = spki_der[-32:]
+        c2sp_payload = note_origin.encode("utf-8") + b"\n\x01" + raw_ed25519_pub
+        hints.add(hashlib.sha256(c2sp_payload).digest()[:4])
+    return hints
+
+
 def _verify_rekor_tlog_entry(
     td: Path,
     tlog: dict,
     expected_payload_sha256: str,
     expected_dsse_sig_b64: str,
     expected_leaf_der: bytes,
-) -> int:
+    verified_tsa_times: list[int],
+    rekor_keys: dict[str, tuple[str, str, str]] = SIGSTORE_REKOR_KEYS,
+) -> list[int]:
     log_id_obj = tlog.get("logId")
     if not isinstance(log_id_obj, dict) or not isinstance(log_id_obj.get("keyId"), str):
         raise ProvenanceVerificationError("missing Rekor logId.keyId")
     key_id = log_id_obj["keyId"]
-    if key_id not in SIGSTORE_REKOR_KEYS:
+    if key_id not in rekor_keys:
         raise ProvenanceVerificationError(f"untrusted Rekor transparency log keyId: {key_id}")
-    spki_b64, key_details = SIGSTORE_REKOR_KEYS[key_id]
+    spki_b64, key_details, expected_origin = rekor_keys[key_id]
+    spki_der = base64.b64decode(spki_b64)
     rekor_pub_pem = _wrap_pem("PUBLIC KEY", spki_b64)
     key_id_bytes = base64.b64decode(key_id)
 
     try:
-        integrated_time = int(tlog["integratedTime"])
+        integrated_time = int(tlog.get("integratedTime", 0) or 0)
         log_index = int(tlog["logIndex"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ProvenanceVerificationError("missing or invalid Rekor integratedTime/logIndex") from exc
-    if integrated_time <= 0 or log_index < 0:
+    if integrated_time < 0 or log_index < 0:
         raise ProvenanceVerificationError("out-of-range Rekor integratedTime/logIndex")
 
     canon_b64 = tlog.get("canonicalizedBody")
@@ -268,26 +476,33 @@ def _verify_rekor_tlog_entry(
     except Exception as exc:
         raise ProvenanceVerificationError("invalid JSON in Rekor canonicalizedBody") from exc
 
-    spec = canon_obj.get("spec") if isinstance(canon_obj, dict) else None
+    if not isinstance(canon_obj, dict):
+        raise ProvenanceVerificationError("Rekor canonicalizedBody must decode to a JSON object")
+    api_version = str(canon_obj.get("apiVersion", "")).strip()
+    kind_ver = tlog.get("kindVersion")
+    kv_version = str(kind_ver.get("version", "")).strip() if isinstance(kind_ver, dict) else ""
+    is_v2_entry = api_version == "0.0.2" or kv_version == "0.0.2"
+
+    spec = canon_obj.get("spec")
     if not isinstance(spec, dict):
         raise ProvenanceVerificationError("missing spec in Rekor canonicalizedBody")
 
-    # Verify Rekor entry binds the exact DSSE payload hash, signature, and leaf X.509 certificate
-    payload_hash_obj = spec.get("payloadHash")
-    if isinstance(payload_hash_obj, dict):
-        alg = str(payload_hash_obj.get("algorithm", "")).lower()
-        val = str(payload_hash_obj.get("value", "")).lower()
-        if alg != "sha256" or val != expected_payload_sha256:
-            raise ProvenanceVerificationError("Rekor payloadHash does not match DSSE payload")
-    elif isinstance(spec.get("data"), dict) and isinstance(spec["data"].get("hash"), dict):
-        alg = str(spec["data"]["hash"].get("algorithm", "")).lower()
-        val = str(spec["data"]["hash"].get("value", "")).lower()
-        if alg != "sha256" or val != expected_payload_sha256:
-            raise ProvenanceVerificationError("Rekor intoto data.hash does not match DSSE payload")
-    else:
-        raise ProvenanceVerificationError("Rekor entry lacks payloadHash binding")
+    # Extract payloadHash & signatures across Rekor v1 (dsse/intoto 0.0.1) and Rekor v2 (dsseV002/intotoV002 0.0.2)
+    inner_v2 = spec.get("dsseV002") or spec.get("intotoV002")
+    active_spec = inner_v2 if isinstance(inner_v2, dict) else spec
+    if isinstance(inner_v2, dict):
+        is_v2_entry = True
 
-    rekor_sigs = spec.get("signatures")
+    payload_hash_obj = active_spec.get("payloadHash")
+    if not isinstance(payload_hash_obj, dict) and isinstance(active_spec.get("data"), dict):
+        payload_hash_obj = active_spec["data"].get("hash") or active_spec["data"]
+    if not isinstance(payload_hash_obj, dict):
+        raise ProvenanceVerificationError("Rekor entry lacks payloadHash binding")
+    alg, digest_hex = _normalize_hash_digest_hex(payload_hash_obj)
+    if alg != "sha256" or digest_hex != expected_payload_sha256:
+        raise ProvenanceVerificationError("Rekor payloadHash does not match DSSE payload")
+
+    rekor_sigs = active_spec.get("signatures")
     if not isinstance(rekor_sigs, list) or not rekor_sigs:
         raise ProvenanceVerificationError("Rekor entry lacks signatures binding")
 
@@ -296,9 +511,9 @@ def _verify_rekor_tlog_entry(
     for item in rekor_sigs:
         if not isinstance(item, dict):
             continue
-        cand = item.get("signature") or item.get("sig")
+        cand = item.get("signature") or item.get("sig") or item.get("content")
         ver = item.get("verifier") or item.get("publicKey")
-        if not isinstance(cand, str) or not isinstance(ver, str):
+        if not isinstance(cand, str) or ver is None:
             continue
         try:
             cand_raw = base64.b64decode(cand)
@@ -317,28 +532,7 @@ def _verify_rekor_tlog_entry(
             "Rekor entry signature/verifier does not match DSSE signature and leaf certificate"
         )
 
-    # Require cryptographic SET over (body, integratedTime, logID, logIndex) so integratedTime cannot be forged
-    promise = tlog.get("inclusionPromise")
-    if not isinstance(promise, dict) or not isinstance(promise.get("signedEntryTimestamp"), str):
-        raise ProvenanceVerificationError(
-            "Rekor tlogEntry missing required inclusionPromise.signedEntryTimestamp"
-        )
-    set_sig = base64.b64decode(promise["signedEntryTimestamp"])
-    set_payload = json.dumps(
-        {
-            "body": canon_b64,
-            "integratedTime": integrated_time,
-            "logID": key_id_bytes.hex(),
-            "logIndex": log_index,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    _verify_signature_with_openssl(
-        td, rekor_pub_pem, key_details, set_payload, set_sig, "rekor-set"
-    )
-
-    # Require RFC 6962 Merkle inclusion proof + signed Rekor checkpoint
+    # Require RFC 6962 Merkle inclusion proof + signed Rekor checkpoint on both v1 and v2
     proof = tlog.get("inclusionProof")
     if not isinstance(proof, dict) or not isinstance(proof.get("checkpoint"), dict):
         raise ProvenanceVerificationError(
@@ -367,11 +561,21 @@ def _verify_rekor_tlog_entry(
     note_lines = note_body.splitlines()
     if len(note_lines) < 3:
         raise ProvenanceVerificationError("Rekor checkpoint note has fewer than 3 lines")
+    note_origin = note_lines[0].strip()
+    if expected_origin and not (
+        note_origin == expected_origin or note_origin.startswith(expected_origin + " - ")
+    ):
+        raise ProvenanceVerificationError(
+            f"Rekor checkpoint origin {note_origin!r} does not match pinned log {expected_origin!r}"
+        )
     if int(note_lines[1].strip()) != tree_size:
         raise ProvenanceVerificationError("Rekor checkpoint treeSize mismatch")
     if base64.b64decode(note_lines[2].strip()) != expected_root:
         raise ProvenanceVerificationError("Rekor checkpoint rootHash mismatch")
 
+    allowed_hints = _compute_allowed_checkpoint_key_hints(
+        key_id_bytes, spki_der, key_details, note_origin
+    )
     checkpoint_verified = False
     for raw_sig_line in sig_section.splitlines():
         line = raw_sig_line.strip()
@@ -381,11 +585,14 @@ def _verify_rekor_tlog_entry(
         parts = line.split()
         if len(parts) < 3:
             continue
+        sig_signer_name = parts[1].strip()
+        if expected_origin and sig_signer_name != expected_origin:
+            continue
         try:
             hint_and_sig = base64.b64decode(parts[-1])
         except Exception:
             continue
-        if len(hint_and_sig) <= 4 or hint_and_sig[:4] != key_id_bytes[:4]:
+        if len(hint_and_sig) <= 4 or hint_and_sig[:4] not in allowed_hints:
             continue
         _verify_signature_with_openssl(
             td, rekor_pub_pem, key_details, signed_note, hint_and_sig[4:], "rekor-ckpt"
@@ -395,10 +602,126 @@ def _verify_rekor_tlog_entry(
     if not checkpoint_verified:
         raise ProvenanceVerificationError("no valid pinned Rekor signature on checkpoint")
 
-    return integrated_time
+    # Authenticate signing timestamp(s) so short-lived Fulcio leaf cert validity cannot be forged:
+    # - Rekor v1 requires signedEntryTimestamp (SET) over (body, integratedTime, logID, logIndex).
+    # - Rekor v2 (rekor-tiles) omits SET and sets integratedTime == 0, authenticating time via RFC 3161 TSA.
+    authenticated_times: list[int] = list(verified_tsa_times)
+    promise = tlog.get("inclusionPromise")
+    has_set = isinstance(promise, dict) and isinstance(promise.get("signedEntryTimestamp"), str)
+    if has_set:
+        if integrated_time <= 0:
+            raise ProvenanceVerificationError(
+                "Rekor inclusionPromise present with non-positive integratedTime"
+            )
+        set_sig = base64.b64decode(promise["signedEntryTimestamp"])
+        set_payload = json.dumps(
+            {
+                "body": canon_b64,
+                "integratedTime": integrated_time,
+                "logID": hashlib.sha256(spki_der).hexdigest(),
+                "logIndex": log_index,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        _verify_signature_with_openssl(
+            td, rekor_pub_pem, key_details, set_payload, set_sig, "rekor-set"
+        )
+        authenticated_times.append(integrated_time)
+    elif not is_v2_entry:
+        raise ProvenanceVerificationError(
+            "Rekor v1 tlogEntry missing required inclusionPromise.signedEntryTimestamp"
+        )
+
+    if not authenticated_times:
+        raise ProvenanceVerificationError(
+            "Rekor tlogEntry lacks authenticated signing timestamp (neither verified SET nor RFC 3161 TSA token present)"
+        )
+
+    return authenticated_times
 
 
-def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact_name: str | None) -> dict:
+def _validate_workflow_ref_policy(
+    san_ref: str,
+    slsa_ref: str,
+    expected_tag: str | None,
+    expected_channel: str | None,
+) -> None:
+    if not san_ref or not PROTECTED_WORKFLOW_REF_RE.fullmatch(san_ref):
+        raise ProvenanceVerificationError(
+            f"Fulcio SAN workflow ref {san_ref!r} is not a protected nightly branch or v4+ release tag"
+        )
+    if not slsa_ref or slsa_ref != san_ref:
+        raise ProvenanceVerificationError(
+            f"SLSA workflow.ref {slsa_ref!r} does not match Fulcio SAN workflow ref {san_ref!r}"
+        )
+
+    norm_channel = expected_channel.strip().lower() if expected_channel else None
+    if norm_channel == "experimental":
+        norm_channel = "nightly"
+    if norm_channel and norm_channel not in ("stable", "nightly"):
+        raise ProvenanceVerificationError(f"unsupported release channel: {expected_channel!r}")
+
+    if expected_tag is not None:
+        tag = expected_tag.strip()
+        if not V4_RELEASE_TAG_RE.fullmatch(tag):
+            raise ProvenanceVerificationError(
+                f"expected release tag {tag!r} does not satisfy v4+ semver floor"
+            )
+        is_prerelease_tag = "-" in tag
+        if norm_channel == "stable" and is_prerelease_tag:
+            raise ProvenanceVerificationError(
+                f"stable channel cannot verify prerelease tag {tag!r}"
+            )
+        if norm_channel == "nightly" and not is_prerelease_tag:
+            raise ProvenanceVerificationError(
+                f"nightly channel requires prerelease tag, got {tag!r}"
+            )
+
+        if not is_prerelease_tag:
+            expected_exact_ref = f"refs/tags/{tag}"
+            if san_ref != expected_exact_ref:
+                raise ProvenanceVerificationError(
+                    f"stable release {tag!r} requires workflow ref {expected_exact_ref!r}, got {san_ref!r}"
+                )
+        elif "-nightly." in tag.lower() or norm_channel == "nightly":
+            allowed_nightly_refs = {"refs/heads/nightly", "refs/heads/Nightly", f"refs/tags/{tag}"}
+            if san_ref not in allowed_nightly_refs:
+                raise ProvenanceVerificationError(
+                    f"nightly release {tag!r} requires workflow ref in {sorted(allowed_nightly_refs)}, got {san_ref!r}"
+                )
+        else:
+            expected_exact_ref = f"refs/tags/{tag}"
+            if san_ref != expected_exact_ref:
+                raise ProvenanceVerificationError(
+                    f"prerelease tag {tag!r} requires workflow ref {expected_exact_ref!r}, got {san_ref!r}"
+                )
+    elif norm_channel == "stable":
+        if not san_ref.startswith("refs/tags/v") or "-" in san_ref.removeprefix("refs/tags/"):
+            raise ProvenanceVerificationError(
+                f"stable channel requires non-prerelease tag workflow ref, got {san_ref!r}"
+            )
+    elif norm_channel == "nightly":
+        if san_ref not in ("refs/heads/nightly", "refs/heads/Nightly") and "-nightly." not in san_ref.lower():
+            raise ProvenanceVerificationError(
+                f"nightly channel requires nightly workflow ref, got {san_ref!r}"
+            )
+
+
+def verify_single_bundle(
+    bundle: dict,
+    repo: str,
+    expected_digest: str,
+    artifact_name: str | None,
+    expected_tag: str | None = None,
+    expected_channel: str | None = None,
+    *,
+    fulcio_roots_b64: tuple[str, ...] = SIGSTORE_FULCIO_ROOTS_B64,
+    fulcio_intermediates_b64: tuple[str, ...] = SIGSTORE_FULCIO_INTERMEDIATES_B64,
+    rekor_keys: dict[str, tuple[str, str, str]] = SIGSTORE_REKOR_KEYS,
+    tsa_roots_b64: tuple[str, ...] = SIGSTORE_TSA_ROOTS_B64,
+    tsa_leaves_b64: tuple[str, ...] = SIGSTORE_TSA_LEAVES_B64,
+) -> dict:
     vm = bundle.get("verificationMaterial")
     dsse = bundle.get("dsseEnvelope")
     if not isinstance(vm, dict) or not isinstance(dsse, dict):
@@ -446,29 +769,40 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
 
         leaf_der = base64.b64decode(leaf_b64)
 
-        # 3. Verify Rekor transparency log entry (authenticates integratedTime + binds payload, sig & leaf cert)
-        integrated_time: int | None = None
+        # 3a. Verify any RFC 3161 signed timestamps against pinned Sigstore TSA chain
+        verified_tsa_times = _verify_rfc3161_timestamps(
+            td, vm, raw_sig, tsa_roots_b64=tsa_roots_b64, tsa_leaves_b64=tsa_leaves_b64
+        )
+
+        # 3b. Verify Rekor transparency log entry (v1 or v2) + authenticated signing timestamps
+        authenticated_times: list[int] | None = None
         last_tlog_err: Exception | None = None
         for entry in tlog_entries:
             if not isinstance(entry, dict):
                 continue
             try:
-                integrated_time = _verify_rekor_tlog_entry(
-                    td, entry, payload_sha256, sig_b64, leaf_der
+                authenticated_times = _verify_rekor_tlog_entry(
+                    td,
+                    entry,
+                    payload_sha256,
+                    sig_b64,
+                    leaf_der,
+                    verified_tsa_times,
+                    rekor_keys=rekor_keys,
                 )
                 break
             except Exception as exc:
                 last_tlog_err = exc
-        if integrated_time is None:
+        if not authenticated_times:
             raise ProvenanceVerificationError(
                 f"no valid Rekor transparency log entry: {last_tlog_err}"
             )
 
-        # 4. Verify Fulcio X.509 certificate chain at authenticated integrated_time
-        roots_pem = "".join(_wrap_pem("CERTIFICATE", c) for c in SIGSTORE_FULCIO_ROOTS_B64)
+        # 4. Verify Fulcio X.509 certificate chain at every authenticated signing timestamp
+        roots_pem = "".join(_wrap_pem("CERTIFICATE", c) for c in fulcio_roots_b64)
         inters_pem = "".join(
             _wrap_pem("CERTIFICATE", c)
-            for c in (*SIGSTORE_FULCIO_INTERMEDIATES_B64, *extra_inters_b64)
+            for c in (*fulcio_intermediates_b64, *extra_inters_b64)
         )
         leaf_pem = _wrap_pem("CERTIFICATE", leaf_b64)
 
@@ -496,23 +830,27 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
                 not_after = _parse_openssl_asn1_time(line.split("=", 1)[1])
         if not_before is None or not_after is None:
             raise ProvenanceVerificationError("leaf X.509 certificate missing validity bounds")
-        if not (not_before <= integrated_time <= not_after):
-            raise ProvenanceVerificationError(
-                f"Rekor integratedTime {integrated_time} outside leaf cert window [{not_before}, {not_after}]"
-            )
 
+        for auth_time in authenticated_times:
+            if not (not_before <= auth_time <= not_after):
+                raise ProvenanceVerificationError(
+                    f"authenticated timestamp {auth_time} outside leaf cert window [{not_before}, {not_after}]"
+                )
+
+        primary_time = authenticated_times[0]
+        chain_cmd = [
+            "openssl",
+            "verify",
+            "-attime",
+            str(primary_time),
+            "-CAfile",
+            str(roots_path),
+        ]
+        if inters_pem.strip():
+            chain_cmd.extend(["-untrusted", str(inters_path)])
+        chain_cmd.append(str(leaf_path))
         chain_res = subprocess.run(
-            [
-                "openssl",
-                "verify",
-                "-attime",
-                str(integrated_time),
-                "-CAfile",
-                str(roots_path),
-                "-untrusted",
-                str(inters_path),
-                str(leaf_path),
-            ],
+            chain_cmd,
             capture_output=True,
             text=True,
             timeout=15,
@@ -522,7 +860,7 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
                 f"Fulcio X.509 chain verification failed: {chain_res.stderr.strip() or chain_res.stdout.strip()}"
             )
 
-        # 5. Verify X.509 EKU (Code Signing) + Fulcio GitHub Actions OIDC identity & issuer extensions
+        # 5. Verify X.509 EKU (Code Signing) + Fulcio GitHub Actions OIDC identity, issuer & runner_environment
         text_res = subprocess.run(
             ["openssl", "x509", "-in", str(leaf_path), "-noout", "-text"],
             capture_output=True,
@@ -558,6 +896,7 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
             raise ProvenanceVerificationError(
                 f"leaf SAN {san_line!r} does not match expected workflow URI prefix for {repo}"
             )
+        san_ref = matched_san.split("@", 1)[1] if "@" in matched_san else ""
 
         # Verify Fulcio OIDC Issuer v1 (1.3.6.1.4.1.57264.1.1) or v2 (1.3.6.1.4.1.57264.1.8)
         issuer_match = re.search(
@@ -567,6 +906,13 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
         if not issuer_match or "https://token.actions.githubusercontent.com" not in issuer_match.group(1):
             raise ProvenanceVerificationError(
                 "leaf certificate missing GitHub Actions OIDC issuer extension"
+            )
+
+        # Verify Fulcio Runner Environment (1.3.6.1.4.1.57264.1.11 == "github-hosted")
+        runner_env = _extract_fulcio_runner_environment(leaf_der)
+        if runner_env != "github-hosted":
+            raise ProvenanceVerificationError(
+                f"leaf certificate runner_environment {runner_env!r} is not 'github-hosted'"
             )
 
         # 6. Verify DSSE PAE cryptographic signature using leaf public key
@@ -590,7 +936,7 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
             td, pub_res.stdout, "PKIX_ECDSA_P256_SHA_256", pae, raw_sig, "dsse-pae"
         )
 
-    # 7. Verify SLSA v1 in-toto statement & subject binding
+    # 7. Verify SLSA v1 in-toto statement, subject binding, & workflow ref/tag policy
     try:
         statement = json.loads(raw_payload.decode("utf-8"))
     except Exception as exc:
@@ -652,12 +998,16 @@ def verify_single_bundle(bundle: dict, repo: str, expected_digest: str, artifact
             f"SLSA workflow path {wf_path!r} is not .github/workflows/release.yml"
         )
 
+    slsa_ref = str(workflow.get("ref", "")).strip()
+    _validate_workflow_ref_policy(san_ref, slsa_ref, expected_tag, expected_channel)
+
     return {
         "verified": True,
         "repo": repo,
         "digest": expected_digest,
         "workflow_uri": matched_san,
-        "integrated_time": integrated_time,
+        "workflow_ref": san_ref,
+        "integrated_time": primary_time,
     }
 
 
@@ -667,6 +1017,8 @@ def verify_provenance(
     artifact_name: str | None = None,
     bundle_file: Path | None = None,
     api_base_url: str | None = None,
+    expected_tag: str | None = None,
+    expected_channel: str | None = None,
 ) -> dict:
     repo = repo.strip()
     if not SAFE_REPO_RE.fullmatch(repo):
@@ -674,6 +1026,10 @@ def verify_provenance(
     digest = digest.strip().lower()
     if not SAFE_HEX64_RE.fullmatch(digest):
         raise ProvenanceVerificationError(f"invalid SHA-256 hex digest: {digest!r}")
+    if expected_tag is not None and not V4_RELEASE_TAG_RE.fullmatch(expected_tag.strip()):
+        raise ProvenanceVerificationError(
+            f"invalid or pre-v4 release tag {expected_tag!r} (v4+ semver tag required)"
+        )
 
     if bundle_file is not None:
         raw = bundle_file.read_bytes()
@@ -696,7 +1052,14 @@ def verify_provenance(
     errors: list[str] = []
     for idx, bundle in enumerate(bundles):
         try:
-            return verify_single_bundle(bundle, repo, digest, artifact_name)
+            return verify_single_bundle(
+                bundle,
+                repo,
+                digest,
+                artifact_name,
+                expected_tag=expected_tag,
+                expected_channel=expected_channel,
+            )
         except Exception as exc:
             errors.append(f"bundle[{idx}]: {exc}")
 
@@ -712,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True, help="GitHub owner/repo (e.g. McEveritts/AetherFlow)")
     parser.add_argument("--digest", required=True, help="Expected lowercase 64-hex SHA-256 artifact digest")
     parser.add_argument("--artifact-name", default=None, help="Expected artifact filename")
+    parser.add_argument("--tag", default=None, help="Expected v4+ release tag (binds workflow ref)")
+    parser.add_argument("--channel", default=None, help="Expected release channel (stable or nightly)")
     parser.add_argument(
         "--bundle-file",
         type=Path,
@@ -732,6 +1097,8 @@ def main(argv: list[str] | None = None) -> int:
             artifact_name=args.artifact_name,
             bundle_file=args.bundle_file,
             api_base_url=args.api_base_url,
+            expected_tag=args.tag,
+            expected_channel=args.channel,
         )
     except Exception as exc:
         sys.stderr.write(f"[PROVENANCE-FAIL] {exc}\n")

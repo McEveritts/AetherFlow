@@ -9589,7 +9589,9 @@ fn parse_master_credentials_content(raw: &str) -> (Option<String>, Option<String
             .or_else(|| val.get("pass"))
             .or_else(|| val.get("MASTER_PASS"))
             .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| af_db::decrypt_secret_if_needed(s).ok())
             .filter(|s| !s.is_empty() && s != "adminadmin");
         return (user, pass);
     }
@@ -9720,9 +9722,11 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
                 uuid::Uuid::new_v4().simple()
             );
             let persist_path = rebase_path("/var/lib/aetherflow/.master.creds");
+            let stored_password =
+                af_db::encrypt_secret_if_configured(&generated).unwrap_or_else(|_| generated.clone());
             let payload = serde_json::json!({
                 "username": master_user,
-                "password": generated,
+                "password": stored_password,
             })
             .to_string();
             let _ = write_file_atomic_with_mode_bounded(

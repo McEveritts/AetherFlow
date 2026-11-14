@@ -31,6 +31,9 @@ import (
 var jwtSecret []byte
 var jwtSecretOnce sync.Once
 var errUnauthorizedSession = errors.New("unauthorized session")
+var errSubjectSuspended = errors.New("subject suspended")
+
+const sessionAbsoluteLifetimeSecs int64 = 30 * 24 * 3600
 
 // rotatedTokenGrace tracks recently rotated JTIs for a 15-second overlap window
 // so concurrent in-flight requests or multi-tab refresh races do not trigger
@@ -38,14 +41,22 @@ var errUnauthorizedSession = errors.New("unauthorized session")
 const rotatedTokenGraceWindow = 15 * time.Second
 
 type rotatedTokenGraceEntry struct {
-	userID    int
-	newToken  string
+	userID       int
+	familyID     string
+	successorJTI string
+	newToken     string
+	expiresAt    time.Time
+}
+
+type rotatedSuccessorEntry struct {
+	nextJTI   string
 	expiresAt time.Time
 }
 
 var rotatedTokenGrace sync.Map
+var rotatedSessionSuccessor sync.Map
 
-func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
+func lookupRotationGraceCached(jti string) (rotatedTokenGraceEntry, bool) {
 	if jti == "" {
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -58,7 +69,251 @@ func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
+	if entry.successorJTI != "" && db.IsTokenRevokedCached(entry.successorJTI) {
+		rotatedTokenGrace.Delete(jti)
+		return rotatedTokenGraceEntry{}, false
+	}
 	return entry, true
+}
+
+func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
+	entry, ok := lookupRotationGraceCached(jti)
+	if !ok {
+		return rotatedTokenGraceEntry{}, false
+	}
+	if entry.successorJTI != "" && db.IsTokenRevoked(entry.successorJTI) {
+		rotatedTokenGrace.Delete(jti)
+		return rotatedTokenGraceEntry{}, false
+	}
+	return entry, true
+}
+
+func resolveCurrentSessionJTI(jti string) string {
+	if jti == "" {
+		return ""
+	}
+	now := time.Now()
+	cur := jti
+	for i := 0; i < 32; i++ {
+		raw, ok := rotatedSessionSuccessor.Load(cur)
+		if !ok {
+			break
+		}
+		entry, valid := raw.(rotatedSuccessorEntry)
+		if !valid || now.After(entry.expiresAt) || entry.nextJTI == "" || entry.nextJTI == cur {
+			if !valid || now.After(entry.expiresAt) {
+				rotatedSessionSuccessor.Delete(cur)
+			}
+			break
+		}
+		cur = entry.nextJTI
+	}
+	return cur
+}
+
+func evictRotationGraceForFamily(familyID, targetJTI string) {
+	rotatedTokenGrace.Range(func(key, val interface{}) bool {
+		oldJTI, _ := key.(string)
+		entry, ok := val.(rotatedTokenGraceEntry)
+		if !ok || oldJTI == targetJTI || entry.successorJTI == targetJTI || (familyID != "" && entry.familyID == familyID) {
+			rotatedTokenGrace.Delete(key)
+		}
+		return true
+	})
+	if targetJTI != "" {
+		rotatedSessionSuccessor.Range(func(key, val interface{}) bool {
+			oldJTI, _ := key.(string)
+			entry, ok := val.(rotatedSuccessorEntry)
+			if !ok || oldJTI == targetJTI || entry.nextJTI == targetJTI {
+				rotatedSessionSuccessor.Delete(key)
+			}
+			return true
+		})
+	}
+}
+
+func evictRotationGraceForUser(userID int) {
+	rotatedTokenGrace.Range(func(key, val interface{}) bool {
+		entry, ok := val.(rotatedTokenGraceEntry)
+		if !ok || entry.userID == userID {
+			rotatedTokenGrace.Delete(key)
+		}
+		return true
+	})
+}
+
+type activeHumanSubject struct {
+	userID               int
+	username             string
+	role                 string
+	sessionsRevokedAfter int64
+}
+
+func loadActiveHumanSubject(execer oidcDBExecer, userID int) (activeHumanSubject, error) {
+	if execer == nil || userID <= 0 {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
+	var subj activeHumanSubject
+	err := execer.QueryRow(
+		"SELECT id, username, COALESCE(role, 'user'), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?",
+		userID,
+	).Scan(&subj.userID, &subj.username, &subj.role, &subj.sessionsRevokedAfter)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		err = execer.QueryRow(
+			"SELECT id, username, COALESCE(role, 'user') FROM users WHERE id = ?",
+			userID,
+		).Scan(&subj.userID, &subj.username, &subj.role)
+	}
+	if err != nil {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(subj.username)), "plugin:") {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
+
+	var quotaStatus string
+	qErr := execer.QueryRow("SELECT COALESCE(status, '') FROM user_quotas WHERE user_id = ?", userID).Scan(&quotaStatus)
+	if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) && !strings.Contains(qErr.Error(), "no such table") {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
+	if qErr == nil {
+		trimmed := strings.TrimSpace(quotaStatus)
+		if trimmed != "" && !strings.EqualFold(trimmed, "active") {
+			return activeHumanSubject{}, errSubjectSuspended
+		}
+	}
+	return subj, nil
+}
+
+func claimInt64(claims jwt.MapClaims, key string) (int64, bool) {
+	raw, exists := claims[key]
+	if !exists || raw == nil {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case float64:
+		return int64(v), true
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func claimVersion(claims jwt.MapClaims) int64 {
+	if v, ok := claimInt64(claims, "ver"); ok && v >= 0 {
+		return v
+	}
+	return 0
+}
+
+func isPluginClaims(claims jwt.MapClaims) bool {
+	if iss, _ := claims["iss"].(string); strings.EqualFold(strings.TrimSpace(iss), "aetherflow-plugin") {
+		return true
+	}
+	if rawPID, exists := claims["plugin_id"]; exists && rawPID != nil {
+		if s, ok := rawPID.(string); !ok || strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	for _, scopeKey := range []string{"plugin_scopes", "scopes"} {
+		if rawScopes, exists := claims[scopeKey]; exists && rawScopes != nil {
+			switch v := rawScopes.(type) {
+			case []interface{}:
+				if len(v) > 0 {
+					return true
+				}
+			case []string:
+				if len(v) > 0 {
+					return true
+				}
+			default:
+				return true
+			}
+		}
+	}
+	if jti, _ := claims["jti"].(string); strings.HasPrefix(strings.TrimSpace(jti), "plg-") {
+		return true
+	}
+	if sub, _ := claims["sub"].(string); strings.HasPrefix(strings.ToLower(strings.TrimSpace(sub)), "plugin:") {
+		return true
+	}
+	return false
+}
+
+func isForeignOrPluginSessionClaims(claims jwt.MapClaims) bool {
+	if isPluginClaims(claims) {
+		return true
+	}
+	iss, ok := claims["iss"].(string)
+	return !ok || iss != "aetherflow"
+}
+
+func sessionAuthTime(claims jwt.MapClaims) (int64, bool) {
+	if at, ok := claimInt64(claims, "auth_time"); ok && at > 0 {
+		return at, true
+	}
+	if iat, ok := claimInt64(claims, "iat"); ok && iat > 0 {
+		return iat, true
+	}
+	return 0, false
+}
+
+func sessionWithinAbsoluteLifetime(claims jwt.MapClaims, nowUnix int64) bool {
+	authTime, ok := sessionAuthTime(claims)
+	if !ok {
+		return false
+	}
+	return authTime <= nowUnix+60 && nowUnix < authTime+sessionAbsoluteLifetimeSecs
+}
+
+func revokeAllUserCredentialsInTx(tx *sql.Tx, userID int) (int64, []string, error) {
+	var newVer int64 = 1
+	err := tx.QueryRow(
+		"UPDATE users SET sessions_revoked_after = COALESCE(sessions_revoked_after, 0) + 1 WHERE id = ? RETURNING sessions_revoked_after",
+		userID,
+	).Scan(&newVer)
+	if err != nil && !strings.Contains(err.Error(), "no such column") {
+		return 0, nil, err
+	}
+
+	var revokedJTIs []string
+	rows, qErr := tx.Query("SELECT jti FROM active_sessions WHERE user_id = ?", userID)
+	if qErr == nil {
+		for rows.Next() {
+			var jti string
+			if scanErr := rows.Scan(&jti); scanErr == nil && jti != "" {
+				revokedJTIs = append(revokedJTIs, jti)
+			}
+		}
+		_ = rows.Close()
+		for _, jti := range revokedJTIs {
+			if rErr := db.RevokeTokenInTx(tx, jti, minRevocationTTL); rErr != nil && !strings.Contains(rErr.Error(), "no such table") {
+				return 0, nil, rErr
+			}
+		}
+		if _, dErr := tx.Exec("DELETE FROM active_sessions WHERE user_id = ?", userID); dErr != nil && !strings.Contains(dErr.Error(), "no such table") {
+			return 0, nil, dErr
+		}
+	}
+
+	_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
+	_, _ = tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE user_id = ?", userID)
+	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE user_id = ?", userID)
+
+	return newVer, revokedJTIs, nil
+}
+
+func finalizeUserCredentialRevocation(userID int, revokedJTIs []string) {
+	for _, jti := range revokedJTIs {
+		db.CacheRevokedToken(jti, minRevocationTTL)
+	}
+	evictRotationGraceForUser(userID)
 }
 
 func getJWTSecret() []byte {
@@ -115,6 +370,12 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" || strings.HasPrefix(strings.ToLower(req.Username), "plugin:") {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Invalid username")
+		return
+	}
+
 	// Enforce minimum password length for security
 	if len(req.Password) < 8 {
 		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Password must be at least 8 characters")
@@ -144,7 +405,7 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	services.SaveMasterCredentials(req.Username, req.Password)
+	services.EnsureProvisioningMasterCredentials(req.Username)
 
 	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
 	tokenString, err := createStandardJWT(int(id), c)
@@ -179,6 +440,12 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+	if strings.HasPrefix(strings.ToLower(req.Username), "plugin:") {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
+		return
+	}
+
 	var user models.User
 	var passwordHash string
 	var googleId sql.NullString
@@ -201,6 +468,15 @@ func LocalLogin(c *gin.Context) {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
+		return
+	}
+
+	if _, subErr := loadActiveHumanSubject(db.DB, user.ID); subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
+			return
+		}
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
 		return
 	}
@@ -328,7 +604,7 @@ func clearOAuthStateCookie(c *gin.Context) {
 	c.SetCookie("oauth2_state", "", -1, "/", "", secureCookie(), true)
 }
 
-func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int, totpEnabled bool, authorized bool, err error) {
+func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string, authenticatedUserID int) (userID int, totpEnabled bool, authorized bool, err error) {
 	googleId = strings.TrimSpace(googleId)
 	email = strings.TrimSpace(email)
 	if googleId == "" || email == "" {
@@ -348,6 +624,12 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int
 		googleId,
 	).Scan(&userID, &totpEnabled)
 	if err == nil {
+		if _, subErr := loadActiveHumanSubject(tx, userID); subErr != nil {
+			if errors.Is(subErr, errSubjectSuspended) {
+				return 0, false, false, errSubjectSuspended
+			}
+			return 0, false, false, nil
+		}
 		if _, updErr := tx.Exec("UPDATE users SET avatar_url = ? WHERE id = ?", avatarUrl, userID); updErr != nil {
 			return 0, false, false, updErr
 		}
@@ -369,13 +651,24 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int
 	}
 	if matches == 1 {
 		var linkedGoogleID string
+		var passwordHash string
 		if err := tx.QueryRow(
-			"SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users WHERE LOWER(email) = LOWER(?)",
+			"SELECT id, COALESCE(google_id, ''), COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE LOWER(email) = LOWER(?)",
 			email,
-		).Scan(&userID, &linkedGoogleID, &totpEnabled); err != nil {
+		).Scan(&userID, &linkedGoogleID, &passwordHash, &totpEnabled); err != nil {
 			return 0, false, false, err
 		}
 		if strings.TrimSpace(linkedGoogleID) != "" {
+			return 0, false, false, nil
+		}
+		// Prevent unauthenticated OAuth account pre-hijack / takeover of password-bearing local accounts.
+		if strings.TrimSpace(passwordHash) != "" && authenticatedUserID != userID {
+			return 0, false, false, nil
+		}
+		if _, subErr := loadActiveHumanSubject(tx, userID); subErr != nil {
+			if errors.Is(subErr, errSubjectSuspended) {
+				return 0, false, false, errSubjectSuspended
+			}
 			return 0, false, false, nil
 		}
 		res, updErr := tx.Exec(
@@ -412,7 +705,7 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int
 	if len(prefix) > 48 {
 		prefix = prefix[:48]
 	}
-	if prefix == "" {
+	if prefix == "" || strings.EqualFold(prefix, "plugin") {
 		prefix = "user"
 	}
 	suffixBytes := make([]byte, 4)
@@ -421,10 +714,8 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string) (userID int
 	}
 	username := prefix + "-" + hex.EncodeToString(suffixBytes)
 
-	role := "user"
-	if adminEmail := strings.TrimSpace(os.Getenv("ADMIN_EMAIL")); adminEmail != "" && strings.EqualFold(email, adminEmail) {
-		role = "admin"
-	}
+	// Never auto-promote OAuth-provisioned accounts to admin via environment email matching.
+	const role = "user"
 
 	res, err := tx.Exec(
 		"INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?, ?, ?, ?, ?)",
@@ -498,7 +789,14 @@ func isConfiguredTrustedProxyIP(ip net.IP) bool {
 		}
 		return false
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	trustHdrs := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS"))
+	if strings.EqualFold(trustHdrs, "false") {
+		return false
+	}
+	if strings.EqualFold(trustHdrs, "true") {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	return ip.IsLoopback()
 }
 
 func isTrustedProxyPeer(c *gin.Context) bool {
@@ -633,9 +931,20 @@ func GoogleCallback(c *gin.Context) {
 		return
 	}
 
+	authenticatedUserID := 0
+	if _, callerClaims, sErr := resolveSessionToken(c); sErr == nil {
+		if uid, ok := claimInt64(callerClaims, "user_id"); ok && uid > 0 {
+			authenticatedUserID = int(uid)
+		}
+	}
+
 	// Lookup, link, or provision user transactionally
-	resolvedID, totpEnabled, authorized, resolveErr := resolveGoogleOAuthUser(googleId, email, name, avatarUrl)
+	resolvedID, totpEnabled, authorized, resolveErr := resolveGoogleOAuthUser(googleId, email, name, avatarUrl, authenticatedUserID)
 	if resolveErr != nil {
+		if errors.Is(resolveErr, errSubjectSuspended) {
+			c.Redirect(http.StatusTemporaryRedirect, "/login?error=account_suspended")
+			return
+		}
 		slog.Error("database error during OAuth callback", "error", resolveErr)
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
 		return
@@ -681,26 +990,74 @@ func GoogleCallback(c *gin.Context) {
 	c.Redirect(http.StatusTemporaryRedirect, "/")
 }
 
+// ConfigureTrustedProxies aligns Gin's ClientIP() proxy trust with AetherFlow's explicit
+// TRUSTED_PROXIES / TRUST_PROXY_HEADERS configuration instead of trusting 0.0.0.0/0.
+func ConfigureTrustedProxies(r *gin.Engine) {
+	if r == nil {
+		return
+	}
+	if raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); raw != "" {
+		var list []string
+		for _, item := range strings.Split(raw, ",") {
+			if tok := strings.TrimSpace(strings.Trim(item, "[]")); tok != "" {
+				list = append(list, tok)
+			}
+		}
+		_ = r.SetTrustedProxies(list)
+		return
+	}
+	trustHdrs := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS"))
+	if strings.EqualFold(trustHdrs, "false") {
+		_ = r.SetTrustedProxies(nil)
+		return
+	}
+	if strings.EqualFold(trustHdrs, "true") {
+		_ = r.SetTrustedProxies([]string{
+			"127.0.0.0/8",
+			"::1/128",
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+			"169.254.0.0/16",
+			"fc00::/7",
+			"fe80::/10",
+		})
+		return
+	}
+	_ = r.SetTrustedProxies([]string{"127.0.0.0/8", "::1/128"})
+}
+
+func firstForwardedValue(raw string) string {
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // getBaseURL determines the scheme + host from the incoming request,
 // with protection against host header injection (CWE-601).
 func getBaseURL(c *gin.Context) string {
-	trustProxy := strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") && isTrustedProxyPeer(c)
+	trustProxy := (strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") || strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) != "") &&
+		!strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "false") &&
+		isTrustedProxyPeer(c)
 
 	scheme := "https"
 	if c.Request.TLS == nil {
 		scheme = "http"
 		// Check X-Forwarded-Proto only from an explicitly trusted reverse proxy peer
 		if trustProxy {
-			if proto := strings.ToLower(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))); proto == "http" || proto == "https" {
+			if proto := strings.ToLower(firstForwardedValue(c.GetHeader("X-Forwarded-Proto"))); proto == "http" || proto == "https" {
 				scheme = proto
 			}
 		}
 	}
 
-	// Validate X-Forwarded-Host against whitelist only from a trusted reverse proxy peer
+	// Validate outermost X-Forwarded-Host against whitelist only from a trusted reverse proxy peer
 	host := c.Request.Host
 	if trustProxy {
-		if fwdHost := strings.TrimSpace(c.GetHeader("X-Forwarded-Host")); fwdHost != "" && isAllowedHost(fwdHost) {
+		if fwdHost := firstForwardedValue(c.GetHeader("X-Forwarded-Host")); fwdHost != "" && isAllowedHost(fwdHost) {
 			host = fwdHost
 		}
 	}
@@ -738,6 +1095,11 @@ func isAllowedHost(host string) bool {
 	return false
 }
 
+var (
+	errSessionRevoked  = errors.New("session revoked")
+	errSessionHijacked = errors.New("session hijacked")
+)
+
 func validateSessionToken(tokenString string) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Prevent algorithm confusion attacks: only accept HMAC signing
@@ -754,38 +1116,60 @@ func validateSessionToken(tokenString string) (jwt.MapClaims, error) {
 	if !ok {
 		return nil, errUnauthorizedSession
 	}
+	if isForeignOrPluginSessionClaims(claims) {
+		return nil, errUnauthorizedSession
+	}
+	if !sessionWithinAbsoluteLifetime(claims, time.Now().Unix()) {
+		return nil, errUnauthorizedSession
+	}
 
 	return claims, nil
 }
 
-func validateResolvedSessionClaims(c *gin.Context, claims jwt.MapClaims) bool {
-	userIdFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		return false
+func validateResolvedSessionClaimsStatus(c *gin.Context, claims jwt.MapClaims) (activeHumanSubject, error) {
+	uid64, ok := claimInt64(claims, "user_id")
+	if !ok || uid64 <= 0 {
+		return activeHumanSubject{}, errUnauthorizedSession
 	}
-	userId := int(userIdFloat)
+	userId := int(uid64)
 
 	if jti, hasJti := claims["jti"].(string); hasJti && jti != "" && db.IsTokenRevoked(jti) {
 		if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
-			return false
+			return activeHumanSubject{}, errSessionRevoked
 		}
 	}
 
 	if cfp, hasCfp := claims["cfp"].(string); hasCfp && cfp != "" {
 		if !matchesClientFingerprint(cfp, c) {
-			return false
+			return activeHumanSubject{}, errSessionHijacked
 		}
 	}
-	return true
+
+	if db.DB != nil {
+		subj, subErr := loadActiveHumanSubject(db.DB, userId)
+		if subErr != nil {
+			return activeHumanSubject{}, subErr
+		}
+		if claimVersion(claims) < subj.sessionsRevokedAfter {
+			return activeHumanSubject{}, errSessionRevoked
+		}
+		return subj, nil
+	}
+	return activeHumanSubject{userID: userId}, nil
 }
 
-func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
+func resolveSessionTokenWithSubject(c *gin.Context) (string, jwt.MapClaims, activeHumanSubject, error) {
+	var lastSpecificErr error
 	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil && validateResolvedSessionClaims(c, claims) {
-				return tokenString, claims, nil
+			if claims, err := validateSessionToken(tokenString); err == nil {
+				subj, vErr := validateResolvedSessionClaimsStatus(c, claims)
+				if vErr == nil {
+					return tokenString, claims, subj, nil
+				}
+				lastSpecificErr = vErr
 			}
 		}
 	}
@@ -794,13 +1178,30 @@ func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
 	if err == nil {
 		tokenString := strings.TrimSpace(cookie)
 		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil && validateResolvedSessionClaims(c, claims) {
-				return tokenString, claims, nil
+			if claims, err := validateSessionToken(tokenString); err == nil {
+				subj, vErr := validateResolvedSessionClaimsStatus(c, claims)
+				if vErr == nil {
+					return tokenString, claims, subj, nil
+				}
+				if lastSpecificErr == nil {
+					lastSpecificErr = vErr
+				}
 			}
 		}
 	}
 
-	return "", nil, errUnauthorizedSession
+	if lastSpecificErr != nil {
+		return "", nil, activeHumanSubject{}, lastSpecificErr
+	}
+	return "", nil, activeHumanSubject{}, errUnauthorizedSession
+}
+
+func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
+	tok, claims, _, err := resolveSessionTokenWithSubject(c)
+	if err != nil {
+		return "", nil, errUnauthorizedSession
+	}
+	return tok, claims, nil
 }
 
 // GetSession godoc
@@ -813,18 +1214,22 @@ func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
 // @Failure      401  {object}  map[string]interface{}
 // @Router       /auth/session [get]
 func GetSession(c *gin.Context) {
-	_, claims, err := resolveSessionToken(c)
+	_, claims, _, err := resolveSessionTokenWithSubject(c)
 	if err != nil {
+		if errors.Is(err, errSubjectSuspended) {
+			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
+			return
+		}
 		Unauthorized(c, "Unauthorized")
 		return
 	}
 
-	userIdFloat, ok := claims["user_id"].(float64)
-	if !ok {
+	uid64, ok := claimInt64(claims, "user_id")
+	if !ok || uid64 <= 0 {
 		Unauthorized(c, "Invalid token claims")
 		return
 	}
-	userId := int(userIdFloat)
+	userId := int(uid64)
 	var user models.User
 	var googleId sql.NullString
 	var totpEnabled sql.NullBool
@@ -845,18 +1250,76 @@ func GetSession(c *gin.Context) {
 
 // Logout godoc
 // @Summary      Logout
-// @Description  Clears the current session and revokes the JWT in Redis.
+// @Description  Clears the current session, revokes its session family, and revokes OIDC refresh tokens.
 // @Tags         auth
 // @Produce      json
 // @Security     ApiKeyAuth
 // @Success      200  {object}  map[string]interface{}
 // @Router       /auth/logout [post]
 func Logout(c *gin.Context) {
-	// Revoke the token durably across the full token lifetime + 2h refresh grace window
 	if _, claims, err := resolveSessionToken(c); err == nil {
-		if jti, ok := claims["jti"].(string); ok && jti != "" {
-			rotatedTokenGrace.Delete(jti)
-			ttl := revocationTTLForClaims(claims)
+		uid64, _ := claimInt64(claims, "user_id")
+		userID := int(uid64)
+		jti, _ := claims["jti"].(string)
+		ttl := revocationTTLForClaims(claims)
+		if jti != "" && db.DB != nil {
+			tx, txErr := db.DB.Begin()
+			if txErr != nil {
+				InternalError(c, "Failed to revoke session")
+				return
+			}
+			currentJTI := resolveCurrentSessionJTI(jti)
+			var familyID string
+			_ = tx.QueryRow(
+				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ? OR family_id = ?) LIMIT 1",
+				userID, jti, currentJTI, jti,
+			).Scan(&familyID)
+			familyID = strings.TrimSpace(familyID)
+			if familyID == "" {
+				familyID = jti
+			}
+
+			var familyJTIs []string
+			if rows, qErr := tx.Query(
+				"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+				userID, familyID, jti, currentJTI,
+			); qErr == nil {
+				for rows.Next() {
+					var fJTI string
+					if rows.Scan(&fJTI) == nil && fJTI != "" {
+						familyJTIs = append(familyJTIs, fJTI)
+					}
+				}
+				_ = rows.Close()
+			}
+			familyJTIs = append(familyJTIs, jti)
+			if currentJTI != "" && currentJTI != jti {
+				familyJTIs = append(familyJTIs, currentJTI)
+			}
+			for _, fJTI := range familyJTIs {
+				if rErr := db.RevokeTokenInTx(tx, fJTI, ttl); rErr != nil {
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
+			}
+			_, _ = tx.Exec(
+				"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+				userID, familyID, jti, currentJTI,
+			)
+			if userID > 0 {
+				_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
+			}
+			if cErr := tx.Commit(); cErr != nil {
+				InternalError(c, "Failed to revoke session")
+				return
+			}
+			for _, fJTI := range familyJTIs {
+				db.CacheRevokedToken(fJTI, ttl)
+				evictRotationGraceForFamily(familyID, fJTI)
+			}
+		} else if jti != "" {
+			evictRotationGraceForFamily("", jti)
 			if err := db.RevokeToken(jti, ttl); err != nil {
 				InternalError(c, "Failed to revoke session")
 				return
@@ -911,12 +1374,25 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
-	if expVal, ok := claims["exp"].(float64); ok {
-		expTime := time.Unix(int64(expVal), 0)
-		if time.Since(expTime) > 2*time.Hour {
-			Unauthorized(c, "Refresh window expired")
-			return
-		}
+	if isPluginClaims(claims) {
+		RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Plugin-scoped tokens cannot be used to refresh user sessions")
+		return
+	}
+	if isForeignOrPluginSessionClaims(claims) {
+		Unauthorized(c, "Invalid session token")
+		return
+	}
+
+	nowUnix := time.Now().Unix()
+	if !sessionWithinAbsoluteLifetime(claims, nowUnix) {
+		Unauthorized(c, "Absolute session lifetime exceeded")
+		return
+	}
+
+	expUnix, hasExp := claimInt64(claims, "exp")
+	if !hasExp || nowUnix-expUnix > 7200 {
+		Unauthorized(c, "Refresh window expired")
+		return
 	}
 
 	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
@@ -927,24 +1403,70 @@ func RefreshSession(c *gin.Context) {
 		}
 	}
 
-	userIDFloat, ok := claims["user_id"].(float64)
-	if !ok {
+	uid64, ok := claimInt64(claims, "user_id")
+	if !ok || uid64 <= 0 {
 		Unauthorized(c, "Missing user ID in claims")
 		return
 	}
-	userID := int(userIDFloat)
+	userID := int(uid64)
 
-	var user models.User
-	err = db.DB.QueryRow("SELECT id, username, role FROM users WHERE id = ?", userID).Scan(&user.ID, &user.Username, &user.Role)
-	if err != nil {
-		Unauthorized(c, "User no longer exists")
+	jti, _ := claims["jti"].(string)
+	jti = strings.TrimSpace(jti)
+	if jti == "" {
+		Unauthorized(c, "Missing token identifier")
 		return
 	}
 
-	jti, _ := claims["jti"].(string)
-	if jti != "" {
-		if db.IsTokenRevoked(jti) {
-			if graceEntry, ok := isWithinRotationGrace(jti); ok && graceEntry.userID == user.ID && graceEntry.newToken != "" {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	subj, subErr := loadActiveHumanSubject(tx, userID)
+	if subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
+			return
+		}
+		Unauthorized(c, "User no longer exists")
+		return
+	}
+	if claimVersion(claims) < subj.sessionsRevokedAfter {
+		Unauthorized(c, "Session has been revoked")
+		return
+	}
+
+	var existingFamily string
+	_ = tx.QueryRow(
+		"SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ? AND user_id = ?",
+		jti, subj.userID,
+	).Scan(&existingFamily)
+	existingFamily = strings.TrimSpace(existingFamily)
+
+	ttl := revocationTTLForClaims(claims)
+	consumed := !db.IsTokenRevokedCached(jti)
+	if consumed {
+		var consumeErr error
+		consumed, consumeErr = db.TryConsumeTokenInTx(tx, jti, ttl)
+		if consumeErr != nil {
+			InternalError(c, "Failed to rotate session")
+			return
+		}
+	}
+
+	if !consumed {
+		if graceEntry, ok := lookupRotationGraceCached(jti); ok && graceEntry.userID == subj.userID && graceEntry.newToken != "" {
+			var succRevoked int
+			revErr := tx.QueryRow(
+				"SELECT 1 FROM revoked_tokens WHERE jti = ? AND datetime(expires_at) > datetime('now') LIMIT 1",
+				graceEntry.successorJTI,
+			).Scan(&succRevoked)
+			if errors.Is(revErr, sql.ErrNoRows) {
+				_ = tx.Rollback()
 				c.SetSameSite(http.SameSiteLaxMode)
 				c.SetCookie("aetherflow_session", graceEntry.newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
 				c.JSON(http.StatusOK, gin.H{
@@ -952,35 +1474,89 @@ func RefreshSession(c *gin.Context) {
 					"token":      graceEntry.newToken,
 					"expires_at": time.Now().Add(15 * time.Minute).Unix(),
 					"user": gin.H{
-						"id":       user.ID,
-						"username": user.Username,
-						"role":     user.Role,
+						"id":       subj.userID,
+						"username": subj.username,
+						"role":     subj.role,
 					},
 				})
 				return
 			}
-			Unauthorized(c, "Session has been revoked")
-			return
 		}
-		if err := db.RevokeToken(jti, revocationTTLForClaims(claims)); err != nil {
-			InternalError(c, "Failed to revoke rotated session")
-			return
+
+		// Replay outside grace window or previously revoked token: wipe entire session family.
+		resolvedSucc := resolveCurrentSessionJTI(jti)
+		targetFamily := existingFamily
+		if targetFamily == "" {
+			_ = tx.QueryRow(
+				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ? OR family_id = ?) LIMIT 1",
+				subj.userID, jti, resolvedSucc, jti,
+			).Scan(&targetFamily)
+			targetFamily = strings.TrimSpace(targetFamily)
 		}
+		if targetFamily == "" {
+			targetFamily = jti
+		}
+
+		var wipedJTIs []string
+		if rows, qErr := tx.Query(
+			"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+			subj.userID, targetFamily, jti, resolvedSucc,
+		); qErr == nil {
+			for rows.Next() {
+				var wJTI string
+				if rows.Scan(&wJTI) == nil && wJTI != "" {
+					wipedJTIs = append(wipedJTIs, wJTI)
+				}
+			}
+			_ = rows.Close()
+		}
+		for _, wJTI := range wipedJTIs {
+			_ = db.RevokeTokenInTx(tx, wJTI, minRevocationTTL)
+		}
+		_, _ = tx.Exec(
+			"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+			subj.userID, targetFamily, jti, resolvedSucc,
+		)
+		if tx.Commit() == nil {
+			for _, wJTI := range wipedJTIs {
+				db.CacheRevokedToken(wJTI, minRevocationTTL)
+				evictRotationGraceForFamily(targetFamily, wJTI)
+			}
+			evictRotationGraceForFamily(targetFamily, jti)
+		}
+		Unauthorized(c, "Session has been revoked")
+		return
 	}
 
-	newToken, err := GenerateJWT(user.ID, c)
+	familyID := existingFamily
+	if familyID == "" {
+		familyID = jti
+	}
+	authTime, _ := sessionAuthTime(claims)
+	newToken, newJTI, err := createSessionJWTInTx(tx, subj.userID, c, authTime, familyID, subj.sessionsRevokedAfter)
 	if err != nil {
 		InternalError(c, "Failed to create new session")
 		return
 	}
+	_, _ = tx.Exec("DELETE FROM active_sessions WHERE jti = ?", jti)
 
-	if jti != "" {
-		rotatedTokenGrace.Store(jti, rotatedTokenGraceEntry{
-			userID:    user.ID,
-			newToken:  newToken,
-			expiresAt: time.Now().Add(rotatedTokenGraceWindow),
-		})
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit rotated session")
+		return
 	}
+
+	db.CacheRevokedToken(jti, ttl)
+	rotatedSessionSuccessor.Store(jti, rotatedSuccessorEntry{
+		nextJTI:   newJTI,
+		expiresAt: time.Now().Add(24 * time.Hour),
+	})
+	rotatedTokenGrace.Store(jti, rotatedTokenGraceEntry{
+		userID:       subj.userID,
+		familyID:     familyID,
+		successorJTI: newJTI,
+		newToken:     newToken,
+		expiresAt:    time.Now().Add(rotatedTokenGraceWindow),
+	})
 
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
@@ -990,11 +1566,18 @@ func RefreshSession(c *gin.Context) {
 		"token":      newToken,
 		"expires_at": time.Now().Add(15 * time.Minute).Unix(),
 		"user": gin.H{
-			"id":       user.ID,
-			"username": user.Username,
-			"role":     user.Role,
+			"id":       subj.userID,
+			"username": subj.username,
+			"role":     subj.role,
 		},
 	})
+}
+
+func isSessionRefreshRoute(path string) bool {
+	return path == "/api/v1/auth/refresh" ||
+		path == "/api/auth/refresh" ||
+		path == "/api/v1/public/auth/refresh" ||
+		path == "/api/public/auth/refresh"
 }
 
 // AuthMiddleware validates the JWT session via Bearer token with cookie fallback
@@ -1002,58 +1585,34 @@ func RefreshSession(c *gin.Context) {
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Allow RefreshSession to validate expired tokens within its 2-hour grace window
-		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || c.Request.URL.Path == "/api/v1/public/auth/refresh" {
+		if isSessionRefreshRoute(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
-		_, claims, err := resolveSessionToken(c)
+		if db.DB == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
+			return
+		}
+
+		_, _, subj, err := resolveSessionTokenWithSubject(c)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
-			return
-		}
-
-		userIdFloat, ok := claims["user_id"].(float64)
-		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Invalid token claims"})
-			return
-		}
-		userId := int(userIdFloat)
-
-		// Phase 11 & 12: Robust JWT Blacklist (Redis O(1) + LRU Fallback)
-		jti, hasJti := claims["jti"].(string)
-		if hasJti && db.IsTokenRevoked(jti) {
-			if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionExpired, Message: "Session revoked"})
-				return
-			}
-		}
-
-		// Verify the user still exists in the database
-		var role string
-		if err := db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&role); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
-			return
-		}
-
-		// Phase 6: Validate client fingerprint to detect session hijacking.
-		// If the JWT contains a cfp claim, it must match the current client's fingerprint.
-		if cfp, hasCfp := claims["cfp"].(string); hasCfp {
-			if !matchesClientFingerprint(cfp, c) {
-				expectedCfp := clientFingerprint(c)
-				slog.Warn("session fingerprint mismatch",
-					"user_id", userId,
-					"expected", cfp[:min(8, len(cfp))],
-					"got", expectedCfp[:min(8, len(expectedCfp))],
-					"ip", c.ClientIP(),
-				)
+			switch {
+			case errors.Is(err, errSubjectSuspended):
+				c.AbortWithStatusJSON(http.StatusForbidden, APIError{Code: ErrCodeForbidden, Message: "Account is not active"})
+			case errors.Is(err, errSessionHijacked):
 				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionHijacked, Message: "Session bound to a different client"})
-				return
+			case errors.Is(err, errSessionRevoked):
+				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionExpired, Message: "Session revoked"})
+			default:
+				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
 			}
+			return
 		}
 
-		c.Set("user_id", userId)
-		c.Set("user_role", role)
+		c.Set("user_id", subj.userID)
+		c.Set("username", subj.username)
+		c.Set("user_role", subj.role)
 		c.Next()
 	}
 }
@@ -1160,6 +1719,10 @@ func HostValidationMiddleware() gin.HandlerFunc {
 		"127.0.0.1":          true,
 		"127.0.0.1:8080":     true,
 		"127.0.0.1:3000":     true,
+		"[::1]":              true,
+		"[::1]:8080":         true,
+		"[::1]:3000":         true,
+		"::1":                true,
 	}
 
 	envHosts := os.Getenv("ALLOWED_HOSTS")
@@ -1167,7 +1730,9 @@ func HostValidationMiddleware() gin.HandlerFunc {
 		// Explicit whitelist overrides defaults entirely
 		allowedHosts = make(map[string]bool)
 		for _, h := range strings.Split(envHosts, ",") {
-			allowedHosts[strings.TrimSpace(h)] = true
+			if trimmed := strings.ToLower(strings.TrimSpace(h)); trimmed != "" {
+				allowedHosts[trimmed] = true
+			}
 		}
 	} else {
 		// Auto-discover local network IPs so the Next.js proxy
@@ -1190,7 +1755,7 @@ func HostValidationMiddleware() gin.HandlerFunc {
 					if ip == nil || ip.IsLoopback() {
 						continue
 					}
-					ipStr := ip.String()
+					ipStr := strings.ToLower(ip.String())
 					allowedHosts[ipStr] = true
 					allowedHosts[ipStr+":8080"] = true
 					allowedHosts[ipStr+":3000"] = true
@@ -1200,15 +1765,48 @@ func HostValidationMiddleware() gin.HandlerFunc {
 		slog.Info("host validation auto-discovered", "allowed_count", len(allowedHosts))
 	}
 
+	hostPermitted := func(candidate string) bool {
+		normalized := strings.ToLower(strings.TrimSpace(candidate))
+		if normalized == "" {
+			return false
+		}
+		if allowedHosts[normalized] {
+			return true
+		}
+		if envHosts == "" && db.DB != nil {
+			var baseDomain string
+			if err := db.DB.QueryRow("SELECT COALESCE(base_domain, '') FROM system_settings WHERE id = 1").Scan(&baseDomain); err == nil {
+				bd := strings.ToLower(strings.TrimSpace(baseDomain))
+				if bd != "" && (normalized == bd || normalized == bd+":443" || normalized == bd+":80") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
 	return func(c *gin.Context) {
 		if len(allowedHosts) > 0 {
-			if !allowedHosts[c.Request.Host] {
+			if !hostPermitted(c.Request.Host) {
 				slog.Warn("host validation rejected request",
 					"host", c.Request.Host,
 					"ip", c.ClientIP(),
 				)
 				c.AbortWithStatus(http.StatusBadRequest)
 				return
+			}
+			trustProxy := (strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") || strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) != "") &&
+				!strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "false") &&
+				isTrustedProxyPeer(c)
+			if trustProxy {
+				if outerFwdHost := firstForwardedValue(c.GetHeader("X-Forwarded-Host")); outerFwdHost != "" && !hostPermitted(outerFwdHost) {
+					slog.Warn("host validation rejected X-Forwarded-Host",
+						"x_forwarded_host", outerFwdHost,
+						"ip", c.ClientIP(),
+					)
+					c.AbortWithStatus(http.StatusBadRequest)
+					return
+				}
 			}
 		}
 		c.Next()
@@ -1222,7 +1820,7 @@ func HostValidationMiddleware() gin.HandlerFunc {
 func CSRFMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Silent refresh requests and Bearer-token requests are exempt from CSRF
-		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || c.Request.URL.Path == "/api/v1/public/auth/refresh" || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
+		if isSessionRefreshRoute(c.Request.URL.Path) || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
 			c.Next()
 			return
 		}
@@ -1250,8 +1848,8 @@ func ListActiveSessions(c *gin.Context) {
 	rawUserID, _ := c.Get("user_id")
 	userID := rawUserID.(int)
 
-	// Clean up expired sessions first (best-effort)
-	db.DB.Exec("DELETE FROM active_sessions WHERE expires_at < CURRENT_TIMESTAMP")
+	// Clean up expired sessions first using UTC RFC3339 comparison
+	_, _ = db.DB.Exec("DELETE FROM active_sessions WHERE expires_at < ?", time.Now().UTC().Format(time.RFC3339))
 
 	rows, err := db.DB.Query(
 		`SELECT jti, ip_address, user_agent, expires_at, last_active
@@ -1273,11 +1871,11 @@ func ListActiveSessions(c *gin.Context) {
 		IsCurrent  bool   `json:"is_current"`
 	}
 
-	// Determine the current session's JTI
+	// Determine the current session's JTI (following recent rotation successor if within grace)
 	var currentJTI string
 	if _, claims, err := resolveSessionToken(c); err == nil {
 		if jti, ok := claims["jti"].(string); ok {
-			currentJTI = jti
+			currentJTI = resolveCurrentSessionJTI(jti)
 		}
 	}
 
@@ -1302,47 +1900,126 @@ func ListActiveSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "count": len(sessions)})
 }
 
-// RevokeSession allows a user to invalidate one of their own sessions by JTI prefix.
+func isValidSessionJTIPrefix(prefix string) bool {
+	if len(prefix) < 8 || len(prefix) > 36 {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		ch := prefix[i]
+		isHex := (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+		if !isHex && ch != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// RevokeSession allows a user to invalidate one of their own sessions by literal JTI prefix.
 func RevokeSession(c *gin.Context) {
 	rawUserID, _ := c.Get("user_id")
 	userID := rawUserID.(int)
-	jtiPrefix := c.Param("jti")
+	jtiPrefix := strings.TrimSuffix(strings.TrimSpace(c.Param("jti")), "...")
 
-	if jtiPrefix == "" || len(jtiPrefix) < 8 {
+	if !isValidSessionJTIPrefix(jtiPrefix) {
 		BadRequest(c, "Invalid session identifier")
 		return
 	}
 
-	// Strip trailing "..." if the frontend sends the masked JTI
-	jtiPrefix = strings.TrimSuffix(jtiPrefix, "...")
-
-	// Look up the full JTI — scoped to USER to prevent IDOR
-	var fullJTI string
-	var expiresAt string
-	err := db.DB.QueryRow(
-		"SELECT jti, expires_at FROM active_sessions WHERE jti LIKE ? AND user_id = ?",
-		jtiPrefix+"%", userID,
-	).Scan(&fullJTI, &expiresAt)
+	tx, err := db.DB.Begin()
 	if err != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	type matchedSession struct {
+		jti       string
+		expiresAt string
+		familyID  string
+	}
+	var matches []matchedSession
+	rows, err := tx.Query(
+		`SELECT jti, expires_at, COALESCE(family_id, '') FROM active_sessions
+		 WHERE user_id = ? AND substr(jti, 1, length(?)) = ? LIMIT 2`,
+		userID, jtiPrefix, jtiPrefix,
+	)
+	if err != nil {
+		InternalError(c, "Failed to query session")
+		return
+	}
+	for rows.Next() {
+		var m matchedSession
+		if scanErr := rows.Scan(&m.jti, &m.expiresAt, &m.familyID); scanErr == nil {
+			matches = append(matches, m)
+		}
+	}
+	_ = rows.Close()
+
+	if len(matches) == 0 {
 		NotFoundError(c, "Session not found")
 		return
 	}
+	if len(matches) > 1 {
+		RespondError(c, http.StatusConflict, ErrCodeConflict, "Ambiguous session identifier")
+		return
+	}
 
-	// Revoke the token via the durable blacklist (>= 2h floor covering refresh grace window)
-	rotatedTokenGrace.Delete(fullJTI)
+	target := matches[0]
+	familyID := strings.TrimSpace(target.familyID)
+	if familyID == "" {
+		familyID = target.jti
+	}
+
 	ttl := minRevocationTTL
-	if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+	if expTime, parseErr := time.Parse(time.RFC3339, target.expiresAt); parseErr == nil {
 		if remaining := time.Until(expTime); remaining > ttl {
 			ttl = remaining
 		}
 	}
-	if err := db.RevokeToken(fullJTI, ttl); err != nil {
-		InternalError(c, "Failed to revoke session")
+
+	var familyJTIs []string
+	fRows, fErr := tx.Query(
+		"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ?)",
+		userID, familyID, target.jti,
+	)
+	if fErr == nil {
+		for fRows.Next() {
+			var fJTI string
+			if fRows.Scan(&fJTI) == nil && fJTI != "" {
+				familyJTIs = append(familyJTIs, fJTI)
+			}
+		}
+		_ = fRows.Close()
+	}
+	if len(familyJTIs) == 0 {
+		familyJTIs = []string{target.jti}
+	}
+
+	for _, fJTI := range familyJTIs {
+		if rErr := db.RevokeTokenInTx(tx, fJTI, ttl); rErr != nil {
+			InternalError(c, "Failed to revoke session")
+			return
+		}
+	}
+	if _, dErr := tx.Exec(
+		"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ?)",
+		userID, familyID, target.jti,
+	); dErr != nil {
+		InternalError(c, "Failed to remove revoked session")
 		return
 	}
 
-	// Remove from active sessions
-	db.DB.Exec("DELETE FROM active_sessions WHERE jti = ?", fullJTI)
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit session revocation")
+		return
+	}
+
+	for _, fJTI := range familyJTIs {
+		db.CacheRevokedToken(fJTI, ttl)
+		evictRotationGraceForFamily(familyID, fJTI)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Session revoked"})
 }
@@ -1354,7 +2031,7 @@ func GenerateJWT(userID int, c *gin.Context) (string, error) {
 
 // ChangePassword godoc
 // @Summary      Update user password
-// @Description  Verifies current password and updates to a new password using bcrypt.
+// @Description  Verifies current password, updates bcrypt hash, revokes concurrent credentials, and rotates session.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -1392,8 +2069,7 @@ func ChangePassword(c *gin.Context) {
 
 	var currentHash string
 	var username string
-	var role string
-	err := db.DB.QueryRow("SELECT username, COALESCE(role, 'member'), COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &role, &currentHash)
+	err := db.DB.QueryRow("SELECT username, COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &currentHash)
 	if err != nil {
 		NotFoundError(c, "User not found")
 		return
@@ -1415,14 +2091,41 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	if _, err := db.DB.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
 		InternalError(c, "Failed to update password")
 		return
 	}
 
-	if role == "admin" {
-		services.SaveMasterCredentials(username, req.NewPassword)
+	newVer, revokedJTIs, revErr := revokeAllUserCredentialsInTx(tx, userID)
+	if revErr != nil {
+		InternalError(c, "Failed to invalidate concurrent credentials")
+		return
 	}
+
+	rotatedToken, _, tokErr := createSessionJWTInTx(tx, userID, c, time.Now().Unix(), "", newVer)
+	if tokErr != nil {
+		InternalError(c, "Failed to rotate session")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit password update")
+		return
+	}
+
+	finalizeUserCredentialRevocation(userID, revokedJTIs)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("aetherflow_session", rotatedToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
+
 	db.RecordAudit(userID, username, "password_update", "user", strconv.Itoa(userID), "Password updated successfully", c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Password updated successfully"})

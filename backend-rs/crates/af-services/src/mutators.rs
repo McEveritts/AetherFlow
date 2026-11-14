@@ -3785,8 +3785,11 @@ pub fn generate_qbittorrent_pbkdf2(password: &str) -> String {
 }
 
 fn default_master_cred_paths() -> Vec<PathBuf> {
+    vec![resolve_config_path("/var/lib/aetherflow/.master.creds")]
+}
+
+fn legacy_duplicate_master_cred_paths() -> Vec<PathBuf> {
     vec![
-        resolve_config_path("/var/lib/aetherflow/.master.creds"),
         resolve_config_path("/opt/AetherFlow/backend/data/.master.creds"),
         PathBuf::from("backend/data/.master.creds"),
     ]
@@ -3802,6 +3805,28 @@ fn master_cred_paths() -> Vec<PathBuf> {
     default_master_cred_paths()
 }
 
+fn decode_stored_master_creds(creds: MasterCreds) -> Option<(String, String, String)> {
+    let user = creds.username.trim().to_string();
+    if user.is_empty() || creds.password.trim().is_empty() {
+        return None;
+    }
+    let password = af_db::decrypt_secret_if_needed(creds.password.trim()).ok()?;
+    if password.is_empty() || password == "adminadmin" {
+        return None;
+    }
+    let raw_ha1 = if creds.ha1.trim().is_empty() {
+        String::new()
+    } else {
+        af_db::decrypt_secret_if_needed(creds.ha1.trim()).unwrap_or_default()
+    };
+    let ha1 = finalized_ha1(&MasterCreds {
+        username: user.clone(),
+        password: password.clone(),
+        ha1: raw_ha1,
+    });
+    Some((user, password, ha1))
+}
+
 fn finalized_ha1(creds: &MasterCreds) -> String {
     let expected = md5_hex(creds.password.as_bytes());
     if creds.ha1.is_empty() || creds.ha1 != expected {
@@ -3811,18 +3836,22 @@ fn finalized_ha1(creds: &MasterCreds) -> String {
     }
 }
 
-/// Persists the master administrator username, password, and MD5(password) HA1
-/// to the same JSON files Go SaveMasterCredentials and auth::save_master_credentials write.
+/// Persists package-provisioning credentials (`username`, AES-256-GCM encrypted `password`
+/// and `ha1` when `AES_MASTER_KEY` is configured) exclusively to `/var/lib/aetherflow/.master.creds`
+/// (mode `0600`), unlinking any legacy duplicate `.master.creds` paths.
 pub fn save_master_credentials(username: &str, password: &str) -> Result<(), String> {
     let user_clean = username.trim();
     if user_clean.is_empty() || password.is_empty() {
         return Err("username and password are required".to_string());
     }
     let ha1 = md5_hex(password.as_bytes());
+    let stored_password =
+        af_db::encrypt_secret_if_configured(password).map_err(|e| e.to_string())?;
+    let stored_ha1 = af_db::encrypt_secret_if_configured(&ha1).map_err(|e| e.to_string())?;
     let payload = serde_json::to_string(&MasterCreds {
         username: user_clean.to_string(),
-        password: password.to_string(),
-        ha1,
+        password: stored_password,
+        ha1: stored_ha1,
     })
     .map_err(|e| e.to_string())?;
     let mut raw = payload.into_bytes();
@@ -3837,15 +3866,27 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
             wrote = true;
         }
     }
-    if let Ok(text) = std::str::from_utf8(&raw[..raw.len().saturating_sub(1)]) {
-        if let Ok(encrypted) = af_db::encrypt_key(text) {
-            if let Ok(conn) = af_db::get_conn() {
-                let _ = conn.execute(
-                    r#"INSERT INTO system_config (key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
+    if env::var("AETHERFLOW_MASTER_CREDS_FILE")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        for legacy in legacy_duplicate_master_cred_paths() {
+            let _ = fs::remove_file(legacy);
+        }
+    }
+    let plain_record = serde_json::to_string(&MasterCreds {
+        username: user_clean.to_string(),
+        password: password.to_string(),
+        ha1,
+    })
+    .map_err(|e| e.to_string())?;
+    if let Ok(encrypted) = af_db::encrypt_secret_if_configured(&plain_record) {
+        if let Ok(conn) = af_db::get_conn() {
+            let _ = conn.execute(
+                r#"INSERT INTO system_config (key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP"#,
-                    params![MASTER_CREDS_SYSTEM_KEY, encrypted],
-                );
-            }
+                params![MASTER_CREDS_SYSTEM_KEY, encrypted],
+            );
         }
     }
     if !wrote {
@@ -3854,15 +3895,45 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
     Ok(())
 }
 
+/// Ensures dedicated random package-provisioning credentials exist in `.master.creds`
+/// without ever persisting the operator's control-plane password.
+pub fn ensure_provisioning_credentials(username: &str) {
+    let user_clean = {
+        let trimmed = username.trim();
+        if trimmed.is_empty() {
+            "admin"
+        } else {
+            trimmed
+        }
+    };
+    let (existing_user, existing_pass, _) = load_master_credentials();
+    if !existing_user.is_empty() && !existing_pass.is_empty() && existing_pass != "adminadmin" {
+        let _ = save_master_credentials(&existing_user, &existing_pass);
+        return;
+    }
+    let mut random_bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut random_bytes);
+    let generated_secret = hex::encode(random_bytes);
+    let _ = save_master_credentials(user_clean, &generated_secret);
+}
+
 /// Loads `(username, password, ha1)` from the master credentials file, the installer
 /// conf, or a previously encrypted `system_config` row.
 pub fn load_master_credentials() -> (String, String, String) {
-    for path in master_cred_paths() {
+    let mut read_paths = master_cred_paths();
+    if env::var("AETHERFLOW_MASTER_CREDS_FILE")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        read_paths.push(resolve_config_path(
+            "/opt/AetherFlow/backend/data/.master.creds",
+        ));
+    }
+    for path in read_paths {
         if let Ok(data) = fs::read(&path) {
             if let Ok(creds) = serde_json::from_slice::<MasterCreds>(&data) {
-                if !creds.username.is_empty() && !creds.password.is_empty() {
-                    let ha1 = finalized_ha1(&creds);
-                    return (creds.username, creds.password, ha1);
+                if let Some(decoded) = decode_stored_master_creds(creds) {
+                    return decoded;
                 }
             }
         }
@@ -3876,11 +3947,12 @@ pub fn load_master_credentials() -> (String, String, String) {
             params![MASTER_CREDS_SYSTEM_KEY],
             |r| r.get::<_, String>(0),
         ) {
-            let decrypted = af_db::decrypt_key(&raw_val).unwrap_or(raw_val);
+            let decrypted = af_db::decrypt_secret_if_needed(&raw_val)
+                .or_else(|_| af_db::decrypt_key(&raw_val))
+                .unwrap_or(raw_val);
             if let Ok(creds) = serde_json::from_str::<MasterCreds>(&decrypted) {
-                if !creds.username.is_empty() && !creds.password.is_empty() {
-                    let ha1 = finalized_ha1(&creds);
-                    return (creds.username, creds.password, ha1);
+                if let Some(decoded) = decode_stored_master_creds(creds) {
+                    return decoded;
                 }
             }
         }

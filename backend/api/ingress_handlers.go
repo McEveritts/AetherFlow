@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 
@@ -199,23 +198,37 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		}
 		cleanHost = strings.TrimSuffix(cleanHost, ".")
 		if cleanHost == "aether.local" || strings.HasSuffix(cleanHost, ".aether.local") {
-			isPrivateIP := regexp.MustCompile(`^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|::1$|\[::1\]|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:)`).MatchString
-			allowed := true
-			if remoteAddr := strings.ToLower(strings.TrimSpace(c.Request.RemoteAddr)); remoteAddr != "" {
-				remoteIP := remoteAddr
-				if idx := strings.LastIndex(remoteIP, ":"); idx != -1 && !strings.Contains(remoteIP[idx:], "]") {
-					remoteIP = strings.Trim(remoteIP[:idx], "[]")
+			isPrivateOrLoopbackIP := func(raw string) bool {
+				trimmed := strings.Trim(strings.TrimSpace(raw), "[]")
+				if trimmed == "" {
+					return false
 				}
-				if remoteIP != "" && !isPrivateIP(remoteIP) {
+				ip := net.ParseIP(trimmed)
+				if ip == nil {
+					return false
+				}
+				return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+			}
+			allowed := true
+			if remoteAddr := strings.TrimSpace(c.Request.RemoteAddr); remoteAddr != "" {
+				remoteIP := remoteAddr
+				if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+					remoteIP = host
+				}
+				if strings.TrimSpace(remoteIP) != "" && !isPrivateOrLoopbackIP(remoteIP) {
 					allowed = false
 				}
 			}
-			if xff := strings.TrimSpace(c.GetHeader("X-Forwarded-For")); xff != "" {
-				for _, hop := range strings.Split(xff, ",") {
-					hopIP := strings.ToLower(strings.Trim(strings.TrimSpace(hop), "[]"))
-					if hopIP == "" || !isPrivateIP(hopIP) {
-						allowed = false
-						break
+			if allowed && isTrustedProxyPeer(c) {
+				if xri := strings.TrimSpace(c.GetHeader("X-Real-IP")); xri != "" && !isPrivateOrLoopbackIP(xri) {
+					allowed = false
+				}
+				if xff := strings.TrimSpace(c.GetHeader("X-Forwarded-For")); xff != "" {
+					for _, hop := range strings.Split(xff, ",") {
+						if !isPrivateOrLoopbackIP(hop) {
+							allowed = false
+							break
+						}
 					}
 				}
 			}
@@ -239,10 +252,8 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		incomingHost := c.Request.Host
 		upgradeHeader := strings.TrimSpace(c.GetHeader("Upgrade"))
 		authenticatedUser := ""
-		if _, claims, err := resolveSessionToken(c); err == nil && db.DB != nil {
-			if userIDFloat, ok := claims["user_id"].(float64); ok {
-				_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", int(userIDFloat)).Scan(&authenticatedUser)
-			}
+		if _, _, subj, err := resolveSessionTokenWithSubject(c); err == nil {
+			authenticatedUser = subj.username
 		}
 		proxy := &httputil.ReverseProxy{
 			FlushInterval: -1,
@@ -264,16 +275,7 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 					peerIP = ip.String()
 				}
 				parsedPeer := net.ParseIP(peerIP)
-				trustForwarded := false
-				if parsedPeer != nil {
-					if strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) != "" {
-						trustForwarded = isConfiguredTrustedProxyIP(parsedPeer)
-					} else if strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "false") {
-						trustForwarded = false
-					} else {
-						trustForwarded = parsedPeer.IsLoopback() || (strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "true") && (parsedPeer.IsPrivate() || parsedPeer.IsLinkLocalUnicast()))
-					}
-				}
+				trustForwarded := parsedPeer != nil && isConfiguredTrustedProxyIP(parsedPeer)
 				if !trustForwarded {
 					for _, hdr := range []string{
 						"Forwarded",

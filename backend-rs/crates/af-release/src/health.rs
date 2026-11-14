@@ -90,16 +90,27 @@ pub fn install_packaged_unit_if_missing(
 }
 
 const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\n";
-const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\n";
+const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n";
+const LOG_RETENTION_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n";
 
 /// Atomically installs vendor-managed systemd hardening drop-ins without modifying
 /// existing base `.service` files (preserving custom operator `ReadWritePaths`/`BindPaths`).
-pub fn install_systemd_hardening_dropins(systemd_units_dst: &Path) -> ReleaseResult<()> {
+pub fn install_systemd_hardening_dropins(
+    systemd_units_dst: &Path,
+    include_log_retention: bool,
+) -> ReleaseResult<()> {
     crate::fs_security::create_dir_all_no_symlinks(systemd_units_dst, 0o755)?;
-    for (dropin_dir_name, content) in [
+    let mut entries = vec![
         ("aetherflow-runner.service.d", RUNNER_HARDENING_DROPIN),
         ("aetherflow-api.service.d", API_HARDENING_DROPIN),
-    ] {
+    ];
+    if include_log_retention {
+        entries.push((
+            "aetherflow-log-retention.service.d",
+            LOG_RETENTION_HARDENING_DROPIN,
+        ));
+    }
+    for (dropin_dir_name, content) in entries {
         let dropin_dir = systemd_units_dst.join(dropin_dir_name);
         crate::fs_security::create_dir_all_no_symlinks(&dropin_dir, 0o755)?;
         let conf_path = dropin_dir.join("10-aetherflow-hardening.conf");
@@ -406,7 +417,7 @@ impl LifecycleController for SystemdLifecycleController {
                     &config.systemd_units_dst,
                 )?;
             }
-            install_systemd_hardening_dropins(&config.systemd_units_dst)?;
+            install_systemd_hardening_dropins(&config.systemd_units_dst, has_log_retention)?;
         }
 
         if config.isolated_root.is_none() {
@@ -638,7 +649,7 @@ impl LifecycleController for NoopLifecycleController {
                     &config.systemd_units_dst,
                 )?;
             }
-            install_systemd_hardening_dropins(&config.systemd_units_dst)?;
+            install_systemd_hardening_dropins(&config.systemd_units_dst, has_log_retention)?;
         }
         Ok(())
     }
