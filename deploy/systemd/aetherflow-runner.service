@@ -35,5 +35,18 @@ RestartSec=3s
 
 LimitNOFILE=65535
 
+# Sandboxing: NoNewPrivileges=yes and RestrictSUIDSGID=yes are intentionally
+# omitted because marketplace package installers drop privileges via Debian
+# sudo 1.9+, which aborts when PR_GET_NO_NEW_PRIVS is set.
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap
+
 [Install]
 WantedBy=multi-user.target

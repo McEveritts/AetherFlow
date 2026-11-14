@@ -5482,7 +5482,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         };
 
         let (master_user, mut master_pass) =
-            resolve_master_credentials(self.env_cfg.fs_root.as_deref());
+            try_resolve_master_credentials(self.env_cfg.fs_root.as_deref())
+                .map_err(|e| PackageExecutorError::SecurityViolation(e.to_string()))?;
         if let Some(explicit_pass) = self.resolve_explicit_password() {
             master_pass = explicit_pass;
         }
@@ -9161,7 +9162,22 @@ fn append_log_line(log_file_path: &Path, line: &str) {
         .append(true)
         .open(log_file_path)
     {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let _ = libc::flock(f.as_raw_fd(), libc::LOCK_SH);
+            }
+        }
         let _ = writeln!(f, "[{}] {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), line);
+        let _ = f.flush();
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let _ = libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
@@ -9644,7 +9660,11 @@ fn parse_master_credentials_content(raw: &str) -> (Option<String>, Option<String
 
 /// Resolves `(MASTER_USER, MASTER_PASS)` from process environment or credential files,
 /// generating and persisting a cryptographically unique fallback secret when absent.
-fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
+/// Fails closed if an existing encrypted `.master.creds` cannot be decrypted or if
+/// configured `AES_MASTER_KEY` encryption fails, preventing silent plaintext clobbering.
+pub(crate) fn try_resolve_master_credentials(
+    fs_root: Option<&Path>,
+) -> anyhow::Result<(String, String)> {
     let env_user = env::var("AETHERFLOW_MASTER_USER")
         .or_else(|_| env::var("MASTER_USER"))
         .ok()
@@ -9659,7 +9679,7 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
         .filter(|v| !v.is_empty() && v != "adminadmin");
 
     if let Some(pass) = env_pass {
-        return (env_user.unwrap_or_else(|| "admin".to_string()), pass);
+        return Ok((env_user.unwrap_or_else(|| "admin".to_string()), pass));
     }
 
     let rebase_path = |logical: &str| -> PathBuf {
@@ -9676,6 +9696,11 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
             }
             None => p.to_path_buf(),
         }
+    };
+
+    let persist_path = match env::var("AETHERFLOW_MASTER_CREDS_FILE") {
+        Ok(custom) if !custom.trim().is_empty() => rebase_path(custom.trim()),
+        _ => rebase_path("/var/lib/aetherflow/.master.creds"),
     };
 
     let mut candidate_paths = Vec::new();
@@ -9699,6 +9724,27 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
     let mut file_pass: Option<String> = None;
     for candidate in candidate_paths {
         if let Ok(contents) = fs::read_to_string(&candidate) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
+                for field in ["password", "passwd", "pass", "MASTER_PASS", "ha1"] {
+                    if let Some(raw_secret) = val.get(field).and_then(|v| v.as_str()) {
+                        let trimmed_secret = raw_secret.trim();
+                        if trimmed_secret.starts_with("enc:v1:") {
+                            af_db::decrypt_secret_if_needed(trimmed_secret).map_err(|err| {
+                                anyhow::anyhow!(
+                                    "refusing to overwrite undecryptable master credentials at {}: {}",
+                                    candidate.display(),
+                                    err
+                                )
+                            })?;
+                        }
+                    }
+                }
+            } else if contents.contains("enc:v1:") {
+                anyhow::bail!(
+                    "refusing to overwrite corrupted encrypted master credentials at {}",
+                    candidate.display()
+                );
+            }
             let (u, p) = parse_master_credentials_content(&contents);
             if file_user.is_none() {
                 file_user = u;
@@ -9716,29 +9762,41 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
     let master_pass = match file_pass {
         Some(pass) => pass,
         None => {
+            if let Ok(existing_persist) = fs::read_to_string(&persist_path) {
+                if existing_persist.contains("enc:v1:") {
+                    anyhow::bail!(
+                        "refusing to overwrite existing encrypted master credentials at {}",
+                        persist_path.display()
+                    );
+                }
+            }
             let generated = format!(
                 "{}{}",
                 uuid::Uuid::new_v4().simple(),
                 uuid::Uuid::new_v4().simple()
             );
-            let persist_path = rebase_path("/var/lib/aetherflow/.master.creds");
-            let stored_password =
-                af_db::encrypt_secret_if_configured(&generated).unwrap_or_else(|_| generated.clone());
+            let stored_password = af_db::encrypt_secret_if_configured(&generated)?;
             let payload = serde_json::json!({
                 "username": master_user,
                 "password": stored_password,
             })
             .to_string();
-            let _ = write_file_atomic_with_mode_bounded(
+            write_file_atomic_with_mode_bounded(
                 &persist_path,
                 payload.as_bytes(),
                 0o600,
                 fs_root,
-            );
+            )?;
             generated
         }
     };
-    (master_user, master_pass)
+    Ok((master_user, master_pass))
+}
+
+#[cfg(test)]
+fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
+    try_resolve_master_credentials(fs_root)
+        .expect("resolve_master_credentials failed in test fixture")
 }
 
 /// Updates listening/scrape port in-place on preserved package configuration files
@@ -11732,10 +11790,15 @@ pub fn execute_package_request_stream(
             cmd.process_group(0);
         }
         apply_legacy_package_environment(&mut cmd, &req);
-        if env_cfg.fs_root.is_some() {
-            let (master_user, master_pass) = resolve_master_credentials(env_cfg.fs_root.as_deref());
-            cmd.env("MASTER_USER", master_user)
-                .env("MASTER_PASS", master_pass);
+        match try_resolve_master_credentials(env_cfg.fs_root.as_deref()) {
+            Ok((master_user, master_pass)) => {
+                cmd.env("MASTER_USER", master_user)
+                    .env("MASTER_PASS", master_pass);
+            }
+            Err(error) => {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:{error}\n"));
+                return;
+            }
         }
 
         #[cfg(unix)]

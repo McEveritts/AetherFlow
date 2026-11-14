@@ -729,6 +729,13 @@ func InitDB() {
 	ensureColumnIfMissing("oidc_refresh_tokens", "family_id",
 		"ALTER TABLE oidc_refresh_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
 	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_oidc_refresh_tokens_family ON oidc_refresh_tokens(family_id) WHERE family_id != '';")
+	ensureColumnIfMissing("mfa_challenges", "credential_ver",
+		"ALTER TABLE mfa_challenges ADD COLUMN credential_ver INTEGER NOT NULL DEFAULT 0;")
+	ensureColumnIfMissing("revoked_tokens", "family_id",
+		"ALTER TABLE revoked_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';")
+	ensureColumnIfMissing("revoked_tokens", "user_id",
+		"ALTER TABLE revoked_tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;")
+	_, _ = DB.Exec("CREATE INDEX IF NOT EXISTS idx_revoked_tokens_family ON revoked_tokens(family_id) WHERE family_id != '';")
 
 	// Enforce RFC 8628 unique user_code index after cleaning any historical duplicates
 	_, _ = DB.Exec(`DELETE FROM oidc_device_codes WHERE rowid NOT IN (SELECT MAX(rowid) FROM oidc_device_codes GROUP BY user_code);`)

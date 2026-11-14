@@ -42,13 +42,21 @@ pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
             return Ok(arr);
         }
     }
+    if raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut arr = [0u8; 32];
+        for (idx, dst) in arr.iter_mut().enumerate() {
+            let hex_pair = &raw[idx * 2..idx * 2 + 2];
+            *dst = u8::from_str_radix(hex_pair, 16)?;
+        }
+        return Ok(arr);
+    }
     if raw.len() == 32 {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(raw.as_bytes());
         return Ok(arr);
     }
     anyhow::bail!(
-        "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} bytes.",
+        "FATAL: AES_MASTER_KEY must decode to 32 bytes (32-byte raw, base64, or 64-char hex). Got {} chars.",
         raw.len()
     )
 }
@@ -1088,6 +1096,24 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
         "family_id",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    ensure_column(
+        conn,
+        "mfa_challenges",
+        "credential_ver",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "revoked_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "revoked_tokens",
+        "user_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     let existing_index_sql: Option<String> = conn
         .query_row(
@@ -1116,6 +1142,10 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_family ON oidc_refresh_tokens(family_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_revoked_tokens_family ON revoked_tokens(family_id)",
         [],
     )?;
     Ok(())
@@ -1696,10 +1726,22 @@ static PENDING_2FA_CACHE: Lazy<Mutex<HashMap<i64, (String, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
-    )
-    .is_ok()
+    if conn
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS revoked_tokens (
+                jti TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL,
+                family_id TEXT NOT NULL DEFAULT '',
+                user_id INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let _ = ensure_column(conn, "revoked_tokens", "family_id", "TEXT NOT NULL DEFAULT ''");
+    let _ = ensure_column(conn, "revoked_tokens", "user_id", "INTEGER NOT NULL DEFAULT 0");
+    true
 }
 
 pub fn cache_revoked_token(jti: &str, ttl: Duration) {
@@ -1722,10 +1764,37 @@ pub fn revoke_token_in_tx(conn: &Connection, jti: &str, ttl: Duration) -> anyhow
     if !ensure_revoked_tokens_table(conn) {
         anyhow::bail!("failed to ensure revoked_tokens table");
     }
+    let mut family_id = String::new();
+    let mut user_id = 0i64;
+    if let Ok(Some((fam, uid))) = conn
+        .query_row(
+            "SELECT COALESCE(family_id, ''), user_id FROM active_sessions WHERE jti = ?1",
+            params![jti],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+    {
+        family_id = if fam.trim().is_empty() {
+            jti.to_string()
+        } else {
+            fam
+        };
+        user_id = uid;
+    } else if let Ok(Some((fam, uid))) = conn
+        .query_row(
+            "SELECT COALESCE(family_id, ''), COALESCE(user_id, 0) FROM revoked_tokens WHERE jti = ?1",
+            params![jti],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+    {
+        family_id = fam;
+        user_id = uid;
+    }
     let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
     conn.execute(
-        "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
-        params![jti, exp_rfc3339],
+        "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, family_id, user_id) VALUES (?1, ?2, ?3, ?4)",
+        params![jti, exp_rfc3339, family_id, user_id],
     )?;
     let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
     Ok(())
@@ -1753,6 +1822,69 @@ pub fn try_consume_session_jti_in_tx(
         params![jti, exp_rfc3339],
     )?;
     Ok(inserted == 1)
+}
+
+pub fn record_revoked_token_lineage_in_tx(
+    conn: &Connection,
+    jti: &str,
+    family_id: &str,
+    user_id: i64,
+) -> anyhow::Result<()> {
+    if jti.is_empty() || family_id.trim().is_empty() {
+        return Ok(());
+    }
+    match conn.execute(
+        "UPDATE revoked_tokens SET family_id = ?1, user_id = ?2 WHERE jti = ?3",
+        params![family_id.trim(), user_id, jti],
+    ) {
+        Ok(_) => Ok(()),
+        Err(e)
+            if e.to_string().contains("family_id") || e.to_string().contains("user_id") =>
+        {
+            let _ = ensure_column(conn, "revoked_tokens", "family_id", "TEXT NOT NULL DEFAULT ''");
+            let _ = ensure_column(
+                conn,
+                "revoked_tokens",
+                "user_id",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            conn.execute(
+                "UPDATE revoked_tokens SET family_id = ?1, user_id = ?2 WHERE jti = ?3",
+                params![family_id.trim(), user_id, jti],
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn resolve_revoked_token_family_in_tx(
+    conn: &Connection,
+    jti: &str,
+    user_id: i64,
+) -> anyhow::Result<Option<String>> {
+    if jti.is_empty() {
+        return Ok(None);
+    }
+    let query = || {
+        conn.query_row(
+            "SELECT COALESCE(family_id, '') FROM revoked_tokens \
+             WHERE jti = ?1 AND (COALESCE(user_id, 0) = 0 OR user_id = ?2) LIMIT 1",
+            params![jti, user_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+    };
+    let fam: Option<String> = match query() {
+        Ok(v) => v,
+        Err(e)
+            if e.to_string().contains("family_id") || e.to_string().contains("user_id") =>
+        {
+            None
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(fam.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
 pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
@@ -1842,34 +1974,142 @@ pub fn delete_2fa_pending(user_id: i64) {
 
 pub const MAX_MFA_ATTEMPTS: i64 = 5;
 
-pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) -> anyhow::Result<()> {
-    let conn = get_conn()?;
+pub fn store_mfa_challenge_in_tx(
+    conn: &Connection,
+    token: &str,
+    user_id: i64,
+    credential_ver: i64,
+    ttl: Duration,
+) -> anyhow::Result<()> {
     let now = Utc::now().timestamp();
+    let exp = now + ttl.as_secs().min(300) as i64;
     conn.execute(
         "DELETE FROM mfa_challenges WHERE expires_at <= ?1",
         params![now],
     )?;
-    conn.execute(
-        "INSERT INTO mfa_challenges (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
-        params![token, user_id, now + ttl.as_secs().min(300) as i64],
-    )?;
+    match conn.execute(
+        "INSERT INTO mfa_challenges (token, user_id, credential_ver, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        params![token, user_id, credential_ver, exp],
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("credential_ver") => {
+            ensure_column(
+                conn,
+                "mfa_challenges",
+                "credential_ver",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            conn.execute(
+                "INSERT INTO mfa_challenges (token, user_id, credential_ver, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                params![token, user_id, credential_ver, exp],
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) -> anyhow::Result<()> {
+    let conn = get_conn()?;
+    let ver: i64 = conn
+        .query_row(
+            "SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    store_mfa_challenge_in_tx(&conn, token, user_id, ver, ttl)
+}
+
+pub fn delete_user_mfa_challenges_in_tx(conn: &Connection, user_id: i64) -> anyhow::Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'mfa_challenges'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if exists {
+        conn.execute(
+            "DELETE FROM mfa_challenges WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
     Ok(())
 }
 
 /// Call within the same write transaction as factor verification and consumption.
 /// Failed verification must commit this attempt; successful consumption must commit with the factor.
+pub fn begin_mfa_attempt_with_epoch(
+    conn: &Connection,
+    token: &str,
+) -> anyhow::Result<Option<(i64, i64)>> {
+    let now = Utc::now().timestamp();
+    match conn
+        .query_row(
+            "UPDATE mfa_challenges SET attempts = attempts + 1 \
+             WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 \
+             RETURNING user_id, COALESCE(credential_ver, 0)",
+            params![token, MAX_MFA_ATTEMPTS, now],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+    {
+        Ok(res) => Ok(res),
+        Err(e) if e.to_string().contains("credential_ver") => Ok(conn
+            .query_row(
+                "UPDATE mfa_challenges SET attempts = attempts + 1 \
+                 WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 \
+                 RETURNING user_id",
+                params![token, MAX_MFA_ATTEMPTS, now],
+                |r| Ok((r.get(0)?, 0i64)),
+            )
+            .optional()?),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn begin_mfa_attempt(conn: &Connection, token: &str) -> anyhow::Result<Option<i64>> {
-    Ok(conn.query_row(
-        "UPDATE mfa_challenges SET attempts = attempts + 1 WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 RETURNING user_id",
-        params![token, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
-    ).optional()?)
+    Ok(begin_mfa_attempt_with_epoch(conn, token)?.map(|(uid, _)| uid))
+}
+
+pub fn consume_mfa_challenge_with_epoch(
+    conn: &Connection,
+    token: &str,
+    user_id: i64,
+    credential_ver: i64,
+) -> anyhow::Result<bool> {
+    let now = Utc::now().timestamp();
+    match conn
+        .query_row(
+            "DELETE FROM mfa_challenges \
+             WHERE token = ?1 AND user_id = ?2 AND COALESCE(credential_ver, 0) = ?3 \
+               AND attempts <= ?4 AND expires_at > ?5 \
+             RETURNING user_id",
+            params![token, user_id, credential_ver, MAX_MFA_ATTEMPTS, now],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+    {
+        Ok(consumed) => Ok(consumed == Some(user_id)),
+        Err(e) if e.to_string().contains("credential_ver") => {
+            if credential_ver != 0 {
+                return Ok(false);
+            }
+            consume_mfa_challenge(conn, token, user_id)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn consume_mfa_challenge(conn: &Connection, token: &str, user_id: i64) -> anyhow::Result<bool> {
-    let consumed: Option<i64> = conn.query_row(
-        "DELETE FROM mfa_challenges WHERE token = ?1 AND user_id = ?2 AND attempts <= ?3 AND expires_at > ?4 RETURNING user_id",
-        params![token, user_id, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
-    ).optional()?;
+    let consumed: Option<i64> = conn
+        .query_row(
+            "DELETE FROM mfa_challenges WHERE token = ?1 AND user_id = ?2 AND attempts <= ?3 AND expires_at > ?4 RETURNING user_id",
+            params![token, user_id, MAX_MFA_ATTEMPTS, Utc::now().timestamp()],
+            |r| r.get(0),
+        )
+        .optional()?;
     Ok(consumed == Some(user_id))
 }
 
@@ -2036,5 +2276,53 @@ pub(crate) mod tests {
             assert!(action.resolved_at.is_some());
             assert!(resolve_action(action_id, new_status, "audit-admin").is_err());
         }
+    }
+
+    #[test]
+    fn test_round3_64hex_aes_key_schema24_and_revoked_lineage_epoch_mfa() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let hex_key: String = (0u8..32).map(|b| format!("{b:02x}")).collect();
+        let parsed = parse_aes_key_bytes(&hex_key).expect("64-char hex AES key must decode");
+        assert_eq!(parsed[0], 0x00);
+        assert_eq!(parsed[1], 0x01);
+        assert!(parse_aes_key_bytes(&hex_key[..16]).is_err());
+        assert!(parse_aes_key_bytes(&"z".repeat(64)).is_err());
+
+        env::set_var("AES_MASTER_KEY", &hex_key);
+        init_aes_key().unwrap();
+        let ct = encrypt_key("hex-key-secret-value").unwrap();
+        assert!(ct.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&ct).unwrap(), "hex-key-secret-value");
+
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 24, "MAX(schema_versions.version) must remain 24");
+
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (777, 'r3_db_user', 'user')",
+            [],
+        )
+        .unwrap();
+
+        revoke_token_in_tx(&conn, "r3-jti-1", Duration::from_secs(600)).unwrap();
+        record_revoked_token_lineage_in_tx(&conn, "r3-jti-1", "r3-family-99", 777).unwrap();
+        assert_eq!(
+            resolve_revoked_token_family_in_tx(&conn, "r3-jti-1", 777)
+                .unwrap()
+                .as_deref(),
+            Some("r3-family-99")
+        );
+
+        store_mfa_challenge_in_tx(&conn, "r3-mfa-tok", 777, 10, Duration::from_secs(300)).unwrap();
+        let (_, ver) = begin_mfa_attempt_with_epoch(&conn, "r3-mfa-tok")
+            .unwrap()
+            .expect("challenge must exist");
+        assert_eq!(ver, 10);
+        assert!(!consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 11).unwrap());
+        assert!(consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 10).unwrap());
     }
 }

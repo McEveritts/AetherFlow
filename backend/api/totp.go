@@ -16,6 +16,7 @@ import (
 	"aetherflow/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -29,7 +30,34 @@ const recoveryCodeCount = 8
 // recoveryCodePattern matches the XXXX-XXXX format used by recovery codes.
 var recoveryCodePattern = regexp.MustCompile(`^[A-Z0-9]{4}-[A-Z0-9]{4}$`)
 
-// ── Recovery Code Helpers ─────────────────────────────────────────────────
+// ── Recovery Code & TOTP Step Anti-Replay Helpers ─────────────────────────
+
+func hashRecoveryCodes(codes []string) ([]string, error) {
+	hashes := make([]string, len(codes))
+	for i, code := range codes {
+		hash, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hash recovery code: %w", err)
+		}
+		hashes[i] = string(hash)
+	}
+	return hashes, nil
+}
+
+func storeHashedRecoveryCodesInTx(tx *sql.Tx, userID int, hashes []string) error {
+	if _, err := tx.Exec("DELETE FROM recovery_codes WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to clear old recovery codes: %w", err)
+	}
+	for _, hash := range hashes {
+		if _, err := tx.Exec(
+			"INSERT INTO recovery_codes (user_id, code_hash, used) VALUES (?, ?, 0)",
+			userID, hash,
+		); err != nil {
+			return fmt.Errorf("failed to insert recovery code: %w", err)
+		}
+	}
+	return nil
+}
 
 // generateRecoveryCodes creates N random codes in XXXX-XXXX format.
 func generateRecoveryCodes(count int) ([]string, error) {
@@ -49,57 +77,101 @@ func generateRecoveryCodes(count int) ([]string, error) {
 	return codes, nil
 }
 
-// storeRecoveryCodes hashes and persists recovery codes for a user, replacing any existing ones.
-func storeRecoveryCodes(userID int, codes []string) error {
-	// Delete existing codes first
-	if _, err := db.DB.Exec("DELETE FROM recovery_codes WHERE user_id = ?", userID); err != nil {
-		return fmt.Errorf("failed to clear old recovery codes: %w", err)
+// validateRecoveryCodeInTx checks a recovery code inside tx and atomically marks it used
+// via `WHERE id = ? AND user_id = ? AND COALESCE(used, 0) = 0` (`RowsAffected() == 1`).
+func validateRecoveryCodeInTx(tx *sql.Tx, userID int, code string) bool {
+	if tx == nil || userID <= 0 || code == "" {
+		return false
 	}
-
-	for _, code := range codes {
-		hash, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
-		if err != nil {
-			return fmt.Errorf("failed to hash recovery code: %w", err)
-		}
-		if _, err := db.DB.Exec(
-			"INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)",
-			userID, string(hash),
-		); err != nil {
-			return fmt.Errorf("failed to insert recovery code: %w", err)
-		}
+	type candidate struct {
+		id   int
+		hash string
 	}
-	return nil
-}
-
-// validateRecoveryCode checks a code against a user's stored hashes and marks it used if valid.
-func validateRecoveryCode(userID int, code string) bool {
-	rows, err := db.DB.Query(
-		"SELECT id, code_hash FROM recovery_codes WHERE user_id = ? AND used = 0", userID,
+	rows, err := tx.Query(
+		"SELECT id, code_hash FROM recovery_codes WHERE user_id = ? AND COALESCE(used, 0) = 0",
+		userID,
 	)
 	if err != nil {
 		return false
 	}
-
-	matchedID := -1
+	var candidates []candidate
 	for rows.Next() {
-		var id int
-		var hash string
-		if err := rows.Scan(&id, &hash); err != nil {
-			continue
+		var c candidate
+		if scanErr := rows.Scan(&c.id, &c.hash); scanErr == nil {
+			candidates = append(candidates, c)
 		}
-		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(code)) == nil {
-			matchedID = id
+	}
+	_ = rows.Close()
+
+	normalized := strings.ToUpper(strings.TrimSpace(code))
+	matchedID := -1
+	for _, cand := range candidates {
+		if bcrypt.CompareHashAndPassword([]byte(cand.hash), []byte(normalized)) == nil {
+			matchedID = cand.id
 			break
 		}
 	}
-	rows.Close()
+	if matchedID == -1 {
+		return false
+	}
 
-	if matchedID != -1 {
-		// Valid match — mark as used after closing rows to avoid SQLite MaxOpenConns(1) deadlock
-		db.DB.Exec("UPDATE recovery_codes SET used = 1 WHERE id = ?", matchedID)
+	res, err := tx.Exec(
+		"UPDATE recovery_codes SET used = 1 WHERE id = ? AND user_id = ? AND COALESCE(used, 0) = 0",
+		matchedID, userID,
+	)
+	if err != nil {
+		return false
+	}
+	affected, rErr := res.RowsAffected()
+	return rErr == nil && affected == 1
+}
+
+// matchTOTPStepAt validates a 6-digit TOTP code across [nowStep-1, nowStep, nowStep+1] with Skew: 0
+// so we know the exact 30-second RFC 6238 counter step matched for anti-replay accounting.
+func matchTOTPStepAt(code, secret string, now time.Time) (int64, bool) {
+	trimmed := strings.TrimSpace(code)
+	if len(trimmed) != 6 || secret == "" {
+		return 0, false
+	}
+	nowStep := now.UTC().Unix() / 30
+	opts := totp.ValidateOpts{
+		Period:    30,
+		Skew:      0,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	}
+	for _, step := range []int64{nowStep, nowStep - 1, nowStep + 1} {
+		stepTime := time.Unix(step*30, 0).UTC()
+		ok, err := totp.ValidateCustom(trimmed, secret, stepTime, opts)
+		if err == nil && ok {
+			return step, true
+		}
+	}
+	return 0, false
+}
+
+// validateAndRecordTOTPStepInTx verifies a TOTP code and atomically advances `users.last_totp_step`
+// inside tx (`COALESCE(last_totp_step, -1) < matchedStep`) so no 6-digit code can be replayed.
+func validateAndRecordTOTPStepInTx(tx *sql.Tx, userID int, code, secret string) bool {
+	if tx == nil || userID <= 0 {
+		return false
+	}
+	matchedStep, ok := matchTOTPStepAt(code, secret, time.Now().UTC())
+	if !ok {
+		return false
+	}
+	res, err := tx.Exec(
+		"UPDATE users SET last_totp_step = ? WHERE id = ? AND COALESCE(last_totp_step, -1) < ?",
+		matchedStep, userID, matchedStep,
+	)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
 		return true
 	}
-	return false
+	if err != nil {
+		return false
+	}
+	affected, rErr := res.RowsAffected()
+	return rErr == nil && affected == 1
 }
 
 // ── Setup 2FA ─────────────────────────────────────────────────────────────
@@ -205,8 +277,8 @@ func Verify2FA(c *gin.Context) {
 		return
 	}
 
-	// Validate the TOTP code
-	if !totp.Validate(req.Code, secret) {
+	matchedStep, ok := matchTOTPStepAt(req.Code, secret, time.Now().UTC())
+	if !ok {
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
 		return
 	}
@@ -219,31 +291,59 @@ func Verify2FA(c *gin.Context) {
 		return
 	}
 
-	// Persist to the database
-	if _, err := db.DB.Exec(
-		"UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ?",
-		encrypted, userID,
-	); err != nil {
-		slog.Error("failed to persist TOTP enrollment", "user_id", userID, "error", err)
+	recoveryCodes, rcErr := generateRecoveryCodes(recoveryCodeCount)
+	var recoveryHashes []string
+	if rcErr != nil {
+		slog.Error("failed to generate recovery codes", "user_id", userID, "error", rcErr)
+		recoveryCodes = []string{}
+	} else {
+		recoveryHashes, rcErr = hashRecoveryCodes(recoveryCodes)
+		if rcErr != nil {
+			slog.Error("failed to hash recovery codes", "user_id", userID, "error", rcErr)
+			recoveryCodes = []string{}
+		}
+	}
+
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	_, updErr := tx.Exec(
+		"UPDATE users SET totp_secret = ?, totp_enabled = 1, last_totp_step = ? WHERE id = ?",
+		encrypted, matchedStep, userID,
+	)
+	if updErr != nil && strings.Contains(updErr.Error(), "no such column") {
+		_, updErr = tx.Exec(
+			"UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ?",
+			encrypted, userID,
+		)
+	}
+	if updErr != nil {
+		slog.Error("failed to persist TOTP enrollment", "user_id", userID, "error", updErr)
+		InternalError(c, "Failed to enable two-factor authentication")
+		return
+	}
+
+	if len(recoveryHashes) > 0 {
+		if err := storeHashedRecoveryCodesInTx(tx, userID, recoveryHashes); err != nil {
+			slog.Error("failed to store recovery codes", "user_id", userID, "error", err)
+			recoveryCodes = []string{}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("failed to commit TOTP enrollment", "user_id", userID, "error", err)
 		InternalError(c, "Failed to enable two-factor authentication")
 		return
 	}
 
 	// Clean up the pending secret
 	db.Delete2FAPending(userID)
-
-	// Generate recovery codes
-	recoveryCodes, err := generateRecoveryCodes(recoveryCodeCount)
-	if err != nil {
-		slog.Error("failed to generate recovery codes", "user_id", userID, "error", err)
-		// Don't fail the entire enrollment — 2FA is already enabled
-		recoveryCodes = []string{}
-	} else {
-		if err := storeRecoveryCodes(userID, recoveryCodes); err != nil {
-			slog.Error("failed to store recovery codes", "user_id", userID, "error", err)
-			recoveryCodes = []string{}
-		}
-	}
 
 	// Audit trail
 	username, _ := c.Get("username")
@@ -264,13 +364,13 @@ func Verify2FA(c *gin.Context) {
 
 // Disable2FA godoc
 // @Summary      Disable 2FA
-// @Description  Validates a current TOTP code, then clears the secret, disables 2FA,
-//               and deletes all recovery codes.
+// @Description  Validates a current TOTP or recovery code (never password-only), then clears
+//               the secret, disables 2FA, deletes recovery codes, and rotates credential epoch.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        req body object true "TOTP code"
+// @Param        req body object true "TOTP or recovery code"
 // @Success      200 {object} map[string]interface{}
 // @Failure      400 {object} map[string]interface{}
 // @Failure      401 {object} map[string]interface{}
@@ -285,13 +385,13 @@ func Disable2FA(c *gin.Context) {
 		Password string `json:"password"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A verification code or current password is required")
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A valid TOTP or recovery code is required")
 		return
 	}
 	code := strings.TrimSpace(req.Code)
 	password := req.Password
-	if code == "" && password == "" {
-		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A verification code or current password is required")
+	if code == "" {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A valid TOTP or recovery code is required to disable 2FA")
 		return
 	}
 
@@ -309,26 +409,23 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 
-	verified := false
-	if code != "" {
-		if recoveryCodePattern.MatchString(strings.ToUpper(code)) {
-			verified = validateRecoveryCode(userID, strings.ToUpper(code))
-		} else {
-			secret, err := DecryptKey(encryptedSecret)
-			if err != nil {
-				slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", err)
-				InternalError(c, "Failed to verify TOTP secret")
-				return
-			}
-			verified = totp.Validate(code, secret)
+	if password != "" && passwordHash != "" {
+		if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
+			RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification factor")
+			return
 		}
-	} else if password != "" && passwordHash != "" {
-		verified = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) == nil
 	}
 
-	if !verified {
-		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification factor")
-		return
+	isRecovery := recoveryCodePattern.MatchString(strings.ToUpper(code))
+	var decryptedSecret string
+	if !isRecovery {
+		var decErr error
+		decryptedSecret, decErr = DecryptKey(encryptedSecret)
+		if decErr != nil {
+			slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", decErr)
+			InternalError(c, "Failed to verify TOTP secret")
+			return
+		}
 	}
 
 	tx, txErr := db.DB.Begin()
@@ -339,6 +436,17 @@ func Disable2FA(c *gin.Context) {
 	defer func() {
 		_ = tx.Rollback()
 	}()
+
+	var verified bool
+	if isRecovery {
+		verified = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
+	} else {
+		verified = validateAndRecordTOTPStepInTx(tx, userID, code, decryptedSecret)
+	}
+	if !verified {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification factor")
+		return
+	}
 
 	if _, err := tx.Exec(
 		"UPDATE users SET totp_secret = '', totp_enabled = 0 WHERE id = ?", userID,
@@ -408,31 +516,64 @@ func MFALoginVerify(c *gin.Context) {
 		return
 	}
 
-	// Look up the challenge
-	userID, err := db.GetMFAChallenge(req.MFAToken)
-	if err != nil {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	userID, challengeVer, ok, attemptErr := db.BeginMFAAttemptWithEpochInTx(tx, req.MFAToken)
+	if attemptErr != nil {
+		InternalError(c, "Failed to verify MFA challenge")
+		return
+	}
+	if !ok {
+		_ = tx.Commit()
+		db.EvictMFAChallengeCache(req.MFAToken)
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
 		return
 	}
 
-	if _, subErr := loadActiveHumanSubject(db.DB, userID); subErr != nil {
+	subj, subErr := loadActiveHumanSubject(tx, userID)
+	if subErr != nil {
+		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
+		_ = tx.Commit()
+		db.EvictMFAChallengeCache(req.MFAToken)
 		if errors.Is(subErr, errSubjectSuspended) {
-			db.DeleteMFAChallenge(req.MFAToken)
 			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
 			return
 		}
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "User not found")
 		return
 	}
+	if subj.sessionsRevokedAfter != challengeVer {
+		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
+		_ = tx.Commit()
+		db.EvictMFAChallengeCache(req.MFAToken)
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
+		return
+	}
 
-	// Fetch user + encrypted TOTP secret
+	// Fetch user + encrypted TOTP secret inside the same transaction
 	var user models.User
 	var encryptedSecret string
 	var googleId sql.NullString
-	if err := db.DB.QueryRow(
-		"SELECT id, username, email, avatar_url, role, google_id, COALESCE(totp_secret, '') FROM users WHERE id = ?", userID,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId, &encryptedSecret); err != nil {
+	var totpEnabled bool
+	if err := tx.QueryRow(
+		"SELECT id, username, email, avatar_url, role, google_id, COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?",
+		userID,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId, &encryptedSecret, &totpEnabled); err != nil {
 		InternalError(c, "User not found")
+		return
+	}
+	if !totpEnabled {
+		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
+		_ = tx.Commit()
+		db.EvictMFAChallengeCache(req.MFAToken)
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "TOTP not configured")
 		return
 	}
 	user.IsOAuth = googleId.Valid && googleId.String != ""
@@ -444,11 +585,10 @@ func MFALoginVerify(c *gin.Context) {
 	codeValid := false
 
 	if isRecoveryCode {
-		// Validate recovery code (bcrypt comparison + mark used)
-		codeValid = validateRecoveryCode(userID, strings.ToUpper(code))
+		codeValid = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
 	} else {
-		// Validate TOTP code
 		if encryptedSecret == "" {
+			_ = tx.Commit()
 			RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "TOTP not configured")
 			return
 		}
@@ -458,30 +598,37 @@ func MFALoginVerify(c *gin.Context) {
 			InternalError(c, "Failed to verify credentials")
 			return
 		}
-		codeValid = totp.Validate(code, secret)
+		codeValid = validateAndRecordTOTPStepInTx(tx, userID, code, secret)
 	}
 
 	if !codeValid {
+		// Commit the incremented attempt counter before returning 401
+		_ = tx.Commit()
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
 		return
 	}
 
-	// ── MFA verified — complete the login ──
+	consumed, consumeErr := db.ConsumeMFAChallengeWithEpochInTx(tx, req.MFAToken, userID, challengeVer)
+	if consumeErr != nil || !consumed {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
+		return
+	}
 
-	// Consume the challenge token (single use)
-	db.DeleteMFAChallenge(req.MFAToken)
-
-	// Log login
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
-	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
+	_, _ = tx.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
 
-	// Issue JWT
-	tokenString, err := createStandardJWT(user.ID, c)
+	tokenString, _, err := createSessionJWTInTx(tx, user.ID, c, time.Now().UTC().Unix(), "", subj.sessionsRevokedAfter)
 	if err != nil {
 		InternalError(c, "Failed to create session")
 		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		InternalError(c, "Failed to commit MFA session")
+		return
+	}
+	db.EvictMFAChallengeCache(req.MFAToken)
 
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
@@ -500,7 +647,7 @@ func MFALoginVerify(c *gin.Context) {
 // Regenerate2FARecoveryCodes godoc
 // @Summary      Regenerate recovery codes
 // @Description  Generates a new set of recovery codes, invalidating all previous ones.
-//               Requires a valid TOTP code to authorize the regeneration.
+//               Requires a valid TOTP or recovery code to authorize the regeneration.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -515,14 +662,18 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 	userID := rawUserID.(int)
 
 	var req struct {
-		Code string `json:"code" binding:"required"`
+		Code string `json:"code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A valid TOTP code is required")
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A valid TOTP or recovery code is required")
+		return
+	}
+	code := strings.TrimSpace(req.Code)
+	if code == "" {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A valid TOTP or recovery code is required")
 		return
 	}
 
-	// Verify 2FA is enabled and TOTP code is valid
 	var encryptedSecret string
 	var totpEnabled bool
 	if err := db.DB.QueryRow(
@@ -532,33 +683,63 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 		return
 	}
 
-	if !totpEnabled {
+	if !totpEnabled || encryptedSecret == "" {
 		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Two-factor authentication is not enabled")
 		return
 	}
 
-	secret, err := DecryptKey(encryptedSecret)
-	if err != nil {
-		slog.Error("failed to decrypt TOTP secret for recovery regen", "user_id", userID, "error", err)
-		InternalError(c, "Failed to verify credentials")
-		return
+	isRecovery := recoveryCodePattern.MatchString(strings.ToUpper(code))
+	var secret string
+	if !isRecovery {
+		var decErr error
+		secret, decErr = DecryptKey(encryptedSecret)
+		if decErr != nil {
+			slog.Error("failed to decrypt TOTP secret for recovery regen", "user_id", userID, "error", decErr)
+			InternalError(c, "Failed to verify credentials")
+			return
+		}
 	}
 
-	if !totp.Validate(req.Code, secret) {
-		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
-		return
-	}
-
-	// Generate new recovery codes (replaces old ones)
 	codes, err := generateRecoveryCodes(recoveryCodeCount)
 	if err != nil {
 		slog.Error("failed to generate recovery codes", "user_id", userID, "error", err)
 		InternalError(c, "Failed to generate recovery codes")
 		return
 	}
+	hashes, err := hashRecoveryCodes(codes)
+	if err != nil {
+		slog.Error("failed to hash recovery codes", "user_id", userID, "error", err)
+		InternalError(c, "Failed to store recovery codes")
+		return
+	}
 
-	if err := storeRecoveryCodes(userID, codes); err != nil {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var verified bool
+	if isRecovery {
+		verified = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
+	} else {
+		verified = validateAndRecordTOTPStepInTx(tx, userID, code, secret)
+	}
+	if !verified {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
+		return
+	}
+
+	if err := storeHashedRecoveryCodesInTx(tx, userID, hashes); err != nil {
 		slog.Error("failed to store recovery codes", "user_id", userID, "error", err)
+		InternalError(c, "Failed to store recovery codes")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
 		InternalError(c, "Failed to store recovery codes")
 		return
 	}

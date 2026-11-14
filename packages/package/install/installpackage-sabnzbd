@@ -145,6 +145,7 @@ if [[ -n "$BASE_DOMAIN" ]]; then
     SAB_WHITELIST="sabnzbd.${BASE_DOMAIN}, ${SAB_WHITELIST}"
 fi
 if [[ ! -f /var/lib/sabnzbd/sabnzbd.ini ]]; then
+    SAB_WEB_PASS="$(derive_app_password sabnzbd "${MASTER_PASS}")"
     (umask 077; write_config_file /var/lib/sabnzbd/sabnzbd.ini 0600 <<EOF
 __version__ = 19
 __encoding__ = utf-8
@@ -154,7 +155,7 @@ host = 127.0.0.1
 inet_exposure = 0
 host_whitelist = ${SAB_WHITELIST}
 username = ${MASTER_USER}
-password = ${MASTER_PASS}
+password = ${SAB_WEB_PASS}
 EOF
     )
 fi

@@ -185,6 +185,7 @@ mod tests {
         fn fetch_release_bundle(
             &self,
             config: &ReleaseConfig,
+            _channel: ReleaseChannel,
             _tag: &str,
             staging_dir: &Path,
         ) -> ReleaseResult<(PathBuf, String)> {
@@ -1040,6 +1041,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &cfg.artifact_name,
             &[
                 ("aetherflow-api", b"binary-content", EntryType::Regular),
+                (".version", b"v4.0.0\n", EntryType::Regular),
                 ("config/app.json", b"{\"ok\":true}", EntryType::Regular),
             ],
         );

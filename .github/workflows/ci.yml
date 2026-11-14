@@ -33,8 +33,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test Release Routing and Manager
-        run: python3 -m unittest discover -s tests -p 'test_release*.py' -v
+      - name: Test Release Routing, Provenance & Modern Stack
+        run: |
+          python3 -m unittest discover -s tests -p 'test_release*.py' -v
+          python3 -m unittest discover -s tests -p 'test_verify_provenance.py' -v
+          python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
 
   node-installers:
     name: Node Application Installer Regression Tests
@@ -52,9 +55,7 @@ jobs:
 
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |
-          python3 -m unittest discover -s tests -p 'test_node_installers.py' -v
-          python3 -m unittest discover -s tests -p 'test_thelounge_installer.py' -v
-          python3 -m unittest discover -s tests -p 'test_marketplace*.py' -v
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 tests/check_shell_hygiene.py
 
   palate-installer:

@@ -438,7 +438,7 @@ fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<Str
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if af_db::is_token_revoked(&claims.jti)
+    if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
         || !crate::auth::matches_client_fingerprint(
             &claims.cfp,
             &extract_client_ip(headers),
@@ -1025,6 +1025,16 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
 
     let base_domain = query_settings_base_domain();
     !base_domain.is_empty() && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
+}
+
+pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {
+    let raw_allowed = env::var("ALLOWED_HOSTS").unwrap_or_default();
+    let allowed_set: HashSet<String> = raw_allowed
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    is_host_trusted(candidate_raw, &allowed_set)
 }
 
 pub async fn host_validation_middleware(req: Request, next: Next) -> Response {

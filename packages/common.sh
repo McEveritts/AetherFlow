@@ -82,7 +82,7 @@ log() {
     local line
     line="$(printf '[%s] %s\n' "$(timestamp)" "$*")"
     python3 - "$target" "$line" <<'PYEOF'
-import os, stat, sys
+import fcntl, os, stat, sys
 
 target, line = sys.argv[1], sys.argv[2]
 parent_dir = os.path.dirname(target) or "."
@@ -97,19 +97,23 @@ except OSError:
     sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
     raise SystemExit(1)
 try:
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
-        raise SystemExit(1)
-    if not line.endswith("\n"):
-        line += "\n"
-    data = line.encode("utf-8", errors="replace")
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("short write")
-        view = view[written:]
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+            raise SystemExit(1)
+        if not line.endswith("\n"):
+            line += "\n"
+        data = line.encode("utf-8", errors="replace")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 finally:
     os.close(fd)
 PYEOF
@@ -4381,8 +4385,8 @@ load_master_credentials() {
     for creds_json in "$primary_creds_file" /opt/AetherFlow/backend/data/.master.creds; do
         if [[ -f "$creds_json" ]]; then
             local parsed_creds=""
-            parsed_creds="$(python3 - "$creds_json" 2>/dev/null <<'PYEOF' || true
-import base64, json, os, sys
+            parsed_creds="$(python3 - "$creds_json" "$primary_creds_file" 2>/dev/null <<'PYEOF' || true
+import base64, ctypes, ctypes.util, json, os, sys
 
 def load_aes_key():
     raw = os.environ.get("AES_MASTER_KEY", "").strip()
@@ -4403,36 +4407,129 @@ def load_aes_key():
             except OSError:
                 pass
     if not raw:
-        return None
+        return "", None
     try:
         dec = base64.b64decode(raw, validate=True)
         if len(dec) == 32:
-            return dec
+            return raw, dec
     except Exception:
         pass
+    if len(raw) == 64:
+        try:
+            dec_hex = bytes.fromhex(raw)
+            if len(dec_hex) == 32:
+                return raw, dec_hex
+        except ValueError:
+            pass
     raw_bytes = raw.encode("utf-8")
-    return raw_bytes if len(raw_bytes) == 32 else None
+    return raw, (raw_bytes if len(raw_bytes) == 32 else None)
 
-def maybe_decrypt(val, key):
+def _load_libcrypto():
+    candidates = []
+    found = ctypes.util.find_library("crypto")
+    if found:
+        candidates.append(found)
+    candidates.extend(("libcrypto.so.3", "libcrypto.so.1.1"))
+    for name in candidates:
+        try:
+            lib = ctypes.CDLL(name)
+            lib.EVP_CIPHER_CTX_new.argtypes = []
+            lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_free.restype = None
+            lib.EVP_aes_256_gcm.argtypes = []
+            lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
+            lib.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            lib.EVP_DecryptInit_ex.restype = ctypes.c_int
+            lib.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int]
+            lib.EVP_DecryptUpdate.restype = ctypes.c_int
+            lib.EVP_DecryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+            lib.EVP_DecryptFinal_ex.restype = ctypes.c_int
+            return lib
+        except OSError:
+            continue
+    raise RuntimeError("OpenSSL libcrypto unavailable")
+
+def aes_gcm_decrypt(key, nonce, ct_and_tag):
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(key).decrypt(nonce, ct_and_tag, None)
+    except ImportError:
+        pass
+    if len(nonce) != 12 or len(ct_and_tag) < 16:
+        raise ValueError("invalid AES-GCM payload length")
+    ct, tag = ct_and_tag[:-16], ct_and_tag[-16:]
+    lib = _load_libcrypto()
+    ctx = lib.EVP_CIPHER_CTX_new()
+    if not ctx:
+        raise RuntimeError("EVP_CIPHER_CTX_new failed")
+    try:
+        key_buf = (ctypes.c_ubyte * 32).from_buffer_copy(key)
+        iv_buf = (ctypes.c_ubyte * 12).from_buffer_copy(nonce)
+        tag_buf = (ctypes.c_ubyte * 16).from_buffer_copy(tag)
+        if lib.EVP_DecryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None) != 1:
+            raise ValueError("EVP_DecryptInit_ex cipher failed")
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 12, None) != 1:
+            raise ValueError("EVP_CTRL_GCM_SET_IVLEN failed")
+        if lib.EVP_DecryptInit_ex(ctx, None, None, ctypes.byref(key_buf), ctypes.byref(iv_buf)) != 1:
+            raise ValueError("EVP_DecryptInit_ex key/iv failed")
+        out_buf = (ctypes.c_ubyte * max(1, len(ct) + 16))()
+        out_len = ctypes.c_int(0)
+        if ct:
+            ct_buf = (ctypes.c_ubyte * len(ct)).from_buffer_copy(ct)
+            if lib.EVP_DecryptUpdate(ctx, ctypes.byref(out_buf), ctypes.byref(out_len), ctypes.byref(ct_buf), len(ct)) != 1:
+                raise ValueError("EVP_DecryptUpdate failed")
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x11, 16, ctypes.byref(tag_buf)) != 1:
+            raise ValueError("EVP_CTRL_GCM_SET_TAG failed")
+        final_len = ctypes.c_int(0)
+        tail_ptr = ctypes.cast(ctypes.addressof(out_buf) + out_len.value, ctypes.c_void_p)
+        if lib.EVP_DecryptFinal_ex(ctx, tail_ptr, ctypes.byref(final_len)) != 1:
+            raise ValueError("AES-GCM authentication failed")
+        return bytes(out_buf[:out_len.value + final_len.value])
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+def decrypt_field(val, key):
     if not isinstance(val, str):
         return ""
     val = val.strip()
     if not val.startswith("enc:v1:"):
         return val
     if key is None:
-        return ""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    blob = base64.b64decode(val[len("enc:v1:"):])
-    if len(blob) < 12:
-        return ""
-    return AESGCM(key).decrypt(blob[:12], blob[12:], None).decode("utf-8")
+        raise ValueError("AES_MASTER_KEY missing or invalid for enc:v1: secret")
+    blob = base64.b64decode(val[len("enc:v1:"):], validate=True)
+    if len(blob) < 28:
+        raise ValueError("enc:v1: ciphertext truncated")
+    return aes_gcm_decrypt(key, blob[:12], blob[12:]).decode("utf-8")
 
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    d = json.load(fh)
-key = load_aes_key()
-u = (d.get("username") or "").strip()
-p = maybe_decrypt(d.get("password") or "", key)
-h = maybe_decrypt(d.get("ha1") or "", key)
+path, primary_path = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    raw_text = fh.read()
+try:
+    d = json.loads(raw_text)
+except Exception:
+    if "enc:v1:" in raw_text or (raw_text.strip() and os.path.abspath(path) == os.path.abspath(primary_path)):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+if not isinstance(d, dict):
+    if os.path.abspath(path) == os.path.abspath(primary_path):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+_, key = load_aes_key()
+u = str(d.get("username") or "").strip()
+raw_pw = d.get("password") or ""
+raw_ha1 = d.get("ha1") or ""
+try:
+    p = decrypt_field(raw_pw, key)
+    h = decrypt_field(raw_ha1, key) if str(raw_ha1).strip() else ""
+except Exception:
+    print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+if isinstance(raw_pw, str) and raw_pw.strip().startswith("enc:v1:") and not p:
+    print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
 if p == "adminadmin":
     p = ""
 print(u)
@@ -4440,6 +4537,10 @@ print(p)
 print(h)
 PYEOF
 )"
+            if [[ "$parsed_creds" == "__AF_CREDS_FATAL__"* ]]; then
+                printf 'Refusing to overwrite undecryptable or corrupted master credentials file: %s\n' "$creds_json" >&2
+                return 1
+            fi
             if [[ -n "$parsed_creds" ]]; then
                 u="$(printf '%s\n' "$parsed_creds" | sed -n '1p')"
                 p="$(printf '%s\n' "$parsed_creds" | sed -n '2p')"
@@ -4484,10 +4585,19 @@ PYEOF
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then
         python3 - "$primary_creds_file" <<'PYEOF'
-import base64, errno, json, os, sys, tempfile
+import base64, ctypes, ctypes.util, errno, json, os, sys, tempfile
 username, password, ha1 = (os.environ[name] for name in ('MASTER_USER', 'MASTER_PASS', 'MASTER_HA1'))
 destination = sys.argv[1]
 directory = os.path.dirname(destination)
+
+if os.path.isfile(destination):
+    try:
+        with open(destination, 'r', encoding='utf-8') as existing_fh:
+            existing_raw = existing_fh.read()
+        if 'enc:v1:' in existing_raw:
+            raise RuntimeError(f'Refusing to overwrite encrypted master credentials at {destination}')
+    except OSError:
+        pass
 
 def resolve_aes_key():
     raw = os.environ.get('AES_MASTER_KEY', '').strip()
@@ -4508,30 +4618,99 @@ def resolve_aes_key():
             except OSError:
                 pass
     if not raw:
-        return None
+        return '', None
     try:
         dec = base64.b64decode(raw, validate=True)
         if len(dec) == 32:
-            return dec
+            return raw, dec
     except Exception:
         pass
+    if len(raw) == 64:
+        try:
+            dec_hex = bytes.fromhex(raw)
+            if len(dec_hex) == 32:
+                return raw, dec_hex
+        except ValueError:
+            pass
     raw_bytes = raw.encode('utf-8')
-    return raw_bytes if len(raw_bytes) == 32 else None
+    return raw, (raw_bytes if len(raw_bytes) == 32 else None)
 
-def maybe_encrypt(plaintext, key):
-    if key is None:
-        return plaintext
+def _load_libcrypto():
+    candidates = []
+    found = ctypes.util.find_library('crypto')
+    if found:
+        candidates.append(found)
+    candidates.extend(('libcrypto.so.3', 'libcrypto.so.1.1'))
+    for name in candidates:
+        try:
+            lib = ctypes.CDLL(name)
+            lib.EVP_CIPHER_CTX_new.argtypes = []
+            lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_free.restype = None
+            lib.EVP_aes_256_gcm.argtypes = []
+            lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
+            lib.EVP_EncryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            lib.EVP_EncryptInit_ex.restype = ctypes.c_int
+            lib.EVP_EncryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int]
+            lib.EVP_EncryptUpdate.restype = ctypes.c_int
+            lib.EVP_EncryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+            lib.EVP_EncryptFinal_ex.restype = ctypes.c_int
+            return lib
+        except OSError:
+            continue
+    raise RuntimeError('OpenSSL libcrypto unavailable')
+
+def aes_gcm_encrypt(key, nonce, pt):
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        nonce = os.urandom(12)
-        ct = AESGCM(key).encrypt(nonce, plaintext.encode('utf-8'), None)
-        return 'enc:v1:' + base64.b64encode(nonce + ct).decode('ascii')
-    except Exception:
-        return plaintext
+        return AESGCM(key).encrypt(nonce, pt, None)
+    except ImportError:
+        pass
+    lib = _load_libcrypto()
+    ctx = lib.EVP_CIPHER_CTX_new()
+    if not ctx:
+        raise RuntimeError('EVP_CIPHER_CTX_new failed')
+    try:
+        key_buf = (ctypes.c_ubyte * 32).from_buffer_copy(key)
+        iv_buf = (ctypes.c_ubyte * 12).from_buffer_copy(nonce)
+        if lib.EVP_EncryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None) != 1:
+            raise RuntimeError('EVP_EncryptInit_ex cipher failed')
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 12, None) != 1:
+            raise RuntimeError('EVP_CTRL_GCM_SET_IVLEN failed')
+        if lib.EVP_EncryptInit_ex(ctx, None, None, ctypes.byref(key_buf), ctypes.byref(iv_buf)) != 1:
+            raise RuntimeError('EVP_EncryptInit_ex key/iv failed')
+        out_buf = (ctypes.c_ubyte * max(1, len(pt) + 16))()
+        out_len = ctypes.c_int(0)
+        if pt:
+            pt_buf = (ctypes.c_ubyte * len(pt)).from_buffer_copy(pt)
+            if lib.EVP_EncryptUpdate(ctx, ctypes.byref(out_buf), ctypes.byref(out_len), ctypes.byref(pt_buf), len(pt)) != 1:
+                raise RuntimeError('EVP_EncryptUpdate failed')
+        final_len = ctypes.c_int(0)
+        tail_ptr = ctypes.cast(ctypes.addressof(out_buf) + out_len.value, ctypes.c_void_p)
+        if lib.EVP_EncryptFinal_ex(ctx, tail_ptr, ctypes.byref(final_len)) != 1:
+            raise RuntimeError('EVP_EncryptFinal_ex failed')
+        tag_buf = (ctypes.c_ubyte * 16)()
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, ctypes.byref(tag_buf)) != 1:
+            raise RuntimeError('EVP_CTRL_GCM_GET_TAG failed')
+        return bytes(out_buf[:out_len.value + final_len.value]) + bytes(tag_buf)
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
 
-key = resolve_aes_key()
-stored_password = maybe_encrypt(password, key)
-stored_ha1 = maybe_encrypt(ha1, key)
+def maybe_encrypt(plaintext, raw_key, key):
+    if not raw_key:
+        return plaintext
+    if key is None:
+        raise RuntimeError('AES_MASTER_KEY is configured but is not a valid 32-byte key')
+    nonce = os.urandom(12)
+    ct = aes_gcm_encrypt(key, nonce, plaintext.encode('utf-8'))
+    return 'enc:v1:' + base64.b64encode(nonce + ct).decode('ascii')
+
+raw_key, key = resolve_aes_key()
+stored_password = maybe_encrypt(password, raw_key, key)
+stored_ha1 = maybe_encrypt(ha1, raw_key, key)
 temporary = None
 try:
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -4569,6 +4748,22 @@ finally:
                 raise
 PYEOF
     fi
+}
+
+derive_app_password() {
+    local app_id="${1:?Application id is required for derive_app_password}"
+    local master_secret="${2:-${MASTER_PASS:-}}"
+    if [[ -z "$master_secret" ]]; then
+        load_master_credentials || return $?
+        master_secret="$MASTER_PASS"
+    fi
+    AF_DERIVE_APP="$app_id" AF_DERIVE_SECRET="$master_secret" python3 - <<'PYEOF'
+import hashlib, hmac, os
+app_id = os.environ["AF_DERIVE_APP"].strip().lower()
+secret = os.environ["AF_DERIVE_SECRET"].encode("utf-8")
+msg = f"aetherflow:{app_id}:webui:v1".encode("utf-8")
+print(hmac.new(secret, msg, hashlib.sha256).hexdigest()[:32])
+PYEOF
 }
 
 generate_qbittorrent_pbkdf2() {

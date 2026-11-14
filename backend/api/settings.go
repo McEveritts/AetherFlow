@@ -53,33 +53,34 @@ func GetSettings(c *gin.Context) {
 		s.UpdateChannel = "stable"
 	}
 
-	// Decrypt the API keys before masking
-	if s.GeminiApiKey != "" {
-		if decrypted, err := DecryptKey(s.GeminiApiKey); err == nil {
-			s.GeminiApiKey = decrypted
-		}
-	}
-	if s.OpenaiApiKey != "" {
-		if decrypted, err := DecryptKey(s.OpenaiApiKey); err == nil {
-			s.OpenaiApiKey = decrypted
-		}
-	}
-	if s.AnthropicApiKey != "" {
-		if decrypted, err := DecryptKey(s.AnthropicApiKey); err == nil {
-			s.AnthropicApiKey = decrypted
-		}
+	role, _ := c.Get("user_role")
+	if role != "admin" {
+		s.GeminiApiKey = ""
+		s.OpenaiApiKey = ""
+		s.AnthropicApiKey = ""
+		s.LmStudioEndpoint = ""
+		s.OllamaEndpoint = ""
+		s.AnthropicEndpoint = ""
+		c.JSON(http.StatusOK, s)
+		return
 	}
 
-	// Mask the API keys for security - only show last 4 chars
-	if len(s.GeminiApiKey) > 4 {
-		s.GeminiApiKey = "****" + s.GeminiApiKey[len(s.GeminiApiKey)-4:]
+	maskStoredAPIKey := func(raw string) string {
+		if raw == "" {
+			return ""
+		}
+		decrypted, err := DecryptKey(raw)
+		if err != nil || strings.HasPrefix(decrypted, "enc:v1:") {
+			return "****"
+		}
+		if len(decrypted) > 4 {
+			return "****" + decrypted[len(decrypted)-4:]
+		}
+		return ""
 	}
-	if len(s.OpenaiApiKey) > 4 {
-		s.OpenaiApiKey = "****" + s.OpenaiApiKey[len(s.OpenaiApiKey)-4:]
-	}
-	if len(s.AnthropicApiKey) > 4 {
-		s.AnthropicApiKey = "****" + s.AnthropicApiKey[len(s.AnthropicApiKey)-4:]
-	}
+	s.GeminiApiKey = maskStoredAPIKey(s.GeminiApiKey)
+	s.OpenaiApiKey = maskStoredAPIKey(s.OpenaiApiKey)
+	s.AnthropicApiKey = maskStoredAPIKey(s.AnthropicApiKey)
 	c.JSON(http.StatusOK, s)
 }
 

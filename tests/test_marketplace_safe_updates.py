@@ -578,6 +578,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "safe_config_python",
             "validate_config_paths",
             "write_config_file",
+            "derive_app_password",
             "set_config_file_mode",
             "verify_sha256",
             "set_config_value",

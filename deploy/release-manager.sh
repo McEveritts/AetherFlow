@@ -960,7 +960,7 @@ resolve_release_tag() {
             local nightly_tag=""
             nightly_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
 import json, re, sys
-tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+nightly_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[Nn]ightly\.[0-9]+(?:\.[0-9]+)?$")
 try:
     for r in json.load(sys.stdin):
         if not isinstance(r, dict) or r.get("draft"):
@@ -968,10 +968,9 @@ try:
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
         if (
-            tag_re.fullmatch(tag)
+            nightly_re.fullmatch(tag)
             and target != "experimental"
-            and "experimental" not in tag.lower()
-            and (target == "nightly" or bool(r.get("prerelease")) or "nightly" in tag.lower())
+            and (bool(r.get("prerelease")) or target == "nightly")
         ):
             print(tag)
             break
@@ -1179,16 +1178,17 @@ pull_prebuilt_artifact() {
         rm -rf "${tmp_dir}"
         return 1
     fi
-    if [[ -s "${RELEASE_DIR}/.version" ]]; then
-        local archive_version
-        archive_version="$(tr -d '[:space:]' < "${RELEASE_DIR}/.version")"
-        if [[ "${archive_version}" != "${tag}" ]]; then
-            log_error "Release archive .version mismatch: expected '${tag}', got '${archive_version}'."
-            rm -rf "${tmp_dir}" "${RELEASE_DIR}"
-            return 1
-        fi
-    else
-        printf '%s\n' "${tag}" > "${RELEASE_DIR}/.version"
+    if [[ ! -f "${RELEASE_DIR}/.version" || -L "${RELEASE_DIR}/.version" || ! -s "${RELEASE_DIR}/.version" ]]; then
+        log_error "Release archive is missing a non-empty regular .version stamp. Refusing to continue."
+        rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+        return 1
+    fi
+    local archive_version
+    archive_version="$(tr -d '[:space:]' < "${RELEASE_DIR}/.version")"
+    if [[ "${archive_version}" != "${tag}" ]]; then
+        log_error "Release archive .version mismatch: expected '${tag}', got '${archive_version}'."
+        rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+        return 1
     fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
     if [[ -f "${RELEASE_DIR}/af" && ! -L "${RELEASE_DIR}/af" ]]; then
@@ -1630,7 +1630,7 @@ restart_systemd_units() {
             mkdir -p "${dropin_dir}"
             chmod 0755 "${dropin_dir}"
             if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
-                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\n'
+                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
             elif [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
                 dropin_payload=$'[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n'
             else

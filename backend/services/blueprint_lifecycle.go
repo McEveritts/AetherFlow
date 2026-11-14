@@ -238,7 +238,7 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 		}
 
 	default:
-		masterUser, masterPass, masterHA1 := LoadMasterCredentials()
+		masterUser, masterPass, _ := LoadMasterCredentials()
 		if bp.AppName == "sabnzbd" {
 			whitelist := "sabnzbd.aether.local, localhost, 127.0.0.1"
 			defaultPub := ""
@@ -256,15 +256,12 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 			settings["host_whitelist"] = whitelist
 			if masterUser != "" && masterPass != "" {
 				settings["username"] = masterUser
-				settings["password"] = masterPass
+				settings["password"] = DeriveAppWebUIPassword("sabnzbd", masterPass)
 			}
 		}
 		if bp.AppName == "qbittorrent" && masterUser != "" && masterPass != "" {
 			settings[`WebUI\Username`] = masterUser
 			settings[`WebUI\Password_PBKDF2`] = GenerateQBittorrentPBKDF2(masterPass)
-			if masterHA1 != "" {
-				settings[`WebUI\Password_ha1`] = fmt.Sprintf("@ByteArray(%s)", masterHA1)
-			}
 		}
 		if bp.MutatorType == "ini" && configPath != "" && len(settings) > 0 {
 			stoppedUnits := []string(nil)
@@ -284,6 +281,9 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 			_ = iniMut.Backup()
 			if err := iniMut.ApplySettings(settings); err == nil {
 				applied = true
+				if bp.AppName == "sabnzbd" || bp.AppName == "qbittorrent" {
+					_ = os.Chmod(configPath, 0600)
+				}
 			}
 			if bp.AppName == "qbittorrent" {
 				altPath := resolveFilesystemPath("/var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf")

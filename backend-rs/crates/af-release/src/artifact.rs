@@ -199,6 +199,25 @@ pub struct GitHubReleaseItem {
     pub prerelease: bool,
 }
 
+pub fn is_v4_nightly_release_tag(tag: &str) -> bool {
+    let trimmed = tag.trim();
+    if !is_v4_or_newer_release_tag(trimmed) {
+        return false;
+    }
+    let Some((_, pre)) = trimmed.split_once('-') else {
+        return false;
+    };
+    if pre.len() <= 8 || !pre[..8].eq_ignore_ascii_case("nightly.") {
+        return false;
+    }
+    let rest = &pre[8..];
+    let parts: Vec<&str> = rest.split('.').collect();
+    (parts.len() == 1 || parts.len() == 2)
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Resolves a v4+ release tag from a GitHub Releases JSON payload, failing closed when
 /// the response is empty, malformed, or lacks an eligible v4+ release tag (preventing
 /// implicit v3 downgrades or unverified `"nightly"` literal tag fallbacks).
@@ -227,15 +246,10 @@ pub fn select_release_tag_from_json(
                     continue;
                 }
                 let tag = r.tag_name.trim();
-                let tag_lower = tag.to_ascii_lowercase();
                 let target_lower = r.target_commitish.trim().to_ascii_lowercase();
-                if is_v4_or_newer_release_tag(tag)
-                    && tag.contains('-')
-                    && tag_lower != "nightly"
-                    && tag_lower != "experimental"
+                if is_v4_nightly_release_tag(tag)
                     && target_lower != "experimental"
-                    && !tag_lower.contains("experimental")
-                    && (target_lower == "nightly" || r.prerelease || tag_lower.contains("nightly"))
+                    && (r.prerelease || target_lower == "nightly")
                 {
                     return Ok(tag.to_string());
                 }
@@ -514,27 +528,25 @@ pub fn extract_and_validate_release_archive(
     let has_non_empty_version = fs::symlink_metadata(&version_path)
         .map(|m| !m.file_type().is_symlink() && m.is_file() && m.len() > 0)
         .unwrap_or(false);
-    if has_non_empty_version {
-        let actual_version = fs::read_to_string(&version_path).map_err(|e| {
-            ReleaseError::ArtifactVerification(format!(
-                "Failed to read extracted .version at {}: {}",
-                version_path.display(),
-                e
-            ))
-        })?;
-        let trimmed_version = actual_version.trim();
-        if trimmed_version != tag {
-            return Err(ReleaseError::ArtifactVerification(format!(
-                "Extracted release .version {:?} does not match expected tag {:?}",
-                trimmed_version, tag
-            )));
-        }
-    } else {
-        crate::fs_security::atomic_write_bytes_with_mode(
-            &version_path,
-            format!("{}\n", tag).as_bytes(),
-            0o644,
-        )?;
+    if !has_non_empty_version {
+        return Err(ReleaseError::ArtifactVerification(
+            "Extracted release archive is missing a non-empty regular .version stamp. Refusing unverified archive."
+                .to_string(),
+        ));
+    }
+    let actual_version = fs::read_to_string(&version_path).map_err(|e| {
+        ReleaseError::ArtifactVerification(format!(
+            "Failed to read extracted .version at {}: {}",
+            version_path.display(),
+            e
+        ))
+    })?;
+    let trimmed_version = actual_version.trim();
+    if trimmed_version != tag {
+        return Err(ReleaseError::ArtifactVerification(format!(
+            "Extracted release .version {:?} does not match expected tag {:?}",
+            trimmed_version, tag
+        )));
     }
 
     stage_running_release_manager(release_dir, config)?;
@@ -1004,6 +1016,7 @@ pub trait ArtifactProvider: Send + Sync {
     fn fetch_release_bundle(
         &self,
         config: &ReleaseConfig,
+        channel: ReleaseChannel,
         tag: &str,
         staging_dir: &Path,
     ) -> ReleaseResult<(PathBuf, String)>;
@@ -1054,6 +1067,7 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
     fn fetch_release_bundle(
         &self,
         config: &ReleaseConfig,
+        channel: ReleaseChannel,
         tag: &str,
         staging_dir: &Path,
     ) -> ReleaseResult<(PathBuf, String)> {
@@ -1079,9 +1093,13 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         let checksum_url = format!("{}/{}", release_base, config.checksum_name);
 
         let archive_dest = staging_dir.join(&config.artifact_name);
-        let artifact_bytes =
-            run_blocking_http_get_bytes(&artifact_url, Duration::from_secs(180))?;
-        crate::fs_security::atomic_write_bytes_with_mode(&archive_dest, &artifact_bytes, 0o600)?;
+        run_blocking_http_download_to_file(
+            &artifact_url,
+            &archive_dest,
+            0o600,
+            Duration::from_secs(180),
+            MAX_RELEASE_ARCHIVE_BYTES,
+        )?;
 
         let manifest_content =
             run_blocking_http_get_text(&checksum_url, Duration::from_secs(30)).map_err(|e| {
@@ -1108,7 +1126,7 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
                 &verified_digest,
                 &config.artifact_name,
                 Some(tag),
-                None,
+                Some(channel),
                 bundle_override.as_deref(),
             )?;
         }
@@ -1117,7 +1135,41 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
     }
 }
 
-fn resolve_github_auth_token_env() -> Option<String> {
+const MAX_RELEASE_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_RELEASE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn is_trusted_github_auth_url(url: &reqwest::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|h| h.to_ascii_lowercase()) else {
+        return false;
+    };
+    if host == "github.com"
+        || host == "api.github.com"
+        || host.ends_with(".githubusercontent.com")
+    {
+        return true;
+    }
+    if let Ok(ghe_base) = std::env::var("AETHERFLOW_GITHUB_API_BASE") {
+        if let Ok(parsed_ghe) = reqwest::Url::parse(ghe_base.trim()) {
+            if parsed_ghe.scheme() == "https"
+                && parsed_ghe
+                    .host_str()
+                    .is_some_and(|gh_host| gh_host.eq_ignore_ascii_case(&host))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn resolve_github_auth_token_for_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !is_trusted_github_auth_url(&parsed) {
+        return None;
+    }
     for key in ["AF_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(val) = std::env::var(key) {
             let trimmed = val.trim();
@@ -1131,7 +1183,7 @@ fn resolve_github_auth_token_env() -> Option<String> {
 
 fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResult<String> {
     let url_owned = url.to_string();
-    let token_opt = resolve_github_auth_token_env();
+    let token_opt = resolve_github_auth_token_for_url(&url_owned);
     std::thread::spawn(move || -> ReleaseResult<String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1169,15 +1221,19 @@ fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResul
 }
 
 fn run_blocking_http_get_text(url: &str, timeout: Duration) -> ReleaseResult<String> {
-    let bytes = run_blocking_http_get_bytes(url, timeout)?;
+    let bytes = run_blocking_http_get_bytes_capped(url, timeout, MAX_RELEASE_TEXT_BYTES)?;
     String::from_utf8(bytes).map_err(|e| {
         ReleaseError::ArtifactVerification(format!("invalid UTF-8 response from {}: {}", url, e))
     })
 }
 
-fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Vec<u8>> {
+fn run_blocking_http_get_bytes_capped(
+    url: &str,
+    timeout: Duration,
+    max_bytes: u64,
+) -> ReleaseResult<Vec<u8>> {
     let url_owned = url.to_string();
-    let token_opt = resolve_github_auth_token_env();
+    let token_opt = resolve_github_auth_token_for_url(&url_owned);
     std::thread::spawn(move || -> ReleaseResult<Vec<u8>> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1193,7 +1249,7 @@ fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Ve
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
             }
-            let resp = req.send().await.map_err(|e| {
+            let mut resp = req.send().await.map_err(|e| {
                 ReleaseError::ArtifactVerification(format!("GET {} failed: {}", url_owned, e))
             })?;
             if !resp.status().is_success() {
@@ -1203,10 +1259,117 @@ fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Ve
                     resp.status()
                 )));
             }
-            let bytes = resp.bytes().await.map_err(|e| {
+            if let Some(len) = resp.content_length() {
+                if len > max_bytes {
+                    return Err(ReleaseError::ArtifactVerification(format!(
+                        "Response from {} exceeds maximum allowed size ({} > {} bytes)",
+                        url_owned, len, max_bytes
+                    )));
+                }
+            }
+            let mut buf = Vec::new();
+            while let Some(chunk) = resp.chunk().await.map_err(|e| {
                 ReleaseError::ArtifactVerification(format!("reading body from {}: {}", url_owned, e))
+            })? {
+                if (buf.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
+                    return Err(ReleaseError::ArtifactVerification(format!(
+                        "Response from {} exceeded maximum allowed size ({} bytes)",
+                        url_owned, max_bytes
+                    )));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(buf)
+        })
+    })
+    .join()
+    .map_err(|_| ReleaseError::ArtifactVerification("HTTP worker thread panicked".to_string()))?
+}
+
+fn run_blocking_http_download_to_file(
+    url: &str,
+    dest_path: &Path,
+    mode: u32,
+    timeout: Duration,
+    max_bytes: u64,
+) -> ReleaseResult<()> {
+    let url_owned = url.to_string();
+    let dest_owned = dest_path.to_path_buf();
+    let token_opt = resolve_github_auth_token_for_url(&url_owned);
+    std::thread::spawn(move || -> ReleaseResult<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e)))?;
+        rt.block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(timeout)
+                .user_agent("AetherFlow-ReleaseEngine/4.0")
+                .build()
+                .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))?;
+            let mut req = client.get(&url_owned);
+            if let Some(ref tok) = token_opt {
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
+            }
+            let mut resp = req.send().await.map_err(|e| {
+                ReleaseError::ArtifactVerification(format!("GET {} failed: {}", url_owned, e))
             })?;
-            Ok(bytes.to_vec())
+            if !resp.status().is_success() {
+                return Err(ReleaseError::ArtifactVerification(format!(
+                    "GET {} returned HTTP {}",
+                    url_owned,
+                    resp.status()
+                )));
+            }
+            if let Some(len) = resp.content_length() {
+                if len > max_bytes {
+                    return Err(ReleaseError::ArtifactVerification(format!(
+                        "Download from {} exceeds maximum allowed size ({} > {} bytes)",
+                        url_owned, len, max_bytes
+                    )));
+                }
+            }
+            let tmp_path = dest_owned.with_extension(format!("part.{}", uuid::Uuid::new_v4()));
+            let mut file = crate::fs_security::open_exclusive_private_file(&tmp_path, mode)?;
+            let mut written: u64 = 0;
+            let write_res: ReleaseResult<()> = async {
+                while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                    ReleaseError::ArtifactVerification(format!(
+                        "streaming body from {}: {}",
+                        url_owned, e
+                    ))
+                })? {
+                    written = written.saturating_add(chunk.len() as u64);
+                    if written > max_bytes {
+                        return Err(ReleaseError::ArtifactVerification(format!(
+                            "Download from {} exceeded maximum allowed size ({} bytes)",
+                            url_owned, max_bytes
+                        )));
+                    }
+                    file.write_all(&chunk).map_err(|e| {
+                        ReleaseError::io(format!("writing download {}", tmp_path.display()), e)
+                    })?;
+                }
+                file.sync_all().map_err(|e| {
+                    ReleaseError::io(format!("syncing download {}", tmp_path.display()), e)
+                })?;
+                Ok(())
+            }
+            .await;
+            drop(file);
+            if let Err(err) = write_res {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(err);
+            }
+            crate::fs_security::ensure_no_symlink_ancestors(&dest_owned)?;
+            if let Err(err) = fs::rename(&tmp_path, &dest_owned) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(ReleaseError::io(
+                    format!("renaming download to {}", dest_owned.display()),
+                    err,
+                ));
+            }
+            Ok(())
         })
     })
     .join()
@@ -1441,5 +1604,27 @@ mod tests {
         )
         .expect_err("replaying nightly bundle under stable v4.0.0 must fail closed");
         assert!(matches!(replay_err, ReleaseError::ArtifactVerification(_)));
+    }
+
+    #[test]
+    fn test_round3_strict_nightly_tag_gate_and_trusted_github_auth_host() {
+        assert!(is_v4_nightly_release_tag("v4.0.0-nightly.110.1"));
+        assert!(is_v4_nightly_release_tag("v4.1.2-Nightly.7"));
+        assert!(!is_v4_nightly_release_tag("v4.9.0-rc.1"));
+        assert!(!is_v4_nightly_release_tag("v4.0.0-beta.1"));
+        assert!(!is_v4_nightly_release_tag("v4.0.0"));
+        assert!(!is_v4_nightly_release_tag("v3.2.7-nightly.1.1"));
+
+        let https_api = reqwest::Url::parse("https://api.github.com/repos/McEveritts/AetherFlow/releases").unwrap();
+        let https_gh = reqwest::Url::parse("https://github.com/McEveritts/AetherFlow/releases/latest").unwrap();
+        let https_obj = reqwest::Url::parse("https://objects.githubusercontent.com/github-production-release-asset/foo").unwrap();
+        let http_downgrade = reqwest::Url::parse("http://api.github.com/repos/McEveritts/AetherFlow/releases").unwrap();
+        let untrusted_host = reqwest::Url::parse("https://evil-mirror.example.com/aetherflow.tar.gz").unwrap();
+
+        assert!(is_trusted_github_auth_url(&https_api));
+        assert!(is_trusted_github_auth_url(&https_gh));
+        assert!(is_trusted_github_auth_url(&https_obj));
+        assert!(!is_trusted_github_auth_url(&http_downgrade));
+        assert!(!is_trusted_github_auth_url(&untrusted_host));
     }
 }

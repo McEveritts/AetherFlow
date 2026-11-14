@@ -277,27 +277,11 @@ fn configured_allowed_hosts() -> Vec<String> {
 }
 
 fn is_allowed_forwarded_host(host: &str) -> bool {
-    if !is_valid_host_authority(host) {
-        return false;
-    }
-    let allowed = configured_allowed_hosts();
-    if allowed.is_empty() {
-        return is_loopback_authority(host);
-    }
-    let lower = host.trim().to_ascii_lowercase();
-    allowed.iter().any(|entry| entry == &lower)
+    is_valid_host_authority(host) && crate::middlewares::is_trusted_request_host(host)
 }
 
 fn is_allowed_direct_host(host: &str) -> bool {
-    if !is_valid_host_authority(host) {
-        return false;
-    }
-    let allowed = configured_allowed_hosts();
-    if allowed.is_empty() {
-        return true;
-    }
-    let lower = host.trim().to_ascii_lowercase();
-    allowed.iter().any(|entry| entry == &lower) || is_loopback_authority(host)
+    is_valid_host_authority(host) && crate::middlewares::is_trusted_request_host(host)
 }
 
 pub fn get_base_url_for_peer(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
@@ -307,10 +291,12 @@ pub fn get_base_url_for_peer(headers: &HeaderMap, peer_ip: Option<std::net::IpAd
             return trimmed.to_string();
         }
     }
-    let trust_forwarded = env::var("TRUST_PROXY_HEADERS")
-        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
-        .unwrap_or(false)
-        && peer_ip.is_none_or(crate::ws::is_trusted_proxy_peer);
+    let trust_forwarded = match peer_ip {
+        Some(ip) => crate::ws::is_trusted_proxy_peer(ip),
+        None => env::var("TRUST_PROXY_HEADERS")
+            .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+            .unwrap_or(false),
+    };
 
     let forwarded_host = if trust_forwarded {
         headers
@@ -730,7 +716,7 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !user_active
-        || af_db::is_token_revoked(&claims.jti)
+        || crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
         || !crate::auth::matches_client_fingerprint(
             &claims.cfp,
             &crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip),
@@ -2878,7 +2864,7 @@ fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Respo
         .and_then(|raw| decode_session_claims(&raw, false).ok())
         .filter(|claims| {
             !claims.jti.is_empty()
-                && !af_db::is_token_revoked(&claims.jti)
+                && !crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
                 && af_db::get_read_conn().ok().is_some_and(|c| {
                     crate::auth::load_active_human_subject(&c, claims.user_id)
                         .is_ok_and(|subj| claims.ver >= subj.sessions_revoked_after)

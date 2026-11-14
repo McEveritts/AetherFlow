@@ -265,6 +265,15 @@ EOF
 fi
 chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 
+PROC_NET_UNIX_PATH="${AF_PROC_NET_UNIX:-/proc/net/unix}"
+x11_display_free() {
+    local disp="$1"
+    [[ ! -e "/tmp/.X${disp}-lock" && ! -L "/tmp/.X${disp}-lock" && ! -e "/tmp/.X11-unix/X${disp}" && ! -L "/tmp/.X11-unix/X${disp}" ]] || return 1
+    if [[ -r "$PROC_NET_UNIX_PATH" ]] && grep -Eq "\.X11-unix/X${disp}([[:space:]]|$)" "$PROC_NET_UNIX_PATH" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
 KASMVNC_DISPLAY=""
 if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
     EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
@@ -285,14 +294,14 @@ for path in (f"/tmp/.X{disp}-lock", f"/tmp/.X11-unix/X{disp}"):
     if not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
         os.unlink(path)
 PYEOF
-        if [[ ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -L "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" && ! -L "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
+        if x11_display_free "$EXISTING_DISPLAY"; then
             KASMVNC_DISPLAY="$EXISTING_DISPLAY"
         fi
     fi
 fi
 if [[ -z "$KASMVNC_DISPLAY" ]]; then
     for candidate_display in $(seq 20 59); do
-        if [[ ! -e "/tmp/.X${candidate_display}-lock" && ! -L "/tmp/.X${candidate_display}-lock" && ! -e "/tmp/.X11-unix/X${candidate_display}" && ! -L "/tmp/.X11-unix/X${candidate_display}" ]]; then
+        if x11_display_free "$candidate_display"; then
             KASMVNC_DISPLAY="$candidate_display"
             break
         fi

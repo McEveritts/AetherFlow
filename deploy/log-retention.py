@@ -143,58 +143,73 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
     descriptor = _open_file(directory, name, os.O_RDWR, allowed_owners)
     pending = name + ".af-retention.pending"
     try:
-        metadata = os.fstat(descriptor)
-        archives = _archive_entries(directory, name, group_id, allowed_owners)
-        _same_entry(directory, name, metadata)
-        _permissions(descriptor, group_id, 0o640)
-        if pending in archives:
-            _same_entry(directory, pending, archives.pop(pending))
-            os.unlink(pending, dir_fd=directory)
-        for entry, archive in archives.items():
-            if int(entry.rsplit(".", 1)[1]) > keep:
-                _same_entry(directory, entry, archive)
-                os.unlink(entry, dir_fd=directory)
-            elif archive.st_size > max_bytes:
-                source = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            metadata = os.fstat(descriptor)
+            archives = _archive_entries(directory, name, group_id, allowed_owners)
+            _same_entry(directory, name, metadata)
+            _permissions(descriptor, group_id, 0o640)
+            if pending in archives:
+                _same_entry(directory, pending, archives.pop(pending))
+                os.unlink(pending, dir_fd=directory)
+            for entry, archive in archives.items():
+                if int(entry.rsplit(".", 1)[1]) > keep:
+                    _same_entry(directory, entry, archive)
+                    os.unlink(entry, dir_fd=directory)
+                elif archive.st_size > max_bytes:
+                    source = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
+                    try:
+                        _copy_tail(directory, source, pending, max_bytes, group_id)
+                    finally:
+                        os.close(source)
+                    _same_entry(directory, entry, archive)
+                    os.replace(pending, entry, src_dir_fd=directory, dst_dir_fd=directory)
+            if os.fstat(descriptor).st_size <= max_bytes:
+                return False
+            archived_end = _copy_tail(directory, descriptor, pending, max_bytes, group_id)
+            for index in range(keep - 1, 0, -1):
+                source = f"{name}.af-retention.{index}"
                 try:
-                    _copy_tail(directory, source, pending, max_bytes, group_id)
+                    archive_descriptor = _open_file(directory, source, os.O_RDONLY, allowed_owners)
+                except FileNotFoundError:
+                    continue
+                try:
+                    _same_entry(directory, source, os.fstat(archive_descriptor))
+                    os.replace(source, f"{name}.af-retention.{index + 1}",
+                               src_dir_fd=directory, dst_dir_fd=directory)
                 finally:
-                    os.close(source)
-                _same_entry(directory, entry, archive)
-                os.replace(pending, entry, src_dir_fd=directory, dst_dir_fd=directory)
-        if os.fstat(descriptor).st_size <= max_bytes:
-            return False
-        archived_end = _copy_tail(directory, descriptor, pending, max_bytes, group_id)
-        for index in range(keep - 1, 0, -1):
-            source = f"{name}.af-retention.{index}"
-            try:
-                archive_descriptor = _open_file(directory, source, os.O_RDONLY, allowed_owners)
-            except FileNotFoundError:
-                continue
-            try:
-                _same_entry(directory, source, os.fstat(archive_descriptor))
-                os.replace(source, f"{name}.af-retention.{index + 1}",
-                           src_dir_fd=directory, dst_dir_fd=directory)
-            finally:
-                os.close(archive_descriptor)
-        os.replace(pending, name + ".af-retention.1", src_dir_fd=directory, dst_dir_fd=directory)
-        os.fsync(directory)
-        _same_entry(directory, name, metadata)
-        post_metadata = _validate_file(descriptor, {os.geteuid()})
-        trailing = _read_bounded_live_tail(
-            descriptor, archived_end, post_metadata.st_size, max_bytes
-        )
-        if trailing:
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            unwritten = memoryview(trailing)
-            while unwritten:
-                written = os.write(descriptor, unwritten)
-                if written <= 0:
-                    raise OSError("zero-length trailing restore write")
-                unwritten = unwritten[written:]
-        os.ftruncate(descriptor, len(trailing))
-        os.fsync(descriptor)
-        return True
+                    os.close(archive_descriptor)
+            os.replace(pending, name + ".af-retention.1", src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+            _same_entry(directory, name, metadata)
+            post_metadata = _validate_file(descriptor, {os.geteuid()})
+            read_cursor = post_metadata.st_size
+            retained = bytearray(
+                _read_bounded_live_tail(descriptor, archived_end, read_cursor, max_bytes)
+            )
+            for _ in range(8):
+                latest_size = os.fstat(descriptor).st_size
+                if latest_size <= read_cursor:
+                    break
+                extra = _read_bounded_live_tail(descriptor, read_cursor, latest_size, max_bytes)
+                read_cursor = latest_size
+                if extra:
+                    retained.extend(extra)
+                    if len(retained) > max_bytes:
+                        del retained[:-max_bytes]
+            if retained:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                unwritten = memoryview(retained)
+                while unwritten:
+                    written = os.write(descriptor, unwritten)
+                    if written <= 0:
+                        raise OSError("zero-length trailing restore write")
+                    unwritten = unwritten[written:]
+            os.ftruncate(descriptor, len(retained))
+            os.fsync(descriptor)
+            return True
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
 

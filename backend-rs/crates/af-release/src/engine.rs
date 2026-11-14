@@ -78,7 +78,22 @@ pub fn append_jsonl_log(log_file: &Path, level: &str, msg: &str) {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    let _ = libc::flock(file.as_raw_fd(), libc::LOCK_SH);
+                }
+            }
             let _ = writeln!(file, "{}", serialized);
+            let _ = file.flush();
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    let _ = libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                }
+            }
         }
     }
     match level {
@@ -817,9 +832,12 @@ where
         ));
         create_new_dir_exclusive(&staging_dir, 0o755, 0o700)?;
 
-        let bundle_res = self
-            .artifact_provider
-            .fetch_release_bundle(cfg, &target_tag, &staging_dir);
+        let bundle_res = self.artifact_provider.fetch_release_bundle(
+            cfg,
+            opts.channel,
+            &target_tag,
+            &staging_dir,
+        );
         let (archive_path, manifest_content) = match bundle_res {
             Ok(pair) => pair,
             Err(err) => {

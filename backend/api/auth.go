@@ -55,6 +55,7 @@ type rotatedSuccessorEntry struct {
 
 var rotatedTokenGrace sync.Map
 var rotatedSessionSuccessor sync.Map
+var refreshRotationMu sync.Mutex
 
 func lookupRotationGraceCached(jti string) (rotatedTokenGraceEntry, bool) {
 	if jti == "" {
@@ -69,7 +70,7 @@ func lookupRotationGraceCached(jti string) (rotatedTokenGraceEntry, bool) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
-	if entry.successorJTI != "" && db.IsTokenRevokedCached(entry.successorJTI) {
+	if entry.successorJTI == "" || db.IsTokenRevokedCached(entry.successorJTI) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -81,7 +82,7 @@ func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
 	if !ok {
 		return rotatedTokenGraceEntry{}, false
 	}
-	if entry.successorJTI != "" && db.IsTokenRevoked(entry.successorJTI) {
+	if entry.successorJTI == "" || db.IsTokenRevoked(entry.successorJTI) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -305,6 +306,7 @@ func revokeAllUserCredentialsInTx(tx *sql.Tx, userID int) (int64, []string, erro
 	_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
 	_, _ = tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE user_id = ?", userID)
 	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE user_id = ?", userID)
+	_ = db.DeleteUserMFAChallengesInTx(tx, userID)
 
 	return newVer, revokedJTIs, nil
 }
@@ -314,6 +316,8 @@ func finalizeUserCredentialRevocation(userID int, revokedJTIs []string) {
 		db.CacheRevokedToken(jti, minRevocationTTL)
 	}
 	evictRotationGraceForUser(userID)
+	db.DeleteUserMFAChallengesCache(userID)
+	db.Delete2FAPending(userID)
 }
 
 func getJWTSecret() []byte {
@@ -450,10 +454,18 @@ func LocalLogin(c *gin.Context) {
 	var passwordHash string
 	var googleId sql.NullString
 	var totpEnabled bool
+	var preAuthVer int64
 	err := db.DB.QueryRow(
-		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id, COALESCE(totp_enabled, 0) FROM users WHERE username = ?",
+		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id, COALESCE(totp_enabled, 0), COALESCE(sessions_revoked_after, 0) FROM users WHERE username = ?",
 		req.Username,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId, &totpEnabled)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId, &totpEnabled, &preAuthVer)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		err = db.DB.QueryRow(
+			"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id, COALESCE(totp_enabled, 0) FROM users WHERE username = ?",
+			req.Username,
+		).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId, &totpEnabled)
+		preAuthVer = 0
+	}
 
 	user.IsOAuth = googleId.Valid && googleId.String != ""
 
@@ -472,7 +484,17 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
-	if _, subErr := loadActiveHumanSubject(db.DB, user.ID); subErr != nil {
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		InternalError(c, "Database unavailable")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	subj, subErr := loadActiveHumanSubject(tx, user.ID)
+	if subErr != nil {
 		if errors.Is(subErr, errSubjectSuspended) {
 			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
 			return
@@ -481,9 +503,24 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
+	var curPasswordHash string
+	var curTotpEnabled bool
+	if recheckErr := tx.QueryRow(
+		"SELECT COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?",
+		user.ID,
+	).Scan(&curPasswordHash, &curTotpEnabled); recheckErr != nil {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
+		return
+	}
+	if curPasswordHash == "" || curPasswordHash != passwordHash || subj.sessionsRevokedAfter != preAuthVer {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
+		return
+	}
+	totpEnabled = curTotpEnabled
+
 	// ── 2FA Gate ──
 	// If the user has TOTP enabled, do NOT issue a session yet.
-	// Instead, return a challenge token that must be verified with a TOTP code.
+	// Instead, atomically persist a challenge token bound to subj.sessionsRevokedAfter.
 	if totpEnabled {
 		mfaToken := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, mfaToken); err != nil {
@@ -492,10 +529,15 @@ func LocalLogin(c *gin.Context) {
 		}
 		token := hex.EncodeToString(mfaToken)
 
-		if err := db.StoreMFAChallenge(token, user.ID, 5*time.Minute); err != nil {
+		if err := db.StoreMFAChallengeWithEpochInTx(tx, token, user.ID, subj.sessionsRevokedAfter, 5*time.Minute); err != nil {
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
+		if err := tx.Commit(); err != nil {
+			InternalError(c, "Failed to store MFA challenge")
+			return
+		}
+		db.CacheMFAChallengeWithEpoch(token, user.ID, subj.sessionsRevokedAfter, 5*time.Minute)
 
 		slog.Info("MFA challenge issued", "user_id", user.ID, "username", user.Username)
 		c.JSON(http.StatusOK, gin.H{
@@ -506,14 +548,16 @@ func LocalLogin(c *gin.Context) {
 	}
 
 	// ── Standard login (no 2FA) ──
-	// Log login
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
-	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
+	_, _ = tx.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
 
-	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
-	tokenString, err := createStandardJWT(user.ID, c)
+	tokenString, _, err := createSessionJWTInTx(tx, user.ID, c, time.Now().UTC().Unix(), "", subj.sessionsRevokedAfter)
 	if err != nil {
+		InternalError(c, "Failed to create session")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		InternalError(c, "Failed to create session")
 		return
 	}
@@ -956,6 +1000,25 @@ func GoogleCallback(c *gin.Context) {
 	var user models.User
 	user.ID = resolvedID
 
+	tx, txErr := db.DB.Begin()
+	if txErr != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
+		return
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	subj, subErr := loadActiveHumanSubject(tx, user.ID)
+	if subErr != nil {
+		if errors.Is(subErr, errSubjectSuspended) {
+			c.Redirect(http.StatusTemporaryRedirect, "/login?error=account_suspended")
+			return
+		}
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=not_authorized")
+		return
+	}
+
 	if totpEnabled {
 		mfaBytes := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, mfaBytes); err != nil {
@@ -964,23 +1027,31 @@ func GoogleCallback(c *gin.Context) {
 			return
 		}
 		challengeToken := hex.EncodeToString(mfaBytes)
-		if err := db.StoreMFAChallenge(challengeToken, user.ID, 5*time.Minute); err != nil {
+		if err := db.StoreMFAChallengeWithEpochInTx(tx, challengeToken, user.ID, subj.sessionsRevokedAfter, 5*time.Minute); err != nil {
 			slog.Error("failed to persist OAuth MFA challenge", "user_id", user.ID, "error", err)
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
+		if err := tx.Commit(); err != nil {
+			InternalError(c, "Failed to store MFA challenge")
+			return
+		}
+		db.CacheMFAChallengeWithEpoch(challengeToken, user.ID, subj.sessionsRevokedAfter, 5*time.Minute)
 		c.Redirect(http.StatusTemporaryRedirect, "/login?mfa="+url.QueryEscape(challengeToken))
 		return
 	}
 
-	// Log login
+	// Log login & issue JWT atomically bound to subj.sessionsRevokedAfter
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
-	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
+	_, _ = tx.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
 
-	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
-	tokenString, err := createStandardJWT(user.ID, c)
+	tokenString, _, err := createSessionJWTInTx(tx, user.ID, c, time.Now().UTC().Unix(), "", subj.sessionsRevokedAfter)
 	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=jwt_failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=jwt_failed")
 		return
 	}
@@ -1417,6 +1488,9 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
+	refreshRotationMu.Lock()
+	defer refreshRotationMu.Unlock()
+
 	tx, txErr := db.DB.Begin()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
@@ -1465,7 +1539,12 @@ func RefreshSession(c *gin.Context) {
 				"SELECT 1 FROM revoked_tokens WHERE jti = ? AND datetime(expires_at) > datetime('now') LIMIT 1",
 				graceEntry.successorJTI,
 			).Scan(&succRevoked)
-			if errors.Is(revErr, sql.ErrNoRows) {
+			var succActive int
+			actErr := tx.QueryRow(
+				"SELECT 1 FROM active_sessions WHERE jti = ? AND user_id = ? LIMIT 1",
+				graceEntry.successorJTI, subj.userID,
+			).Scan(&succActive)
+			if errors.Is(revErr, sql.ErrNoRows) && actErr == nil && succActive == 1 {
 				_ = tx.Rollback()
 				c.SetSameSite(http.SameSiteLaxMode)
 				c.SetCookie("aetherflow_session", graceEntry.newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
@@ -1486,6 +1565,9 @@ func RefreshSession(c *gin.Context) {
 		// Replay outside grace window or previously revoked token: wipe entire session family.
 		resolvedSucc := resolveCurrentSessionJTI(jti)
 		targetFamily := existingFamily
+		if targetFamily == "" {
+			targetFamily = db.ResolveRevokedTokenFamilyInTx(tx, subj.userID, jti)
+		}
 		if targetFamily == "" {
 			_ = tx.QueryRow(
 				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ? OR family_id = ?) LIMIT 1",
@@ -1511,7 +1593,7 @@ func RefreshSession(c *gin.Context) {
 			_ = rows.Close()
 		}
 		for _, wJTI := range wipedJTIs {
-			_ = db.RevokeTokenInTx(tx, wJTI, minRevocationTTL)
+			_ = db.RecordRevokedTokenLineageInTx(tx, wJTI, targetFamily, subj.userID, minRevocationTTL)
 		}
 		_, _ = tx.Exec(
 			"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
@@ -1531,6 +1613,10 @@ func RefreshSession(c *gin.Context) {
 	familyID := existingFamily
 	if familyID == "" {
 		familyID = jti
+	}
+	if err := db.RecordRevokedTokenLineageInTx(tx, jti, familyID, subj.userID, ttl); err != nil {
+		InternalError(c, "Failed to rotate session")
+		return
 	}
 	authTime, _ := sessionAuthTime(claims)
 	newToken, newJTI, err := createSessionJWTInTx(tx, subj.userID, c, authTime, familyID, subj.sessionsRevokedAfter)
@@ -1595,7 +1681,7 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		_, _, subj, err := resolveSessionTokenWithSubject(c)
+		_, claims, subj, err := resolveSessionTokenWithSubject(c)
 		if err != nil {
 			switch {
 			case errors.Is(err, errSubjectSuspended):
@@ -1613,6 +1699,10 @@ func AuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", subj.userID)
 		c.Set("username", subj.username)
 		c.Set("user_role", subj.role)
+		if jti, _ := claims["jti"].(string); jti != "" {
+			c.Set("session_jti", jti)
+		}
+		c.Set("session_ver", claimVersion(claims))
 		c.Next()
 	}
 }
@@ -1775,10 +1865,16 @@ func HostValidationMiddleware() gin.HandlerFunc {
 		}
 		if envHosts == "" && db.DB != nil {
 			var baseDomain string
-			if err := db.DB.QueryRow("SELECT COALESCE(base_domain, '') FROM system_settings WHERE id = 1").Scan(&baseDomain); err == nil {
+			if err := db.DB.QueryRow("SELECT COALESCE(base_domain, '') FROM settings WHERE id = 1").Scan(&baseDomain); err == nil {
 				bd := strings.ToLower(strings.TrimSpace(baseDomain))
-				if bd != "" && (normalized == bd || normalized == bd+":443" || normalized == bd+":80") {
-					return true
+				if bd != "" {
+					hostOnly := normalized
+					if h, _, splitErr := net.SplitHostPort(normalized); splitErr == nil && h != "" {
+						hostOnly = strings.ToLower(strings.TrimSpace(h))
+					}
+					if hostOnly == bd || strings.HasSuffix(hostOnly, "."+bd) {
+						return true
+					}
 				}
 			}
 		}
@@ -1815,8 +1911,7 @@ func HostValidationMiddleware() gin.HandlerFunc {
 
 // CSRFMiddleware validates X-CSRF-Token on mutating requests.
 // Bearer-token authenticated API requests are exempt (tokens are not auto-sent by browsers).
-// Only cookie-authenticated requests (e.g., OIDC flows) require CSRF validation.
-// Enable by setting CSRF_ENABLED=true in the environment.
+// Enabled by default on cookie-authenticated routes; set CSRF_DISABLED=true for local dev opt-out only.
 func CSRFMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Silent refresh requests and Bearer-token requests are exempt from CSRF

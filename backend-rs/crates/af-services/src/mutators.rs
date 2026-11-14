@@ -6,7 +6,7 @@ use regex::Regex;
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
@@ -3895,8 +3895,67 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
     Ok(())
 }
 
+fn hmac_sha256_bytes(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut block_key = [0u8; 64];
+    if key.len() > 64 {
+        let hashed = Sha256::digest(key);
+        block_key[..32].copy_from_slice(&hashed);
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= block_key[i];
+        opad[i] ^= block_key[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    let outer_digest = outer.finalize();
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer_digest);
+    out
+}
+
+/// Derives a domain-separated, irreversible 32-hex-character WebUI password for
+/// applications that store cleartext passwords in their local INI/TOML configs
+/// (such as SABnzbd), preventing recovery of the shared provisioning secret.
+pub fn derive_app_webui_password(app_id: &str, master_pass: &str) -> String {
+    let msg = format!("aetherflow:{}:webui:v1", app_id.trim().to_ascii_lowercase());
+    let digest = hmac_sha256_bytes(master_pass.as_bytes(), msg.as_bytes());
+    hex::encode(&digest[..16])
+}
+
+fn has_existing_encrypted_master_creds_file() -> bool {
+    let mut read_paths = master_cred_paths();
+    if env::var("AETHERFLOW_MASTER_CREDS_FILE")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        read_paths.push(resolve_config_path(
+            "/opt/AetherFlow/backend/data/.master.creds",
+        ));
+    }
+    for path in read_paths {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if raw.contains("enc:v1:") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Ensures dedicated random package-provisioning credentials exist in `.master.creds`
-/// without ever persisting the operator's control-plane password.
+/// without ever persisting the operator's control-plane password or overwriting an
+/// existing encrypted `.master.creds` file on decryption failure.
 pub fn ensure_provisioning_credentials(username: &str) {
     let user_clean = {
         let trimmed = username.trim();
@@ -3909,6 +3968,12 @@ pub fn ensure_provisioning_credentials(username: &str) {
     let (existing_user, existing_pass, _) = load_master_credentials();
     if !existing_user.is_empty() && !existing_pass.is_empty() && existing_pass != "adminadmin" {
         let _ = save_master_credentials(&existing_user, &existing_pass);
+        return;
+    }
+    if has_existing_encrypted_master_creds_file() {
+        tracing::warn!(
+            "Existing encrypted master credentials could not be decrypted; refusing to overwrite .master.creds"
+        );
         return;
     }
     let mut random_bytes = [0u8; 16];
@@ -3990,13 +4055,12 @@ fn load_install_master_conf() -> Option<(String, String, String)> {
     Some((username, password, ha1))
 }
 
-/// Propagates the master credentials to installed applications (qBittorrent PBKDF2, SABnzbd, Transmission).
+/// Propagates the master credentials to installed applications (qBittorrent PBKDF2, SABnzbd derived secret, Transmission).
 pub fn sync_master_credentials_to_installed_apps(username: &str, password: &str) {
     if username.trim().is_empty() || password.is_empty() {
         return;
     }
     let qbit_hash = generate_qbittorrent_pbkdf2(password);
-    let ha1_value = format!("@ByteArray({})", md5_hex(password.as_bytes()));
     for raw in [
         "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
         "/var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf",
@@ -4005,10 +4069,10 @@ pub fn sync_master_credentials_to_installed_apps(username: &str, password: &str)
         if p.is_file() {
             let _ = mutate_ini_key(&p, "Preferences", r"WebUI\Username", username.trim());
             let _ = mutate_ini_key(&p, "Preferences", r"WebUI\Password_PBKDF2", &qbit_hash);
-            let _ = mutate_ini_key(&p, "Preferences", r"WebUI\Password_ha1", &ha1_value);
         }
     }
 
+    let sab_password = derive_app_webui_password("sabnzbd", password);
     for raw in [
         "/var/lib/sabnzbd/sabnzbd.ini",
         "/var/lib/sabnzbd/.sabnzbd/sabnzbd.ini",
@@ -4017,7 +4081,12 @@ pub fn sync_master_credentials_to_installed_apps(username: &str, password: &str)
         let p = resolve_config_path(raw);
         if p.is_file() {
             let _ = mutate_ini_key(&p, "misc", "username", username.trim());
-            let _ = mutate_ini_key(&p, "misc", "password", password);
+            let _ = mutate_ini_key(&p, "misc", "password", &sab_password);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+            }
         }
     }
 
@@ -4465,14 +4534,10 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 if !master_user.is_empty() && !master_pass.is_empty() {
                     let has_user = extract_ini_value(&existing_ini, &[r"WebUI\Username"])
                         .is_some_and(|v| !v.trim().is_empty());
-                    let has_pass = extract_ini_value(
-                        &existing_ini,
-                        &[r"WebUI\Password_PBKDF2", r"WebUI\Password_ha1"],
-                    )
-                    .is_some_and(|v| !v.trim().is_empty());
+                    let has_pass = extract_ini_value(&existing_ini, &[r"WebUI\Password_PBKDF2"])
+                        .is_some_and(|v| !v.trim().is_empty());
                     if !has_user || !has_pass {
                         let qbit_hash = generate_qbittorrent_pbkdf2(&master_pass);
-                        let ha1_value = format!("@ByteArray({})", md5_hex(master_pass.as_bytes()));
                         file_changed |= handle_host_mutation(mutate_ini_key(
                             &resolved,
                             "Preferences",
@@ -4484,12 +4549,6 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                             "Preferences",
                             r"WebUI\Password_PBKDF2",
                             &qbit_hash,
-                        ))?;
-                        file_changed |= handle_host_mutation(mutate_ini_key(
-                            &resolved,
-                            "Preferences",
-                            r"WebUI\Password_ha1",
-                            &ha1_value,
                         ))?;
                     }
                 }
@@ -4536,8 +4595,14 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                     let has_pass = extract_ini_value(&existing_ini, &["password"])
                         .is_some_and(|v| !v.trim().is_empty());
                     if !has_user || !has_pass {
+                        let sab_pass = derive_app_webui_password("sabnzbd", &master_pass);
                         file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "username", &master_user))?;
-                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "password", &master_pass))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "password", &sab_pass))?;
+                        #[cfg(unix)]
+                        if resolved.is_file() {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(&resolved, fs::Permissions::from_mode(0o600));
+                        }
                     }
                 }
                 if file_changed {

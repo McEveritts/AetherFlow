@@ -111,7 +111,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.PUT("/profile/avatar", UpdateAvatar)
 		authGroup.DELETE("/profile/avatar", DeleteAvatar)
 		authGroup.GET("/system/topology", GetSystemTopology)
-		authGroup.GET("/fs", BrowseDirectories)
+		authGroup.GET("/fs", AdminOnly(), BrowseDirectories)
 
 		authGroup.GET("/user/quota", GetOwnQuota)
 
@@ -138,9 +138,9 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.PUT("/notifications/:id/read", MarkNotificationRead)
 		authGroup.POST("/notifications/dismiss-all", DismissAllNotifications)
 
-		authGroup.GET("/ws/logs", HandleLogWebSocket)
-		authGroup.GET("/deploy/stream", HandleDeployStream)
-		authGroup.POST("/deploy/:appName", HandleDeployProcess)
+		authGroup.GET("/ws/logs", AdminOnly(), HandleLogWebSocket)
+		authGroup.GET("/deploy/stream", AdminOnly(), HandleDeployStream)
+		authGroup.POST("/deploy/:appName", AdminOnly(), HandleDeployProcess)
 		authGroup.GET("/blueprints", GetBlueprints)
 		authGroup.GET("/blueprints/:appName", GetAppBlueprint)
 
@@ -149,9 +149,13 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.GET("/streaming/artwork/:itemId", GetStreamingArtwork)
 	}
 
-	// ── Admin routes (require valid JWT session + admin role) ──
+	// ── Admin routes (require valid JWT session + admin role + CSRF) ──
+	csrfEnabled := strings.ToLower(os.Getenv("CSRF_DISABLED")) != "true"
 	adminGroup := apiGroup.Group("/admin")
 	adminGroup.Use(AuthMiddleware(), AdminOnly())
+	if csrfEnabled {
+		adminGroup.Use(CSRFMiddleware())
+	}
 	{
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/backup/run", RunBackup)
@@ -331,10 +335,15 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	}
 
 	// Compatibility aliases for frontend and legacy routing (api/ingress)
-	apiGroup.GET("/deploy/stream", AuthMiddleware(), HandleDeployStream)
-	apiGroup.GET("/ingress/configs", AuthMiddleware(), GetIngressConfigs)            // api/ingress/configs
-	apiGroup.PUT("/ingress/apps/:appName", AuthMiddleware(), UpdateAppIngressConfig) // api/ingress/apps
-	apiGroup.GET("/fs", AuthMiddleware(), BrowseDirectories)
+	apiGroup.GET("/deploy/stream", AuthMiddleware(), AdminOnly(), HandleDeployStream)
+	if csrfEnabled {
+		apiGroup.GET("/ingress/configs", AuthMiddleware(), AdminOnly(), CSRFMiddleware(), GetIngressConfigs)            // api/ingress/configs
+		apiGroup.PUT("/ingress/apps/:appName", AuthMiddleware(), AdminOnly(), CSRFMiddleware(), UpdateAppIngressConfig) // api/ingress/apps
+	} else {
+		apiGroup.GET("/ingress/configs", AuthMiddleware(), AdminOnly(), GetIngressConfigs)            // api/ingress/configs
+		apiGroup.PUT("/ingress/apps/:appName", AuthMiddleware(), AdminOnly(), UpdateAppIngressConfig) // api/ingress/apps
+	}
+	apiGroup.GET("/fs", AuthMiddleware(), AdminOnly(), BrowseDirectories)
 }
 
 func getSystemMetrics(c *gin.Context) {

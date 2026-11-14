@@ -284,16 +284,17 @@ _stage_prebuilt_release_archive() {
         chmod 0755 "${release_dir}/af"
     fi
 
-    if [[ -s "${release_dir}/.version" ]]; then
-        local archive_version
-        archive_version="$(tr -d '[:space:]' < "${release_dir}/.version")"
-        if [[ "${archive_version}" != "${release_tag}" ]]; then
-            echo "[ERROR] Extracted release archive .version '${archive_version}' does not match expected tag '${release_tag}'." >&2
-            rm -rf "${release_dir}"
-            return 1
-        fi
-    else
-        printf '%s\n' "${release_tag}" > "${release_dir}/.version"
+    if [[ ! -f "${release_dir}/.version" || -L "${release_dir}/.version" || ! -s "${release_dir}/.version" ]]; then
+        echo "[ERROR] Extracted release archive is missing a non-empty regular .version stamp." >&2
+        rm -rf "${release_dir}"
+        return 1
+    fi
+    local archive_version
+    archive_version="$(tr -d '[:space:]' < "${release_dir}/.version")"
+    if [[ "${archive_version}" != "${release_tag}" ]]; then
+        echo "[ERROR] Extracted release archive .version '${archive_version}' does not match expected tag '${release_tag}'." >&2
+        rm -rf "${release_dir}"
+        return 1
     fi
 
     if [[ -f "${af_root}/deploy/release-manager.sh" ]]; then
@@ -383,7 +384,7 @@ _pull_prebuilt_v4_release() {
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
                 target_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
 import json, re, sys
-tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+nightly_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[Nn]ightly\.[0-9]+(?:\.[0-9]+)?$")
 try:
     for r in json.load(sys.stdin):
         if not isinstance(r, dict) or r.get("draft"):
@@ -391,10 +392,9 @@ try:
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
         if (
-            tag_re.fullmatch(tag)
+            nightly_re.fullmatch(tag)
             and target != "experimental"
-            and "experimental" not in tag.lower()
-            and (target == "nightly" or bool(r.get("prerelease")) or "nightly" in tag.lower())
+            and (bool(r.get("prerelease")) or target == "nightly")
         ):
             print(tag)
             break
@@ -594,8 +594,8 @@ _af_read_env_raw() {
         {
             line = $0
             sub(/\r$/, "", line)
-            if (line ~ "^[[:space:]]*" k "=") {
-                sub("^[[:space:]]*" k "=", "", line)
+            if (line ~ "^[[:space:]]*(export[[:space:]]+)?" k "=") {
+                sub("^[[:space:]]*(export[[:space:]]+)?" k "=", "", line)
                 value = line
                 found = 1
             }
@@ -832,7 +832,7 @@ _build_modern_stack() {
     # Preserve any custom operator environment variables from existing file before overwriting
     local extra_lines=""
     if [[ -f "${existing_env}" ]]; then
-        extra_lines="$(grep -v -E '^[[:space:]]*(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
+        extra_lines="$(grep -v -E '^[[:space:]]*(export[[:space:]]+)?(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     fi
 
     cat > "${env_dir}/aetherflow.env" <<EOF

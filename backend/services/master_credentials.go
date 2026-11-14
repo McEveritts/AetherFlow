@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/md5" // #nosec G501 -- legacy rTorrent/ruTorrent digest compatibility in memory only
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
@@ -211,8 +213,33 @@ func SaveMasterCredentials(username, password string) {
 	}
 }
 
+func hasExistingEncryptedMasterCredsFile() bool {
+	readPaths := append([]string{}, masterCredsPaths()...)
+	if strings.TrimSpace(os.Getenv("AETHERFLOW_MASTER_CREDS_FILE")) == "" {
+		readPaths = append(readPaths, legacyDuplicateMasterCredsPaths()...)
+	}
+	for _, p := range readPaths {
+		if p == "" {
+			continue
+		}
+		if data, err := os.ReadFile(p); err == nil && strings.Contains(string(data), masterCredsEncPrefix) { // #nosec G304 -- controlled internal credential store path
+			return true
+		}
+	}
+	return false
+}
+
+// DeriveAppWebUIPassword derives a domain-separated, irreversible 32-hex-character
+// password for downstream apps whose configuration format requires plaintext values.
+func DeriveAppWebUIPassword(appID, masterPass string) string {
+	mac := hmac.New(sha256.New, []byte(masterPass))
+	_, _ = mac.Write([]byte("aetherflow:" + strings.ToLower(strings.TrimSpace(appID)) + ":webui:v1"))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
 // EnsureProvisioningMasterCredentials initializes dedicated random package-provisioning
-// credentials if none exist yet, so the control-plane admin password is never written to disk.
+// credentials if none exist yet, so the control-plane admin password is never written to disk,
+// while refusing to clobber an existing encrypted .master.creds file on decryption failure.
 func EnsureProvisioningMasterCredentials(username string) {
 	u := strings.TrimSpace(username)
 	if u == "" {
@@ -220,6 +247,10 @@ func EnsureProvisioningMasterCredentials(username string) {
 	}
 	if existingUser, existingPass, _ := LoadMasterCredentials(); existingUser != "" && existingPass != "" && existingPass != "adminadmin" {
 		SaveMasterCredentials(existingUser, existingPass)
+		return
+	}
+	if hasExistingEncryptedMasterCredsFile() {
+		slog.Warn("existing encrypted master credentials could not be decrypted; refusing to overwrite .master.creds")
 		return
 	}
 	buf := make([]byte, 16)

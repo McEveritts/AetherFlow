@@ -74,8 +74,12 @@ jobs:
         run: |
           echo "Resolved release identity: ${RELEASE_TAG} (${VERSION_STAMP})"
 
-      - name: Test Release Routing
-        run: python3 -m unittest discover -s tests -p 'test_release_workflow.py' -v
+      - name: Test Release Routing, Provenance & Security Regressions
+        run: |
+          python3 -m unittest discover -s tests -p 'test_release*.py' -v
+          python3 -m unittest discover -s tests -p 'test_verify_provenance.py' -v
+          python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
+          python3 -m unittest discover -s tests -p 'test_round3_security_regressions.py' -v
 
   security-gate:
     name: Release Security, SAST & Advisory Gate
@@ -93,9 +97,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check Shell Hygiene
+      - name: Check Shell Hygiene & Full Python Verification Suite
         working-directory: .
-        run: python3 tests/check_shell_hygiene.py
+        run: |
+          python3 tests/check_shell_hygiene.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Secret Scan (Gitleaks Gate)
         working-directory: .

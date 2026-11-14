@@ -87,8 +87,11 @@ fn replace_verified_recovery_codes(
     encrypted_secret: &str,
     password_hash: &str,
     code: &str,
-    password_verified: bool,
+    password_ok: bool,
 ) -> anyhow::Result<Option<Vec<String>>> {
+    if !password_ok || code.trim().is_empty() {
+        return Ok(None);
+    }
     let transaction = conn.unchecked_transaction()?;
     let current: (String, bool, String) = transaction.query_row(
         "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
@@ -98,7 +101,9 @@ fn replace_verified_recovery_codes(
         return Ok(None);
     }
     let secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
-    if !password_verified && !crate::auth::consume_totp_code(&transaction, user_id, &secret, code) {
+    if !crate::auth::consume_totp_code(&transaction, user_id, &secret, code)
+        && !crate::auth::validate_recovery_code(&transaction, user_id, code)
+    {
         return Ok(None);
     }
     let codes = generate_recovery_codes();
@@ -112,11 +117,11 @@ pub async fn regenerate_2fa_recovery_codes(
     headers: HeaderMap,
     Json(req): Json<RegenerateRecoveryReq>,
 ) -> Response {
-    if req.code.trim().is_empty() && req.password.is_empty() {
+    if req.code.trim().is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
-            "A valid TOTP code is required",
+            "A valid TOTP or recovery code is required",
         );
     }
 
@@ -136,17 +141,22 @@ pub async fn regenerate_2fa_recovery_codes(
         if !totp_enabled {
             return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Two-factor authentication is not enabled");
         }
-        let password_verified = !req.password.is_empty() && !password_hash.is_empty()
-            && crate::auth::verify_password(&req.password, &password_hash);
+        let password_ok = req.password.is_empty()
+            || (!password_hash.is_empty() && crate::auth::verify_password(&req.password, &password_hash));
         let result = (|| -> anyhow::Result<_> {
             let conn = af_db::get_conn()?;
-            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_verified)
+            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_ok)
         })();
         let codes = match result {
             Ok(Some(codes)) => codes,
-            Ok(None) => return api_error(StatusCode::FORBIDDEN,
-                if req.code.trim().is_empty() { "INVALID_CURRENT_PASSWORD" } else { "INVALID_2FA_CODE" },
-                "Invalid verification code or password"),
+            Ok(None) => {
+                let err_code = if !req.password.is_empty() && !password_ok {
+                    "INVALID_CURRENT_PASSWORD"
+                } else {
+                    "INVALID_2FA_CODE"
+                };
+                return api_error(StatusCode::FORBIDDEN, err_code, "Invalid verification code or password");
+            }
             Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to regenerate recovery codes"),
         };
         let ip = extract_client_ip(&headers);
@@ -1120,8 +1130,18 @@ mod tests {
             1,
             "JBSWY3DPEHPK3PXP",
             "test-hash",
+            "",
+            true
+        )
+        .unwrap()
+        .is_none());
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_some());
@@ -1138,7 +1158,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_none());
@@ -1147,7 +1167,7 @@ mod tests {
             1,
             "JBSWY3DPEHPK3PXP",
             "stale-password-hash",
-            "",
+            &code,
             true
         )
         .unwrap()
@@ -1173,7 +1193,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .is_err());
         let old: String = conn
@@ -1193,7 +1213,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_some());

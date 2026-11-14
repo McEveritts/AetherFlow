@@ -57,6 +57,8 @@ func GetMarketplaceApps(c *gin.Context) {
 		}
 	}
 
+	role, _ := c.Get("user_role")
+	isAdmin := role == "admin"
 	baseDomain := services.ResolveBaseDomain()
 	apps := []App{}
 	for _, p := range pkgs {
@@ -83,6 +85,10 @@ func GetMarketplaceApps(c *gin.Context) {
 			}
 		}
 
+		updateErr := p.UpdateError
+		if !isAdmin {
+			updateErr = ""
+		}
 		app := App{
 			Id:                    p.Name,
 			Name:                  p.Label,
@@ -102,7 +108,7 @@ func GetMarketplaceApps(c *gin.Context) {
 			UpdateAvailable:       p.UpdateAvailable,
 			UpdateCheckedAt:       p.UpdateCheckedAt,
 			UpdateURL:             p.UpdateURL,
-			UpdateError:           p.UpdateError,
+			UpdateError:           updateErr,
 		}
 
 		// Enrich with live progress data if job is active
@@ -110,7 +116,9 @@ func GetMarketplaceApps(c *gin.Context) {
 			app.Progress = jobInfo.Progress
 			ts := jobInfo.StartedAt.Format(time.RFC3339)
 			app.StartedAt = &ts
-			app.LogLine = jobInfo.LastLine
+			if isAdmin {
+				app.LogLine = jobInfo.LastLine
+			}
 		}
 
 		apps = append(apps, app)
@@ -325,11 +333,14 @@ func PackageProgress(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"status":     jobInfo.Status,
 		"progress":   jobInfo.Progress,
 		"started_at": jobInfo.StartedAt.Format(time.RFC3339),
-		"log_line":   jobInfo.LastLine,
-		"log_lines":  jobInfo.LogLines,
-	})
+	}
+	if role, _ := c.Get("user_role"); role == "admin" {
+		resp["log_line"] = jobInfo.LastLine
+		resp["log_lines"] = jobInfo.LogLines
+	}
+	c.JSON(http.StatusOK, resp)
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"aetherflow/db"
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
@@ -70,14 +72,25 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub        *Hub
+	conn       *websocket.Conn
+	send       chan []byte
+	userID     int
+	role       string
+	sessionJTI string
+	sessionVer int64
+}
+
+type hubEnvelope struct {
+	raw          []byte
+	adminOnly    bool
+	targetUserID *int
 }
 
 type Hub struct {
 	clients    map[*Client]bool
 	broadcast  chan []byte
+	dispatch   chan hubEnvelope
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.Mutex
@@ -86,9 +99,64 @@ type Hub struct {
 func newHub() *Hub {
 	return &Hub{
 		broadcast:  make(chan []byte, 256),
+		dispatch:   make(chan hubEnvelope, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+	}
+}
+
+func isTokenRevokedBeyondGraceForUser(jti string, userID int) bool {
+	if jti == "" || !db.IsTokenRevoked(jti) {
+		return false
+	}
+	if graceEntry, ok := isWithinRotationGrace(jti); ok && graceEntry.userID == userID {
+		return false
+	}
+	return true
+}
+
+func evaluateClientDelivery(cl *Client, env hubEnvelope) (alive bool, deliver bool) {
+	role := cl.role
+	if db.DB != nil && cl.userID > 0 {
+		if isTokenRevokedBeyondGraceForUser(cl.sessionJTI, cl.userID) {
+			return false, false
+		}
+		subj, err := loadActiveHumanSubject(db.DB, cl.userID)
+		if err != nil || cl.sessionVer < subj.sessionsRevokedAfter {
+			return false, false
+		}
+		role = subj.role
+		cl.role = role
+	}
+	if env.adminOnly && role != "admin" {
+		return true, false
+	}
+	if env.targetUserID != nil && *env.targetUserID > 0 && cl.userID != *env.targetUserID {
+		return true, false
+	}
+	return true, true
+}
+
+func (h *Hub) fanout(env hubEnvelope) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client := range h.clients {
+		alive, deliver := evaluateClientDelivery(client, env)
+		if !alive {
+			close(client.send)
+			delete(h.clients, client)
+			continue
+		}
+		if !deliver {
+			continue
+		}
+		select {
+		case client.send <- env.raw:
+		default:
+			close(client.send)
+			delete(h.clients, client)
+		}
 	}
 }
 
@@ -107,16 +175,9 @@ func (h *Hub) run() {
 			}
 			h.mu.Unlock()
 		case message := <-h.broadcast:
-			h.mu.Lock()
-			for client := range h.clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(h.clients, client)
-				}
-			}
-			h.mu.Unlock()
+			h.fanout(hubEnvelope{raw: message})
+		case env := <-h.dispatch:
+			h.fanout(env)
 		}
 	}
 }
@@ -201,9 +262,15 @@ func init() {
 	go broadcastMetricsLoop()
 }
 
+const wsTicketTTL = 30 * time.Second
+
 type wsTicketEntry struct {
-	UserID   int
-	ClientIP string
+	UserID     int
+	Role       string
+	SessionJTI string
+	SessionVer int64
+	ClientIP   string
+	ExpiresAt  int64
 }
 
 var (
@@ -218,21 +285,55 @@ func IssueWSTicket(c *gin.Context) {
 		Unauthorized(c, "Unauthorized")
 		return
 	}
+	userID, ok := rawUserID.(int)
+	if !ok || userID <= 0 {
+		Unauthorized(c, "Unauthorized")
+		return
+	}
+
+	role, _ := c.Get("user_role")
+	roleStr, _ := role.(string)
+	if roleStr == "" {
+		roleStr = "user"
+	}
+	jtiVal, _ := c.Get("session_jti")
+	sessionJTI, _ := jtiVal.(string)
+	var sessionVer int64
+	if verVal, hasVer := c.Get("session_ver"); hasVer {
+		switch v := verVal.(type) {
+		case int64:
+			sessionVer = v
+		case int:
+			sessionVer = int64(v)
+		}
+	}
 
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		InternalError(c, "Failed to generate WebSocket ticket")
+		return
+	}
 	ticket := hex.EncodeToString(b)
+	nowUnix := time.Now().Unix()
 
 	wsTicketsMu.Lock()
+	for k, existing := range wsTickets {
+		if existing.ExpiresAt > 0 && nowUnix > existing.ExpiresAt {
+			delete(wsTickets, k)
+		}
+	}
 	wsTickets[ticket] = wsTicketEntry{
-		UserID:   rawUserID.(int),
-		ClientIP: c.ClientIP(),
+		UserID:     userID,
+		Role:       roleStr,
+		SessionJTI: sessionJTI,
+		SessionVer: sessionVer,
+		ClientIP:   c.ClientIP(),
+		ExpiresAt:  nowUnix + int64(wsTicketTTL.Seconds()),
 	}
 	wsTicketsMu.Unlock()
 
-	// 90 seconds expiry for ticket
 	go func(t string) {
-		time.Sleep(90 * time.Second)
+		time.Sleep(wsTicketTTL)
 		wsTicketsMu.Lock()
 		delete(wsTickets, t)
 		wsTicketsMu.Unlock()
@@ -245,7 +346,7 @@ func isLoopbackIP(ip string) bool {
 	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
 }
 
-// HandleWebSocket authenticates the request via WS ticket with IP-binding validation.
+// HandleWebSocket authenticates the request via WS ticket with IP-binding and session revocation validation.
 func HandleWebSocket(c *gin.Context) {
 	ticket := c.Query("ticket")
 	if ticket == "" {
@@ -260,7 +361,7 @@ func HandleWebSocket(c *gin.Context) {
 	}
 	wsTicketsMu.Unlock()
 
-	if !ok {
+	if !ok || (entry.ExpiresAt > 0 && time.Now().Unix() > entry.ExpiresAt) {
 		RespondError(c, http.StatusUnauthorized, "WS_INVALID_TICKET", "Invalid or expired ticket")
 		return
 	}
@@ -273,14 +374,45 @@ func HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	_ = entry.UserID // validated user — available for future per-user channel filtering
+	resolvedRole := entry.Role
+	if resolvedRole == "" {
+		resolvedRole = "user"
+	}
+	if db.DB != nil && entry.UserID > 0 {
+		if isTokenRevokedBeyondGraceForUser(entry.SessionJTI, entry.UserID) {
+			RespondError(c, http.StatusUnauthorized, ErrCodeSessionExpired, "Session revoked")
+			return
+		}
+		subj, subErr := loadActiveHumanSubject(db.DB, entry.UserID)
+		if subErr != nil {
+			if errors.Is(subErr, errSubjectSuspended) {
+				RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
+				return
+			}
+			RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Unauthorized")
+			return
+		}
+		if entry.SessionVer < subj.sessionsRevokedAfter {
+			RespondError(c, http.StatusUnauthorized, ErrCodeSessionExpired, "Session revoked")
+			return
+		}
+		resolvedRole = subj.role
+	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade error", "error", err)
 		return
 	}
-	client := &Client{hub: WSHub, conn: conn, send: make(chan []byte, 256)}
+	client := &Client{
+		hub:        WSHub,
+		conn:       conn,
+		send:       make(chan []byte, 256),
+		userID:     entry.UserID,
+		role:       resolvedRole,
+		sessionJTI: entry.SessionJTI,
+		sessionVer: entry.SessionVer,
+	}
 	client.hub.register <- client
 
 	// Immediately push an initial METRICS_UPDATE snapshot so the newly connected
@@ -426,7 +558,7 @@ func broadcastMetricsLoop() {
 	}
 }
 
-// BroadcastNotification sends a notification to all connected WebSocket clients.
+// BroadcastNotification sends a notification to the target user (or all connected clients when global).
 func BroadcastNotification(n services.Notification) {
 	payload := map[string]interface{}{
 		"type": "NOTIFICATION",
@@ -444,10 +576,16 @@ func BroadcastNotification(n services.Notification) {
 		return
 	}
 
+	var targetUID *int
+	if n.UserID != nil && *n.UserID > 0 {
+		uid := *n.UserID
+		targetUID = &uid
+	}
+
 	select {
-	case WSHub.broadcast <- message:
+	case WSHub.dispatch <- hubEnvelope{raw: message, targetUserID: targetUID}:
 	default:
-		slog.Info("WARNING: WebSocket broadcast channel full, dropping notification", "title", n.Title)
+		slog.Info("WARNING: WebSocket dispatch channel full, dropping notification", "title", n.Title)
 	}
 }
 
@@ -472,9 +610,9 @@ func BroadcastMarketplaceUpdates(packages []string) {
 	}
 
 	select {
-	case WSHub.broadcast <- message:
+	case WSHub.dispatch <- hubEnvelope{raw: message, adminOnly: true}:
 	default:
-		slog.Warn("WebSocket broadcast channel full, dropping marketplace update")
+		slog.Warn("WebSocket dispatch channel full, dropping marketplace update")
 	}
 }
 
@@ -506,14 +644,13 @@ func BroadcastMarketplaceJobEvent(pkgId, action, status string, progress int, la
 	}
 
 	select {
-	case WSHub.broadcast <- message:
+	case WSHub.dispatch <- hubEnvelope{raw: message, adminOnly: true}:
 	default:
-		slog.Warn("WebSocket broadcast channel full, dropping marketplace job event")
+		slog.Warn("WebSocket dispatch channel full, dropping marketplace job event")
 	}
 }
 
-// BroadcastActionQueued sends an ACTION_QUEUED WebSocket message to all connected clients.
-// This enables real-time Inbox updates without relying solely on polling.
+// BroadcastActionQueued sends an ACTION_QUEUED WebSocket message exclusively to connected admin clients.
 func BroadcastActionQueued(actionID int64, classification, source, action string) {
 	payload := map[string]interface{}{
 		"type": "ACTION_QUEUED",
@@ -531,8 +668,8 @@ func BroadcastActionQueued(actionID int64, classification, source, action string
 	}
 
 	select {
-	case WSHub.broadcast <- message:
+	case WSHub.dispatch <- hubEnvelope{raw: message, adminOnly: true}:
 	default:
-		slog.Warn("WebSocket broadcast channel full, dropping action queued event")
+		slog.Warn("WebSocket dispatch channel full, dropping action queued event")
 	}
 }

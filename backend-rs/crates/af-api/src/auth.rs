@@ -493,6 +493,28 @@ fn check_rotation_grace(jti: &str) -> Option<RotatedTokenGraceEntry> {
     map.get(jti).cloned()
 }
 
+pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> bool {
+    match af_db::token_revocation_status(jti) {
+        Ok(false) => false,
+        Err(_) => true,
+        Ok(true) => {
+            let Some(grace) = check_rotation_grace(jti).filter(|g| g.user_id == user_id) else {
+                return true;
+            };
+            if grace.successor_jti.is_empty() {
+                return true;
+            }
+            match af_db::token_revocation_status(&grace.successor_jti) {
+                Ok(false) => false,
+                Ok(true) | Err(_) => {
+                    evict_rotation_grace_for_family(&grace.family_id, jti);
+                    true
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn evict_rotation_grace_for_family(family_id: &str, target_jti: &str) {
     if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
         map.retain(|old_jti, entry| {
@@ -571,6 +593,7 @@ pub(crate) fn revoke_all_user_credentials_in_tx(
             params![user_id],
         )?;
     }
+    af_db::delete_user_mfa_challenges_in_tx(tx, user_id)?;
 
     Ok((new_ver, revoked_jtis))
 }
@@ -580,6 +603,7 @@ pub(crate) fn finalize_user_credential_revocation(user_id: i64, revoked_jtis: &[
         af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
     }
     evict_rotation_grace_for_user(user_id);
+    af_db::delete_2fa_pending(user_id);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1147,7 +1171,8 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         },
     );
 
-    let Ok((id, username, email, avatar_url, role, password_hash, google_id, totp_enabled)) = row
+    let Ok((id, _username, _email, _avatar_url, _role, password_hash, _google_id, _totp_enabled)) =
+        row
     else {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -1157,6 +1182,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     };
 
     let subject_status = load_active_human_subject(&conn, id);
+    let pre_auth_ver = query_user_credential_version(&conn, id);
     drop(conn);
 
     if password_hash.is_empty() {
@@ -1201,11 +1227,104 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         }
     }
 
+    let Ok(mut write_conn) = af_db::get_conn() else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
+        );
+    };
+    let Ok(tx) = write_conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
+        );
+    };
+    match load_active_human_subject(&tx, id) {
+        Ok(_) => {}
+        Err(SubjectStatusError::Suspended) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is not active",
+            );
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Invalid username or password",
+            );
+        }
+        Err(SubjectStatusError::DbError) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database unavailable",
+            );
+        }
+    }
+    let current_row = tx.query_row(
+        "SELECT username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
+         COALESCE(password_hash, ''), COALESCE(google_id, ''), COALESCE(totp_enabled, 0) \
+         FROM users WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, bool>(6)?,
+            ))
+        },
+    );
+    let Ok((
+        username,
+        email,
+        avatar_url,
+        role,
+        current_password_hash,
+        google_id,
+        totp_enabled,
+    )) = current_row
+    else {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid username or password",
+        );
+    };
+    let current_ver = query_user_credential_version(&tx, id);
+    if current_password_hash.is_empty()
+        || current_password_hash != password_hash
+        || current_ver != pre_auth_ver
+    {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid username or password",
+        );
+    }
+
     if totp_enabled {
         let mut raw_token = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw_token);
         let mfa_token = hex::encode(raw_token);
-        if af_db::store_mfa_challenge(&mfa_token, id, Duration::from_secs(300)).is_err() {
+        if af_db::store_mfa_challenge_in_tx(
+            &tx,
+            &mfa_token,
+            id,
+            current_ver,
+            Duration::from_secs(300),
+        )
+        .is_err()
+            || tx.commit().is_err()
+        {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
@@ -1224,20 +1343,28 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if let Ok(history_conn) = af_db::get_conn() {
-        let _ = history_conn.execute(
-            "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
-            params![id, client_ip, user_agent],
-        );
-    }
+    let _ = tx.execute(
+        "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+        params![id, client_ip, user_agent],
+    );
 
-    let Ok((token, _)) = create_standard_jwt(id, &headers) else {
+    let Ok((token, _)) =
+        create_session_jwt_in_conn(&tx, id, &headers, Utc::now().timestamp(), None, current_ver)
+    else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to create session",
         );
     };
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to create session",
+        );
+    }
+    drop(write_conn);
 
     let user = User {
         id,
@@ -1564,6 +1691,12 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        if resolved_family.is_none() {
+            resolved_family =
+                af_db::resolve_revoked_token_family_in_tx(&tx, &claims.jti, subj.user_id)
+                    .ok()
+                    .flatten();
+        }
         if table_exists(&tx, "active_sessions").unwrap_or(false) {
             if resolved_family.is_none() && has_family {
                 resolved_family = tx
@@ -1651,6 +1784,7 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     };
 
+    let _ = af_db::record_revoked_token_lineage_in_tx(&tx, &claims.jti, &family_id, subj.user_id);
     let _ = tx.execute(
         "DELETE FROM active_sessions WHERE jti = ?1",
         params![claims.jti],
@@ -1743,7 +1877,7 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if af_db::is_token_revoked(&claims.jti)
+    if is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
         || !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent)
     {
         return api_error(
@@ -2033,7 +2167,7 @@ pub(crate) fn store_recovery_codes(
     Ok(())
 }
 
-fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &str) -> bool {
+pub(crate) fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &str) -> bool {
     let normalized = raw_code.trim().to_uppercase();
     if normalized.is_empty() {
         return false;
@@ -2228,11 +2362,11 @@ pub async fn disable_2fa(req: Request) -> Response {
     let Ok(payload) = serde_json::from_slice::<Disable2FaRequest>(&bytes) else {
         return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Invalid JSON");
     };
-    if payload.code.trim().is_empty() && payload.password.is_empty() {
+    if payload.code.trim().is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
-            "Verification code or password required",
+            "A valid TOTP or recovery code is required",
         );
     }
     blocking_auth_work(move || {
@@ -2248,8 +2382,8 @@ pub async fn disable_2fa(req: Request) -> Response {
         };
         drop(conn);
         let secret = af_db::decrypt_key(&encrypted_secret).unwrap_or(encrypted_secret);
-        let password_verified = !payload.password.is_empty() && !password_hash.is_empty()
-            && verify_password(&payload.password, &password_hash);
+        let password_ok = payload.password.is_empty()
+            || (!password_hash.is_empty() && verify_password(&payload.password, &password_hash));
         let result = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
             let mut conn = af_db::get_conn()?;
             let transaction =
@@ -2260,8 +2394,12 @@ pub async fn disable_2fa(req: Request) -> Response {
             )?;
             let current_secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
             anyhow::ensure!(current_secret == secret && current.1 == password_hash, "Credentials changed");
-            if !password_verified && !consume_totp_code(&transaction, auth_user.user_id, &secret, &payload.code)
-                && !validate_recovery_code(&transaction, auth_user.user_id, &payload.code) {
+            if !password_ok {
+                return Ok(None);
+            }
+            if !consume_totp_code(&transaction, auth_user.user_id, &secret, &payload.code)
+                && !validate_recovery_code(&transaction, auth_user.user_id, &payload.code)
+            {
                 return Ok(None);
             }
             let affected = transaction.execute(
@@ -2285,7 +2423,14 @@ pub async fn disable_2fa(req: Request) -> Response {
         })();
         let (new_token, revoked_jtis) = match result {
             Ok(Some(pair)) => pair,
-            Ok(None) => return api_error(StatusCode::FORBIDDEN, if payload.code.trim().is_empty() { "INVALID_CURRENT_PASSWORD" } else { "INVALID_2FA_CODE" }, "Invalid verification code or password"),
+            Ok(None) => {
+                let err_code = if !payload.password.is_empty() && !password_ok {
+                    "INVALID_CURRENT_PASSWORD"
+                } else {
+                    "INVALID_2FA_CODE"
+                };
+                return api_error(StatusCode::FORBIDDEN, err_code, "Invalid verification code or password");
+            }
             Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to disable two-factor authentication"),
         };
         finalize_user_credential_revocation(auth_user.user_id, &revoked_jtis);
@@ -2315,22 +2460,23 @@ pub async fn mfa_login_verify(headers: HeaderMap, Json(req): Json<MfaVerifyReque
 
 #[derive(Debug)]
 enum MfaVerifyOutcome {
-    Verified(User),
+    Verified(User, Option<String>),
     Invalid,
     Suspended,
 }
 
-fn verify_mfa_factor_outcome(
-    conn: &rusqlite::Connection,
+fn redeem_mfa_challenge_in_tx(
+    transaction: rusqlite::Transaction<'_>,
     token: &str,
     code: &str,
+    session_headers: Option<&HeaderMap>,
 ) -> anyhow::Result<MfaVerifyOutcome> {
-    let transaction = conn.unchecked_transaction()?;
-    let Some(user_id) = af_db::begin_mfa_attempt(&transaction, token)? else {
+    let Some((user_id, challenge_ver)) = af_db::begin_mfa_attempt_with_epoch(&transaction, token)?
+    else {
         return Ok(MfaVerifyOutcome::Invalid);
     };
-    match load_active_human_subject(&transaction, user_id) {
-        Ok(_) => {}
+    let subj = match load_active_human_subject(&transaction, user_id) {
+        Ok(subj) => subj,
         Err(SubjectStatusError::Suspended) => {
             let _ = transaction.execute(
                 "DELETE FROM mfa_challenges WHERE token = ?1",
@@ -2350,6 +2496,14 @@ fn verify_mfa_factor_outcome(
         Err(SubjectStatusError::DbError) => {
             anyhow::bail!("Failed to verify account status during MFA");
         }
+    };
+    if subj.sessions_revoked_after != challenge_ver {
+        let _ = transaction.execute(
+            "DELETE FROM mfa_challenges WHERE token = ?1",
+            params![token],
+        );
+        transaction.commit()?;
+        return Ok(MfaVerifyOutcome::Invalid);
     }
     let (user, encrypted): (User, String) = transaction.query_row(
         "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), COALESCE(google_id, ''), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
@@ -2373,11 +2527,47 @@ fn verify_mfa_factor_outcome(
         return Ok(MfaVerifyOutcome::Invalid);
     }
     anyhow::ensure!(
-        af_db::consume_mfa_challenge(&transaction, token, user_id)?,
+        af_db::consume_mfa_challenge_with_epoch(&transaction, token, user_id, challenge_ver)?,
         "Challenge already consumed"
     );
+    let session_token = if let Some(headers) = session_headers {
+        let (jwt, _) = create_session_jwt_in_conn(
+            &transaction,
+            user.id,
+            headers,
+            Utc::now().timestamp(),
+            None,
+            challenge_ver,
+        )?;
+        if table_exists(&transaction, "login_history").unwrap_or(false) {
+            let _ = transaction.execute(
+                "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+                params![
+                    user.id,
+                    extract_client_ip(headers),
+                    headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                ],
+            );
+        }
+        Some(jwt)
+    } else {
+        None
+    };
     transaction.commit()?;
-    Ok(MfaVerifyOutcome::Verified(user))
+    Ok(MfaVerifyOutcome::Verified(user, session_token))
+}
+
+#[cfg(test)]
+fn verify_mfa_factor_outcome(
+    conn: &rusqlite::Connection,
+    token: &str,
+    code: &str,
+) -> anyhow::Result<MfaVerifyOutcome> {
+    let transaction = conn.unchecked_transaction()?;
+    redeem_mfa_challenge_in_tx(transaction, token, code, None)
 }
 
 #[cfg(test)]
@@ -2387,16 +2577,19 @@ fn verify_mfa_factor(
     code: &str,
 ) -> anyhow::Result<Option<User>> {
     match verify_mfa_factor_outcome(conn, token, code)? {
-        MfaVerifyOutcome::Verified(user) => Ok(Some(user)),
+        MfaVerifyOutcome::Verified(user, _) => Ok(Some(user)),
         MfaVerifyOutcome::Invalid | MfaVerifyOutcome::Suspended => Ok(None),
     }
 }
 
 fn mfa_login_verify_blocking(headers: HeaderMap, req: MfaVerifyRequest) -> Response {
-    let result = af_db::get_conn()
-        .and_then(|conn| verify_mfa_factor_outcome(&conn, &req.mfa_token, &req.code));
-    let user = match result {
-        Ok(MfaVerifyOutcome::Verified(user)) => user,
+    let result = (|| -> anyhow::Result<MfaVerifyOutcome> {
+        let mut conn = af_db::get_conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        redeem_mfa_challenge_in_tx(tx, &req.mfa_token, &req.code, Some(&headers))
+    })();
+    let (user, token_opt) = match result {
+        Ok(MfaVerifyOutcome::Verified(user, token_opt)) => (user, token_opt),
         Ok(MfaVerifyOutcome::Suspended) => {
             return api_error(
                 StatusCode::FORBIDDEN,
@@ -2419,14 +2612,13 @@ fn mfa_login_verify_blocking(headers: HeaderMap, req: MfaVerifyRequest) -> Respo
             )
         }
     };
-    let Ok((token, _)) = create_standard_jwt(user.id, &headers) else {
+    let Some(token) = token_opt else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to create session",
         );
     };
-    record_login(user.id, &headers);
     let mut resp =
         Json(serde_json::json!({ "message": "Login successful", "user": user })).into_response();
     set_session_cookie(&mut resp, &token);
@@ -2469,9 +2661,9 @@ mod tests {
 
     fn mfa_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, avatar_url TEXT, role TEXT, google_id TEXT, totp_secret TEXT, totp_enabled INTEGER, last_totp_step INTEGER DEFAULT -1);
-            INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1);
-            CREATE TABLE mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER, attempts INTEGER DEFAULT 0, expires_at INTEGER);
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, avatar_url TEXT, role TEXT, google_id TEXT, totp_secret TEXT, totp_enabled INTEGER, last_totp_step INTEGER DEFAULT -1, sessions_revoked_after INTEGER DEFAULT 0);
+            INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1, 0);
+            CREATE TABLE mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER, credential_ver INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, expires_at INTEGER);
             CREATE TABLE recovery_codes (id INTEGER PRIMARY KEY, user_id INTEGER, code_hash TEXT, used INTEGER DEFAULT 0);").unwrap();
         conn
     }
@@ -2554,7 +2746,7 @@ mod tests {
         for sql in schema {
             conn.execute_batch(&sql).unwrap();
         }
-        conn.execute("INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1)", []).unwrap();
+        conn.execute("INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1, 0)", []).unwrap();
         add_challenge(&conn, "shared");
         add_challenge(&conn, "later");
         drop(conn);
@@ -3266,13 +3458,32 @@ mod tests {
         let (other_session, other_claims) = create_standard_jwt(992, &headers).unwrap();
         let (_, caller_claims) = create_standard_jwt(992, &headers).unwrap();
 
-        let mut req = Request::builder()
+        let mut pw_only_req = Request::builder()
             .method("POST")
             .uri("/api/v1/auth/2fa/disable")
             .header(header::USER_AGENT, "epoch-agent")
             .body(axum::body::Body::from(
                 r#"{"password":"correct-horse-battery"}"#,
             ))
+            .unwrap();
+        pw_only_req.extensions_mut().insert(AuthUser {
+            user_id: 992,
+            username: "epoch-user".into(),
+            role: "admin".into(),
+            jti: caller_claims.jti.clone(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        assert_eq!(disable_2fa(pw_only_req).await.status(), StatusCode::BAD_REQUEST);
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/2fa/disable")
+            .header(header::USER_AGENT, "epoch-agent")
+            .body(axum::body::Body::from(format!(
+                r#"{{"password":"correct-horse-battery","code":"{}"}}"#,
+                totp_now()
+            )))
             .unwrap();
         req.extensions_mut().insert(AuthUser {
             user_id: 992,
@@ -3402,5 +3613,64 @@ mod tests {
         )
         .await;
         assert_eq!(mfa_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn round3_disable_2fa_requires_second_factor_and_mfa_epoch_invalidation() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("r3-strong-pass", 4).unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, totp_enabled, totp_secret, sessions_revoked_after) \
+                 VALUES (994, 'r3-mfa-user', ?1, 'user', 1, 'JBSWY3DPEHPK3PXP', 50)",
+                params![pw_hash],
+            )
+            .unwrap();
+        }
+
+        // 1. disable_2fa with password only (no second-factor `code`) MUST return 400 BAD_REQUEST
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/2fa/disable")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"password":"r3-strong-pass"}"#))
+            .unwrap();
+        req.extensions_mut().insert(AuthUser {
+            user_id: 994,
+            username: "r3-mfa-user".into(),
+            role: "user".into(),
+            jti: "jti-994".into(),
+            plugin_id: None,
+            plugin_scopes: vec![],
+        });
+        let disable_resp = disable_2fa(req).await;
+        assert_eq!(disable_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 2. Pending MFA challenge issued at epoch 50 MUST fail after sessions_revoked_after advances to 60
+        {
+            let conn = af_db::get_conn().unwrap();
+            af_db::store_mfa_challenge_in_tx(&conn, "r3-epoch-mfa", 994, 50, Duration::from_secs(300)).unwrap();
+            conn.execute(
+                "UPDATE users SET sessions_revoked_after = 60 WHERE id = 994",
+                [],
+            )
+            .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("r3-agent"));
+        let epoch_resp = mfa_login_verify(
+            headers,
+            Json(MfaVerifyRequest {
+                mfa_token: "r3-epoch-mfa".into(),
+                code: totp_now(),
+            }),
+        )
+        .await;
+        assert_eq!(epoch_resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
