@@ -125,7 +125,7 @@ func main() {
 		api.BroadcastMarketplaceUpdates(changed)
 	})
 
-		// Initialize the Metrics Recorder (Phase 19 — Predictive Resource Scaling)
+	// Initialize the Metrics Recorder (Phase 19 — Predictive Resource Scaling)
 	services.InitMetricsRecorder()
 
 	// Phase 8: Initialize MediaFlow Job Poller

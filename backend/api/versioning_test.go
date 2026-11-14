@@ -10,11 +10,11 @@ import (
 
 func TestNormalizeAPIVersion(t *testing.T) {
 	cases := map[string]string{
-		"v1":       "v1",
-		"1":        "v1",
+		"v1":          "v1",
+		"1":           "v1",
 		" version=1 ": "v1",
-		"VERSION=V1": "v1",
-		"":         "",
+		"VERSION=V1":  "v1",
+		"":            "",
 	}
 
 	for input, want := range cases {

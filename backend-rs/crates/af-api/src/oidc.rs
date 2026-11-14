@@ -1,6 +1,7 @@
+#[cfg(test)]
+use crate::auth::create_standard_jwt;
 use crate::auth::{
-    api_error, blocking_response, create_standard_jwt, decode_session_claims,
-    secure_cookie_enabled, AuthUser,
+    api_error, blocking_response, decode_session_claims, secure_cookie_enabled, AuthUser,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
 use axum::extract::{Form, Path, Query, Request};
@@ -582,6 +583,7 @@ fn record_consent(user_id: i64, client_id: &str, scope: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_and_store_auth_code(
     client_id: &str,
     user_id: i64,
@@ -590,10 +592,15 @@ fn generate_and_store_auth_code(
     code_challenge: &str,
     code_challenge_method: &str,
     nonce: &str,
+    session_family_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut code_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut code_bytes);
-    let code = hex::encode(code_bytes);
+    let raw_hex = hex::encode(code_bytes);
+    let code = match session_family_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(fam) => format!("s{}_{}", crate::auth::oidc_session_tag(fam), raw_hex),
+        None => raw_hex,
+    };
     let expires_at = (Utc::now() + Duration::minutes(10)).to_rfc3339();
 
     let conn = af_db::get_conn()?;
@@ -613,6 +620,49 @@ fn generate_and_store_auth_code(
         ],
     )?;
     Ok(code)
+}
+
+fn oidc_code_family_id(code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"af-oidc-code:");
+    hasher.update(code.as_bytes());
+    let code_tag = &hex::encode(hasher.finalize())[..32];
+    if code.len() > 33 && code.starts_with('s') && code.as_bytes()[33] == b'_' {
+        let sess_tag = &code[1..33];
+        if sess_tag
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return format!("sf:{}:{}", sess_tag, code_tag);
+        }
+    }
+    format!("cf:{}", code_tag)
+}
+
+fn oidc_device_family_id(device_code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"af-oidc-dc:");
+    hasher.update(device_code.as_bytes());
+    let dc_tag = &hex::encode(hasher.finalize())[..32];
+    format!("dc:{}", dc_tag)
+}
+
+fn is_oidc_grant_revoked(fam: &str) -> bool {
+    let trimmed = fam.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if af_db::is_token_revoked(&format!("oidc-fam:{}", trimmed)) {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix("sf:") {
+        if let Some((sess_tag, _)) = rest.split_once(':') {
+            if sess_tag.len() == 32 && af_db::is_token_revoked(&format!("oidc-sess:{}", sess_tag)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Deserialize)]
@@ -709,6 +759,8 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
 
     let user_active = crate::auth::load_active_human_subject(&conn, claims.user_id)
         .is_ok_and(|subj| claims.ver >= subj.sessions_revoked_after);
+    let session_family_id =
+        crate::auth::resolve_session_family_id(&conn, claims.user_id, &claims.jti);
     drop(conn);
     let peer_ip = req
         .extensions()
@@ -719,13 +771,15 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+    let client_ip = crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip);
+    let caller_strict_fp = crate::auth::legacy_client_fingerprint(&client_ip, user_agent);
     if !user_active
-        || crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
-        || !crate::auth::matches_client_fingerprint(
-            &claims.cfp,
-            &crate::ws::extract_client_ip_for_peer(req.headers(), peer_ip),
-            user_agent,
+        || crate::auth::is_session_token_revoked_beyond_grace_for_fp(
+            &claims.jti,
+            claims.user_id,
+            Some(&caller_strict_fp),
         )
+        || !crate::auth::matches_client_fingerprint(&claims.cfp, &client_ip, user_agent)
     {
         let return_to = urlencoding::encode(full_uri);
         return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
@@ -740,6 +794,7 @@ fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
             &q.code_challenge,
             &q.code_challenge_method,
             &q.nonce,
+            Some(&session_family_id),
         ) else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -925,6 +980,7 @@ fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
             .into_response();
     }
 
+    let session_family_id = crate::auth::resolve_session_family_id(&conn, user.user_id, &user.jti);
     drop(conn);
     let scope = validate_oidc_scopes(&payload.scope);
     let Ok(code) = generate_and_store_auth_code(
@@ -935,6 +991,7 @@ fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
         &payload.code_challenge,
         &payload.code_challenge_method,
         &payload.nonce,
+        Some(&session_family_id),
     ) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1059,6 +1116,8 @@ struct AccessTokenClaims {
     jti: String,
     #[serde(default)]
     ver: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    fam: String,
 }
 
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
@@ -1125,6 +1184,16 @@ fn issue_oidc_tokens_in_tx(
         nonce: nonce.filter(|v| !v.is_empty()).map(str::to_string),
     };
 
+    let mut refresh_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut refresh_bytes);
+    let refresh_token = hex::encode(refresh_bytes);
+    let refresh_exp = (Utc::now() + Duration::days(30)).to_rfc3339();
+    let effective_family = family_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&refresh_token)
+        .to_string();
+
     let access_claims = AccessTokenClaims {
         iss: issuer,
         sub: user_id.to_string(),
@@ -1134,6 +1203,7 @@ fn issue_oidc_tokens_in_tx(
         scope: validated_scope.clone(),
         jti: uuid::Uuid::new_v4().to_string(),
         ver: active_subj.sessions_revoked_after,
+        fam: effective_family.clone(),
     };
 
     let Ok(id_token) = encode(&jwt_header, &id_claims, &keys.encoding_key) else {
@@ -1152,15 +1222,6 @@ fn issue_oidc_tokens_in_tx(
             .into_response());
     };
 
-    let mut refresh_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut refresh_bytes);
-    let refresh_token = hex::encode(refresh_bytes);
-    let refresh_exp = (Utc::now() + Duration::days(30)).to_rfc3339();
-    let effective_family = family_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&refresh_token);
-
     let insert_res = if crate::auth::column_exists(conn, "oidc_refresh_tokens", "family_id")
         .unwrap_or(false)
     {
@@ -1173,7 +1234,7 @@ fn issue_oidc_tokens_in_tx(
                 user_id,
                 validated_scope,
                 refresh_exp,
-                effective_family
+                &effective_family
             ],
         )
     } else {
@@ -1261,9 +1322,17 @@ fn oidc_token_blocking(
                 )
                     .into_response();
             };
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "server_error" })),
+                )
+                    .into_response();
+            };
 
             let Ok((stored_client, user_id, stored_redirect, scope, challenge, challenge_method, expires_at, used, nonce)) =
-                conn.query_row(
+                tx.query_row(
                     "SELECT client_id, user_id, redirect_uri, scope, COALESCE(code_challenge, ''), COALESCE(code_challenge_method, ''), expires_at, used, COALESCE(nonce, '') \
                      FROM oidc_auth_codes WHERE code = ?1",
                     params![code],
@@ -1289,7 +1358,45 @@ fn oidc_token_blocking(
                     .into_response();
             };
 
+            if stored_client != client_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid_grant" })),
+                )
+                    .into_response();
+            }
+
+            let code_family = oidc_code_family_id(&code);
+            let fam_marker = format!("oidc-fam:{}", code_family);
+
             if used {
+                if crate::auth::column_exists(&tx, "oidc_refresh_tokens", "family_id")
+                    .unwrap_or(false)
+                    && tx
+                        .execute(
+                            "UPDATE oidc_refresh_tokens SET revoked = 1 \
+                             WHERE user_id = ?1 AND client_id = ?2 AND family_id = ?3",
+                            params![user_id, client_id, code_family],
+                        )
+                        .is_err()
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                        .into_response();
+                }
+                if af_db::revoke_token_in_tx(&tx, &fam_marker, std::time::Duration::from_secs(8160))
+                    .is_err()
+                    || tx.commit().is_err()
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "server_error" })),
+                    )
+                        .into_response();
+                }
+                af_db::cache_revoked_token(&fam_marker, std::time::Duration::from_secs(8160));
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1300,7 +1407,7 @@ fn oidc_token_blocking(
                     .into_response();
             }
 
-            if stored_client != client_id || stored_redirect != redirect_uri {
+            if stored_redirect != redirect_uri || is_oidc_grant_revoked(&code_family) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": "invalid_grant" })),
@@ -1342,14 +1449,6 @@ fn oidc_token_blocking(
                     .into_response();
             }
 
-            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            else {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": "server_error" })),
-                )
-                    .into_response();
-            };
             let affected = tx
                 .execute(
                     "UPDATE oidc_auth_codes SET used = 1 WHERE code = ?1 AND used = 0",
@@ -1357,6 +1456,22 @@ fn oidc_token_blocking(
                 )
                 .unwrap_or(0);
             if affected == 0 {
+                if crate::auth::column_exists(&tx, "oidc_refresh_tokens", "family_id")
+                    .unwrap_or(false)
+                {
+                    let _ = tx.execute(
+                        "UPDATE oidc_refresh_tokens SET revoked = 1 \
+                         WHERE user_id = ?1 AND client_id = ?2 AND family_id = ?3",
+                        params![user_id, client_id, code_family],
+                    );
+                }
+                let _ = af_db::revoke_token_in_tx(
+                    &tx,
+                    &fam_marker,
+                    std::time::Duration::from_secs(8160),
+                );
+                let _ = tx.commit();
+                af_db::cache_revoked_token(&fam_marker, std::time::Duration::from_secs(8160));
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1375,7 +1490,7 @@ fn oidc_token_blocking(
                 user_id,
                 &scope,
                 Some(&nonce),
-                None,
+                Some(&code_family),
             ) {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -1446,6 +1561,15 @@ fn oidc_token_blocking(
             } else {
                 stored_family
             };
+            let fam_marker = format!("oidc-fam:{}", effective_family);
+
+            if is_oidc_grant_revoked(&effective_family) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid_grant" })),
+                )
+                    .into_response();
+            }
 
             if revoked {
                 let revoke_res = if has_family {
@@ -1461,13 +1585,22 @@ fn oidc_token_blocking(
                         params![user_id, client_id],
                     )
                 };
-                if revoke_res.is_err() || tx.commit().is_err() {
+                if revoke_res.is_err()
+                    || af_db::revoke_token_in_tx(
+                        &tx,
+                        &fam_marker,
+                        std::time::Duration::from_secs(8160),
+                    )
+                    .is_err()
+                    || tx.commit().is_err()
+                {
                     return api_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
                         "Failed to revoke compromised refresh token family",
                     );
                 }
+                af_db::cache_revoked_token(&fam_marker, std::time::Duration::from_secs(8160));
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1528,13 +1661,17 @@ fn oidc_token_blocking(
                     )
                         .into_response();
                 }
-                if tx.commit().is_err() {
+                if af_db::revoke_token_in_tx(&tx, &fam_marker, std::time::Duration::from_secs(8160))
+                    .is_err()
+                    || tx.commit().is_err()
+                {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({ "error": "server_error" })),
                     )
                         .into_response();
                 }
+                af_db::cache_revoked_token(&fam_marker, std::time::Duration::from_secs(8160));
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1583,8 +1720,16 @@ fn oidc_token_blocking(
                 )
                     .into_response();
             };
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "server_error" })),
+                )
+                    .into_response();
+            };
 
-            let Ok((stored_client, user_id_opt, scope, expires_at, status)) = conn.query_row(
+            let Ok((stored_client, user_id_opt, scope, expires_at, status)) = tx.query_row(
                 "SELECT client_id, user_id, scope, expires_at, status FROM oidc_device_codes WHERE device_code = ?1",
                 params![device_code],
                 |r| {
@@ -1646,15 +1791,6 @@ fn oidc_token_blocking(
                         )
                             .into_response();
                     };
-                    let Ok(tx) =
-                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    else {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({ "error": "server_error" })),
-                        )
-                            .into_response();
-                    };
                     if !matches!(consume_device_code(&tx, &device_code, &client_id), Ok(Some((consumed_uid, _))) if consumed_uid == uid)
                     {
                         return (
@@ -1663,6 +1799,7 @@ fn oidc_token_blocking(
                         )
                             .into_response();
                     }
+                    let dc_family = oidc_device_family_id(&device_code);
                     let granted_scope = validate_oidc_scopes(&scope);
                     let payload = match issue_oidc_tokens_in_tx(
                         &tx,
@@ -1672,7 +1809,7 @@ fn oidc_token_blocking(
                         uid,
                         &granted_scope,
                         None,
-                        None,
+                        Some(&dc_family),
                     ) {
                         Ok(v) => v,
                         Err(resp) => return resp,
@@ -1747,6 +1884,7 @@ fn oidc_userinfo_blocking(headers: HeaderMap, peer_ip: Option<std::net::IpAddr>)
     };
     if token_data.claims.jti.is_empty()
         || af_db::is_token_revoked(&token_data.claims.jti)
+        || is_oidc_grant_revoked(&token_data.claims.fam)
         || !is_accepted_oidc_issuer(&token_data.claims.iss, &headers, peer_ip)
     {
         return (
@@ -1876,27 +2014,77 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
         }
     }
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
             .into_response();
     };
-    let revoke_sql =
-        if crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id").unwrap_or(false) {
-            "UPDATE oidc_refresh_tokens SET revoked = 1 \
-         WHERE client_id = ?2 AND (token = ?1 OR (COALESCE(family_id, '') != '' AND family_id IN \
-         (SELECT family_id FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2)))"
-        } else {
-            "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND client_id = ?2"
-        };
-    if conn.execute(revoke_sql, params![token, client_id]).is_err() {
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
         )
             .into_response();
+    };
+    let has_fam_col =
+        crate::auth::column_exists(&tx, "oidc_refresh_tokens", "family_id").unwrap_or(false);
+    let revoked_family = if has_fam_col {
+        tx.query_row(
+            "SELECT COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2",
+            params![token, client_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .map(|f| if f.trim().is_empty() { token.clone() } else { f })
+    } else {
+        tx.query_row(
+            "SELECT token FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2",
+            params![token, client_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    };
+    let revoke_sql = if has_fam_col {
+        "UPDATE oidc_refresh_tokens SET revoked = 1 \
+         WHERE client_id = ?2 AND (token = ?1 OR (COALESCE(family_id, '') != '' AND family_id IN \
+         (SELECT family_id FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2)))"
+    } else {
+        "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND client_id = ?2"
+    };
+    if tx.execute(revoke_sql, params![token, client_id]).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "server_error" })),
+        )
+            .into_response();
+    }
+    let mut cached_fam_marker: Option<String> = None;
+    if let Some(fam) = revoked_family.filter(|s| !s.trim().is_empty()) {
+        let marker = format!("oidc-fam:{}", fam.trim());
+        if af_db::revoke_token_in_tx(&tx, &marker, std::time::Duration::from_secs(8160)).is_err() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "server_error" })),
+            )
+                .into_response();
+        }
+        cached_fam_marker = Some(marker);
+    }
+    if tx.commit().is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "server_error" })),
+        )
+            .into_response();
+    }
+    if let Some(marker) = cached_fam_marker {
+        af_db::cache_revoked_token(&marker, std::time::Duration::from_secs(8160));
     }
     Json(serde_json::json!({})).into_response()
 }
@@ -2029,6 +2217,7 @@ fn oidc_introspect_blocking(
             {
                 let token_valid = !data.claims.jti.is_empty()
                     && !af_db::is_token_revoked(&data.claims.jti)
+                    && !is_oidc_grant_revoked(&data.claims.fam)
                     && af_db::get_read_conn().ok().is_some_and(|connection| {
                         oidc_client_exists(&connection, &data.claims.aud)
                             && access_token_subject_valid(
@@ -2058,24 +2247,35 @@ fn oidc_introspect_blocking(
 
     if hint != "access_token" {
         if let Ok(conn) = af_db::get_read_conn() {
-            if let Ok((user_id, scope, revoked, expires_at)) = conn.query_row(
-                "SELECT user_id, scope, revoked, expires_at FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2",
-                params![token_str, client_id],
-                |r| {
+            let has_fam_col = crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id")
+                .unwrap_or(false);
+            let rt_sql = if has_fam_col {
+                "SELECT user_id, scope, revoked, expires_at, COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
+            } else {
+                "SELECT user_id, scope, revoked, expires_at, '' FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2"
+            };
+            if let Ok((user_id, scope, revoked, expires_at, rt_family)) =
+                conn.query_row(rt_sql, params![token_str, client_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, bool>(2)?,
                         r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
-                },
-            ) {
+                })
+            {
                 let expired = DateTime::parse_from_rfc3339(&expires_at)
                     .map(|dt| Utc::now() > dt.with_timezone(&Utc))
                     .unwrap_or(true);
                 let user_active = oidc_client_exists(&conn, &client_id)
                     && crate::auth::load_active_human_subject(&conn, user_id).is_ok();
-                if !revoked && !expired && user_active {
+                let eff_fam = if rt_family.trim().is_empty() {
+                    token_str.clone()
+                } else {
+                    rt_family
+                };
+                if !revoked && !is_oidc_grant_revoked(&eff_fam) && !expired && user_active {
                     return Json(serde_json::json!({
                         "active": true,
                         "sub": user_id.to_string(),
@@ -2921,41 +3121,95 @@ fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Respo
                 })
         })
         .map(|claims| claims.user_id);
-    let result = af_db::get_conn().and_then(|conn| {
-        resolve_google_user(
+    enum GoogleLoginDecision {
+        NotAuthorized,
+        MfaChallenge(String),
+        SessionIssued(String),
+    }
+
+    let outcome = (|| -> anyhow::Result<GoogleLoginDecision> {
+        let mut conn = af_db::get_conn()?;
+        let Some((user_id, mfa_hint)) = resolve_google_user(
             &conn,
             info,
             &env::var("AETHERFLOW_GOOGLE_ALLOWED_EMAILS").unwrap_or_default(),
             &env::var("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS").unwrap_or_default(),
             authenticated_user_id,
-        )
-    });
-    let mut response = match result {
-        Ok(Some((user_id, true))) => {
+        )?
+        else {
+            return Ok(GoogleLoginDecision::NotAuthorized);
+        };
+
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Ok(subj) = crate::auth::load_active_human_subject(&tx, user_id) else {
+            return Ok(GoogleLoginDecision::NotAuthorized);
+        };
+        let current_mfa: bool =
+            if crate::auth::column_exists(&tx, "users", "totp_enabled").unwrap_or(false) {
+                tx.query_row(
+                    "SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
+                    params![user_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(mfa_hint)
+            } else {
+                mfa_hint
+            };
+
+        if current_mfa {
             let mut bytes = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut bytes);
             let challenge = hex::encode(bytes);
-            if af_db::store_mfa_challenge(&challenge, user_id, std::time::Duration::from_secs(300))
-                .is_ok()
-            {
-                Redirect::temporary(&google_login_location(headers, "mfa", &challenge))
-                    .into_response()
-            } else {
-                google_login_error(headers, "db_error")
-            }
+            af_db::store_mfa_challenge_in_tx(
+                &tx,
+                &challenge,
+                user_id,
+                subj.sessions_revoked_after,
+                std::time::Duration::from_secs(300),
+            )?;
+            tx.commit()?;
+            return Ok(GoogleLoginDecision::MfaChallenge(challenge));
         }
-        Ok(Some((user_id, false))) => match create_standard_jwt(user_id, headers) {
-            Ok((token, _)) => {
-                crate::auth::record_login(user_id, headers);
-                let mut response =
-                    Redirect::temporary(google_return_to(headers).as_deref().unwrap_or("/"))
-                        .into_response();
-                crate::auth::set_session_cookie(&mut response, &token);
-                response
-            }
-            Err(_) => google_login_error(headers, "jwt_failed"),
-        },
-        Ok(None) => google_login_error(headers, "not_authorized"),
+
+        let (token, _) = crate::auth::create_session_jwt_in_conn(
+            &tx,
+            user_id,
+            headers,
+            Utc::now().timestamp(),
+            None,
+            subj.sessions_revoked_after,
+        )
+        .map_err(|_| anyhow::anyhow!("jwt_failed"))?;
+        if crate::auth::table_exists(&tx, "login_history").unwrap_or(false) {
+            let _ = tx.execute(
+                "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+                params![
+                    user_id,
+                    crate::ws::extract_client_ip(headers),
+                    headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                ],
+            );
+        }
+        tx.commit()?;
+        Ok(GoogleLoginDecision::SessionIssued(token))
+    })();
+
+    let mut response = match outcome {
+        Ok(GoogleLoginDecision::MfaChallenge(challenge)) => {
+            Redirect::temporary(&google_login_location(headers, "mfa", &challenge)).into_response()
+        }
+        Ok(GoogleLoginDecision::SessionIssued(token)) => {
+            let mut response =
+                Redirect::temporary(google_return_to(headers).as_deref().unwrap_or("/"))
+                    .into_response();
+            crate::auth::set_session_cookie(&mut response, &token);
+            response
+        }
+        Ok(GoogleLoginDecision::NotAuthorized) => google_login_error(headers, "not_authorized"),
+        Err(e) if e.to_string() == "jwt_failed" => google_login_error(headers, "jwt_failed"),
         Err(_) => google_login_error(headers, "db_error"),
     };
     clear_google_cookies(&mut response);
@@ -3653,11 +3907,55 @@ mod hardening_tests {
             "Successor refresh token must be revoked when predecessor reuse is detected"
         );
 
-        // Userinfo accepts a1 initially, then rejects a1 immediately after /oidc/revoke.
+        // Replaying R1 must also immediately invalidate access tokens (a1, a2) from that compromised family.
+        for poisoned_at in [&a1, &a2] {
+            let mut poisoned_headers = HeaderMap::new();
+            poisoned_headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {poisoned_at}")).unwrap(),
+            );
+            assert_eq!(
+                oidc_userinfo(crate::ws::PeerIp(None), poisoned_headers)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "Access tokens from a compromised refresh-token family must be rejected immediately"
+            );
+        }
+
+        // Issue two fresh uncompromised grants (a3, a4) to verify /oidc/revoke and client deletion independently.
+        let conn = af_db::get_conn().unwrap();
+        let v3 = issue_oidc_tokens_in_tx(
+            &conn,
+            &HeaderMap::new(),
+            None,
+            "rev-client",
+            888,
+            "openid profile email",
+            None,
+            None,
+        )
+        .expect("fresh OIDC token issuance a3 should succeed");
+        let v4 = issue_oidc_tokens_in_tx(
+            &conn,
+            &HeaderMap::new(),
+            None,
+            "rev-client",
+            888,
+            "openid profile email",
+            None,
+            None,
+        )
+        .expect("fresh OIDC token issuance a4 should succeed");
+        drop(conn);
+        let a3 = v3["access_token"].as_str().unwrap().to_string();
+        let a4 = v4["access_token"].as_str().unwrap().to_string();
+
+        // Userinfo accepts a3 initially, then rejects a3 immediately after /oidc/revoke.
         let mut ui_headers = HeaderMap::new();
         ui_headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {a1}")).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {a3}")).unwrap(),
         );
         assert_eq!(
             oidc_userinfo(crate::ws::PeerIp(None), ui_headers.clone())
@@ -3666,16 +3964,16 @@ mod hardening_tests {
             StatusCode::OK
         );
 
-        let revoke_a1: HashMap<String, String> = [
+        let revoke_a3: HashMap<String, String> = [
             ("client_id", "rev-client"),
             ("client_secret", "rev-secret"),
-            ("token", a1.as_str()),
+            ("token", a3.as_str()),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
         assert_eq!(
-            oidc_revoke(HeaderMap::new(), Form(revoke_a1))
+            oidc_revoke(HeaderMap::new(), Form(revoke_a3))
                 .await
                 .status(),
             StatusCode::OK
@@ -3687,10 +3985,10 @@ mod hardening_tests {
             StatusCode::UNAUTHORIZED
         );
 
-        let introspect_a1: HashMap<String, String> = [
+        let introspect_a3: HashMap<String, String> = [
             ("client_id", "rev-client"),
             ("client_secret", "rev-secret"),
-            ("token", a1.as_str()),
+            ("token", a3.as_str()),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
@@ -3698,7 +3996,7 @@ mod hardening_tests {
         let intr_resp = oidc_introspect(
             crate::ws::PeerIp(None),
             HeaderMap::new(),
-            Form(introspect_a1),
+            Form(introspect_a3),
         )
         .await;
         let intr_bytes = axum::body::to_bytes(intr_resp.into_body(), 8192)
@@ -3707,11 +4005,11 @@ mod hardening_tests {
         let intr_val: serde_json::Value = serde_json::from_slice(&intr_bytes).unwrap();
         assert_eq!(intr_val["active"], false);
 
-        // Deleting the client invalidates any remaining access token (a2) at /oidc/userinfo.
+        // Deleting the client invalidates any remaining access token (a4) at /oidc/userinfo.
         let mut ui2_headers = HeaderMap::new();
         ui2_headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {a2}")).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {a4}")).unwrap(),
         );
         assert_eq!(
             oidc_userinfo(crate::ws::PeerIp(None), ui2_headers.clone())
@@ -3761,5 +4059,198 @@ mod hardening_tests {
         let rich_json = serde_json::to_value(&rich).unwrap();
         assert_eq!(rich_json["name"], "alice");
         assert_eq!(rich_json["email"], "alice@example.com");
+    }
+
+    #[tokio::test]
+    async fn round8_session_scoped_oidc_revocation_and_auth_code_replay_wipes_grant_family() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let db = ensure_shared_test_db();
+        env::set_var("OIDC_KEY_PATH", db.parent().unwrap().join("oidc-r8.pem"));
+        let secret_hash = hex::encode(Sha256::digest(b"r8-secret"));
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, email, role, sessions_revoked_after) \
+                 VALUES (889, 'r8-oidc-user', 'r8@example.com', 'user', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) \
+                 VALUES ('r8-client', ?1, 'R8Client', '[\"https://r8.example/cb\"]')",
+                params![secret_hash],
+            )
+            .unwrap();
+        }
+
+        let mut ua_headers = HeaderMap::new();
+        ua_headers.insert(header::USER_AGENT, HeaderValue::from_static("r8-oidc-ua"));
+        let (sess_a_tok, sess_a_claims) = create_standard_jwt(889, &ua_headers).unwrap();
+        let (_sess_b_tok, sess_b_claims) = create_standard_jwt(889, &ua_headers).unwrap();
+
+        let (fam_a, fam_b) = {
+            let conn = af_db::get_conn().unwrap();
+            (
+                crate::auth::resolve_session_family_id(&conn, 889, &sess_a_claims.jti),
+                crate::auth::resolve_session_family_id(&conn, 889, &sess_b_claims.jti),
+            )
+        };
+
+        let verifier = "v".repeat(43);
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let code_a = generate_and_store_auth_code(
+            "r8-client",
+            889,
+            "https://r8.example/cb",
+            "openid profile email",
+            &challenge,
+            "S256",
+            "",
+            Some(&fam_a),
+        )
+        .unwrap();
+        let code_b = generate_and_store_auth_code(
+            "r8-client",
+            889,
+            "https://r8.example/cb",
+            "openid profile email",
+            &challenge,
+            "S256",
+            "",
+            Some(&fam_b),
+        )
+        .unwrap();
+
+        let exchange = |code: String| {
+            let verifier = verifier.clone();
+            async move {
+                let form: HashMap<String, String> = [
+                    ("grant_type", "authorization_code"),
+                    ("client_id", "r8-client"),
+                    ("client_secret", "r8-secret"),
+                    ("code", code.as_str()),
+                    ("redirect_uri", "https://r8.example/cb"),
+                    ("code_verifier", verifier.as_str()),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+                let resp = oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(form)).await;
+                let status = resp.status();
+                let bytes = axum::body::to_bytes(resp.into_body(), 32768).await.unwrap();
+                let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                (status, val)
+            }
+        };
+
+        let (st_a, val_a) = exchange(code_a).await;
+        assert_eq!(st_a, StatusCode::OK);
+        let access_a = val_a["access_token"].as_str().unwrap().to_string();
+        let refresh_a = val_a["refresh_token"].as_str().unwrap().to_string();
+
+        let (st_b, val_b) = exchange(code_b.clone()).await;
+        assert_eq!(st_b, StatusCode::OK);
+        let access_b = val_b["access_token"].as_str().unwrap().to_string();
+        let refresh_b = val_b["refresh_token"].as_str().unwrap().to_string();
+
+        let bearer_headers = |tok: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {tok}")).unwrap(),
+            );
+            h
+        };
+        assert_eq!(
+            oidc_userinfo(crate::ws::PeerIp(None), bearer_headers(&access_a))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            oidc_userinfo(crate::ws::PeerIp(None), bearer_headers(&access_b))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        // 1. Logging out browser Session A revokes Session A's OIDC access + refresh tokens,
+        //    while preserving sibling Session B's OIDC tokens.
+        let logout_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/logout")
+            .header(header::USER_AGENT, "r8-oidc-ua")
+            .header(header::COOKIE, format!("aetherflow_session={sess_a_tok}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            crate::auth::logout(logout_req).await.status(),
+            StatusCode::OK
+        );
+
+        assert_eq!(
+            oidc_userinfo(crate::ws::PeerIp(None), bearer_headers(&access_a))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let refresh_a_form: HashMap<String, String> = [
+            ("grant_type", "refresh_token"),
+            ("client_id", "r8-client"),
+            ("client_secret", "r8-secret"),
+            ("refresh_token", refresh_a.as_str()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        assert_eq!(
+            oidc_token(
+                crate::ws::PeerIp(None),
+                HeaderMap::new(),
+                Form(refresh_a_form)
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            oidc_userinfo(crate::ws::PeerIp(None), bearer_headers(&access_b))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        // 2. Replaying consumed authorization code `code_b` fails AND immediately revokes
+        //    its issued grant family (`access_b` + `refresh_b`).
+        let (st_replay, _) = exchange(code_b).await;
+        assert_eq!(st_replay, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            oidc_userinfo(crate::ws::PeerIp(None), bearer_headers(&access_b))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let refresh_b_form: HashMap<String, String> = [
+            ("grant_type", "refresh_token"),
+            ("client_id", "r8-client"),
+            ("client_secret", "r8-secret"),
+            ("refresh_token", refresh_b.as_str()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        assert_eq!(
+            oidc_token(
+                crate::ws::PeerIp(None),
+                HeaderMap::new(),
+                Form(refresh_b_form)
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }

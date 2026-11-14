@@ -85,7 +85,7 @@ func TriggerScan(c *gin.Context) {
 // ApproveItem flips status to APPROVED moving the item into the passive execution list
 func ApproveItem(c *gin.Context) {
 	id := c.Param("id")
-	
+
 	result, err := db.DB.Exec("UPDATE mediaflow_queue SET status = 'APPROVED', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'PENDING_APPROVAL'", id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to approve"})

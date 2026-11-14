@@ -65,7 +65,7 @@ func HandleMetadataStatus(c *gin.Context) {
 func HandleMetadataResults(c *gin.Context) {
 	results, err := services.GetStoredMetadata()
 	if err != nil {
-		InternalError(c, "Failed to query metadata: " + err.Error())
+		InternalError(c, "Failed to query metadata: "+err.Error())
 		return
 	}
 	if results == nil {

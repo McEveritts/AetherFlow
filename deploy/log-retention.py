@@ -14,7 +14,9 @@ import sys
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_KEEP = 3
-LOG_NAME = re.compile(r"(?:install\.log|(?:install|remove)-(?P<package>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\.log)\Z")
+LOG_NAME = re.compile(
+    r"(?:install\.log|self_healing\.log|(?:install|remove)-(?P<package>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\.log)\Z"
+)
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 

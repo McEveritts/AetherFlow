@@ -457,6 +457,202 @@ false || cleanup
             archive_bytes = (log_dir / "install-sabnzbd.log.af-retention.1").read_bytes()
             self.assertIn(b"ACTIVE_INSTALL_LINE\n", archive_bytes)
 
+    def test_round8_release_manager_recovery_state_guard_and_standalone_rollback_snapshot(self) -> None:
+        import contextlib
+        import hashlib
+        import sqlite3
+
+        with tempfile.TemporaryDirectory(prefix="af-r8-rm-") as tmp:
+            root = Path(tmp) / "isolated_root"
+            af_opt = root / "opt/AetherFlow"
+            releases = af_opt / "releases"
+            prev_rel = releases / "1111111111"
+            cur_rel = releases / "2222222222"
+            data_dir = root / "var/lib/aetherflow"
+            log_dir = root / "var/log/aetherflow"
+            bin_dir = root / "usr/local/bin"
+            stub_bin = Path(tmp) / "stub_bin"
+            env_dir = root / "etc/aetherflow"
+            systemd_dst = root / "etc/systemd/system"
+            for d in (prev_rel, cur_rel / "data-snapshot", data_dir, log_dir, bin_dir, stub_bin, env_dir, systemd_dst):
+                d.mkdir(parents=True, exist_ok=True)
+
+            (prev_rel / "aetherflow-api").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (prev_rel / "af").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(prev_rel / "aetherflow-api", 0o755)
+            os.chmod(prev_rel / "af", 0o755)
+            (prev_rel / ".version").write_text("v4.0.0-nightly.109.1\n", encoding="utf-8")
+            (cur_rel / "aetherflow-api").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (cur_rel / "af").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(cur_rel / "aetherflow-api", 0o755)
+            os.chmod(cur_rel / "af", 0o755)
+            (cur_rel / ".version").write_text("v4.0.0-nightly.110.1\n", encoding="utf-8")
+
+            bak_db = cur_rel / "data-snapshot/aetherflow.sqlite.bak"
+            with contextlib.closing(sqlite3.connect(bak_db)) as c:
+                c.execute("CREATE TABLE marker (v TEXT)")
+                c.execute("INSERT INTO marker VALUES ('PRE_DEPLOY_GOOD_DB')")
+                c.commit()
+            digest = hashlib.sha256(bak_db.read_bytes()).hexdigest()
+            (cur_rel / "data-snapshot/MANIFEST.sha256").write_text(
+                f"{digest}  aetherflow.sqlite.bak\n", encoding="utf-8"
+            )
+
+            live_db = data_dir / "aetherflow.sqlite"
+            with contextlib.closing(sqlite3.connect(live_db)) as c:
+                c.execute("CREATE TABLE marker (v TEXT)")
+                c.execute("INSERT INTO marker VALUES ('INITIAL_LIVE_DB')")
+                c.commit()
+
+            (releases / ".previous_release").write_text(str(prev_rel), encoding="utf-8")
+            (af_opt / "current").symlink_to(cur_rel)
+
+            for tool, body in {
+                "systemctl": "#!/bin/sh\nexit 0\n",
+                "curl": '#!/bin/sh\nprintf \'{"status":"ok"}\\n200\'\n',
+            }.items():
+                p = stub_bin / tool
+                p.write_text(body, encoding="utf-8")
+                os.chmod(p, 0o755)
+
+            conf = Path(tmp) / "rm.conf"
+            conf.write_text(
+                f"RELEASES_DIR={releases}\n"
+                f"CURRENT_LINK={af_opt / 'current'}\n"
+                f"REPO_DIR={af_opt}\n"
+                f"LEGACY_OPT_ROOT={af_opt}\n"
+                f"DATA_DIR={data_dir}\n"
+                f"AF_DB_PATH={live_db}\n"
+                f"LOG_FILE={log_dir / 'deploy.log'}\n"
+                f"ENV_DIR={env_dir}\n"
+                f"ENV_FILE={env_dir / 'aetherflow.env'}\n"
+                f"SYSTEMD_UNITS_SRC={ROOT / 'deploy/systemd'}\n"
+                f"SYSTEMD_UNITS_DST={systemd_dst}\n"
+                f"CLI_BIN_DIR={bin_dir}\n"
+                "HEALTH_RETRIES=1\n"
+                "HEALTH_INTERVAL=0\n",
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+
+            # 1. Unfinished post-swap `.recovery_state.json` MUST block `cleanup` (and `deploy`) until `rollback` runs.
+            rec_file = releases / ".recovery_state.json"
+            rec_file.write_text(
+                json.dumps(
+                    {
+                        "command": "deploy",
+                        "phase": "stage3_health_probe",
+                        "candidate_release": str(cur_rel),
+                        "previous_release": str(prev_rel),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            blocked = subprocess.run(
+                ["bash", str(ROOT / "deploy/release-manager.sh"), "cleanup", "--config", str(conf)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("unfinished after symlink swap", blocked.stdout + blocked.stderr)
+
+            # 2. Standalone `rollback` (after completed deploy + DB corruption) restores `cur_rel/data-snapshot` and marks `complete`.
+            live_db.write_bytes(b"CORRUPT_POST_DEPLOY_DB")
+            rec_file.write_text(
+                json.dumps(
+                    {
+                        "command": "deploy",
+                        "phase": "complete",
+                        "candidate_release": str(cur_rel),
+                        "previous_release": str(prev_rel),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rb = subprocess.run(
+                ["bash", str(ROOT / "deploy/release-manager.sh"), "rollback", "--config", str(conf)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(rb.returncode, 0, msg=rb.stdout + rb.stderr)
+            with contextlib.closing(sqlite3.connect(live_db)) as c:
+                val = c.execute("SELECT v FROM marker").fetchone()[0]
+            self.assertEqual(val, "PRE_DEPLOY_GOOD_DB")
+            rec_after = json.loads(rec_file.read_text(encoding="utf-8"))
+            self.assertEqual(rec_after["phase"], "complete")
+
+    def test_round8_common_sh_af_logged_nofollow_and_log_retention_self_healing_and_setup_hygiene(self) -> None:
+        import importlib.util
+
+        with tempfile.TemporaryDirectory(prefix="af-r8-common-") as tmp:
+            tmp_path = Path(tmp)
+            lock_dir = tmp_path / "locks"
+            lock_dir.mkdir()
+            boot_log = tmp_path / "boot.log"
+            victim = tmp_path / "victim.txt"
+            sym_log = tmp_path / "symlink.log"
+            sym_log.symlink_to(victim)
+
+            probe_symlink = f"""
+set -euo pipefail
+export LOCK_DIR={str(lock_dir)!r}
+export LOGFILE={str(boot_log)!r}
+source {str(ROOT / 'packages/common.sh')!r}
+export LOGFILE={str(sym_log)!r}
+af_logged echo "SHOULD_NOT_WRITE"
+"""
+            res_sym = subprocess.run(["bash", "-c", probe_symlink], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(res_sym.returncode, 0)
+            self.assertFalse(victim.exists(), "af_logged O_NOFOLLOW must never create symlink target")
+
+            real_log = tmp_path / "install-test.log"
+            probe_ok = f"""
+set -euo pipefail
+export LOCK_DIR={str(lock_dir)!r}
+export LOGFILE={str(real_log)!r}
+source {str(ROOT / 'packages/common.sh')!r}
+my_shell_fn() {{ echo "SHELL_FN_OK"; }}
+af_logged my_shell_fn
+"""
+            res_ok = subprocess.run(["bash", "-c", probe_ok], capture_output=True, text=True, timeout=10)
+            self.assertEqual(res_ok.returncode, 0, msg=res_ok.stderr)
+            self.assertIn("SHELL_FN_OK", real_log.read_text(encoding="utf-8"))
+
+            # Verify deploy/log-retention.py rotates self_healing.log
+            spec = importlib.util.spec_from_file_location(
+                "af_log_retention_r8", ROOT / "deploy/log-retention.py"
+            )
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            heal_dir = tmp_path / "heal_logs"
+            heal_dir.mkdir()
+            os.chmod(heal_dir, 0o750)
+            heal_log = heal_dir / "self_healing.log"
+            heal_log.write_bytes(b"H" * 1024)
+            os.chmod(heal_log, 0o640)
+            self.assertEqual(mod.retain_logs(str(heal_dir), max_bytes=256, keep=2), (1, []))
+            self.assertTrue((heal_dir / "self_healing.log.af-retention.1").is_file())
+
+        # Static hygiene checks on setup/sudoers/plugin scripts
+        sudo_tpl = (ROOT / "setup/templates/sudoers.template").read_text(encoding="utf-8")
+        self.assertNotIn("NOPASSWD", sudo_tpl)
+        fin_src = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
+        self.assertIn('data-snapshot" \\) -prune', fin_src)
+        self.assertNotIn("Admin Password:", fin_src)
+        for p in sorted((ROOT / "packages/plugin").rglob("*")):
+            if p.is_file():
+                txt = p.read_text(encoding="utf-8")
+                self.assertNotIn("/tmp/rutorrent-git-$$", txt, msg=str(p))
+                self.assertNotIn(">>", txt, msg=str(p))
+
 
 if __name__ == "__main__":
     unittest.main()

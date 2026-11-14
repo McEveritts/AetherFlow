@@ -7,9 +7,8 @@ import (
 	"io"
 	"log"
 	"os"
-
 	// SQLite driver (Ensure this compiles via CGO if used, alternatively use modernc.org/sqlite for pure-Go)
-	// _ "github.com/mattn/go-sqlite3" 
+	// _ "github.com/mattn/go-sqlite3"
 )
 
 // AppContext represents the operational paths for the targeted service to inject
@@ -18,7 +17,7 @@ type AppContext struct {
 	DBPath      string // e.g., "/var/lib/radarr/radarr.db"
 }
 
-// ArrInjector coordinates zero-downtime, safe hijacking of hardcoded 
+// ArrInjector coordinates zero-downtime, safe hijacking of hardcoded
 // dependencies in Arr stack applications using SQLite modifications.
 type ArrInjector struct {
 	DNSMgr *DNSManager
@@ -30,7 +29,7 @@ func NewArrInjector() *ArrInjector {
 	}
 }
 
-// HijackDownloadClient changes an Arr dependency host (e.g. qBittorrent) 
+// HijackDownloadClient changes an Arr dependency host (e.g. qBittorrent)
 // strictly checking the new internal router state before taking down the app.
 func (ai *ArrInjector) HijackDownloadClient(ctx AppContext, currentHost string, newHost string, targetPort int) error {
 	// 1. Safety Rollback Check: Does OS resolve the new target?
@@ -101,7 +100,7 @@ func (ai *ArrInjector) injectSQLite(dbPath string, currentHost, newHost string, 
 			settings["Port"] = targetPort
 
 			modifiedJSON, _ := json.Marshal(settings)
-			
+
 			// Upate modified settings back to this specific client
 			_, err = db.Exec("UPDATE DownloadClients SET Settings = ? WHERE Id = ?", string(modifiedJSON), id)
 			if err != nil {

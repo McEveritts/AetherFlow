@@ -195,15 +195,15 @@ func OIDCDiscovery(c *gin.Context) {
 	issuer := getOIDCIssuer(c)
 
 	c.JSON(http.StatusOK, gin.H{
-		"issuer":                 issuer,
-		"authorization_endpoint": issuer + "/api/v1/public/oidc/authorize",
-		"token_endpoint":         issuer + "/api/v1/public/oidc/token",
-		"userinfo_endpoint":      issuer + "/api/v1/public/oidc/userinfo",
-		"jwks_uri":               issuer + "/api/v1/public/oidc/jwks",
-		"revocation_endpoint":    issuer + "/api/v1/public/oidc/revoke",
-		"introspection_endpoint": issuer + "/api/v1/public/oidc/introspect",
-		"response_types_supported": []string{"code"},
-		"subject_types_supported":  []string{"public"},
+		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/api/v1/public/oidc/authorize",
+		"token_endpoint":                        issuer + "/api/v1/public/oidc/token",
+		"userinfo_endpoint":                     issuer + "/api/v1/public/oidc/userinfo",
+		"jwks_uri":                              issuer + "/api/v1/public/oidc/jwks",
+		"revocation_endpoint":                   issuer + "/api/v1/public/oidc/revoke",
+		"introspection_endpoint":                issuer + "/api/v1/public/oidc/introspect",
+		"response_types_supported":              []string{"code"},
+		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic", "none"},
@@ -279,13 +279,15 @@ func OIDCAuthorize(c *gin.Context) {
 	}
 
 	// Check session — user must have a non-revoked, fingerprint-matching active human session
-	_, _, subj, err := resolveSessionTokenWithSubject(c)
+	_, claims, subj, err := resolveSessionTokenWithSubject(c)
 	if err != nil {
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
 	userID := subj.userID
+	sessJTI, _ := claims["jti"].(string)
+	sessFamily := resolveSessionFamilyID(db.DB, userID, sessJTI)
 
 	// Validate requested scopes against supported scopes
 	validatedScope := validateOIDCScopes(scope)
@@ -293,7 +295,7 @@ func OIDCAuthorize(c *gin.Context) {
 	// Check if user has already granted consent for this client + scope combination.
 	// If so, skip the consent screen and issue the authorization code directly.
 	if hasExistingConsent(userID, clientID, validatedScope) {
-		code, err := generateAndStoreAuthCode(clientID, userID, redirectURI, validatedScope, nonce, codeChallenge, codeChallengeMethod)
+		code, err := generateAndStoreAuthCodeForSession(clientID, userID, redirectURI, validatedScope, nonce, codeChallenge, codeChallengeMethod, sessFamily)
 		if err != nil {
 			slog.Error("OIDC: failed to issue auth code for returning consent", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -395,7 +397,8 @@ func OIDCConsent(c *gin.Context) {
 		scope = "openid profile email"
 	}
 
-	code, err := generateAndStoreAuthCode(req.ClientID, userId.(int), req.RedirectURI, scope, req.Nonce, req.CodeChallenge, req.CodeChallengeMethod)
+	sessFamily := resolveSessionFamilyID(db.DB, userId.(int), c.GetString("session_jti"))
+	code, err := generateAndStoreAuthCodeForSession(req.ClientID, userId.(int), req.RedirectURI, scope, req.Nonce, req.CodeChallenge, req.CodeChallengeMethod, sessFamily)
 	if err != nil {
 		slog.Error("OIDC: failed to store auth code", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -472,10 +475,84 @@ func OIDCToken(c *gin.Context) {
 	}
 }
 
+func oidcCodeFamilyID(code string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte("af-oidc-code:"))
+	_, _ = h.Write([]byte(code))
+	codeTag := hex.EncodeToString(h.Sum(nil))[:32]
+	if len(code) > 33 && code[0] == 's' && code[33] == '_' {
+		sessTag := code[1:33]
+		validHex := true
+		for i := 0; i < len(sessTag); i++ {
+			ch := sessTag[i]
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+				validHex = false
+				break
+			}
+		}
+		if validHex {
+			return "sf:" + sessTag + ":" + codeTag
+		}
+	}
+	return "cf:" + codeTag
+}
+
+func oidcDeviceFamilyID(deviceCode string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte("af-oidc-dc:"))
+	_, _ = h.Write([]byte(deviceCode))
+	return "dc:" + hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+func isOIDCGrantRevoked(fam string) bool {
+	trimmed := strings.TrimSpace(fam)
+	if trimmed == "" {
+		return false
+	}
+	if db.IsTokenRevoked("oidc-fam:" + trimmed) {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(trimmed, "sf:"); ok {
+		if idx := strings.IndexByte(rest, ':'); idx == 32 {
+			if db.IsTokenRevoked("oidc-sess:" + rest[:32]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isOIDCGrantRevokedInTx(tx *sql.Tx, fam string) bool {
+	trimmed := strings.TrimSpace(fam)
+	if trimmed == "" {
+		return false
+	}
+	famMarker := "oidc-fam:" + trimmed
+	if db.IsTokenRevokedCached(famMarker) || (tx != nil && sqlTableExists(tx, "revoked_tokens") && db.IsTokenRevokedInTx(tx, famMarker)) {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(trimmed, "sf:"); ok {
+		if idx := strings.IndexByte(rest, ':'); idx == 32 {
+			sessMarker := "oidc-sess:" + rest[:32]
+			if db.IsTokenRevokedCached(sessMarker) || (tx != nil && sqlTableExists(tx, "revoked_tokens") && db.IsTokenRevokedInTx(tx, sessMarker)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool) {
 	code := c.PostForm("code")
 	redirectURI := c.PostForm("redirect_uri")
 	codeVerifier := c.PostForm("code_verifier")
+
+	tx, release, txErr := db.BeginWriteTx()
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	defer release()
 
 	var (
 		storedClientID      string
@@ -489,7 +566,7 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 		used                bool
 	)
 
-	err := db.DB.QueryRow(
+	err := tx.QueryRow(
 		`SELECT client_id, user_id, redirect_uri, scope, COALESCE(nonce, ''), code_challenge, code_challenge_method, expires_at, used
 		 FROM oidc_auth_codes WHERE code = ?`,
 		code,
@@ -500,17 +577,42 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 		return
 	}
 
-	if used {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "code already used"})
-		return
-	}
-
 	if storedClientID != clientID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 		return
 	}
 
-	if storedRedirectURI != redirectURI {
+	codeFamily := oidcCodeFamilyID(code)
+	famMarker := "oidc-fam:" + codeFamily
+
+	if used {
+		if sqlTableExists(tx, "oidc_refresh_tokens") {
+			if hasFam, _ := dbColumnExists(tx, "oidc_refresh_tokens", "family_id"); hasFam {
+				if _, revErr := tx.Exec(
+					"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ? AND client_id = ? AND family_id = ?",
+					userID, clientID, codeFamily,
+				); revErr != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+					return
+				}
+			}
+		}
+		if sqlTableExists(tx, "revoked_tokens") {
+			if revErr := db.RevokeTokenInTx(tx, famMarker, minRevocationTTL); revErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+				return
+			}
+		}
+		if commitErr := db.CommitWriteTx(tx, release); commitErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		db.CacheRevokedToken(famMarker, minRevocationTTL)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "code already used"})
+		return
+	}
+
+	if storedRedirectURI != redirectURI || isOIDCGrantRevokedInTx(tx, codeFamily) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 		return
 	}
@@ -533,18 +635,9 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 		return
 	}
 
-	// Phase 16: Wrap code-use + token-issue in a transaction to prevent replay attacks.
-	// Without this, two concurrent requests with the same auth code could both succeed.
-	tx, txErr := db.DB.Begin()
-	if txErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
-	}
-
-	// Mark code as used within the transaction
+	// Mark code as used within the immediate write transaction
 	result, execErr := tx.Exec("UPDATE oidc_auth_codes SET used = 1 WHERE code = ? AND used = 0", code)
 	if execErr != nil {
-		_ = tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -552,13 +645,25 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 	// Check that exactly 1 row was affected (code wasn't already used)
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		_ = tx.Rollback()
+		if sqlTableExists(tx, "oidc_refresh_tokens") {
+			if hasFam, _ := dbColumnExists(tx, "oidc_refresh_tokens", "family_id"); hasFam {
+				_, _ = tx.Exec(
+					"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ? AND client_id = ? AND family_id = ?",
+					userID, clientID, codeFamily,
+				)
+			}
+		}
+		if sqlTableExists(tx, "revoked_tokens") {
+			_ = db.RevokeTokenInTx(tx, famMarker, minRevocationTTL)
+		}
+		if commitErr := db.CommitWriteTx(tx, release); commitErr == nil {
+			db.CacheRevokedToken(famMarker, minRevocationTTL)
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "code already used"})
 		return
 	}
 
 	if _, subErr := loadActiveHumanSubject(tx, userID); subErr != nil {
-		_ = tx.Rollback()
 		if errors.Is(subErr, errSubjectSuspended) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "invalid_grant", "error_description": "account suspended"})
 			return
@@ -567,14 +672,13 @@ func handleAuthCodeExchange(c *gin.Context, clientID string, isPublicClient bool
 		return
 	}
 
-	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, nonce, "")
+	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, nonce, codeFamily)
 	if issueErr != nil {
-		_ = tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
-	if commitErr := tx.Commit(); commitErr != nil {
+	if commitErr := db.CommitWriteTx(tx, release); commitErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -589,14 +693,12 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var (
 		storedClientID string
@@ -627,9 +729,10 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 	if effFamily == "" {
 		effFamily = refreshToken
 	}
+	famMarker := "oidc-fam:" + effFamily
 
-	if revoked {
-		slog.Warn("OIDC: refresh token reuse detected; revoking token family", "client_id", clientID, "user_id", userID)
+	if revoked || isOIDCGrantRevokedInTx(tx, effFamily) {
+		slog.Warn("OIDC: refresh token reuse or revoked grant detected; revoking token family", "client_id", clientID, "user_id", userID)
 		if _, revErr := tx.Exec(
 			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND user_id = ? AND (family_id = ? OR token = ?)",
 			clientID, userID, effFamily, refreshToken,
@@ -638,11 +741,18 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if sqlTableExists(tx, "revoked_tokens") {
+			if revErr := db.RevokeTokenInTx(tx, famMarker, minRevocationTTL); revErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+				return
+			}
+		}
+		if commitErr := db.CommitWriteTx(tx, release); commitErr != nil {
 			slog.Error("OIDC: failed to commit reused refresh token family revocation", "client_id", clientID, "user_id", userID, "error", commitErr)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
+		db.CacheRevokedToken(famMarker, minRevocationTTL)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}
@@ -693,10 +803,14 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
-		if cErr := tx.Commit(); cErr != nil {
+		if sqlTableExists(tx, "revoked_tokens") {
+			_ = db.RevokeTokenInTx(tx, famMarker, minRevocationTTL)
+		}
+		if cErr := db.CommitWriteTx(tx, release); cErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
+		db.CacheRevokedToken(famMarker, minRevocationTTL)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}
@@ -707,7 +821,7 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	if commitErr := tx.Commit(); commitErr != nil {
+	if commitErr := db.CommitWriteTx(tx, release); commitErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -780,27 +894,6 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 		return nil, err
 	}
 
-	// Access Token (short-lived, 1 hour, revocable via jti + ver)
-	accessJTI := uuid.New().String()
-	accessTokenClaims := jwt.MapClaims{
-		"iss":   issuer,
-		"sub":   fmt.Sprintf("%d", userID),
-		"aud":   clientID,
-		"exp":   now.Add(1 * time.Hour).Unix(),
-		"iat":   now.Unix(),
-		"jti":   accessJTI,
-		"ver":   subj.sessionsRevokedAfter,
-		"scope": scope,
-	}
-
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessTokenClaims)
-	accessToken.Header["kid"] = oidcKeyID
-	accessTokenString, err := accessToken.SignedString(oidcPrivateKey)
-	if err != nil {
-		slog.Error("OIDC: failed to sign access_token", "error", err)
-		return nil, err
-	}
-
 	// Refresh Token (long-lived, 30 days, family-bound)
 	refreshBytes := make([]byte, 32)
 	if _, err := rand.Read(refreshBytes); err != nil {
@@ -812,6 +905,29 @@ func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID strin
 	if effFamily == "" {
 		effFamily = refreshToken
 	}
+
+	// Access Token (short-lived, 1 hour, revocable via jti + ver + fam)
+	accessJTI := uuid.New().String()
+	accessTokenClaims := jwt.MapClaims{
+		"iss":   issuer,
+		"sub":   fmt.Sprintf("%d", userID),
+		"aud":   clientID,
+		"exp":   now.Add(1 * time.Hour).Unix(),
+		"iat":   now.Unix(),
+		"jti":   accessJTI,
+		"ver":   subj.sessionsRevokedAfter,
+		"fam":   effFamily,
+		"scope": scope,
+	}
+
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodRS256, accessTokenClaims)
+	accessToken.Header["kid"] = oidcKeyID
+	accessTokenString, err := accessToken.SignedString(oidcPrivateKey)
+	if err != nil {
+		slog.Error("OIDC: failed to sign access_token", "error", err)
+		return nil, err
+	}
+
 	refreshExpires := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
 
 	_, err = execer.Exec(
@@ -883,7 +999,8 @@ func OIDCUserInfo(c *gin.Context) {
 
 	jti, _ := claims["jti"].(string)
 	jti = strings.TrimSpace(jti)
-	if jti == "" || db.IsTokenRevoked(jti) {
+	fam, _ := claims["fam"].(string)
+	if jti == "" || db.IsTokenRevoked(jti) || isOIDCGrantRevoked(fam) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "token revoked"})
 		return
 	}
@@ -1027,8 +1144,15 @@ func OIDCRevoke(c *gin.Context) {
 	}
 
 	// Revoke matching refresh token (and its entire token family).
+	tx, release, txErr := db.BeginWriteTx()
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	defer release()
+
 	var familyID string
-	fErr := db.DB.QueryRow(
+	fErr := tx.QueryRow(
 		"SELECT COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ? AND client_id = ?",
 		token, clientID,
 	).Scan(&familyID)
@@ -1037,7 +1161,8 @@ func OIDCRevoke(c *gin.Context) {
 		if effFamily == "" {
 			effFamily = token
 		}
-		if _, err := db.DB.Exec(
+		famMarker := "oidc-fam:" + effFamily
+		if _, err := tx.Exec(
 			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
 			clientID, effFamily, token,
 		); err != nil {
@@ -1045,12 +1170,29 @@ func OIDCRevoke(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
+		if sqlTableExists(tx, "revoked_tokens") {
+			if err := db.RevokeTokenInTx(tx, famMarker, minRevocationTTL); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+				return
+			}
+		}
+		if err := db.CommitWriteTx(tx, release); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		db.CacheRevokedToken(famMarker, minRevocationTTL)
 	} else if !errors.Is(fErr, sql.ErrNoRows) {
-		if _, err := db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID); err != nil {
+		if _, err := tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID); err != nil {
 			slog.Error("OIDC: failed to revoke refresh token", "client_id", clientID, "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
+		if err := db.CommitWriteTx(tx, release); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+	} else {
+		release()
 	}
 	c.JSON(http.StatusOK, gin.H{}) // RFC 7009: 200 even if token doesn't exist
 }
@@ -1162,7 +1304,8 @@ func introspectAccessToken(c *gin.Context, tokenStr, clientID string) gin.H {
 
 	jti, _ := claims["jti"].(string)
 	jti = strings.TrimSpace(jti)
-	if jti == "" || db.IsTokenRevoked(jti) {
+	fam, _ := claims["fam"].(string)
+	if jti == "" || db.IsTokenRevoked(jti) || isOIDCGrantRevoked(fam) {
 		return nil
 	}
 
@@ -1204,17 +1347,29 @@ func introspectRefreshToken(tokenStr, clientID string) gin.H {
 	var scope string
 	var revoked bool
 	var expiresAt string
+	var familyID string
 
 	err := db.DB.QueryRow(
-		"SELECT user_id, scope, revoked, expires_at FROM oidc_refresh_tokens WHERE token = ? AND client_id = ?",
+		"SELECT user_id, scope, revoked, expires_at, COALESCE(family_id, '') FROM oidc_refresh_tokens WHERE token = ? AND client_id = ?",
 		tokenStr, clientID,
-	).Scan(&userID, &scope, &revoked, &expiresAt)
+	).Scan(&userID, &scope, &revoked, &expiresAt, &familyID)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		err = db.DB.QueryRow(
+			"SELECT user_id, scope, revoked, expires_at FROM oidc_refresh_tokens WHERE token = ? AND client_id = ?",
+			tokenStr, clientID,
+		).Scan(&userID, &scope, &revoked, &expiresAt)
+	}
 
 	if err != nil {
 		return nil
 	}
 
-	if revoked {
+	effFamily := strings.TrimSpace(familyID)
+	if effFamily == "" {
+		effFamily = tokenStr
+	}
+
+	if revoked || isOIDCGrantRevoked(effFamily) {
 		return gin.H{"active": false}
 	}
 
@@ -1292,6 +1447,11 @@ func sqlTableExists(q oidcDBExecer, table string) bool {
 }
 
 func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authTime int64, familyID string, credentialVer int64) (string, string, error) {
+	tokenString, jti, _, err := createSessionJWTWithExpInTx(execer, userID, c, authTime, familyID, credentialVer)
+	return tokenString, jti, err
+}
+
+func createSessionJWTWithExpInTx(execer oidcDBExecer, userID int, c *gin.Context, authTime int64, familyID string, credentialVer int64) (string, string, int64, error) {
 	now := time.Now().UTC()
 	nowUnix := now.Unix()
 	if authTime <= 0 {
@@ -1299,7 +1459,7 @@ func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authT
 	}
 	absExp := authTime + sessionAbsoluteLifetimeSecs
 	if absExp <= nowUnix {
-		return "", "", fmt.Errorf("absolute session lifetime exceeded")
+		return "", "", 0, fmt.Errorf("absolute session lifetime exceeded")
 	}
 	expUnix := nowUnix + int64((15 * time.Minute).Seconds())
 	if expUnix > absExp {
@@ -1328,7 +1488,7 @@ func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString(getJWTSecret())
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 
 	if execer != nil {
@@ -1355,12 +1515,12 @@ func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authT
 			}
 			if insErr != nil {
 				slog.Error("session tracking: failed to record active session", "error", insErr)
-				return "", "", fmt.Errorf("failed to record active session: %w", insErr)
+				return "", "", 0, fmt.Errorf("failed to record active session: %w", insErr)
 			}
 		}
 	}
 
-	return tokenString, jti, nil
+	return tokenString, jti, expUnix, nil
 }
 
 // createStandardJWT creates a JWT with a unique jti, short-lived expiry, 30-day absolute
@@ -1469,6 +1629,13 @@ func OIDCDeviceAuthorize(c *gin.Context) {
 func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 	deviceCode := c.PostForm("device_code")
 
+	tx, release, txErr := db.BeginWriteTx()
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	defer release()
+
 	var (
 		storedClientID string
 		userIDErr      sql.NullInt64
@@ -1477,7 +1644,7 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 		status         string
 	)
 
-	err := db.DB.QueryRow(
+	err := tx.QueryRow(
 		"SELECT client_id, user_id, scope, expires_at, status FROM oidc_device_codes WHERE device_code = ?",
 		deviceCode,
 	).Scan(&storedClientID, &userIDErr, &scope, &expiresAt, &status)
@@ -1505,28 +1672,20 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
-		tx, txErr := db.DB.Begin()
-		if txErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-			return
-		}
 		res, delErr := tx.Exec(
 			"DELETE FROM oidc_device_codes WHERE device_code = ? AND client_id = ? AND status = 'approved'",
 			deviceCode, clientID,
 		)
 		if delErr != nil {
-			_ = tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
 		affected, _ := res.RowsAffected()
 		if affected == 0 {
-			_ = tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 			return
 		}
 		if _, subErr := loadActiveHumanSubject(tx, int(userIDErr.Int64)); subErr != nil {
-			_ = tx.Rollback()
 			if errors.Is(subErr, errSubjectSuspended) {
 				c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "account suspended"})
 				return
@@ -1534,13 +1693,12 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 			return
 		}
-		payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, int(userIDErr.Int64), validateOIDCScopes(scope), "", "")
+		payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, int(userIDErr.Int64), validateOIDCScopes(scope), "", oidcDeviceFamilyID(deviceCode))
 		if issueErr != nil {
-			_ = tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := db.CommitWriteTx(tx, release); commitErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 			return
 		}
@@ -1622,14 +1780,12 @@ func OIDCDeviceConsent(c *gin.Context) {
 		status = "approved"
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	rows, qErr := tx.Query(
 		"SELECT device_code, client_id, expires_at FROM oidc_device_codes WHERE user_code = ? AND status = 'pending' LIMIT 2",
@@ -1678,7 +1834,7 @@ func OIDCDeviceConsent(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
@@ -1756,11 +1912,19 @@ func recordConsent(userID int, clientID, scope string) {
 
 // generateAndStoreAuthCode creates a cryptographic authorization code, persists it, and returns it.
 func generateAndStoreAuthCode(clientID string, userID int, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod string) (string, error) {
+	return generateAndStoreAuthCodeForSession(clientID, userID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, "")
+}
+
+func generateAndStoreAuthCodeForSession(clientID string, userID int, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, sessionFamilyID string) (string, error) {
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
 		return "", fmt.Errorf("crypto/rand failure: %w", err)
 	}
-	code := hex.EncodeToString(codeBytes)
+	rawHex := hex.EncodeToString(codeBytes)
+	code := rawHex
+	if fam := strings.TrimSpace(sessionFamilyID); fam != "" {
+		code = "s" + oidcSessionTag(fam) + "_" + rawHex
+	}
 
 	expiresAt := time.Now().UTC().Add(10 * time.Minute)
 	_, err := db.DB.Exec(

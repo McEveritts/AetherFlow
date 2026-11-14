@@ -194,4 +194,3 @@ func TestShortCiphertextRejection(t *testing.T) {
 		}
 	}
 }
-

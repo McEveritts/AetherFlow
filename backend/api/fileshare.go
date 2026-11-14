@@ -147,13 +147,13 @@ var blockedExtensions = map[string]bool{
 
 // blockedContentTypes contains MIME types that indicate executable content.
 var blockedContentTypes = map[string]bool{
-	"application/x-executable":      true,
-	"application/x-msdos-program":   true,
-	"application/x-msdownload":      true,
-	"application/x-dosexec":         true,
-	"application/x-sharedlib":       true,
-	"application/x-pie-executable":  true,
-	"application/x-elf":             true,
+	"application/x-executable":                      true,
+	"application/x-msdos-program":                   true,
+	"application/x-msdownload":                      true,
+	"application/x-dosexec":                         true,
+	"application/x-sharedlib":                       true,
+	"application/x-pie-executable":                  true,
+	"application/x-elf":                             true,
 	"application/vnd.microsoft.portable-executable": true,
 }
 

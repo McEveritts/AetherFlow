@@ -139,14 +139,12 @@ func DeleteOIDCClient(c *gin.Context) {
 		return
 	}
 
-	tx, err := db.DB.Begin()
+	tx, release, err := db.BeginWriteTx()
 	if err != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	result, err := tx.Exec("DELETE FROM oidc_clients WHERE id = ?", clientID)
 	if err != nil {
@@ -165,7 +163,7 @@ func DeleteOIDCClient(c *gin.Context) {
 	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE client_id = ?", clientID)
 	_, _ = tx.Exec("DELETE FROM oidc_consents WHERE client_id = ?", clientID)
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit client deletion")
 		return
 	}

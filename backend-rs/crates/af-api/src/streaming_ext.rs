@@ -3015,7 +3015,7 @@ fn record_live_sessions_snapshot_for_source(
             [],
         );
         let _ = conn.execute(
-            "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
+            "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
             [],
         );
     }

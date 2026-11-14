@@ -820,7 +820,7 @@ if [[ ${ffmpeg} == "yes" ]]; then
 	_run_step "ffmpeg" "Building ffmpeg from source for screenshots" _ffmpeg
 fi
 
-_run_step_fg "apachesudo" "Configuring Apache sudo" _apachesudo
+_run_step_fg "apachesudo" "Purging legacy sudoers grants" _apachesudo
 
 # NOTE: Torrent client installation (rTorrent, qBittorrent, Transmission, Deluge, AutoDL-irssi)
 #       removed from bootstrap — deferred to AetherFlow Marketplace.

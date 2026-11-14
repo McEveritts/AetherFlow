@@ -963,6 +963,8 @@ where
             }
         };
 
+        let current_before_rollback = fs::canonicalize(&cfg.current_link).ok();
+
         let epoch_id = allocate_unique_release_epoch_id(&cfg.releases_dir);
         atomic_replace_symlink(
             &cfg.current_link,
@@ -986,8 +988,14 @@ where
             .and_then(|r| r.candidate_release.as_deref())
             .filter(|p| p.join("data-snapshot").is_dir());
 
+        let outgoing_current_snapshot = current_before_rollback.as_deref().filter(|cur| {
+            canonicalize_preserve_normal(cur) != canonicalize_preserve_normal(&previous_target)
+                && cur.join("data-snapshot").is_dir()
+        });
+
         let snapshot_release = failed_deploy_release
             .or(inferred_failed_candidate)
+            .or(outgoing_current_snapshot)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| previous_target.clone());
         append_jsonl_log(

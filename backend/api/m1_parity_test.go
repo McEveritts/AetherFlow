@@ -31,8 +31,6 @@ func setupTestDB(t *testing.T) {
 	db.InitDB()
 }
 
-
-
 func TestRefreshSession_Lifecycle(t *testing.T) {
 	setupTestDB(t)
 
@@ -355,5 +353,3 @@ func TestGetSystemTopology_RealNodes(t *testing.T) {
 		t.Errorf("missing 'SQLite WAL' node in topology")
 	}
 }
-
-

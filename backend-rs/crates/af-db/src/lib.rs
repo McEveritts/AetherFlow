@@ -87,8 +87,7 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
     let env_file = env::var("AETHERFLOW_ENV_FILE")
         .ok()
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/etc/aetherflow/aetherflow.env".to_string());
+        .filter(|v| !v.is_empty())?;
     if let Some(clean) = read_last_aes_key_from_env_file(Path::new(&env_file)) {
         if let Ok(key) = parse_aes_key_bytes(&clean) {
             return Some(key);
@@ -1377,8 +1376,8 @@ pub fn prune_expired_data() {
     let static_queries = [
         "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
         "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
-        "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')",
-        "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
+        "DELETE FROM login_history WHERE replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
+        "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
     ];
     for query_sql in static_queries {
         let _ = conn.execute(query_sql, []);
@@ -2567,5 +2566,60 @@ pub(crate) mod tests {
             .unwrap();
         assert!(stream_enc.starts_with("enc:v1:"));
         assert_eq!(decrypt_key(&stream_enc).unwrap(), "plain-jf-api-key");
+    }
+
+    #[test]
+    fn test_round8_env_file_aes_fallback_and_rfc3339_prune_expired_data() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let env_path = std::env::temp_dir().join(format!(
+            "af_r8_env_file_{}_{}.env",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::write(&env_path, format!("AES_MASTER_KEY={}\n", "e".repeat(64))).unwrap();
+        env::remove_var("AES_MASTER_KEY");
+        env::set_var("AETHERFLOW_ENV_FILE", &env_path);
+        init_aes_key().expect("init_aes_key must load AES_MASTER_KEY from AETHERFLOW_ENV_FILE");
+        let ct = encrypt_key("r8-env-secret").unwrap();
+        assert_eq!(decrypt_key(&ct).unwrap(), "r8-env-secret");
+        env::remove_var("AETHERFLOW_ENV_FILE");
+        let _ = std::fs::remove_file(&env_path);
+        env::set_var("AES_MASTER_KEY", "c".repeat(64));
+        init_aes_key().unwrap();
+
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let now_rfc3339 = Utc::now().to_rfc3339();
+        {
+            let conn = get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO login_history (user_id, ip_address, user_agent, created_at) \
+                 VALUES (1, '10.0.0.1', 'ua-old', '2020-01-01T00:00:00+00:00'), \
+                        (1, '10.0.0.2', 'ua-fresh', ?1)",
+                params![now_rfc3339],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO metrics_history (cpu_avg, timestamp) \
+                 VALUES (1.0, '2020-01-01T00:00:00+00:00'), \
+                        (2.0, ?1)",
+                params![now_rfc3339],
+            )
+            .unwrap();
+        }
+        prune_expired_data();
+        let conn = get_conn().unwrap();
+        let login_rem: Vec<String> = conn
+            .prepare("SELECT user_agent FROM login_history")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(login_rem, vec!["ua-fresh".to_string()]);
+        let metrics_cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM metrics_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(metrics_cnt, 1);
     }
 }

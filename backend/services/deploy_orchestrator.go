@@ -13,13 +13,13 @@ import (
 // DeployConfig parameters for the orchestration cycle
 type DeployConfig struct {
 	AppName         string
-	VersionStr      string // e.g., "v3.0.1" (Green)
-	ActiveSymlink   string // e.g., "/opt/radarr/active"
-	BinaryStaging   string // e.g., "/opt/radarr/v3.0.1"
-	CentralDBPath   string // e.g., "/var/lib/radarr/radarr.db"
-	TargetInternal  string // e.g., "qbittorrent.aether.local"
-	TargetPort      int    // Dynamic green port
-	HealthCheckPath string // Blueprint health check endpoint
+	VersionStr      string      // e.g., "v3.0.1" (Green)
+	ActiveSymlink   string      // e.g., "/opt/radarr/active"
+	BinaryStaging   string      // e.g., "/opt/radarr/v3.0.1"
+	CentralDBPath   string      // e.g., "/var/lib/radarr/radarr.db"
+	TargetInternal  string      // e.g., "qbittorrent.aether.local"
+	TargetPort      int         // Dynamic green port
+	HealthCheckPath string      // Blueprint health check endpoint
 	StatusChan      chan string // SSE Livestreaming
 }
 

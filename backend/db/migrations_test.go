@@ -415,4 +415,3 @@ func TestMigration17AppIngressConfigs(t *testing.T) {
 		t.Errorf("Expected 1 config, got %d", len(all))
 	}
 }
-

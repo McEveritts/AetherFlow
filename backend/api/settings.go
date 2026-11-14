@@ -35,8 +35,8 @@ func GetSettings(c *gin.Context) {
 		       COALESCE(gemini_api_key, ''), COALESCE(openai_api_key, ''), COALESCE(lm_studio_endpoint, ''), COALESCE(ollama_endpoint, ''),
 		       COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, ''), COALESCE(base_domain, '')
 		FROM settings WHERE id = 1
-	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted, 
-		    &s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint, &s.BaseDomain)
+	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted,
+		&s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint, &s.BaseDomain)
 
 	if err != nil {
 		slog.Error("fetching settings", "error", err)
@@ -180,7 +180,6 @@ func updateSettings(c *gin.Context) {
 		req.OllamaEndpoint,
 		req.AnthropicEndpoint,
 	)
-
 
 	if err != nil {
 		slog.Error("updating settings", "error", err)

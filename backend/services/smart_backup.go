@@ -359,10 +359,10 @@ func FindOptimalBackupWindow(apiKey string) (*BackupWindow, error) {
 
 	// Build hourly activity summary
 	type hourStats struct {
-		count    int
-		cpuSum   float64
-		diskSum  float64
-		loadSum  float64
+		count   int
+		cpuSum  float64
+		diskSum float64
+		loadSum float64
 	}
 	hours := make([]hourStats, 24)
 

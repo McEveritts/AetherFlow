@@ -203,11 +203,11 @@ func MigrateLegacySecrets() error {
 		return nil
 	}
 
-	tx, err := db.DB.Begin()
+	tx, release, err := db.BeginWriteTx()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	if sqlTableExists(tx, "settings") {
 		var geminiKey, openaiKey, anthropicKey string
@@ -321,5 +321,5 @@ func MigrateLegacySecrets() error {
 		}
 	}
 
-	return tx.Commit()
+	return db.CommitWriteTx(tx, release)
 }

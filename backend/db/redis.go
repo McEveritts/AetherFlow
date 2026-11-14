@@ -496,17 +496,16 @@ func StoreMFAChallenge(token string, userID int, ttl time.Duration) error {
 	}
 	var credentialVer int64
 	if DB != nil {
-		_ = DB.QueryRow("SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?", userID).Scan(&credentialVer)
-		tx, err := DB.Begin()
+		tx, release, err := BeginWriteTx()
 		if err != nil {
 			return fmt.Errorf("failed to begin MFA challenge transaction: %w", err)
 		}
+		defer release()
+		_ = tx.QueryRow("SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?", userID).Scan(&credentialVer)
 		if err := StoreMFAChallengeWithEpochInTx(tx, token, userID, credentialVer, ttl); err != nil {
-			_ = tx.Rollback()
 			return err
 		}
-		if err := tx.Commit(); err != nil {
-			_ = tx.Rollback()
+		if err := CommitWriteTx(tx, release); err != nil {
 			return fmt.Errorf("failed to commit MFA challenge: %w", err)
 		}
 	}

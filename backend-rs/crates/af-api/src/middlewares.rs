@@ -1015,21 +1015,18 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
     }
     let trimmed = candidate_raw.trim().to_ascii_lowercase();
 
-    // Loopback authorities are always trusted for local health/CLI/test probes.
-    if clean == "localhost" || clean.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
-        return true;
+    // When ALLOWED_HOSTS is explicitly configured, treat it as a closed allowlist.
+    if !allowed_set.is_empty() {
+        return allowed_set.contains(&trimmed) || allowed_set.contains(&clean);
     }
 
-    if !allowed_set.is_empty() {
-        if allowed_set.contains(&trimmed) || allowed_set.contains(&clean) {
-            return true;
-        }
-    } else {
-        // When ALLOWED_HOSTS is unset, allow direct IP-literal access (pre-domain setup)
-        // and explicitly configured URLs/domains, but reject unconfigured arbitrary hostnames.
-        if clean.parse::<IpAddr>().is_ok() || matches_configured_env_host(&clean) {
-            return true;
-        }
+    // When ALLOWED_HOSTS is unset, allow loopback authorities, direct IP-literal access
+    // (pre-domain setup), and explicitly configured URLs/domains, rejecting arbitrary hosts.
+    if clean == "localhost"
+        || clean.parse::<IpAddr>().is_ok()
+        || matches_configured_env_host(&clean)
+    {
+        return true;
     }
 
     if clean == "aether.local" || clean.ends_with(".aether.local") {

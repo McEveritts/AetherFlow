@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,21 +40,45 @@ func canonicalOriginAuthority(scheme, hostPort string) string {
 	return h
 }
 
+func isTrustedWSProxyRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "false") ||
+		strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")) == "0" {
+		return false
+	}
+	remoteAddr := strings.TrimSpace(r.RemoteAddr)
+	if remoteAddr == "" {
+		// Synthetic in-process http.NewRequest without a socket peer (matching Rust peer_ip == None).
+		return strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")) == ""
+	}
+	host := remoteAddr
+	if splitHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = splitHost
+	} else if strings.HasPrefix(remoteAddr, "[") && strings.HasSuffix(remoteAddr, "]") {
+		host = remoteAddr[1 : len(remoteAddr)-1]
+	}
+	return isConfiguredTrustedProxyIP(net.ParseIP(host))
+}
+
 func requestExpectedWSScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
-	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
-		if strings.EqualFold(proto, "https") {
+	if isTrustedWSProxyRequest(r) {
+		if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+			if strings.EqualFold(proto, "https") {
+				return "https"
+			}
+			if strings.EqualFold(proto, "http") {
+				return "http"
+			}
+			return ""
+		}
+		if strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Port"), ",")[0]) == "443" {
 			return "https"
 		}
-		if strings.EqualFold(proto, "http") {
-			return "http"
-		}
-		return ""
-	}
-	if strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Port"), ",")[0]) == "443" {
-		return "https"
 	}
 	return "http"
 }
@@ -585,7 +610,7 @@ func maintainSystemState() {
 			WSHub.mu.Lock()
 			clientCount := len(WSHub.clients)
 			WSHub.mu.Unlock()
-			
+
 			if clientCount > 0 {
 				s := services.GetActiveServices()
 				systemStateMutex.Lock()
@@ -602,7 +627,7 @@ func maintainSystemState() {
 			WSHub.mu.Lock()
 			clientCount := len(WSHub.clients)
 			WSHub.mu.Unlock()
-			
+
 			if clientCount > 0 {
 				m := services.GetSystemMetricsCore()
 				systemStateMutex.Lock()
@@ -622,7 +647,7 @@ func broadcastMetricsLoop() {
 
 	for {
 		<-broadcastTicker.C
-		
+
 		WSHub.mu.Lock()
 		clientCount := len(WSHub.clients)
 		WSHub.mu.Unlock()

@@ -11,12 +11,12 @@ import (
 
 // WireGuardPeer represents a WireGuard peer configuration.
 type WireGuardPeer struct {
-	PublicKey           string `json:"public_key"`
-	Endpoint            string `json:"endpoint,omitempty"`
-	AllowedIPs          string `json:"allowed_ips"`
-	LatestHandshake     string `json:"latest_handshake,omitempty"`
-	TransferRx          string `json:"transfer_rx,omitempty"`
-	TransferTx          string `json:"transfer_tx,omitempty"`
+	PublicKey       string `json:"public_key"`
+	Endpoint        string `json:"endpoint,omitempty"`
+	AllowedIPs      string `json:"allowed_ips"`
+	LatestHandshake string `json:"latest_handshake,omitempty"`
+	TransferRx      string `json:"transfer_rx,omitempty"`
+	TransferTx      string `json:"transfer_tx,omitempty"`
 }
 
 // WireGuardStatus represents the WireGuard interface status.
@@ -55,11 +55,11 @@ type WireGuardKeyPair struct {
 
 // NetworkStatus combines WireGuard and Tailscale status.
 type NetworkStatus struct {
-	WireGuard     *WireGuardStatus  `json:"wireguard,omitempty"`
-	Tailscale     *TailscaleStatus  `json:"tailscale,omitempty"`
-	WireGuardAvailable bool          `json:"wireguard_available"`
-	TailscaleAvailable bool          `json:"tailscale_available"`
-	Platform            string       `json:"platform"`
+	WireGuard          *WireGuardStatus `json:"wireguard,omitempty"`
+	Tailscale          *TailscaleStatus `json:"tailscale,omitempty"`
+	WireGuardAvailable bool             `json:"wireguard_available"`
+	TailscaleAvailable bool             `json:"tailscale_available"`
+	Platform           string           `json:"platform"`
 }
 
 // GetNetworkStatus returns combined VPN status.

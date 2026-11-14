@@ -1299,12 +1299,13 @@ fn parse_live_log_line(line: &str, default_source: &str) -> serde_json::Value {
         "info"
     };
 
+    let safe_message = af_services::redact_secrets(&message);
     serde_json::json!({
         "timestamp": timestamp,
         "source": default_source,
         "unit": unit,
         "priority": priority,
-        "message": message,
+        "message": safe_message,
         "hostname": host,
     })
 }

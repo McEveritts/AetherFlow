@@ -151,7 +151,7 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 			if err != nil {
 				slog.Error("package update check failed", "package", p.Name, "error", err)
 			}
-			
+
 			mu.Lock()
 			if record != nil {
 				changed = append(changed, p.Name)

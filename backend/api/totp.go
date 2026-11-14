@@ -227,9 +227,11 @@ func validateAndRecordTOTPStepInTx(tx *sql.Tx, userID int, code, secret string) 
 // Setup2FA godoc
 // @Summary      Initialize 2FA enrollment
 // @Description  Generates a new TOTP key for the authenticated user and returns
-//               the otpauth:// URI for QR code rendering. The secret is held in
-//               an ephemeral cache (Redis or in-memory) for 5 minutes until the
-//               user verifies it with a valid code.
+//
+//	the otpauth:// URI for QR code rendering. The secret is held in
+//	an ephemeral cache (Redis or in-memory) for 5 minutes until the
+//	user verifies it with a valid code.
+//
 // @Tags         auth
 // @Produce      json
 // @Security     BearerAuth
@@ -293,8 +295,10 @@ func Setup2FA(c *gin.Context) {
 // Verify2FA godoc
 // @Summary      Confirm 2FA enrollment
 // @Description  Validates a TOTP code against the pending secret, then persists
-//               the encrypted secret to the database, marks totp_enabled=1,
-//               and generates one-time recovery codes.
+//
+//	the encrypted secret to the database, marks totp_enabled=1,
+//	and generates one-time recovery codes.
+//
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -314,6 +318,13 @@ func Verify2FA(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "A 6-digit code is required")
+		return
+	}
+
+	var existingEnabled int
+	if err := db.DB.QueryRow("SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?", userID).Scan(&existingEnabled); err == nil && existingEnabled == 1 {
+		db.Delete2FAPending(userID)
+		RespondError(c, http.StatusConflict, ErrCodeConflict, "Two-factor authentication is already enabled")
 		return
 	}
 
@@ -352,28 +363,38 @@ func Verify2FA(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
-	_, updErr := tx.Exec(
-		"UPDATE users SET totp_secret = ?, totp_enabled = 1, last_totp_step = ? WHERE id = ?",
+	updRes, updErr := tx.Exec(
+		"UPDATE users SET totp_secret = ?, totp_enabled = 1, last_totp_step = ? WHERE id = ? AND COALESCE(totp_enabled, 0) = 0",
 		encrypted, matchedStep, userID,
 	)
 	if updErr != nil && strings.Contains(updErr.Error(), "no such column") {
-		_, updErr = tx.Exec(
-			"UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ?",
+		updRes, updErr = tx.Exec(
+			"UPDATE users SET totp_secret = ?, totp_enabled = 1 WHERE id = ? AND COALESCE(totp_enabled, 0) = 0",
 			encrypted, userID,
 		)
 	}
 	if updErr != nil {
 		slog.Error("failed to persist TOTP enrollment", "user_id", userID, "error", updErr)
 		InternalError(c, "Failed to enable two-factor authentication")
+		return
+	}
+	if affected, _ := updRes.RowsAffected(); affected == 0 {
+		var alreadyEnabled bool
+		_ = tx.QueryRow("SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?", userID).Scan(&alreadyEnabled)
+		release()
+		if alreadyEnabled {
+			db.Delete2FAPending(userID)
+			RespondError(c, http.StatusConflict, ErrCodeConflict, "Two-factor authentication is already enabled")
+			return
+		}
+		NotFoundError(c, "User not found")
 		return
 	}
 
@@ -383,7 +404,7 @@ func Verify2FA(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		slog.Error("failed to commit TOTP enrollment", "user_id", userID, "error", err)
 		InternalError(c, "Failed to enable two-factor authentication")
 		return
@@ -412,7 +433,9 @@ func Verify2FA(c *gin.Context) {
 // Disable2FA godoc
 // @Summary      Disable 2FA
 // @Description  Validates a current TOTP or recovery code (never password-only), then clears
-//               the secret, disables 2FA, deletes recovery codes, and rotates credential epoch.
+//
+//	the secret, disables 2FA, deletes recovery codes, and rotates credential epoch.
+//
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -475,14 +498,12 @@ func Disable2FA(c *gin.Context) {
 		}
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var verified bool
 	if isRecovery {
@@ -517,7 +538,7 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit two-factor disablement")
 		return
 	}
@@ -543,7 +564,9 @@ func Disable2FA(c *gin.Context) {
 // MFALoginVerify godoc
 // @Summary      Complete login with MFA code
 // @Description  Validates a TOTP code or recovery code against a pending MFA
-//               challenge token from the login flow. On success, issues a session JWT.
+//
+//	challenge token from the login flow. On success, issues a session JWT.
+//
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -563,14 +586,12 @@ func MFALoginVerify(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	userID, challengeVer, ok, attemptErr := db.BeginMFAAttemptWithEpochInTx(tx, req.MFAToken)
 	if attemptErr != nil {
@@ -578,7 +599,7 @@ func MFALoginVerify(c *gin.Context) {
 		return
 	}
 	if !ok {
-		_ = tx.Commit()
+		_ = db.CommitWriteTx(tx, release)
 		db.EvictMFAChallengeCache(req.MFAToken)
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
 		return
@@ -587,7 +608,7 @@ func MFALoginVerify(c *gin.Context) {
 	subj, subErr := loadActiveHumanSubject(tx, userID)
 	if subErr != nil {
 		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
-		_ = tx.Commit()
+		_ = db.CommitWriteTx(tx, release)
 		db.EvictMFAChallengeCache(req.MFAToken)
 		if errors.Is(subErr, errSubjectSuspended) {
 			RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Account is not active")
@@ -598,7 +619,7 @@ func MFALoginVerify(c *gin.Context) {
 	}
 	if subj.sessionsRevokedAfter != challengeVer {
 		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
-		_ = tx.Commit()
+		_ = db.CommitWriteTx(tx, release)
 		db.EvictMFAChallengeCache(req.MFAToken)
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "MFA challenge expired or invalid. Please log in again.")
 		return
@@ -618,7 +639,7 @@ func MFALoginVerify(c *gin.Context) {
 	}
 	if !totpEnabled {
 		_, _ = tx.Exec("DELETE FROM mfa_challenges WHERE token = ?", req.MFAToken)
-		_ = tx.Commit()
+		_ = db.CommitWriteTx(tx, release)
 		db.EvictMFAChallengeCache(req.MFAToken)
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "TOTP not configured")
 		return
@@ -635,7 +656,7 @@ func MFALoginVerify(c *gin.Context) {
 		codeValid = validateRecoveryCodeInTx(tx, userID, strings.ToUpper(code))
 	} else {
 		if encryptedSecret == "" {
-			_ = tx.Commit()
+			_ = db.CommitWriteTx(tx, release)
 			RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "TOTP not configured")
 			return
 		}
@@ -650,7 +671,7 @@ func MFALoginVerify(c *gin.Context) {
 
 	if !codeValid {
 		// Commit the incremented attempt counter before returning 401
-		_ = tx.Commit()
+		_ = db.CommitWriteTx(tx, release)
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification code")
 		return
 	}
@@ -671,7 +692,7 @@ func MFALoginVerify(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit MFA session")
 		return
 	}
@@ -694,7 +715,9 @@ func MFALoginVerify(c *gin.Context) {
 // Regenerate2FARecoveryCodes godoc
 // @Summary      Regenerate recovery codes
 // @Description  Generates a new set of recovery codes, invalidating all previous ones.
-//               Requires a valid TOTP or recovery code to authorize the regeneration.
+//
+//	Requires a valid TOTP or recovery code to authorize the regeneration.
+//
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -760,14 +783,12 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var verified bool
 	if isRecovery {
@@ -786,7 +807,7 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to store recovery codes")
 		return
 	}

@@ -60,10 +60,10 @@ type NotificationChannel struct {
 // NotificationEngine manages rules, evaluation, and dispatch.
 type NotificationEngine struct {
 	mu             sync.RWMutex
-	evalMu         sync.Mutex   // Dedicated lock for the background evaluation loop
+	evalMu         sync.Mutex // Dedicated lock for the background evaluation loop
 	rules          []NotificationRule
 	channels       []NotificationChannel
-	dispatchFn     func(Notification) // callback to broadcast via WebSocket
+	dispatchFn     func(Notification)   // callback to broadcast via WebSocket
 	lastEvaluation map[string]time.Time // tracks cooldown per rule to avoid spam
 }
 

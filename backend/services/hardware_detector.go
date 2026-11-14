@@ -17,7 +17,7 @@ type GPUFlags struct {
 // GetGPUTranscodeFlags reads sysfs to determine if AMD or Intel hardware is present.
 func GetGPUTranscodeFlags() GPUFlags {
 	vendorPath := "/sys/class/drm/renderD128/device/vendor"
-	
+
 	data, err := os.ReadFile(vendorPath)
 	if err != nil {
 		slog.Warn("GPU detection failed, falling back to CPU", "error", err, "path", vendorPath)

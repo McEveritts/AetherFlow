@@ -24,23 +24,23 @@ var validMediaExtensions = map[string]bool{
 
 // MediaFile represents a discovered media file.
 type MediaFile struct {
-	Path     string `json:"path"`
-	Filename string `json:"filename"`
-	SizeBytes int64 `json:"size_bytes"`
+	Path      string `json:"path"`
+	Filename  string `json:"filename"`
+	SizeBytes int64  `json:"size_bytes"`
 	Extension string `json:"extension"`
 }
 
 // EnrichedMedia represents AI-enriched metadata for a media file.
 type EnrichedMedia struct {
-	ID           int    `json:"id"`
-	FilePath     string `json:"file_path"`
-	Filename     string `json:"filename"`
-	Title        string `json:"title"`
-	Year         string `json:"year"`
-	Language     string `json:"language"`
-	Quality      string `json:"quality"`
+	ID            int    `json:"id"`
+	FilePath      string `json:"file_path"`
+	Filename      string `json:"filename"`
+	Title         string `json:"title"`
+	Year          string `json:"year"`
+	Language      string `json:"language"`
+	Quality       string `json:"quality"`
 	SubtitlesJSON string `json:"subtitles_json"`
-	EnrichedAt   string `json:"enriched_at"`
+	EnrichedAt    string `json:"enriched_at"`
 }
 
 // MetadataEnricher handles media directory scanning and AI enrichment.

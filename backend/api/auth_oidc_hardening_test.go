@@ -280,11 +280,11 @@ func TestOIDCNoncePropagationAndScopeFiltering(t *testing.T) {
 	r.GET("/oidc/userinfo", OIDCUserInfo)
 
 	cases := []struct {
-		name         string
-		scope        string
-		nonce        string
-		expectEmail  bool
-		expectName   bool
+		name        string
+		scope       string
+		nonce       string
+		expectEmail bool
+		expectName  bool
 	}{
 		{name: "openid_only", scope: "openid", nonce: "nonce-open-1", expectEmail: false, expectName: false},
 		{name: "openid_email", scope: "openid email", nonce: "nonce-email-2", expectEmail: true, expectName: false},

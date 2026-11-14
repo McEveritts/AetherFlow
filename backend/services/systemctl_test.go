@@ -18,8 +18,8 @@ func TestValidateServiceName(t *testing.T) {
 		{name: "bad name", wantErr: true},
 		{name: "bad;rm -rf /", wantErr: true},
 		{name: "bad$(cmd)", wantErr: true},
-		{name: "-starts-with-dash", wantErr: true},           // flag injection
-		{name: "", wantErr: true},                              // empty
+		{name: "-starts-with-dash", wantErr: true},            // flag injection
+		{name: "", wantErr: true},                             // empty
 		{name: "a" + string(make([]byte, 64)), wantErr: true}, // > 64 chars
 	}
 

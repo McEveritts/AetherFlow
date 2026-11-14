@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"aetherflow/db"
+	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
@@ -1031,5 +1034,209 @@ func TestRound7_ConcurrentSetupAdminOIDCReuseSettingsEncryptAndLegacySecretMigra
 	r.ServeHTTP(wOIDC, reqOIDC)
 	if wOIDC.Code != http.StatusInternalServerError {
 		t.Fatalf("expected OIDCToken reuse revocation DB write failure to return 500, got %d: %s", wOIDC.Code, wOIDC.Body.String())
+	}
+}
+
+func TestRound8_OIDCSessionScopingAuthCodeReplayVerify2FAConflictWSOriginAndLogRedaction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTestDB(t)
+	db.RedisClient = nil
+	prevKey := append([]byte(nil), aesMasterKey...)
+	aesMasterKey = bytes.Repeat([]byte{0x88}, 32)
+	t.Cleanup(func() {
+		aesMasterKey = prevKey
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+	t.Setenv("OIDC_KEY_PATH", filepath.Join(t.TempDir(), "oidc_r8.pem"))
+	loadOrGenerateOIDCKey()
+
+	// 1. BeginWriteTx upgrades immediately to RESERVED lock and commits cleanly
+	tx, release, err := db.BeginWriteTx()
+	if err != nil {
+		t.Fatalf("BeginWriteTx: %v", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO users (id, username, email, role, password_hash, totp_enabled, totp_secret)
+		 VALUES (980, 'r8_user', 'r8@example.test', 'user', 'h', 1, 'JBSWY3DPEHPK3PXP')`,
+	); err != nil {
+		release()
+		t.Fatalf("insert user in write tx: %v", err)
+	}
+	if err := db.CommitWriteTx(tx, release); err != nil {
+		t.Fatalf("CommitWriteTx: %v", err)
+	}
+
+	r := gin.New()
+	r.POST("/user/2fa/verify", AuthMiddleware(), Verify2FA)
+	r.POST("/logout", AuthMiddleware(), Logout)
+	r.POST("/oidc/token", OIDCToken)
+	r.GET("/oidc/userinfo", OIDCUserInfo)
+
+	// 2. Verify2FA returns 409 Conflict when totp_enabled == 1
+	sessA := mintSessionTokenForTest(t, 980, "127.0.0.1:48001", "R8UA/1.0")
+	_ = mintSessionTokenForTest(t, 980, "127.0.0.1:48001", "R8UA/1.0")
+	var jtis []string
+	rows, err := db.DB.Query(`SELECT jti FROM active_sessions WHERE user_id = 980 ORDER BY rowid ASC`)
+	if err != nil {
+		t.Fatalf("query active_sessions: %v", err)
+	}
+	for rows.Next() {
+		var j string
+		_ = rows.Scan(&j)
+		jtis = append(jtis, j)
+	}
+	_ = rows.Close()
+	if len(jtis) != 2 {
+		t.Fatalf("expected 2 active sessions, got %d", len(jtis))
+	}
+
+	validCode, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	w2FA := httptest.NewRecorder()
+	req2FA := httptest.NewRequest(http.MethodPost, "/user/2fa/verify", strings.NewReader(fmt.Sprintf(`{"code":%q}`, validCode)))
+	req2FA.Header.Set("Content-Type", "application/json")
+	req2FA.Header.Set("Authorization", "Bearer "+sessA)
+	req2FA.RemoteAddr = "127.0.0.1:48001"
+	req2FA.Header.Set("User-Agent", "R8UA/1.0")
+	r.ServeHTTP(w2FA, req2FA)
+	if w2FA.Code != http.StatusConflict {
+		t.Fatalf("expected Verify2FA when already enabled to return 409, got %d: %s", w2FA.Code, w2FA.Body.String())
+	}
+
+	// 3. Session-scoped OIDC revocation on Logout + single-use auth-code replay family revocation
+	secSum := sha256.Sum256([]byte("r8-go-secret"))
+	if _, err := db.DB.Exec(
+		`INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) VALUES ('r8-go-client', ?, 'R8Go', '["https://r8.example/cb"]')`,
+		hex.EncodeToString(secSum[:]),
+	); err != nil {
+		t.Fatalf("insert oidc client: %v", err)
+	}
+	verifier := strings.Repeat("v", 43)
+	vSum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(vSum[:])
+
+	codeA, err := generateAndStoreAuthCodeForSession("r8-go-client", 980, "https://r8.example/cb", "openid profile email", "", challenge, "S256", jtis[0])
+	if err != nil {
+		t.Fatalf("codeA: %v", err)
+	}
+	codeB, err := generateAndStoreAuthCodeForSession("r8-go-client", 980, "https://r8.example/cb", "openid profile email", "", challenge, "S256", jtis[1])
+	if err != nil {
+		t.Fatalf("codeB: %v", err)
+	}
+
+	exchangeCode := func(code string) (int, map[string]any) {
+		f := url.Values{
+			"grant_type":    {"authorization_code"},
+			"client_id":     {"r8-go-client"},
+			"client_secret": {"r8-go-secret"},
+			"code":          {code},
+			"redirect_uri":  {"https://r8.example/cb"},
+			"code_verifier": {verifier},
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/oidc/token", strings.NewReader(f.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+
+	stA, tokA := exchangeCode(codeA)
+	stB, tokB := exchangeCode(codeB)
+	if stA != http.StatusOK || stB != http.StatusOK {
+		t.Fatalf("expected initial code exchanges 200/200, got %d/%d", stA, stB)
+	}
+	accessA := tokA["access_token"].(string)
+	refreshA := tokA["refresh_token"].(string)
+	accessB := tokB["access_token"].(string)
+	refreshB := tokB["refresh_token"].(string)
+
+	callUserInfo := func(at string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/oidc/userinfo", nil)
+		req.Header.Set("Authorization", "Bearer "+at)
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if callUserInfo(accessA) != http.StatusOK || callUserInfo(accessB) != http.StatusOK {
+		t.Fatalf("expected both OIDC access tokens valid before logout")
+	}
+
+	// Logout Session A -> revokes accessA + refreshA, keeps accessB alive
+	wOut := httptest.NewRecorder()
+	reqOut := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	reqOut.Header.Set("Authorization", "Bearer "+sessA)
+	reqOut.RemoteAddr = "127.0.0.1:48001"
+	reqOut.Header.Set("User-Agent", "R8UA/1.0")
+	r.ServeHTTP(wOut, reqOut)
+	if wOut.Code != http.StatusOK {
+		t.Fatalf("Logout sessA failed: %d", wOut.Code)
+	}
+	if got := callUserInfo(accessA); got != http.StatusUnauthorized {
+		t.Fatalf("expected accessA revoked after Logout sessA (401), got %d", got)
+	}
+	if got := callUserInfo(accessB); got != http.StatusOK {
+		t.Fatalf("expected sibling session accessB to stay active (200), got %d", got)
+	}
+	fRefA := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {"r8-go-client"},
+		"client_secret": {"r8-go-secret"},
+		"refresh_token": {refreshA},
+	}
+	wRefA := httptest.NewRecorder()
+	reqRefA := httptest.NewRequest(http.MethodPost, "/oidc/token", strings.NewReader(fRefA.Encode()))
+	reqRefA.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.ServeHTTP(wRefA, reqRefA)
+	if wRefA.Code != http.StatusBadRequest {
+		t.Fatalf("expected refreshA revoked after Logout sessA (400), got %d", wRefA.Code)
+	}
+
+	// Replay consumed codeB -> revokes accessB + refreshB immediately
+	stReplayB, _ := exchangeCode(codeB)
+	if stReplayB != http.StatusBadRequest {
+		t.Fatalf("expected consumed codeB replay 400, got %d", stReplayB)
+	}
+	if got := callUserInfo(accessB); got != http.StatusUnauthorized {
+		t.Fatalf("expected accessB immediately revoked on auth-code replay (401), got %d", got)
+	}
+	fRefB := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {"r8-go-client"},
+		"client_secret": {"r8-go-secret"},
+		"refresh_token": {refreshB},
+	}
+	wRefB := httptest.NewRecorder()
+	reqRefB := httptest.NewRequest(http.MethodPost, "/oidc/token", strings.NewReader(fRefB.Encode()))
+	reqRefB.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.ServeHTTP(wRefB, reqRefB)
+	if wRefB.Code != http.StatusBadRequest {
+		t.Fatalf("expected refreshB revoked on auth-code replay (400), got %d", wRefB.Code)
+	}
+
+	// 4. CheckOrigin rejects spoofed X-Forwarded-Proto: https from untrusted external RemoteAddr
+	t.Setenv("ALLOWED_ORIGINS", "")
+	spoofWS := httptest.NewRequest(http.MethodGet, "http://panel.example.test/api/v1/ws", nil)
+	spoofWS.Host = "panel.example.test"
+	spoofWS.RemoteAddr = "203.0.113.77:54321"
+	spoofWS.Header.Set("Origin", "https://panel.example.test")
+	spoofWS.Header.Set("X-Forwarded-Proto", "https")
+	if upgrader.CheckOrigin(spoofWS) {
+		t.Fatalf("expected CheckOrigin to reject spoofed X-Forwarded-Proto: https on plain-HTTP direct peer")
+	}
+
+	// 5. RedactLogSecrets scrubs tokens, URL credentials, JSON keys, and KV passwords
+	rawLog := `Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret postgres://af:s3cr3t@127.0.0.1/db {"api_key":"sk-live-999"} rclone_pass=topsecret123`
+	scrubbed := services.RedactLogSecrets(rawLog)
+	for _, leaked := range []string{"eyJhbGciOiJIUzI1NiJ9.secret", "s3cr3t", "sk-live-999", "topsecret123"} {
+		if strings.Contains(scrubbed, leaked) {
+			t.Fatalf("RedactLogSecrets leaked %q in %q", leaked, scrubbed)
+		}
 	}
 }

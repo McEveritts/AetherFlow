@@ -28,10 +28,10 @@ func IsWSL() bool {
 // GetRuntimePolicy creates an explicit runtime policy matrix depending on the underlying environment
 func GetRuntimePolicy() EnvironmentPolicy {
 	isWsl := IsWSL()
-	
+
 	// On Bare Metal, we aggressively sandbox systemd units and enforce restrictions.
-	// On WSL, systemd sandboxing (like PrivateTmp, ProtectSystem, etc) often fails 
-	// unless running under a very specific WSL2 systemd configuration. 
+	// On WSL, systemd sandboxing (like PrivateTmp, ProtectSystem, etc) often fails
+	// unless running under a very specific WSL2 systemd configuration.
 	// We safely bypass these incompatible restrictions on WSL.
 	return EnvironmentPolicy{
 		IsWSL:          isWsl,

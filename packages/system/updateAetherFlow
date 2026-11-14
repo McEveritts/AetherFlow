@@ -267,9 +267,8 @@ function _updaterttheme() { :; }
 
 
 function _updatesudo() {
-  if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
-    cp -a /etc/sudoers /etc/sudoers.BAK 2>/dev/null || true
-    install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
+  if [[ -d /etc/sudoers.d && ! -L /etc/sudoers.d ]]; then
+    find /etc/sudoers.d -maxdepth 1 \( -type f -o -type l \) -name 'aether*' -delete 2>/dev/null || true
   fi
 }
 

@@ -1851,4 +1851,73 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
         assert_eq!(recovery.phase, ReleasePhase::Failed);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_round8_standalone_rollback_restores_current_release_data_snapshot() {
+        let sandbox = TempSandbox::new("standalone-rollback-snap");
+        let mut cfg = ReleaseConfig::for_root(sandbox.path());
+        cfg.health_retries = 1;
+        cfg.health_interval = Duration::ZERO;
+        let live_db = cfg.host_data_dir.join(&cfg.sqlite_db);
+
+        let previous = cfg.releases_dir.join("1111111111");
+        let broken = cfg.releases_dir.join("2222222222");
+        fs::create_dir_all(&previous).unwrap();
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(previous.join("aetherflow-api"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(previous.join(".version"), b"v4.0.0-prev\n").unwrap();
+        fs::write(broken.join("aetherflow-api"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(broken.join(".version"), b"v4.0.0-broken\n").unwrap();
+
+        // Snapshot pre-deploy good DB under `broken/data-snapshot/` (just like Stage 1 of `broken`'s deploy).
+        seed_valid_sqlite_db(&live_db, "pre-deploy-good-state");
+        let resolved = ResolvedDbPath {
+            path: live_db.clone(),
+            source: DbPathSource::DataDirDefault,
+        };
+        create_state_snapshot(&cfg, &resolved, &broken, false).unwrap();
+
+        // Corrupt live DB to simulate post-deploy corruption before operator runs standalone `Rollback`.
+        fs::write(&live_db, b"CORRUPT_POST_DEPLOY_DB").unwrap();
+        std::os::unix::fs::symlink(&broken, &cfg.current_link).unwrap();
+        write_previous_release(&cfg.releases_dir, &previous).unwrap();
+
+        let tar_path = sandbox.path().join("unused.tar.gz");
+        let (_, manifest) = build_synthetic_release_tarball(
+            &tar_path,
+            &cfg.artifact_name,
+            &[("aetherflow-api", b"unused", EntryType::Regular)],
+        );
+        let provider = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: tar_path,
+            manifest_content: manifest,
+        };
+        let prober = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200,
+            body: r#"{"status":"ok"}"#.to_string(),
+        })]);
+        let engine = ReleaseEngine::new(cfg.clone(), provider, MockLifecycle::default(), prober);
+        let outcome = engine
+            .execute(&ReleaseOptions {
+                command: ReleaseCommand::Rollback,
+                ..ReleaseOptions::default()
+            })
+            .expect("standalone rollback must succeed");
+        let ReleaseOutcome::Rollback(report) = outcome else {
+            panic!("expected Rollback outcome");
+        };
+        assert_eq!(report.snapshot_release, broken);
+        assert!(report.restore_error.is_none());
+
+        let conn = Connection::open(&live_db).unwrap();
+        let restored_marker: String = conn
+            .query_row("SELECT marker FROM test_state LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            restored_marker, "pre-deploy-good-state",
+            "standalone rollback must restore snapshot from outgoing current release (`broken/data-snapshot`)"
+        );
+    }
 }

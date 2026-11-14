@@ -219,6 +219,7 @@ func HandleLogWebSocket(c *gin.Context) {
 				continue
 			}
 
+			entry.Message = services.RedactLogSecrets(entry.Message)
 			payload := map[string]interface{}{
 				"type": "LOG_ENTRY",
 				"data": entry,
@@ -266,11 +267,11 @@ func GetBookmarks(c *gin.Context) {
 		var logSource, logLine, timestamp, note, createdAt string
 		if err := rows.Scan(&id, &logSource, &logLine, &timestamp, &note, &createdAt); err == nil {
 			bookmarks = append(bookmarks, map[string]interface{}{
-				"id": id,
+				"id":         id,
 				"log_source": logSource,
-				"log_line": logLine,
-				"timestamp": timestamp,
-				"note": note,
+				"log_line":   logLine,
+				"timestamp":  timestamp,
+				"note":       note,
 				"created_at": createdAt,
 			})
 		}

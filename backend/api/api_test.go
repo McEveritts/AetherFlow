@@ -136,11 +136,11 @@ func TestResolveProvider(t *testing.T) {
 
 func TestBuildProviderConfig(t *testing.T) {
 	ps := &ProviderSettings{
-		GeminiAPIKey:    "gemini-test-key",
-		OpenAIAPIKey:    "openai-test-key",
-		AnthropicAPIKey: "anthropic-test-key",
-		LMStudioEndpoint: "http://localhost:1234",
-		OllamaEndpoint:   "http://localhost:11434",
+		GeminiAPIKey:      "gemini-test-key",
+		OpenAIAPIKey:      "openai-test-key",
+		AnthropicAPIKey:   "anthropic-test-key",
+		LMStudioEndpoint:  "http://localhost:1234",
+		OllamaEndpoint:    "http://localhost:11434",
 		AnthropicEndpoint: "https://custom-anthropic.example.com",
 	}
 
@@ -361,11 +361,11 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		{"http://example.com", "example.com", "https", "", false}, // Scheme downgrade rejected
 		{"http://example.com", "example.com", "", "", true},
 		{"https://evil.com", "example.com", "https", "", false},
-		{"", "example.com", "", "", true},                                   // Non-browser CLI/Bearer clients
-		{"", "example.com", "", "aetherflow_session=tok", false},            // Browser cookie upgrade requires Origin
-		{"http://localhost:9999", "localhost:8080", "", "", false},          // Cross-port loopback CSWSH rejected
-		{"http://localhost:8080", "localhost:8080", "", "", true},           // Exact loopback host:port allowed
-		{"https://sub.example.com", "example.com", "https", "", false},      // Subdomain mismatch
+		{"", "example.com", "", "", true},                              // Non-browser CLI/Bearer clients
+		{"", "example.com", "", "aetherflow_session=tok", false},       // Browser cookie upgrade requires Origin
+		{"http://localhost:9999", "localhost:8080", "", "", false},     // Cross-port loopback CSWSH rejected
+		{"http://localhost:8080", "localhost:8080", "", "", true},      // Exact loopback host:port allowed
+		{"https://sub.example.com", "example.com", "https", "", false}, // Subdomain mismatch
 	}
 
 	for _, tt := range tests {
@@ -458,28 +458,27 @@ func TestUploadBackupChunkRequiresChunkParams(t *testing.T) {
 
 func TestAdminRouteBlocksStandardUser(t *testing.T) {
 	r := gin.New()
-	
+
 	// Set up the routes exactly as they are in production
 	adminGroup := r.Group("/admin")
-	
+
 	// Mock AuthMiddleware to set standard user role
 	mockAuth := func(c *gin.Context) {
 		c.Set("user_id", 123)
 		c.Set("user_role", "user") // Standard user
 		c.Next()
 	}
-	
+
 	adminGroup.Use(mockAuth, AdminOnly())
 	adminGroup.GET("/metrics", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 	})
-	
+
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/admin/metrics", nil)
 	r.ServeHTTP(w, req)
-	
+
 	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected 403 Forbidden for standard user accessing admin route, got %d", w.Code)
 	}
 }
-

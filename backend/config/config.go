@@ -24,11 +24,11 @@ var Cfg *AppConfig
 // AppConfig holds all application configuration derived from environment variables.
 type AppConfig struct {
 	// ── Server ──────────────────────────────────────────────────────────
-	Port             string
-	AllowedHosts     []string
+	Port              string
+	AllowedHosts      []string
 	AllowedCORSOrigin string
-	CookieSecure     bool
-	CSRFDisabled     bool
+	CookieSecure      bool
+	CSRFDisabled      bool
 
 	// ── Database ────────────────────────────────────────────────────────
 	DBPath        string
@@ -36,11 +36,11 @@ type AppConfig struct {
 	RedisPassword string
 
 	// ── Auth ────────────────────────────────────────────────────────────
-	JWTSecret       string
-	AdminEmail      string
-	GoogleClientID  string
-	GoogleSecret    string
-	GoogleRedirect  string
+	JWTSecret      string
+	AdminEmail     string
+	GoogleClientID string
+	GoogleSecret   string
+	GoogleRedirect string
 
 	// ── OIDC ────────────────────────────────────────────────────────────
 	OIDCKeyPath string

@@ -152,8 +152,8 @@ func (c *clusterServiceClient) RegisterWorker(ctx context.Context, in *RegisterR
 func (c *clusterServiceClient) Heartbeat(ctx context.Context, opts ...grpc.CallOption) (ClusterService_HeartbeatClient, error) {
 	stream, err := c.cc.NewStream(ctx, &grpc.StreamDesc{
 		StreamName:    "Heartbeat",
-		ServerStreams:  true,
-		ClientStreams:  true,
+		ServerStreams: true,
+		ClientStreams: true,
 	}, "/cluster.ClusterService/Heartbeat", opts...)
 	if err != nil {
 		return nil, err
@@ -275,8 +275,8 @@ var _ClusterService_serviceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Heartbeat",
 			Handler:       _ClusterService_Heartbeat_Handler,
-			ServerStreams:  true,
-			ClientStreams:  true,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "proto/cluster.proto",

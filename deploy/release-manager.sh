@@ -206,6 +206,123 @@ PY
 }
 
 ACTIVE_STAGE_DIR=""
+RECOVERY_OPERATION_ID=""
+RECOVERY_STARTED_AT=""
+RECOVERY_COMMAND=""
+RECOVERY_CHANNEL=""
+RECOVERY_PHASE=""
+RECOVERY_CANDIDATE_RELEASE=""
+RECOVERY_PREVIOUS_RELEASE=""
+RECOVERY_SNAPSHOT_PATH=""
+RECOVERY_OWNS_JOURNAL=false
+INFERRED_POST_SWAP_CANDIDATE=""
+RECOVERY_FROM_UNFINISHED_POST_SWAP=false
+
+save_recovery_state() {
+    local phase="$1"
+    local err_msg="${2:-}"
+    [[ -n "${RELEASES_DIR:-}" && -n "${RECOVERY_OPERATION_ID:-}" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    RECOVERY_PHASE="${phase}"
+    RECOVERY_OWNS_JOURNAL=true
+    python3 - "${RELEASES_DIR}" "${RECOVERY_OPERATION_ID}" "${RECOVERY_COMMAND}" "${RECOVERY_CHANNEL}" "${DRY_RUN:-false}" "${phase}" "${RECOVERY_CANDIDATE_RELEASE}" "${RECOVERY_PREVIOUS_RELEASE}" "${RESOLVED_DB_PATH:-}" "${RESOLVED_DB_SOURCE:-}" "${RECOVERY_SNAPSHOT_PATH}" "${RECOVERY_STARTED_AT}" "${err_msg}" <<'PY'
+import datetime, json, os, pathlib, stat, sys, uuid
+
+(
+    releases_dir_s,
+    op_id,
+    cmd,
+    channel,
+    dry_run_s,
+    phase,
+    cand_rel,
+    prev_rel,
+    db_path,
+    db_source,
+    snap_path,
+    started_at,
+    err_msg,
+) = sys.argv[1:]
+
+releases_dir = pathlib.Path(releases_dir_s)
+if releases_dir.is_symlink():
+    raise SystemExit(f"Refusing symlinked releases directory: {releases_dir}")
+releases_dir.mkdir(parents=True, exist_ok=True)
+target = releases_dir / ".recovery_state.json"
+if target.is_symlink():
+    raise SystemExit(f"Refusing symlinked recovery journal: {target}")
+
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+payload = {
+    "operation_id": op_id,
+    "command": cmd,
+    "channel": "nightly" if channel == "experimental" else (channel or "stable"),
+    "dry_run": dry_run_s == "true",
+    "phase": phase,
+    "candidate_release": cand_rel or None,
+    "previous_release": prev_rel or None,
+    "resolved_db_path": db_path or None,
+    "resolved_db_source": db_source or None,
+    "snapshot_path": snap_path or None,
+    "started_at": started_at or now,
+    "updated_at": now,
+}
+if err_msg:
+    payload["last_error"] = err_msg
+
+data = json.dumps(payload, indent=2).encode("utf-8") + b"\n"
+tmp_name = releases_dir / f".recovery_state.json.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+fd = os.open(str(tmp_name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(str(tmp_name), str(target))
+    tmp_name = None
+finally:
+    if tmp_name is not None:
+        try:
+            os.unlink(str(tmp_name))
+        except OSError:
+            pass
+PY
+}
+
+finalize_recovery_state_on_exit() {
+    local rc="$1"
+    [[ "${rc}" -ne 0 && "${RECOVERY_OWNS_JOURNAL}" == true ]] || return 0
+    [[ "${RECOVERY_PHASE}" != "complete" && "${RECOVERY_PHASE}" != "failed" ]] || return 0
+    local msg="${LAST_LOG_ERROR:-release-manager exited with status ${rc}}"
+    case "${RECOVERY_PHASE}" in
+        stage0_fhs_layout|stage1_scaffold|stage1_5_snapshot)
+            if [[ -n "${RECOVERY_CANDIDATE_RELEASE}" && -d "${RECOVERY_CANDIDATE_RELEASE}" && ! -L "${RECOVERY_CANDIDATE_RELEASE}" ]]; then
+                local cur_real="" prev_real="" cand_real=""
+                [[ -L "${CURRENT_LINK:-}" ]] && cur_real="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                [[ -f "${RELEASES_DIR:-}/.previous_release" ]] && prev_real="$(readlink -f "$(cat "${RELEASES_DIR}/.previous_release")" 2>/dev/null || true)"
+                cand_real="$(readlink -f "${RECOVERY_CANDIDATE_RELEASE}" 2>/dev/null || true)"
+                if [[ -n "${cand_real}" && "${cand_real}" == "${RELEASES_DIR%/}/"* && "${cand_real}" != "${cur_real}" && "${cand_real}" != "${prev_real}" ]]; then
+                    rm -rf "${RECOVERY_CANDIDATE_RELEASE}" 2>/dev/null || true
+                fi
+            fi
+            save_recovery_state "failed" "${msg}" || true
+            ;;
+        stage5_cleanup|stage6_migrate_systemd)
+            save_recovery_state "failed" "${msg}" || true
+            ;;
+        stage4_rollback)
+            if [[ "${RECOVERY_FROM_UNFINISHED_POST_SWAP}" == true ]]; then
+                save_recovery_state "stage4_rollback" "${msg}" || true
+            else
+                save_recovery_state "failed" "${msg}" || true
+            fi
+            ;;
+        stage2_symlink_swap|stage3_health_probe)
+            save_recovery_state "${RECOVERY_PHASE}" "${msg}" || true
+            ;;
+    esac
+}
 
 finalize_self_update_status_on_exit() {
     local rc="$1"
@@ -224,6 +341,7 @@ cleanup_on_exit() {
         rm -rf "${ACTIVE_STAGE_DIR}" 2>/dev/null || true
     fi
     ACTIVE_STAGE_DIR=""
+    finalize_recovery_state_on_exit "${rc}"
     finalize_self_update_status_on_exit "${rc}"
 }
 
@@ -1977,7 +2095,7 @@ state_restore() {
         mv "${db_path}" "${db_path}.corrupted.$(date +%s)" || return 1
     fi
     cp -pf "${bak_path}" "${db_path}" || return 1
-    if id -u aetherflow >/dev/null 2>&1; then
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]] && id -u aetherflow >/dev/null 2>&1; then
         chown aetherflow:aetherflow "${db_path}" || return 1
     fi
     chmod 0600 "${db_path}" || return 1
@@ -1987,7 +2105,11 @@ state_restore() {
 rollback() {
     local snapshot_release="${1:-}"
     log_error "=== STAGE 4: ROLLBACK INITIATED ==="
+    save_recovery_state "stage4_rollback"
     local prev_file="${RELEASES_DIR}/.previous_release"
+    if [[ ! -f "${prev_file}" && -n "${RECOVERY_PREVIOUS_RELEASE}" && -d "${RECOVERY_PREVIOUS_RELEASE}" && ! -L "${prev_file}" ]]; then
+        printf '%s\n' "${RECOVERY_PREVIOUS_RELEASE}" > "${prev_file}"
+    fi
     if [[ ! -f "${prev_file}" ]]; then
         log_fatal "No previous release record found at ${prev_file}."
     fi
@@ -1998,6 +2120,11 @@ rollback() {
         log_fatal "Previous release directory missing: ${previous_target}."
     fi
 
+    local current_before_rollback=""
+    if [[ -L "${CURRENT_LINK}" ]]; then
+        current_before_rollback="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+    fi
+
     local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
     ln -s "${previous_target}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
@@ -2006,7 +2133,15 @@ rollback() {
     log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
 
     if [[ -z "${snapshot_release}" ]]; then
-        snapshot_release="${previous_target}"
+        local prev_canon
+        prev_canon="$(readlink -f "${previous_target}" 2>/dev/null || printf '%s' "${previous_target}")"
+        if [[ -n "${INFERRED_POST_SWAP_CANDIDATE}" && -d "${INFERRED_POST_SWAP_CANDIDATE}/data-snapshot" ]]; then
+            snapshot_release="${INFERRED_POST_SWAP_CANDIDATE}"
+        elif [[ -n "${current_before_rollback}" && "${current_before_rollback}" != "${prev_canon}" && -d "${current_before_rollback}/data-snapshot" ]]; then
+            snapshot_release="${current_before_rollback}"
+        else
+            snapshot_release="${previous_target}"
+        fi
     fi
     log_info "Database recovery snapshot release: ${snapshot_release}"
 
@@ -2023,6 +2158,8 @@ rollback() {
         fi
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
+    RECOVERY_PREVIOUS_RELEASE="${previous_target}"
+    save_recovery_state "complete"
 }
 
 ###############################################################################
@@ -2165,6 +2302,137 @@ PY
     fi
 }
 
+guard_and_init_recovery_state() {
+    local parsed=""
+    if ! parsed="$(python3 - "${RELEASES_DIR}" "${CURRENT_LINK}" "${COMMAND}" "${CHANNEL:-stable}" "${DRY_RUN:-false}" "${AETHERFLOW_UPDATE_OPERATION_ID:-}" <<'PY'
+import datetime, json, os, pathlib, shutil, stat, sys, uuid
+
+releases_dir_s, current_link_s, cmd, channel, dry_run_s, env_op_id = sys.argv[1:]
+releases_dir = pathlib.Path(releases_dir_s)
+current_link = pathlib.Path(current_link_s)
+state_file = releases_dir / ".recovery_state.json"
+prev_file = releases_dir / ".previous_release"
+
+if state_file.is_symlink():
+    sys.stderr.write(f"Refusing symlinked recovery journal: {state_file}\n")
+    raise SystemExit(1)
+
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+valid_env_op = ""
+if env_op_id:
+    try:
+        valid_env_op = str(uuid.UUID(env_op_id))
+    except ValueError:
+        valid_env_op = ""
+
+op_id = valid_env_op or str(uuid.uuid4())
+started_at = now
+rec_cmd = cmd
+rec_channel = "nightly" if channel == "experimental" else (channel or "stable")
+rec_cand = ""
+rec_prev = ""
+rec_snap = ""
+inferred_cand = ""
+from_post_swap = "false"
+
+if state_file.exists():
+    st = state_file.lstat()
+    if not stat.S_ISREG(st.st_mode):
+        sys.stderr.write(f"Refusing non-regular recovery journal: {state_file}\n")
+        raise SystemExit(1)
+    try:
+        existing = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            raise ValueError("not a JSON object")
+    except Exception as exc:
+        sys.stderr.write(f"Corrupted recovery journal {state_file}: {exc}\n")
+        raise SystemExit(1)
+
+    phase = str(existing.get("phase") or "")
+    ex_cmd = str(existing.get("command") or "")
+    ex_dry = bool(existing.get("dry_run", False))
+    is_unfinished = phase not in ("complete", "completed", "failed")
+    post_swap_deploy = (
+        is_unfinished
+        and ex_cmd in ("", "deploy")
+        and not ex_dry
+        and phase in ("stage2_symlink_swap", "stage3_health_probe", "stage4_rollback")
+    )
+
+    if post_swap_deploy:
+        if cmd != "rollback":
+            sys.stderr.write(
+                f"Refusing to run '{cmd}' while an interrupted deployment "
+                f"(operation_id={existing.get('operation_id')}, phase={phase}, "
+                f"candidate={existing.get('candidate_release')}, previous_release={existing.get('previous_release')}) "
+                f"is unfinished after symlink swap; run 'rollback' first so '.previous_release' is not overwritten.\n"
+            )
+            raise SystemExit(2)
+        ex_prev = existing.get("previous_release")
+        if isinstance(ex_prev, str) and ex_prev and pathlib.Path(ex_prev).is_dir():
+            if prev_file.is_symlink():
+                sys.stderr.write(f"Refusing symlinked .previous_release: {prev_file}\n")
+                raise SystemExit(1)
+            tmp_prev = releases_dir / f".previous_release.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+            tmp_prev.write_text(ex_prev + "\n", encoding="utf-8")
+            os.replace(str(tmp_prev), str(prev_file))
+            rec_prev = ex_prev
+        ex_cand = existing.get("candidate_release")
+        if isinstance(ex_cand, str) and ex_cand:
+            rec_cand = ex_cand
+            if (pathlib.Path(ex_cand) / "data-snapshot").is_dir():
+                inferred_cand = ex_cand
+        ex_snap = existing.get("snapshot_path")
+        if isinstance(ex_snap, str) and ex_snap:
+            rec_snap = ex_snap
+        op_id = valid_env_op or str(existing.get("operation_id") or op_id)
+        started_at = str(existing.get("started_at") or now)
+        rec_cmd = ex_cmd or "rollback"
+        rec_channel = str(existing.get("channel") or rec_channel)
+        from_post_swap = "true"
+    elif is_unfinished and phase in ("stage0_fhs_layout", "stage1_scaffold", "stage1_5_snapshot") and cmd != "rollback":
+        ex_cand = existing.get("candidate_release")
+        if isinstance(ex_cand, str) and ex_cand:
+            cand_p = pathlib.Path(ex_cand)
+            try:
+                cand_res = cand_p.resolve(strict=False)
+                rel_res = releases_dir.resolve(strict=False)
+                cur_res = current_link.resolve(strict=False) if current_link.is_symlink() else None
+                prev_res = pathlib.Path(prev_file.read_text(encoding="utf-8").strip()).resolve(strict=False) if prev_file.is_file() else None
+                if (
+                    cand_p.is_dir()
+                    and not cand_p.is_symlink()
+                    and str(cand_res).startswith(str(rel_res) + "/")
+                    and cand_res != cur_res
+                    and cand_res != prev_res
+                ):
+                    shutil.rmtree(cand_p, ignore_errors=True)
+            except OSError:
+                pass
+    elif cmd == "rollback":
+        ex_prev = existing.get("previous_release")
+        if isinstance(ex_prev, str) and ex_prev:
+            rec_prev = ex_prev
+
+for val in (op_id, started_at, rec_cmd, rec_channel, rec_cand, rec_prev, rec_snap, inferred_cand, from_post_swap):
+    sys.stdout.write(val.replace("\n", "") + "\n")
+PY
+    )"; then
+        log_fatal "Recovery state admission refused command '${COMMAND}'; run 'rollback' first or inspect ${RELEASES_DIR}/.recovery_state.json."
+    fi
+    {
+        IFS= read -r RECOVERY_OPERATION_ID
+        IFS= read -r RECOVERY_STARTED_AT
+        IFS= read -r RECOVERY_COMMAND
+        IFS= read -r RECOVERY_CHANNEL
+        IFS= read -r RECOVERY_CANDIDATE_RELEASE
+        IFS= read -r RECOVERY_PREVIOUS_RELEASE
+        IFS= read -r RECOVERY_SNAPSHOT_PATH
+        IFS= read -r INFERRED_POST_SWAP_CANDIDATE
+        IFS= read -r RECOVERY_FROM_UNFINISHED_POST_SWAP
+    } <<< "${parsed}"
+}
+
 acquire_release_lock() {
     local shared_db_lock="${AETHERFLOW_MAINTENANCE_LOCK_PATH:-}"
     if [[ -z "${shared_db_lock}" ]]; then
@@ -2259,21 +2527,54 @@ acquire_release_lock() {
     if ! flock -w "${SNAPSHOT_TIMEOUT}" 201; then
         log_fatal "Could not acquire release lock ${release_lock} within ${SNAPSHOT_TIMEOUT}s."
     fi
+    guard_and_init_recovery_state
 }
 
 case "${COMMAND}" in
     deploy)
         acquire_release_lock
+        save_recovery_state "stage0_fhs_layout"
         ensure_fhs_layout
+        RECOVERY_CANDIDATE_RELEASE="${RELEASE_DIR}"
+        save_recovery_state "stage1_scaffold"
         release_scaffold
         prepare_release_permissions || exit 1
+        save_recovery_state "stage1_5_snapshot"
         state_snapshot || exit 1
+        if [[ -f "${RELEASE_DIR}/data-snapshot/${SQLITE_DB}.bak" ]]; then
+            RECOVERY_SNAPSHOT_PATH="${RELEASE_DIR}/data-snapshot/${SQLITE_DB}.bak"
+        fi
+        PRIOR_PREVIOUS_RELEASE=""
+        if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
+            PRIOR_PREVIOUS_RELEASE="$(cat "${RELEASES_DIR}/.previous_release")"
+        fi
+        if [[ -L "${CURRENT_LINK}" ]]; then
+            RECOVERY_PREVIOUS_RELEASE="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+        else
+            RECOVERY_PREVIOUS_RELEASE="${PRIOR_PREVIOUS_RELEASE}"
+        fi
+        save_recovery_state "stage2_symlink_swap"
         symlink_swap
+        if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
+            RECOVERY_PREVIOUS_RELEASE="$(cat "${RELEASES_DIR}/.previous_release")"
+        fi
+        save_recovery_state "stage3_health_probe"
         if ! health_probe; then
+            RECOVERY_FROM_UNFINISHED_POST_SWAP=true
+            save_recovery_state "stage4_rollback" "${LAST_LOG_ERROR:-Health probe failed}"
             rollback "${RELEASE_DIR}"
+            if [[ -n "${PRIOR_PREVIOUS_RELEASE}" && -d "${PRIOR_PREVIOUS_RELEASE}" ]]; then
+                REVERTED_CANON="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                PRIOR_CANON="$(readlink -f "${PRIOR_PREVIOUS_RELEASE}" 2>/dev/null || printf '%s' "${PRIOR_PREVIOUS_RELEASE}")"
+                if [[ "${PRIOR_CANON}" != "${REVERTED_CANON}" && ! -L "${RELEASES_DIR}/.previous_release" ]]; then
+                    printf '%s\n' "${PRIOR_PREVIOUS_RELEASE}" > "${RELEASES_DIR}/.previous_release"
+                fi
+            fi
             exit 2
         fi
+        save_recovery_state "stage5_cleanup"
         cleanup_old_releases
+        save_recovery_state "complete"
         if [[ "${DRY_RUN}" == true ]]; then
             log_info "DRY-RUN SUCCESSFUL: Release ${EPOCH} (${CHANNEL}) staged at ${CURRENT_LINK}. Systemd was not restarted."
         else
@@ -2286,11 +2587,15 @@ case "${COMMAND}" in
         ;;
     cleanup)
         acquire_release_lock
+        save_recovery_state "stage5_cleanup"
         cleanup_old_releases
+        save_recovery_state "complete"
         ;;
     migrate-systemd)
         acquire_release_lock
+        save_recovery_state "stage6_migrate_systemd"
         migrate_systemd
+        save_recovery_state "complete"
         ;;
     *)
         echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly] [--from-source] [--dry-run] [--offline]"

@@ -3919,18 +3919,23 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
     let mut raw = payload.into_bytes();
     raw.push(b'\n');
 
-    let mut wrote = false;
+    let mut wrote_any = false;
+    let mut wrote_all = true;
     for path in master_cred_paths() {
         if path.as_os_str().is_empty() {
             continue;
         }
         if write_file_atomic_mode(&path, &raw, Some(0o600)).is_ok() {
-            wrote = true;
+            wrote_any = true;
+        } else {
+            wrote_all = false;
         }
     }
-    if env::var("AETHERFLOW_MASTER_CREDS_FILE")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
+    if wrote_any
+        && wrote_all
+        && env::var("AETHERFLOW_MASTER_CREDS_FILE")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
     {
         for legacy in legacy_duplicate_master_cred_paths() {
             let _ = fs::remove_file(legacy);
@@ -3951,7 +3956,7 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
             );
         }
     }
-    if !wrote {
+    if !wrote_any {
         return Err("failed to persist master credentials file".to_string());
     }
     Ok(())
@@ -5619,6 +5624,47 @@ mod tests {
         env::remove_var("AETHERFLOW_DNSMASQ_DIR");
         env::remove_var("AETHERFLOW_PIHOLE_DIR");
         env::remove_var("AETHERFLOW_LAN_IP");
+        let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_round8_save_master_credentials_preserves_legacy_on_primary_write_failure() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        let scratch_dir =
+            env::temp_dir().join(format!("af_r8_master_creds_{}", uuid::Uuid::new_v4()));
+        let legacy_file = scratch_dir.join("opt/AetherFlow/backend/data/.master.creds");
+        fs::create_dir_all(legacy_file.parent().unwrap()).unwrap();
+        fs::write(&legacy_file, b"legacy-must-survive\n").unwrap();
+
+        // Block primary `/var/lib/aetherflow/.master.creds` by making parent `/var/lib/aetherflow` a regular file.
+        let blocked_dir = scratch_dir.join("var/lib/aetherflow");
+        fs::create_dir_all(blocked_dir.parent().unwrap()).unwrap();
+        fs::write(&blocked_dir, b"blocking-regular-file").unwrap();
+
+        env::set_var("AETHERFLOW_CONFIG_ROOT", &scratch_dir);
+        env::remove_var("AETHERFLOW_MASTER_CREDS_FILE");
+        env::set_var("AES_MASTER_KEY", "d".repeat(64));
+        let _ = af_db::init_aes_key();
+
+        let err_res = save_master_credentials("admin", "R8StrongPass!");
+        assert!(err_res.is_err(), "primary write failure must return error");
+        assert_eq!(
+            fs::read_to_string(&legacy_file).unwrap(),
+            "legacy-must-survive\n",
+            "legacy .master.creds must NOT be unlinked when primary write fails"
+        );
+
+        // Fix `/var/lib/aetherflow` into a real directory and verify primary write + legacy unlink succeed.
+        fs::remove_file(&blocked_dir).unwrap();
+        fs::create_dir_all(&blocked_dir).unwrap();
+        save_master_credentials("admin", "R8StrongPass!").expect("primary write should succeed");
+        assert!(blocked_dir.join(".master.creds").is_file());
+        assert!(
+            !legacy_file.exists(),
+            "legacy .master.creds must be unlinked once all primary writes succeed"
+        );
+
+        env::remove_var("AETHERFLOW_CONFIG_ROOT");
         let _ = fs::remove_dir_all(&scratch_dir);
     }
 }

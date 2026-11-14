@@ -18,6 +18,68 @@ import (
 )
 
 var DB *sql.DB
+var writeTxMu sync.Mutex
+
+// BeginWriteTx acquires an in-process writer mutex and forces SQLite to upgrade
+// the transaction immediately to a RESERVED write lock on the main database
+// before any SELECT executes (mitigating modernc.org/sqlite's deferredDB.Begin).
+func BeginWriteTx() (*sql.Tx, func(), error) {
+	if DB == nil {
+		return nil, func() {}, fmt.Errorf("database is not initialized")
+	}
+	writeTxMu.Lock()
+	tx, err := DB.Begin()
+	if err != nil {
+		writeTxMu.Unlock()
+		return nil, func() {}, err
+	}
+
+	lockQueries := []string{
+		"DELETE FROM revoked_tokens WHERE rowid = -1",
+		"DELETE FROM users WHERE rowid = -1",
+		"DELETE FROM settings WHERE rowid = -1",
+		"DELETE FROM mfa_challenges WHERE rowid = -1",
+		"DELETE FROM oidc_auth_codes WHERE rowid = -1",
+		"DELETE FROM oidc_refresh_tokens WHERE rowid = -1",
+	}
+	for _, q := range lockQueries {
+		_, lockErr := tx.Exec(q)
+		if lockErr == nil {
+			break
+		}
+		if strings.Contains(strings.ToLower(lockErr.Error()), "no such table") {
+			continue
+		}
+		_ = tx.Rollback()
+		writeTxMu.Unlock()
+		return nil, func() {}, lockErr
+	}
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			_ = tx.Rollback()
+			writeTxMu.Unlock()
+		})
+	}
+	return tx, release, nil
+}
+
+// CommitWriteTx commits an immediate write transaction opened by BeginWriteTx
+// and releases the writer mutex immediately after commit/rollback.
+func CommitWriteTx(tx *sql.Tx, release func()) error {
+	if tx == nil {
+		if release != nil {
+			release()
+		}
+		return fmt.Errorf("nil transaction")
+	}
+	err := tx.Commit()
+	if release != nil {
+		release()
+	}
+	return err
+}
 
 // migrate runs a set of SQL statements only if the given version has not
 // already been applied. This keeps the migration runner fully idempotent
@@ -934,11 +996,11 @@ func PruneExpiredData() {
 		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
 		{"mfa_challenges", "DELETE FROM mfa_challenges WHERE expires_at <= strftime('%s', 'now')"},
 		// Keep 90 days of metrics history
-		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},
+		{"metrics_history", "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')"},
 		// Keep 90 days of login history
-		{"login_history", "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')"},
+		{"login_history", "DELETE FROM login_history WHERE replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')"},
 		// Keep 90 days of streaming bandwidth telemetry samples
-		{"streaming_bandwidth_samples", "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')"},
+		{"streaming_bandwidth_samples", "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')"},
 	}
 
 	for _, target := range pruneTargets {

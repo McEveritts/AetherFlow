@@ -29,15 +29,15 @@ type WorkerNode struct {
 
 // WorkerMetrics holds recent metrics from a worker node.
 type WorkerMetrics struct {
-	CPUUsage     float64   `json:"cpu_usage"`
-	MemUsedGB    float64   `json:"mem_used_gb"`
-	MemTotalGB   float64   `json:"mem_total_gb"`
-	DiskUsedGB   float64   `json:"disk_used_gb"`
-	DiskTotalGB  float64   `json:"disk_total_gb"`
-	NetRxSpeed   string    `json:"net_rx_speed"`
-	NetTxSpeed   string    `json:"net_tx_speed"`
-	Uptime       string    `json:"uptime"`
-	LoadAverage  []float64 `json:"load_average"`
+	CPUUsage    float64   `json:"cpu_usage"`
+	MemUsedGB   float64   `json:"mem_used_gb"`
+	MemTotalGB  float64   `json:"mem_total_gb"`
+	DiskUsedGB  float64   `json:"disk_used_gb"`
+	DiskTotalGB float64   `json:"disk_total_gb"`
+	NetRxSpeed  string    `json:"net_rx_speed"`
+	NetTxSpeed  string    `json:"net_tx_speed"`
+	Uptime      string    `json:"uptime"`
+	LoadAverage []float64 `json:"load_average"`
 }
 
 // WorkerService represents a service running on a worker node.
@@ -326,13 +326,13 @@ func (cm *ClusterManager) GetClusterStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_nodes":    len(cm.workers),
-		"online":         online,
-		"offline":        offline,
-		"total_cpu_avg":  totalCPU / float64(max(online, 1)),
-		"total_mem_used": totalMemUsed,
-		"total_mem_total": totalMemTotal,
-		"total_disk_used": totalDiskUsed,
+		"total_nodes":      len(cm.workers),
+		"online":           online,
+		"offline":          offline,
+		"total_cpu_avg":    totalCPU / float64(max(online, 1)),
+		"total_mem_used":   totalMemUsed,
+		"total_mem_total":  totalMemTotal,
+		"total_disk_used":  totalDiskUsed,
 		"total_disk_total": totalDiskTotal,
 	}
 }

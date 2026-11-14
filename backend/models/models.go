@@ -43,8 +43,8 @@ type SystemMetrics struct {
 	CPUUsage      float64                `json:"cpu_usage"`
 	PerCoreCPU    []float64              `json:"per_core_cpu"`
 	CPUFreqMhz    float64                `json:"cpu_freq_mhz"`
-	DiskSpace     map[string]float64     `json:"disk_space"`  // legacy: root partition summary
-	Disks         []DiskPartition        `json:"disks"`       // all mounted partitions
+	DiskSpace     map[string]float64     `json:"disk_space"` // legacy: root partition summary
+	Disks         []DiskPartition        `json:"disks"`      // all mounted partitions
 	DiskIO        map[string]float64     `json:"disk_io"`
 	Services      map[string]bool        `json:"services"`
 	Memory        map[string]float64     `json:"memory"`
@@ -56,4 +56,3 @@ type SystemMetrics struct {
 	Processes     []ProcessInfo          `json:"processes"`
 	GPUs          []GpuMetric            `json:"gpus,omitempty"`
 }
-

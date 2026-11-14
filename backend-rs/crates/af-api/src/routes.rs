@@ -1,8 +1,8 @@
 use crate::auth::{
     admin_only_middleware, api_error, auth_middleware, check_setup_needed, csrf_middleware,
     disable_2fa, get_session, issue_csrf_token, list_active_sessions, local_login, logout,
-    mfa_login_verify, refresh_session, revoke_session, setup_2fa, setup_admin, verify_2fa,
-    verify_proxy_auth, AuthUser,
+    mfa_login_verify, refresh_session_with_peer, revoke_session, setup_2fa, setup_admin,
+    verify_2fa, verify_proxy_auth, AuthUser,
 };
 use crate::embed::spa_fallback_handler;
 use crate::intelligence::{
@@ -221,7 +221,7 @@ fn build_v1_router() -> Router {
         .route("/auth/google/callback", get(google_callback))
         .route("/auth/verify", get(verify_proxy_auth))
         .route("/auth/setup/check", get(check_setup_needed))
-        .route("/auth/refresh", post(refresh_session))
+        .route("/auth/refresh", post(refresh_session_with_peer))
         .route("/marketplace", get(get_marketplace_apps))
         .route("/oidc/jwks", get(oidc_jwks))
         .merge(auth_limited_public)
@@ -243,7 +243,7 @@ fn build_v1_router() -> Router {
         .merge(ai_limited_auth)
         .route("/session", get(get_session))
         .route("/ready", get(authenticated_ready))
-        .route("/refresh", post(refresh_session))
+        .route("/refresh", post(refresh_session_with_peer))
         .route("/sessions", get(list_active_sessions))
         .route("/sessions/:jti", delete(revoke_session))
         .route("/logout", post(logout))

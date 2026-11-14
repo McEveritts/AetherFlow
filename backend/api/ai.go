@@ -20,12 +20,12 @@ type ChatMessage struct {
 // allowedAIModels is the set of valid model identifiers across all providers.
 var allowedAIModels = map[string]bool{
 	// Gemini (current frontier)
-	"gemini-4-argon":                  true,
-	"gemini-3.1-pro-preview":          true,
-	"gemini-3-flash-preview":          true,
-	"gemini-3.1-flash-lite-preview":   true,
-	"gemini-3-pro-image-preview":      true,
-	"gemini-3.1-flash-image-preview":  true,
+	"gemini-4-argon":                 true,
+	"gemini-3.1-pro-preview":         true,
+	"gemini-3-flash-preview":         true,
+	"gemini-3.1-flash-lite-preview":  true,
+	"gemini-3-pro-image-preview":     true,
+	"gemini-3.1-flash-image-preview": true,
 	// Gemini (stable)
 	"gemini-2.5-pro":        true,
 	"gemini-2.5-flash":      true,
@@ -45,8 +45,8 @@ var allowedAIModels = map[string]bool{
 	"claude-haiku-5-5":  true,
 	// Local AI (OpenAI-compatible endpoints)
 	"lm-studio":       true,
-	"ollama":           true,
-	"anthropic-local":  true,
+	"ollama":          true,
+	"anthropic-local": true,
 }
 
 type ChatRequest struct {
@@ -73,7 +73,7 @@ type ProposedAction struct {
 	Type        string `json:"type"`         // always "system_action"
 	ActionID    int    `json:"action_id"`    // ID in pending_actions table
 	Title       string `json:"title"`        // human-readable title
-	Description string `json:"description"` // what the action will do
+	Description string `json:"description"`  // what the action will do
 	DangerLevel string `json:"danger_level"` // "info", "warning", "critical"
 	Impact      string `json:"impact"`       // blast radius description
 }
@@ -362,34 +362,34 @@ func TestAiConnection(c *gin.Context) {
 // and human-readable descriptions. The AI's reply is scanned for these patterns
 // to decide whether to create a proposed action for operator approval.
 var actionKeywords = []struct {
-	Keywords      []string
+	Keywords       []string
 	Classification string
-	TitleTemplate string
-	Impact        string
+	TitleTemplate  string
+	Impact         string
 }{
 	{
-		Keywords:      []string{"restart", "reboot"},
+		Keywords:       []string{"restart", "reboot"},
 		Classification: "warn",
-		TitleTemplate: "Restart %s",
-		Impact:        "Service will be temporarily unavailable during restart (5-30 seconds).",
+		TitleTemplate:  "Restart %s",
+		Impact:         "Service will be temporarily unavailable during restart (5-30 seconds).",
 	},
 	{
-		Keywords:      []string{"stop", "shutdown"},
+		Keywords:       []string{"stop", "shutdown"},
 		Classification: "warn",
-		TitleTemplate: "Stop %s",
-		Impact:        "Service will become unavailable until manually started.",
+		TitleTemplate:  "Stop %s",
+		Impact:         "Service will become unavailable until manually started.",
 	},
 	{
-		Keywords:      []string{"delete", "remove", "uninstall", "purge"},
+		Keywords:       []string{"delete", "remove", "uninstall", "purge"},
 		Classification: "critical",
-		TitleTemplate: "Delete %s",
-		Impact:        "Data associated with this service may be permanently lost.",
+		TitleTemplate:  "Delete %s",
+		Impact:         "Data associated with this service may be permanently lost.",
 	},
 	{
-		Keywords:      []string{"update", "upgrade", "patch"},
+		Keywords:       []string{"update", "upgrade", "patch"},
 		Classification: "warn",
-		TitleTemplate: "Update %s",
-		Impact:        "Service will restart after update. Configuration may change.",
+		TitleTemplate:  "Update %s",
+		Impact:         "Service will restart after update. Configuration may change.",
 	},
 }
 

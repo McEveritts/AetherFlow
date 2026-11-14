@@ -244,15 +244,20 @@ func SaveMasterCredentials(username, password string) {
 	}
 	raw = append(raw, '\n')
 
+	wroteAny := false
+	wroteAll := true
 	for _, p := range masterCredsPaths() {
 		if p == "" {
 			continue
 		}
 		if err := writeMasterCredsAtomically(p, raw); err != nil {
+			wroteAll = false
 			slog.Debug("unable to write master credentials file", "path", p, "error", err)
+		} else {
+			wroteAny = true
 		}
 	}
-	if strings.TrimSpace(os.Getenv("AETHERFLOW_MASTER_CREDS_FILE")) == "" {
+	if wroteAny && wroteAll && strings.TrimSpace(os.Getenv("AETHERFLOW_MASTER_CREDS_FILE")) == "" {
 		for _, legacy := range legacyDuplicateMasterCredsPaths() {
 			_ = os.Remove(legacy)
 		}

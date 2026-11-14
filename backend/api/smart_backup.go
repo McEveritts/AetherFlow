@@ -64,7 +64,7 @@ func HandleSetBackupSchedule(c *gin.Context) {
 
 	_, err := db.DB.Exec("UPDATE settings SET backup_schedule_mode = ? WHERE id = 1", req.Mode)
 	if err != nil {
-		InternalError(c, "Failed to update schedule mode: " + err.Error())
+		InternalError(c, "Failed to update schedule mode: "+err.Error())
 		return
 	}
 

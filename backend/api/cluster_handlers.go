@@ -73,7 +73,7 @@ func RemoveWorker(c *gin.Context) {
 	}
 
 	if err := cm.RemoveWorker(nodeID); err != nil {
-		InternalError(c, "Failed to remove node: " + err.Error())
+		InternalError(c, "Failed to remove node: "+err.Error())
 		return
 	}
 
@@ -101,12 +101,12 @@ func GetWorkerMetrics(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"node_id":  node.ID,
-		"hostname": node.Hostname,
-		"status":   node.Status,
-		"metrics":  node.Metrics,
-		"services": node.Services,
-		"system_info": node.SystemInfo,
+		"node_id":        node.ID,
+		"hostname":       node.Hostname,
+		"status":         node.Status,
+		"metrics":        node.Metrics,
+		"services":       node.Services,
+		"system_info":    node.SystemInfo,
 		"last_heartbeat": node.LastHeartbeat,
 	})
 }

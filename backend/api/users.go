@@ -77,14 +77,12 @@ func UpdateUserRole(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var currentRole string
 	if err := tx.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole); err != nil {
@@ -120,7 +118,7 @@ func UpdateUserRole(c *gin.Context) {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit role update")
 		return
 	}
@@ -146,14 +144,12 @@ func DeleteUser(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var currentRole string
 	err = tx.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
@@ -190,7 +186,7 @@ func DeleteUser(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit user deletion")
 		return
 	}
@@ -218,5 +214,3 @@ func DeleteUser(c *gin.Context) {
 // @Failure      400  {object}  map[string]interface{}
 // @Failure      401  {object}  map[string]interface{}
 // @Failure      500  {object}  map[string]interface{}
-
-

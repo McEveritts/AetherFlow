@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -35,15 +36,17 @@ var errSubjectSuspended = errors.New("subject suspended")
 
 const sessionAbsoluteLifetimeSecs int64 = 30 * 24 * 3600
 
-// rotatedTokenGrace tracks recently rotated JTIs for a 15-second overlap window
-// so concurrent in-flight requests or multi-tab refresh races do not trigger
-// false 401 logouts while db.IsTokenRevoked(jti) still reflects revocation.
-const rotatedTokenGraceWindow = 15 * time.Second
+// rotatedTokenGrace tracks recently rotated JTIs for a 10-second overlap window
+// bound to strict client IP + User-Agent fingerprint so concurrent in-flight
+// requests or multi-tab refresh races do not trigger false 401 logouts.
+const rotatedTokenGraceWindow = 10 * time.Second
 
 type rotatedTokenGraceEntry struct {
 	userID       int
 	familyID     string
 	successorJTI string
+	successorExp int64
+	strictFP     string
 	newToken     string
 	expiresAt    time.Time
 }
@@ -91,12 +94,16 @@ func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
 	return entry, true
 }
 
-func resolveLatestGraceToken(jti string, userID int) (string, string, bool) {
+func resolveLatestGraceToken(jti string, userID int, callerStrictFP string) (string, string, int64, bool) {
 	entry, ok := lookupRotationGraceCached(jti)
 	if !ok || entry.userID != userID || entry.newToken == "" {
-		return "", "", false
+		return "", "", 0, false
+	}
+	if entry.strictFP != "" && entry.strictFP != callerStrictFP {
+		return "", "", 0, false
 	}
 	latestToken := entry.newToken
+	latestExp := entry.successorExp
 	curSucc := entry.successorJTI
 	now := time.Now()
 	for i := 0; i < 32 && curSucc != ""; i++ {
@@ -108,14 +115,81 @@ func resolveLatestGraceToken(jti string, userID int) (string, string, bool) {
 		if !valid || nextEntry.userID != userID || now.After(nextEntry.expiresAt) || nextEntry.newToken == "" || nextEntry.successorJTI == curSucc {
 			break
 		}
+		if nextEntry.strictFP != "" && nextEntry.strictFP != callerStrictFP {
+			break
+		}
 		latestToken = nextEntry.newToken
+		if nextEntry.successorExp > 0 {
+			latestExp = nextEntry.successorExp
+		}
 		curSucc = nextEntry.successorJTI
 	}
 	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
 	if leafSucc == "" {
-		return "", "", false
+		return "", "", 0, false
 	}
-	return latestToken, leafSucc, true
+	if latestExp <= 0 {
+		latestExp = time.Now().Add(15 * time.Minute).Unix()
+	}
+	return latestToken, leafSucc, latestExp, true
+}
+
+func oidcSessionTag(familyID string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte("af-oidc-sess:"))
+	_, _ = h.Write([]byte(strings.TrimSpace(familyID)))
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+func resolveSessionFamilyID(execer oidcDBExecer, userID int, jti string) string {
+	trimmed := strings.TrimSpace(jti)
+	if trimmed == "" {
+		return ""
+	}
+	if raw, ok := rotatedTokenGrace.Load(trimmed); ok {
+		if entry, valid := raw.(rotatedTokenGraceEntry); valid && entry.userID == userID && strings.TrimSpace(entry.familyID) != "" {
+			return strings.TrimSpace(entry.familyID)
+		}
+	}
+	resolvedJTI := resolveCurrentSessionJTI(trimmed)
+	if execer != nil && sqlTableExists(execer, "active_sessions") {
+		if hasFam, err := dbColumnExists(execer, "active_sessions", "family_id"); err == nil && hasFam {
+			var fam string
+			if qErr := execer.QueryRow(
+				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ?) AND COALESCE(family_id, '') != '' LIMIT 1",
+				userID, trimmed, resolvedJTI,
+			).Scan(&fam); qErr == nil && strings.TrimSpace(fam) != "" {
+				return strings.TrimSpace(fam)
+			}
+		}
+	}
+	return trimmed
+}
+
+func revokeSessionOIDCGrantsInTx(tx *sql.Tx, userID int, sessionFamilyID string, ttl time.Duration) (string, error) {
+	effFam := strings.TrimSpace(sessionFamilyID)
+	if effFam == "" || tx == nil {
+		return "", nil
+	}
+	sessTag := oidcSessionTag(effFam)
+	sessMarker := "oidc-sess:" + sessTag
+	famPrefix := "sf:" + sessTag + ":"
+	if userID > 0 && sqlTableExists(tx, "oidc_refresh_tokens") {
+		if hasFam, cErr := dbColumnExists(tx, "oidc_refresh_tokens", "family_id"); cErr == nil && hasFam {
+			if _, oErr := tx.Exec(
+				"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ? AND substr(COALESCE(family_id, ''), 1, ?) = ?",
+				userID, len(famPrefix), famPrefix,
+			); oErr != nil {
+				return "", oErr
+			}
+		}
+	}
+	if sqlTableExists(tx, "revoked_tokens") {
+		if err := db.RevokeTokenInTx(tx, sessMarker, ttl); err != nil {
+			return "", err
+		}
+	}
+	return sessMarker, nil
 }
 
 func resolveCurrentSessionJTI(jti string) string {
@@ -568,13 +642,13 @@ func SetupAdmin(c *gin.Context) {
 	setupAdminMu.Lock()
 	defer setupAdminMu.Unlock()
 
-	tx, err := db.DB.Begin()
+	tx, release, err := db.BeginWriteTx()
 	if err != nil {
 		slog.Error("failed to begin transaction during admin setup", "error", err)
 		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Database unavailable")
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	if err := tx.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
 		slog.Error("failed to verify user count in transaction during admin setup", "error", err)
@@ -610,7 +684,7 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		slog.Error("failed to commit admin setup transaction", "error", err)
 		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to create admin account")
 		return
@@ -684,14 +758,12 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	subj, subErr := loadActiveHumanSubject(tx, user.ID)
 	if subErr != nil {
@@ -733,7 +805,7 @@ func LocalLogin(c *gin.Context) {
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
-		if err := tx.Commit(); err != nil {
+		if err := db.CommitWriteTx(tx, release); err != nil {
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
@@ -757,7 +829,7 @@ func LocalLogin(c *gin.Context) {
 		InternalError(c, "Failed to create session")
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to create session")
 		return
 	}
@@ -855,13 +927,11 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string, authenticat
 		return 0, false, false, nil
 	}
 
-	tx, err := db.DB.Begin()
+	tx, release, err := db.BeginWriteTx()
 	if err != nil {
 		return 0, false, false, err
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	err = tx.QueryRow(
 		"SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?",
@@ -877,7 +947,7 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string, authenticat
 		if _, updErr := tx.Exec("UPDATE users SET avatar_url = ? WHERE id = ?", avatarUrl, userID); updErr != nil {
 			return 0, false, false, updErr
 		}
-		if err := tx.Commit(); err != nil {
+		if err := db.CommitWriteTx(tx, release); err != nil {
 			return 0, false, false, err
 		}
 		return userID, totpEnabled, true, nil
@@ -926,7 +996,7 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string, authenticat
 		if affected != 1 {
 			return 0, false, false, nil
 		}
-		if err := tx.Commit(); err != nil {
+		if err := db.CommitWriteTx(tx, release); err != nil {
 			return 0, false, false, err
 		}
 		return userID, totpEnabled, true, nil
@@ -972,7 +1042,7 @@ func resolveGoogleOAuthUser(googleId, email, name, avatarUrl string, authenticat
 	if err != nil {
 		return 0, false, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		return 0, false, false, err
 	}
 	return int(insertedID), false, true, nil
@@ -1183,7 +1253,7 @@ func GoogleCallback(c *gin.Context) {
 	}
 
 	// Lookup, link, or provision user transactionally
-	resolvedID, totpEnabled, authorized, resolveErr := resolveGoogleOAuthUser(googleId, email, name, avatarUrl, authenticatedUserID)
+	resolvedID, _, authorized, resolveErr := resolveGoogleOAuthUser(googleId, email, name, avatarUrl, authenticatedUserID)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errSubjectSuspended) {
 			c.Redirect(http.StatusTemporaryRedirect, "/login?error=account_suspended")
@@ -1200,14 +1270,12 @@ func GoogleCallback(c *gin.Context) {
 	var user models.User
 	user.ID = resolvedID
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	subj, subErr := loadActiveHumanSubject(tx, user.ID)
 	if subErr != nil {
@@ -1219,7 +1287,12 @@ func GoogleCallback(c *gin.Context) {
 		return
 	}
 
-	if totpEnabled {
+	var currentTotpEnabled bool
+	if err := tx.QueryRow("SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?", user.ID).Scan(&currentTotpEnabled); err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=not_authorized")
+		return
+	}
+	if currentTotpEnabled {
 		mfaBytes := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, mfaBytes); err != nil {
 			slog.Error("crypto/rand failure generating OAuth MFA challenge", "error", err)
@@ -1232,7 +1305,7 @@ func GoogleCallback(c *gin.Context) {
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
-		if err := tx.Commit(); err != nil {
+		if err := db.CommitWriteTx(tx, release); err != nil {
 			InternalError(c, "Failed to store MFA challenge")
 			return
 		}
@@ -1251,7 +1324,7 @@ func GoogleCallback(c *gin.Context) {
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=jwt_failed")
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		c.Redirect(http.StatusTemporaryRedirect, "/login?error=jwt_failed")
 		return
 	}
@@ -1410,7 +1483,8 @@ func validateResolvedSessionClaimsStatus(c *gin.Context, claims jwt.MapClaims) (
 		return activeHumanSubject{}, errUnauthorizedSession
 	}
 	if db.IsTokenRevoked(jti) {
-		if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
+		callerStrictFP := legacyClientFingerprint(c)
+		if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId || (graceEntry.strictFP != "" && graceEntry.strictFP != callerStrictFP) {
 			return activeHumanSubject{}, errSessionRevoked
 		}
 	}
@@ -1539,11 +1613,12 @@ func Logout(c *gin.Context) {
 		jti, _ := claims["jti"].(string)
 		ttl := revocationTTLForClaims(claims)
 		if jti != "" && db.DB != nil {
-			tx, txErr := db.DB.Begin()
+			tx, release, txErr := db.BeginWriteTx()
 			if txErr != nil {
 				InternalError(c, "Failed to revoke session")
 				return
 			}
+			defer release()
 			currentJTI := resolveCurrentSessionJTI(jti)
 			var familyID string
 			var familyJTIs []string
@@ -1553,11 +1628,13 @@ func Logout(c *gin.Context) {
 					userID, jti, currentJTI, jti,
 				).Scan(&familyID)
 				if famErr != nil && !errors.Is(famErr, sql.ErrNoRows) {
-					_ = tx.Rollback()
 					InternalError(c, "Failed to revoke session")
 					return
 				}
 				familyID = strings.TrimSpace(familyID)
+				if familyID == "" {
+					familyID = db.ResolveRevokedTokenFamilyInTx(tx, userID, jti)
+				}
 				if familyID == "" {
 					familyID = jti
 				}
@@ -1567,7 +1644,6 @@ func Logout(c *gin.Context) {
 					userID, familyID, jti, currentJTI,
 				)
 				if qErr != nil {
-					_ = tx.Rollback()
 					InternalError(c, "Failed to revoke session")
 					return
 				}
@@ -1575,7 +1651,6 @@ func Logout(c *gin.Context) {
 					var fJTI string
 					if sErr := rows.Scan(&fJTI); sErr != nil {
 						_ = rows.Close()
-						_ = tx.Rollback()
 						InternalError(c, "Failed to revoke session")
 						return
 					}
@@ -1585,7 +1660,6 @@ func Logout(c *gin.Context) {
 				}
 				if rErr := rows.Err(); rErr != nil {
 					_ = rows.Close()
-					_ = tx.Rollback()
 					InternalError(c, "Failed to revoke session")
 					return
 				}
@@ -1600,7 +1674,6 @@ func Logout(c *gin.Context) {
 			}
 			for _, fJTI := range familyJTIs {
 				if rErr := db.RevokeTokenInTx(tx, fJTI, ttl); rErr != nil {
-					_ = tx.Rollback()
 					InternalError(c, "Failed to revoke session")
 					return
 				}
@@ -1610,25 +1683,25 @@ func Logout(c *gin.Context) {
 					"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
 					userID, familyID, jti, currentJTI,
 				); dErr != nil {
-					_ = tx.Rollback()
 					InternalError(c, "Failed to revoke session")
 					return
 				}
 			}
-			if userID > 0 && sqlTableExists(tx, "oidc_refresh_tokens") {
-				if _, oErr := tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID); oErr != nil {
-					_ = tx.Rollback()
-					InternalError(c, "Failed to revoke session")
-					return
-				}
+			oidcSessMarker, oErr := revokeSessionOIDCGrantsInTx(tx, userID, familyID, ttl)
+			if oErr != nil {
+				InternalError(c, "Failed to revoke session")
+				return
 			}
-			if cErr := tx.Commit(); cErr != nil {
+			if cErr := db.CommitWriteTx(tx, release); cErr != nil {
 				InternalError(c, "Failed to revoke session")
 				return
 			}
 			for _, fJTI := range familyJTIs {
 				db.CacheRevokedToken(fJTI, ttl)
 				evictRotationGraceForFamily(familyID, fJTI)
+			}
+			if oidcSessMarker != "" {
+				db.CacheRevokedToken(oidcSessMarker, ttl)
 			}
 		} else if jti != "" {
 			evictRotationGraceForFamily("", jti)
@@ -1707,14 +1780,6 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
-	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
-		if !matchesClientFingerprint(cfp, c) {
-			slog.Warn("refresh rejected: client fingerprint mismatch", "ip", c.ClientIP())
-			Unauthorized(c, "Client fingerprint mismatch")
-			return
-		}
-	}
-
 	uid64, ok := claimInt64(claims, "user_id")
 	if !ok || uid64 <= 0 {
 		Unauthorized(c, "Missing user ID in claims")
@@ -1729,17 +1794,27 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
+	fpMatches := true
+	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
+		fpMatches = matchesClientFingerprint(cfp, c)
+		if !fpMatches && !db.IsTokenRevoked(jti) {
+			slog.Warn("refresh rejected: client fingerprint mismatch", "ip", c.ClientIP())
+			Unauthorized(c, "Client fingerprint mismatch")
+			return
+		}
+	}
+
 	refreshRotationMu.Lock()
 	defer refreshRotationMu.Unlock()
 
-	tx, txErr := db.DB.Begin()
+	callerStrictFP := legacyClientFingerprint(c)
+
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	subj, subErr := loadActiveHumanSubject(tx, userID)
 	if subErr != nil {
@@ -1798,32 +1873,34 @@ func RefreshSession(c *gin.Context) {
 	}
 
 	if !consumed {
-		if latestToken, leafSucc, ok := resolveLatestGraceToken(jti, subj.userID); ok {
-			succRevoked := leafSucc == "" || db.IsTokenRevokedInTx(tx, leafSucc)
-			var succActive int
-			actErr := tx.QueryRow(
-				"SELECT 1 FROM active_sessions WHERE jti = ? AND user_id = ? LIMIT 1",
-				leafSucc, subj.userID,
-			).Scan(&succActive)
-			if !succRevoked && actErr == nil && succActive == 1 {
-				_ = tx.Rollback()
-				c.SetSameSite(http.SameSiteLaxMode)
-				c.SetCookie("aetherflow_session", latestToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
-				c.JSON(http.StatusOK, gin.H{
-					"status":     "success",
-					"token":      latestToken,
-					"expires_at": time.Now().Add(15 * time.Minute).Unix(),
-					"user": gin.H{
-						"id":       subj.userID,
-						"username": subj.username,
-						"role":     subj.role,
-					},
-				})
-				return
+		if fpMatches {
+			if latestToken, leafSucc, latestExp, ok := resolveLatestGraceToken(jti, subj.userID, callerStrictFP); ok {
+				succRevoked := leafSucc == "" || db.IsTokenRevokedInTx(tx, leafSucc)
+				var succActive int
+				actErr := tx.QueryRow(
+					"SELECT 1 FROM active_sessions WHERE jti = ? AND user_id = ? LIMIT 1",
+					leafSucc, subj.userID,
+				).Scan(&succActive)
+				if !succRevoked && actErr == nil && succActive == 1 {
+					release()
+					c.SetSameSite(http.SameSiteLaxMode)
+					c.SetCookie("aetherflow_session", latestToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
+					c.JSON(http.StatusOK, gin.H{
+						"status":     "success",
+						"token":      latestToken,
+						"expires_at": latestExp,
+						"user": gin.H{
+							"id":       subj.userID,
+							"username": subj.username,
+							"role":     subj.role,
+						},
+					})
+					return
+				}
 			}
 		}
 
-		// Replay outside grace window or previously revoked token: wipe entire session family.
+		// Replay outside grace window or mismatched strict fingerprint: wipe entire session family.
 		resolvedSucc := resolveCurrentSessionJTI(jti)
 		targetFamily := existingFamily
 		if targetFamily == "" {
@@ -1879,7 +1956,12 @@ func RefreshSession(c *gin.Context) {
 			InternalError(c, "Failed to revoke compromised session family")
 			return
 		}
-		if cErr := tx.Commit(); cErr != nil {
+		oidcSessMarker, oErr := revokeSessionOIDCGrantsInTx(tx, subj.userID, targetFamily, minRevocationTTL)
+		if oErr != nil {
+			InternalError(c, "Failed to revoke compromised session family")
+			return
+		}
+		if cErr := db.CommitWriteTx(tx, release); cErr != nil {
 			InternalError(c, "Failed to commit session family revocation")
 			return
 		}
@@ -1887,8 +1969,16 @@ func RefreshSession(c *gin.Context) {
 			db.CacheRevokedToken(wJTI, minRevocationTTL)
 			evictRotationGraceForFamily(targetFamily, wJTI)
 		}
+		if oidcSessMarker != "" {
+			db.CacheRevokedToken(oidcSessMarker, minRevocationTTL)
+		}
 		evictRotationGraceForFamily(targetFamily, jti)
 		Unauthorized(c, "Session has been revoked")
+		return
+	}
+
+	if !fpMatches {
+		Unauthorized(c, "Client fingerprint mismatch")
 		return
 	}
 
@@ -1901,7 +1991,7 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 	authTime, _ := sessionAuthTime(claims)
-	newToken, newJTI, err := createSessionJWTInTx(tx, subj.userID, c, authTime, familyID, subj.sessionsRevokedAfter)
+	newToken, newJTI, newExp, err := createSessionJWTWithExpInTx(tx, subj.userID, c, authTime, familyID, subj.sessionsRevokedAfter)
 	if err != nil {
 		InternalError(c, "Failed to create new session")
 		return
@@ -1911,7 +2001,7 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit rotated session")
 		return
 	}
@@ -1925,6 +2015,8 @@ func RefreshSession(c *gin.Context) {
 		userID:       subj.userID,
 		familyID:     familyID,
 		successorJTI: newJTI,
+		successorExp: newExp,
+		strictFP:     callerStrictFP,
 		newToken:     newToken,
 		expiresAt:    time.Now().Add(rotatedTokenGraceWindow),
 	})
@@ -1935,7 +2027,7 @@ func RefreshSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "success",
 		"token":      newToken,
-		"expires_at": time.Now().Add(15 * time.Minute).Unix(),
+		"expires_at": newExp,
 		"user": gin.H{
 			"id":       subj.userID,
 			"username": subj.username,
@@ -2046,15 +2138,13 @@ func UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		slog.Error("profile update tx error", "error", txErr)
 		InternalError(c, "Failed to update profile")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	var conflictCount int
 	if err := tx.QueryRow(
@@ -2075,7 +2165,7 @@ func UpdateProfile(c *gin.Context) {
 		InternalError(c, "Failed to update profile")
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		slog.Error("profile update commit error", "error", err)
 		InternalError(c, "Failed to update profile")
 		return
@@ -2305,14 +2395,12 @@ func RevokeSession(c *gin.Context) {
 		return
 	}
 
-	tx, err := db.DB.Begin()
+	tx, release, err := db.BeginWriteTx()
 	if err != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	type matchedSession struct {
 		jti       string
@@ -2390,8 +2478,13 @@ func RevokeSession(c *gin.Context) {
 		InternalError(c, "Failed to remove revoked session")
 		return
 	}
+	oidcSessMarker, oErr := revokeSessionOIDCGrantsInTx(tx, userID, familyID, ttl)
+	if oErr != nil {
+		InternalError(c, "Failed to revoke session OIDC grants")
+		return
+	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit session revocation")
 		return
 	}
@@ -2399,6 +2492,9 @@ func RevokeSession(c *gin.Context) {
 	for _, fJTI := range familyJTIs {
 		db.CacheRevokedToken(fJTI, ttl)
 		evictRotationGraceForFamily(familyID, fJTI)
+	}
+	if oidcSessMarker != "" {
+		db.CacheRevokedToken(oidcSessMarker, ttl)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Session revoked"})
@@ -2475,14 +2571,12 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	tx, txErr := db.DB.Begin()
+	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
 		InternalError(c, "Database unavailable")
 		return
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer release()
 
 	updRes, err := tx.Exec(
 		"UPDATE users SET password_hash = ? WHERE id = ? AND COALESCE(password_hash, '') = ? AND COALESCE(sessions_revoked_after, 0) <= ?",
@@ -2509,7 +2603,7 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit password update")
 		return
 	}
@@ -2635,4 +2729,3 @@ func DeleteAvatar(c *gin.Context) {
 func RemoveAvatar(c *gin.Context) {
 	DeleteAvatar(c)
 }
-

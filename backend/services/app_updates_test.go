@@ -106,10 +106,10 @@ func TestAppUpdateWatcherRefreshesGitHubPackage(t *testing.T) {
 	}
 
 	envs := map[string]string{
-		"AETHERFLOW_PACKAGES_CONFIG":            configPath,
-		"AETHERFLOW_PACKAGE_AUTOMATION_CONFIG":  automationPath,
-		"AETHERFLOW_GITHUB_API_BASE_URL":        "",
-		"DB_PATH":                               dbPath,
+		"AETHERFLOW_PACKAGES_CONFIG":           configPath,
+		"AETHERFLOW_PACKAGE_AUTOMATION_CONFIG": automationPath,
+		"AETHERFLOW_GITHUB_API_BASE_URL":       "",
+		"DB_PATH":                              dbPath,
 	}
 	for key, value := range envs {
 		if err := os.Setenv(key, value); err != nil {

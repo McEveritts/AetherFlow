@@ -42,7 +42,7 @@ func HandleGetMetricsHistory(c *gin.Context) {
 
 	snapshots, err := services.GetMetricsHistory(days)
 	if err != nil {
-		InternalError(c, "Failed to query metrics history: " + err.Error())
+		InternalError(c, "Failed to query metrics history: "+err.Error())
 		return
 	}
 	if snapshots == nil {

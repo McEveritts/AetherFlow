@@ -27,10 +27,10 @@ type NetworkInfo struct {
 }
 
 type StorageInfo struct {
-	Name       string `json:"name"`
-	Model      string `json:"model"`
-	SizeBytes  uint64 `json:"size_bytes"`
-	DriveType  string `json:"drive_type"` // HDD, SSD, NVME
+	Name        string `json:"name"`
+	Model       string `json:"model"`
+	SizeBytes   uint64 `json:"size_bytes"`
+	DriveType   string `json:"drive_type"` // HDD, SSD, NVME
 	IsRemovable bool   `json:"is_removable"`
 }
 

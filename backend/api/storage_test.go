@@ -105,12 +105,12 @@ func TestIsValidBackupFilename_ValidNames(t *testing.T) {
 func TestIsValidBackupFilename_InvalidNames(t *testing.T) {
 	invalid := []string{
 		"../../../etc/passwd",
-		"backup.db",           // wrong extension
-		"backup.sqlite.bak",   // double extension
-		"",                    // empty
-		"backup.sql",          // wrong extension
-		"backup",              // no extension
-		"backup.exe",          // dangerous extension
+		"backup.db",         // wrong extension
+		"backup.sqlite.bak", // double extension
+		"",                  // empty
+		"backup.sql",        // wrong extension
+		"backup",            // no extension
+		"backup.exe",        // dangerous extension
 	}
 	for _, name := range invalid {
 		if isValidBackupFilename(name) {

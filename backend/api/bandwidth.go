@@ -22,7 +22,7 @@ func HandleBandwidthAnalyze(c *gin.Context) {
 
 	rec, err := services.AnalyzeBandwidth(ps.GeminiAPIKey)
 	if err != nil {
-		InternalError(c, "Bandwidth analysis failed: " + err.Error())
+		InternalError(c, "Bandwidth analysis failed: "+err.Error())
 		return
 	}
 
@@ -49,8 +49,8 @@ func HandleBandwidthApply(c *gin.Context) {
 	payload := map[string]interface{}{
 		"method": "session-set",
 		"arguments": map[string]interface{}{
-			"alt-speed-down": req.DownloadKBps,
-			"alt-speed-up":   req.UploadKBps,
+			"alt-speed-down":    req.DownloadKBps,
+			"alt-speed-up":      req.UploadKBps,
 			"alt-speed-enabled": true,
 		},
 	}
@@ -68,7 +68,7 @@ func HandleBandwidthApply(c *gin.Context) {
 		return
 	}
 	rpcReq.Header.Set("Content-Type", "application/json")
-	
+
 	// Inject required dummy headers to prevent blind rejections (Transmission often requires X-Transmission-Session-Id)
 	// For this strict limit-testing pattern, if the server returns 409 we'd extract the header and retry.
 	// We'll mimic the basic request first.
@@ -94,8 +94,8 @@ func HandleBandwidthApply(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Limits applied successfully to Torrent engine via RPC",
-		"upload_kbps":  req.UploadKBps,
+		"message":       "Limits applied successfully to Torrent engine via RPC",
+		"upload_kbps":   req.UploadKBps,
 		"download_kbps": req.DownloadKBps,
 		"rpc_response":  string(respBody),
 	})

@@ -66,8 +66,9 @@ function _boot() {
 	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
 	systemctl restart aetherflow-api.service >/dev/null 2>&1 || true
 
-	# Automatically seed the master administrator account in the Control Plane SQLite database
-	if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
+	# Wait for Control Plane readiness; only auto-seed /api/v1/public/auth/setup when an explicit
+	# dedicated web admin password (AETHERFLOW_WEB_ADMIN_PASSWORD) is supplied — never reuse ${passwd}.
+	if [[ -n "${username:-}" ]]; then
 		local _api_try=0
 		while (( _api_try < 20 )); do
 			if curl -fsS --max-time 1 "http://127.0.0.1:8080/health/ready" >/dev/null 2>&1; then
@@ -76,9 +77,12 @@ function _boot() {
 			sleep 0.5
 			_api_try=$((_api_try + 1))
 		done
-		AF_SETUP_USER="${username}" AF_SETUP_PASS="${passwd}" python3 -c '
+		AF_SETUP_USER="${username}" AF_SETUP_WEB_PASS="${AETHERFLOW_WEB_ADMIN_PASSWORD:-}" python3 -c '
 import json, os, urllib.request
-payload = json.dumps({"username": os.environ["AF_SETUP_USER"], "password": os.environ["AF_SETUP_PASS"]}).encode("utf-8")
+web_pass = os.environ.get("AF_SETUP_WEB_PASS", "")
+if not web_pass:
+    raise SystemExit(0)
+payload = json.dumps({"username": os.environ["AF_SETUP_USER"], "password": web_pass}).encode("utf-8")
 req = urllib.request.Request("http://127.0.0.1:8080/api/v1/public/auth/setup", data=payload, headers={"Content-Type": "application/json"}, method="POST")
 try:
     urllib.request.urlopen(req, timeout=5)
@@ -129,13 +133,13 @@ _harden_permissions() {
 
 	# Ownership: root:aetherflow for immutable code, releases, and scripts; only mutable data dirs are writable by aetherflow
 	if [[ -d "${af_root}" ]]; then
-		chown -R root:aetherflow "${af_root}" >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${OUTTO}" 2>&1
 
-		# Directories: 755 (rwxr-xr-x)
-		find "${af_root}" -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
+		# Directories: 755 (rwxr-xr-x), pruning sensitive mutable/snapshot directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
 
-		# Regular files: 644 (rw-r--r--)
-		find "${af_root}" -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+		# Regular files: 644 (rw-r--r--), pruning sensitive mutable/snapshot directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
 
 		# Executables: restore execute permission on known binaries
 		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
@@ -183,15 +187,15 @@ _harden_permissions() {
 
 		# Database & runtime state directories: exclusively writable by the service user
 		mkdir -p "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow
-		chmod 700 /var/lib/aetherflow 2>/dev/null || true
-		if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
-			AF_SETUP_USER="${username}" AF_SETUP_PASS="${passwd}" python3 - <<'PY' 2>/dev/null || true
-import base64, binascii, ctypes, ctypes.util, hashlib, importlib.util, json, os, stat, tempfile
+		chmod 700 /var/lib/aetherflow "${af_root}/backend/data" 2>/dev/null || true
+		if [[ -n "${username:-}" && ! -f /var/lib/aetherflow/.master.creds ]]; then
+			AF_SETUP_USER="${username}" AF_MASTER_SECRET="${AETHERFLOW_MASTER_CREDS_SECRET:-}" python3 - <<'PY' 2>/dev/null || true
+import base64, binascii, ctypes, ctypes.util, hashlib, importlib.util, json, os, secrets, stat, tempfile
 
 destination = "/var/lib/aetherflow/.master.creds"
 directory = "/var/lib/aetherflow"
 u = os.environ["AF_SETUP_USER"]
-p = os.environ["AF_SETUP_PASS"]
+p = os.environ.get("AF_MASTER_SECRET", "").strip() or secrets.token_hex(16)
 h = hashlib.md5(p.encode("utf-8")).hexdigest()
 
 if os.path.lexists(directory) and stat.S_ISLNK(os.lstat(directory).st_mode):
@@ -303,8 +307,13 @@ PY
 		fi
 		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow 2>/dev/null || true
 		chown root:aetherflow /var/log/aetherflow 2>/dev/null || true
-		chmod 750 "${af_root}/backend/data" /var/log/aetherflow 2>/dev/null || true
-		chmod 700 /var/lib/aetherflow 2>/dev/null || true
+		chmod 750 /var/log/aetherflow 2>/dev/null || true
+		chmod 700 /var/lib/aetherflow "${af_root}/backend/data" 2>/dev/null || true
+		find "${af_root}/backend/data" /var/lib/aetherflow -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null || true
+		if [[ -d "${af_root}/releases" ]]; then
+			find "${af_root}/releases" -path "*/data-snapshot" -type d -exec chmod 700 {} + 2>/dev/null || true
+			find "${af_root}/releases" -path "*/data-snapshot/*" -type f -exec chmod 600 {} + 2>/dev/null || true
+		fi
 		if [[ -d "${af_root}/dashboard/db" ]]; then
 			chown -R aetherflow:aetherflow "${af_root}/dashboard/db" 2>/dev/null || true
 			chmod 750 "${af_root}/dashboard/db"
@@ -402,7 +411,6 @@ function _finished() {
 AetherFlow Seedbox Initialized successfully.
 Dashboard Onboarding: http://${ip}:8080
 Admin Username: ${username}
-Admin Password: ${passwd}
 EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
 		rm -rf "$0" >>"${OUTTO}" 2>&1

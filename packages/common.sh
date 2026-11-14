@@ -137,43 +137,75 @@ af_logged() {
         "$@" >/dev/null 2>&1
         return $?
     fi
-    local parent_dir="."
-    if [[ "$target" == */* ]]; then
-        parent_dir="${target%/*}"
-        [[ -n "$parent_dir" ]] || parent_dir="/"
-    fi
-    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
-        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
-        return 1
-    fi
-    if [[ ! -f "$target" ]]; then
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1 && [[ ! -f "$target" ]]; then
         af_prepare_logfile_path "$target" || return 1
     fi
     local _flock_bin="flock"
     if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
         _flock_bin="/usr/bin/flock"
     fi
-    local lock_fd=""
-    exec {lock_fd}>>"$target" || return 1
-    if [[ -L "$target" ]]; then
-        exec {lock_fd}>&-
-        printf 'Refusing symlinked logfile target: %s\n' "$target" >&2
+    local _out_r="" _meta=""
+    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, grp, os, select, stat, sys
+
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            try:
+                target_gid = grp.getgrnam("aetherflow").gr_gid
+            except KeyError:
+                target_gid = 0
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+    ) || return 1
+    if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        exec {_out_r}<&-
         return 1
     fi
-    "$_flock_bin" -s "$lock_fd" || {
-        exec {lock_fd}>&-
+    local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd=""
+    if ! exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}"; then
+        exec {_out_r}<&-
         return 1
-    }
-    if [[ -x /usr/bin/stat && -e "/proc/self/fd/${lock_fd}" ]]; then
-        local fd_meta=""
-        fd_meta="$(/usr/bin/stat -Lc '%F:%h' "/proc/self/fd/${lock_fd}" 2>/dev/null || true)"
-        if [[ "$fd_meta" != "regular file:1" && "$fd_meta" != "regular empty file:1" ]]; then
-            "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
-            exec {lock_fd}>&-
-            printf 'Refusing non-regular or hardlinked logfile target: %s\n' "$target" >&2
-            return 1
-        fi
     fi
+    if ! "$_flock_bin" -s "$lock_fd"; then
+        exec {lock_fd}>&-
+        exec {_out_r}<&-
+        return 1
+    fi
+    exec {_out_r}<&-
     local rc=0
     "$@" >&"$lock_fd" 2>&1 || rc=$?
     "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
@@ -187,43 +219,75 @@ af_logged_stderr() {
         "$@" 2>/dev/null
         return $?
     fi
-    local parent_dir="."
-    if [[ "$target" == */* ]]; then
-        parent_dir="${target%/*}"
-        [[ -n "$parent_dir" ]] || parent_dir="/"
-    fi
-    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
-        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
-        return 1
-    fi
-    if [[ ! -f "$target" ]]; then
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1 && [[ ! -f "$target" ]]; then
         af_prepare_logfile_path "$target" || return 1
     fi
     local _flock_bin="flock"
     if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
         _flock_bin="/usr/bin/flock"
     fi
-    local lock_fd=""
-    exec {lock_fd}>>"$target" || return 1
-    if [[ -L "$target" ]]; then
-        exec {lock_fd}>&-
-        printf 'Refusing symlinked logfile target: %s\n' "$target" >&2
+    local _out_r="" _meta=""
+    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, grp, os, select, stat, sys
+
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            try:
+                target_gid = grp.getgrnam("aetherflow").gr_gid
+            except KeyError:
+                target_gid = 0
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+    ) || return 1
+    if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        exec {_out_r}<&-
         return 1
     fi
-    "$_flock_bin" -s "$lock_fd" || {
-        exec {lock_fd}>&-
+    local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd=""
+    if ! exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}"; then
+        exec {_out_r}<&-
         return 1
-    }
-    if [[ -x /usr/bin/stat && -e "/proc/self/fd/${lock_fd}" ]]; then
-        local fd_meta=""
-        fd_meta="$(/usr/bin/stat -Lc '%F:%h' "/proc/self/fd/${lock_fd}" 2>/dev/null || true)"
-        if [[ "$fd_meta" != "regular file:1" && "$fd_meta" != "regular empty file:1" ]]; then
-            "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
-            exec {lock_fd}>&-
-            printf 'Refusing non-regular or hardlinked logfile target: %s\n' "$target" >&2
-            return 1
-        fi
     fi
+    if ! "$_flock_bin" -s "$lock_fd"; then
+        exec {lock_fd}>&-
+        exec {_out_r}<&-
+        return 1
+    fi
+    exec {_out_r}<&-
     local rc=0
     "$@" 2>&"$lock_fd" || rc=$?
     "$_flock_bin" -u "$lock_fd" 2>/dev/null || true

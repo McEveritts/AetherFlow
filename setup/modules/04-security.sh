@@ -175,16 +175,18 @@ function _lshell() {
 	chmod 770 /var/log/lshell
 }
 
-# function to enable sudo for www-data function
+# Purge legacy sudoers drop-ins without overwriting /etc/sudoers (privileged actions use af-runner)
 function _apachesudo() {
-	mkdir -p /etc/apache2
-	if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
-		install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
-	else
-		echo "ERROR: Invalid sudoers.template; refusing to overwrite /etc/sudoers" >&2
-		return 1
+	if [[ -d /etc/sudoers.d && ! -L /etc/sudoers.d ]]; then
+		find /etc/sudoers.d -maxdepth 1 \( -type f -o -type l \) -name 'aether*' -delete 2>/dev/null || true
 	fi
-	echo -n "${username}" >/etc/apache2/master.txt
+	if [[ ! -L /etc/apache2 ]]; then
+		mkdir -p /etc/apache2
+		if [[ ! -L /etc/apache2/master.txt ]]; then
+			install -o root -g root -m 0640 /dev/null /etc/apache2/master.txt
+			printf '%s' "${username:-}" >/etc/apache2/master.txt
+		fi
+	fi
 	cd || exit 1
 }
 

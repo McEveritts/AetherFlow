@@ -53,52 +53,52 @@ type StreamingServerStatus struct {
 
 // ActiveStreamSession represents a live playback session with rich stream and bandwidth telemetry.
 type ActiveStreamSession struct {
-	SessionID            string   `json:"sessionId"`
-	Provider             string   `json:"provider"`
-	ServerName           string   `json:"serverName"`
-	UserID               string   `json:"userId"`
-	UserName             string   `json:"userName"`
-	ClientName           string   `json:"clientName"`
-	DeviceName           string   `json:"deviceName"`
-	DeviceID             string   `json:"deviceId"`
-	AppVersion           string   `json:"appVersion"`
-	IPAddress            string   `json:"ipAddress"`
-	IsLAN                bool     `json:"isLan"`
-	ItemID               string   `json:"itemId"`
-	ItemName             string   `json:"itemName"`
-	ItemType             string   `json:"itemType"` // Movie, Episode, Audio, LiveTV
-	SeriesName           string   `json:"seriesName,omitempty"`
-	SeriesID             string   `json:"seriesId,omitempty"`
-	SeasonNumber         int      `json:"seasonNumber,omitempty"`
-	EpisodeNumber        int      `json:"episodeNumber,omitempty"`
-	ProductionYear       int      `json:"productionYear,omitempty"`
-	HasArtwork           bool     `json:"hasArtwork"`
-	ArtworkItemID        string   `json:"artworkItemId,omitempty"`
-	State                string   `json:"state"` // "playing" | "paused"
-	PositionSecs         int      `json:"positionSecs"`
-	DurationSecs         int      `json:"durationSecs"`
-	ProgressPct          float64  `json:"progressPct"`
-	PlayMethod           string   `json:"playMethod"` // "DirectPlay" | "DirectStream" | "Transcode"
-	Container            string   `json:"container"`
-	TargetContainer      string   `json:"targetContainer,omitempty"`
-	VideoCodec           string   `json:"videoCodec"`
-	TargetVideoCodec     string   `json:"targetVideoCodec,omitempty"`
-	VideoResolution      string   `json:"videoResolution"`
-	VideoRange           string   `json:"videoRange"` // SDR, HDR10, Dolby Vision
-	VideoFramerate       float64  `json:"videoFramerate,omitempty"`
-	IsVideoDirect        bool     `json:"isVideoDirect"`
-	AudioCodec           string   `json:"audioCodec"`
-	TargetAudioCodec     string   `json:"targetAudioCodec,omitempty"`
-	AudioChannels        int      `json:"audioChannels"`
-	AudioLayout          string   `json:"audioLayout"`
-	AudioLanguage        string   `json:"audioLanguage,omitempty"`
-	IsAudioDirect        bool     `json:"isAudioDirect"`
-	SubtitleCodec        string   `json:"subtitleCodec,omitempty"`
-	SubtitleLanguage     string   `json:"subtitleLanguage,omitempty"`
-	HWAccel              string   `json:"hwAccel,omitempty"`
-	TranscodeReasons     []string `json:"transcodeReasons"`
-	TranscodeProgressPct float64  `json:"transcodeProgressPct,omitempty"`
-	TranscodeFps         float64  `json:"transcodeFps,omitempty"`
+	SessionID             string   `json:"sessionId"`
+	Provider              string   `json:"provider"`
+	ServerName            string   `json:"serverName"`
+	UserID                string   `json:"userId"`
+	UserName              string   `json:"userName"`
+	ClientName            string   `json:"clientName"`
+	DeviceName            string   `json:"deviceName"`
+	DeviceID              string   `json:"deviceId"`
+	AppVersion            string   `json:"appVersion"`
+	IPAddress             string   `json:"ipAddress"`
+	IsLAN                 bool     `json:"isLan"`
+	ItemID                string   `json:"itemId"`
+	ItemName              string   `json:"itemName"`
+	ItemType              string   `json:"itemType"` // Movie, Episode, Audio, LiveTV
+	SeriesName            string   `json:"seriesName,omitempty"`
+	SeriesID              string   `json:"seriesId,omitempty"`
+	SeasonNumber          int      `json:"seasonNumber,omitempty"`
+	EpisodeNumber         int      `json:"episodeNumber,omitempty"`
+	ProductionYear        int      `json:"productionYear,omitempty"`
+	HasArtwork            bool     `json:"hasArtwork"`
+	ArtworkItemID         string   `json:"artworkItemId,omitempty"`
+	State                 string   `json:"state"` // "playing" | "paused"
+	PositionSecs          int      `json:"positionSecs"`
+	DurationSecs          int      `json:"durationSecs"`
+	ProgressPct           float64  `json:"progressPct"`
+	PlayMethod            string   `json:"playMethod"` // "DirectPlay" | "DirectStream" | "Transcode"
+	Container             string   `json:"container"`
+	TargetContainer       string   `json:"targetContainer,omitempty"`
+	VideoCodec            string   `json:"videoCodec"`
+	TargetVideoCodec      string   `json:"targetVideoCodec,omitempty"`
+	VideoResolution       string   `json:"videoResolution"`
+	VideoRange            string   `json:"videoRange"` // SDR, HDR10, Dolby Vision
+	VideoFramerate        float64  `json:"videoFramerate,omitempty"`
+	IsVideoDirect         bool     `json:"isVideoDirect"`
+	AudioCodec            string   `json:"audioCodec"`
+	TargetAudioCodec      string   `json:"targetAudioCodec,omitempty"`
+	AudioChannels         int      `json:"audioChannels"`
+	AudioLayout           string   `json:"audioLayout"`
+	AudioLanguage         string   `json:"audioLanguage,omitempty"`
+	IsAudioDirect         bool     `json:"isAudioDirect"`
+	SubtitleCodec         string   `json:"subtitleCodec,omitempty"`
+	SubtitleLanguage      string   `json:"subtitleLanguage,omitempty"`
+	HWAccel               string   `json:"hwAccel,omitempty"`
+	TranscodeReasons      []string `json:"transcodeReasons"`
+	TranscodeProgressPct  float64  `json:"transcodeProgressPct,omitempty"`
+	TranscodeFps          float64  `json:"transcodeFps,omitempty"`
 	BitrateBps            int64    `json:"bitrateBps"`
 	BandwidthMbps         float64  `json:"bandwidthMbps"`
 	SessionDataBytes      int64    `json:"sessionDataBytes"`
@@ -113,16 +113,16 @@ type ActiveStreamSession struct {
 
 // StreamingLiveSummary aggregates real-time session and bandwidth metrics.
 type StreamingLiveSummary struct {
-	ActiveStreams       int     `json:"activeStreams"`
-	DirectPlayCount     int     `json:"directPlayCount"`
-	DirectStreamCount   int     `json:"directStreamCount"`
-	TranscodeCount      int     `json:"transcodeCount"`
-	TotalBitrateBps     int64   `json:"totalBitrateBps"`
-	TotalBandwidthMbps  float64 `json:"totalBandwidthMbps"`
-	ActiveSessionBytes  int64   `json:"activeSessionBytes"`
-	LANStreams          int     `json:"lanStreams"`
-	WANStreams          int     `json:"wanStreams"`
-	IsDemoMode          bool    `json:"isDemoMode"`
+	ActiveStreams      int     `json:"activeStreams"`
+	DirectPlayCount    int     `json:"directPlayCount"`
+	DirectStreamCount  int     `json:"directStreamCount"`
+	TranscodeCount     int     `json:"transcodeCount"`
+	TotalBitrateBps    int64   `json:"totalBitrateBps"`
+	TotalBandwidthMbps float64 `json:"totalBandwidthMbps"`
+	ActiveSessionBytes int64   `json:"activeSessionBytes"`
+	LANStreams         int     `json:"lanStreams"`
+	WANStreams         int     `json:"wanStreams"`
+	IsDemoMode         bool    `json:"isDemoMode"`
 }
 
 // StreamTypeDistribution holds counts and percentages by play method.
@@ -158,18 +158,18 @@ type StreamingTimeSeriesPoint struct {
 
 // StreamingUserStat represents per-user leaderboard metrics.
 type StreamingUserStat struct {
-	UserID            string  `json:"userId"`
-	UserName          string  `json:"userName"`
-	Provider          string  `json:"provider"`
-	TotalPlays        int     `json:"totalPlays"`
-	TotalWatchSecs    int64   `json:"totalWatchSecs"`
-	TotalDataBytes    int64   `json:"totalDataBytes"`
-	UniqueItems       int     `json:"uniqueItems"`
-	DirectPlayCount   int     `json:"directPlayCount"`
-	TranscodeCount    int     `json:"transcodeCount"`
-	AvgCompletionPct  float64 `json:"avgCompletionPct"`
-	LastDevice        string  `json:"lastDevice"`
-	LastSeenAt        string  `json:"lastSeenAt"`
+	UserID           string  `json:"userId"`
+	UserName         string  `json:"userName"`
+	Provider         string  `json:"provider"`
+	TotalPlays       int     `json:"totalPlays"`
+	TotalWatchSecs   int64   `json:"totalWatchSecs"`
+	TotalDataBytes   int64   `json:"totalDataBytes"`
+	UniqueItems      int     `json:"uniqueItems"`
+	DirectPlayCount  int     `json:"directPlayCount"`
+	TranscodeCount   int     `json:"transcodeCount"`
+	AvgCompletionPct float64 `json:"avgCompletionPct"`
+	LastDevice       string  `json:"lastDevice"`
+	LastSeenAt       string  `json:"lastSeenAt"`
 }
 
 // StreamingTitleStat represents top-watched media items.
@@ -227,22 +227,22 @@ type StreamingHistoryItem struct {
 
 // StreamingAnalytics aggregates historical watch statistics and bandwidth usage.
 type StreamingAnalytics struct {
-	WindowDays          int                      `json:"windowDays"`
-	TotalPlays          int                      `json:"totalPlays"`
-	TotalWatchTimeSecs  int64                    `json:"totalWatchTimeSecs"`
-	TotalDataUsedBytes  int64                    `json:"totalDataUsedBytes"`
-	UniqueUsers         int                      `json:"uniqueUsers"`
-	UniqueTitles        int                      `json:"uniqueTitles"`
-	AvgCompletionPct    float64                  `json:"avgCompletionPct"`
-	PeakBandwidthMbps   float64                  `json:"peakBandwidthMbps"`
-	StreamTypes         StreamTypeDistribution   `json:"streamTypes"`
-	MediaTypeBreakdown  []BreakdownEntry         `json:"mediaTypeBreakdown"`
-	ResolutionBreakdown []BreakdownEntry         `json:"resolutionBreakdown"`
-	CodecBreakdown      []BreakdownEntry         `json:"codecBreakdown"`
+	WindowDays          int                        `json:"windowDays"`
+	TotalPlays          int                        `json:"totalPlays"`
+	TotalWatchTimeSecs  int64                      `json:"totalWatchTimeSecs"`
+	TotalDataUsedBytes  int64                      `json:"totalDataUsedBytes"`
+	UniqueUsers         int                        `json:"uniqueUsers"`
+	UniqueTitles        int                        `json:"uniqueTitles"`
+	AvgCompletionPct    float64                    `json:"avgCompletionPct"`
+	PeakBandwidthMbps   float64                    `json:"peakBandwidthMbps"`
+	StreamTypes         StreamTypeDistribution     `json:"streamTypes"`
+	MediaTypeBreakdown  []BreakdownEntry           `json:"mediaTypeBreakdown"`
+	ResolutionBreakdown []BreakdownEntry           `json:"resolutionBreakdown"`
+	CodecBreakdown      []BreakdownEntry           `json:"codecBreakdown"`
 	TimeSeries          []StreamingTimeSeriesPoint `json:"timeSeries"`
-	TopUsers            []StreamingUserStat      `json:"topUsers"`
-	TopTitles           []StreamingTitleStat     `json:"topTitles"`
-	RecentHistory       []StreamingHistoryItem   `json:"recentHistory"`
+	TopUsers            []StreamingUserStat        `json:"topUsers"`
+	TopTitles           []StreamingTitleStat       `json:"topTitles"`
+	RecentHistory       []StreamingHistoryItem     `json:"recentHistory"`
 }
 
 // StreamingDashboardResponse is the unified payload returned by GET /api/v1/auth/streaming/dashboard.
@@ -255,7 +255,7 @@ type StreamingDashboardResponse struct {
 }
 
 var (
-	streamingMu      sync.RWMutex
+	streamingMu       sync.RWMutex
 	demoSessionsCache []ActiveStreamSession
 	demoModeEnabled   bool
 )
@@ -1017,52 +1017,52 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 		}
 
 		active = append(active, ActiveStreamSession{
-			SessionID:            s.ID,
-			Provider:             "jellyfin",
-			ServerName:           serverName,
-			UserID:               s.UserID,
-			UserName:             s.UserName,
-			ClientName:           s.Client,
-			DeviceName:           s.DeviceName,
-			DeviceID:             s.DeviceID,
-			AppVersion:           s.ApplicationVersion,
-			IPAddress:            s.RemoteEndPoint,
-			IsLAN:                isPrivateOrLocalIP(s.RemoteEndPoint),
-			ItemID:               item.ID,
-			ItemName:             item.Name,
-			ItemType:             normalizeMediaType(item.Type),
-			SeriesName:           item.SeriesName,
-			SeriesID:             item.SeriesID,
-			SeasonNumber:         item.ParentIndexNumber,
-			EpisodeNumber:        item.IndexNumber,
-			ProductionYear:       item.ProductionYear,
-			HasArtwork:           hasArtwork,
-			ArtworkItemID:        artworkID,
-			State:                stateStr,
-			PositionSecs:         posSecs,
-			DurationSecs:         durSecs,
-			ProgressPct:          progressPct,
-			PlayMethod:           playMethod,
-			Container:            strings.ToUpper(item.Container),
-			TargetContainer:      targetContainer,
-			VideoCodec:           videoCodec,
-			TargetVideoCodec:     targetVideoCodec,
-			VideoResolution:      formatResolutionLabel(videoWidth, videoHeight),
-			VideoRange:           videoRange,
-			VideoFramerate:       videoFramerate,
-			IsVideoDirect:        isVideoDirect,
-			AudioCodec:           audioCodec,
-			TargetAudioCodec:     targetAudioCodec,
-			AudioChannels:        audioChannels,
-			AudioLayout:          formatAudioLayout(audioChannels, audioLayout),
-			AudioLanguage:        audioLang,
-			IsAudioDirect:        isAudioDirect,
-			SubtitleCodec:        subCodec,
-			SubtitleLanguage:     subLang,
-			HWAccel:              hwAccel,
-			TranscodeReasons:     transcodeReasons,
-			TranscodeProgressPct: transcodePct,
-			TranscodeFps:         transcodeFps,
+			SessionID:             s.ID,
+			Provider:              "jellyfin",
+			ServerName:            serverName,
+			UserID:                s.UserID,
+			UserName:              s.UserName,
+			ClientName:            s.Client,
+			DeviceName:            s.DeviceName,
+			DeviceID:              s.DeviceID,
+			AppVersion:            s.ApplicationVersion,
+			IPAddress:             s.RemoteEndPoint,
+			IsLAN:                 isPrivateOrLocalIP(s.RemoteEndPoint),
+			ItemID:                item.ID,
+			ItemName:              item.Name,
+			ItemType:              normalizeMediaType(item.Type),
+			SeriesName:            item.SeriesName,
+			SeriesID:              item.SeriesID,
+			SeasonNumber:          item.ParentIndexNumber,
+			EpisodeNumber:         item.IndexNumber,
+			ProductionYear:        item.ProductionYear,
+			HasArtwork:            hasArtwork,
+			ArtworkItemID:         artworkID,
+			State:                 stateStr,
+			PositionSecs:          posSecs,
+			DurationSecs:          durSecs,
+			ProgressPct:           progressPct,
+			PlayMethod:            playMethod,
+			Container:             strings.ToUpper(item.Container),
+			TargetContainer:       targetContainer,
+			VideoCodec:            videoCodec,
+			TargetVideoCodec:      targetVideoCodec,
+			VideoResolution:       formatResolutionLabel(videoWidth, videoHeight),
+			VideoRange:            videoRange,
+			VideoFramerate:        videoFramerate,
+			IsVideoDirect:         isVideoDirect,
+			AudioCodec:            audioCodec,
+			TargetAudioCodec:      targetAudioCodec,
+			AudioChannels:         audioChannels,
+			AudioLayout:           formatAudioLayout(audioChannels, audioLayout),
+			AudioLanguage:         audioLang,
+			IsAudioDirect:         isAudioDirect,
+			SubtitleCodec:         subCodec,
+			SubtitleLanguage:      subLang,
+			HWAccel:               hwAccel,
+			TranscodeReasons:      transcodeReasons,
+			TranscodeProgressPct:  transcodePct,
+			TranscodeFps:          transcodeFps,
 			BitrateBps:            activeBitrate,
 			BandwidthMbps:         bwMbps,
 			SessionDataBytes:      sessionBytes,
@@ -2026,40 +2026,40 @@ func SeedStreamingDemoData() error {
 	demoModeEnabled = true
 	demoSessionsCache = []ActiveStreamSession{
 		{
-			SessionID:        "demo-session-1",
-			Provider:         "jellyfin",
-			ServerName:       "AetherFlow Jellyfin",
-			UserID:           "usr-alex",
-			UserName:         "alex_mercer",
-			ClientName:       "Infuse 7",
-			DeviceName:       "Apple TV 4K (Living Room)",
-			DeviceID:         "atv4k-01",
-			AppVersion:       "7.8.2",
-			IPAddress:        "192.168.1.44",
-			IsLAN:            true,
-			ItemID:           "item-dune-2",
-			ItemName:         "Dune: Part Two",
-			ItemType:         "Movie",
-			ProductionYear:   2024,
-			State:            "playing",
-			PositionSecs:     5840,
-			DurationSecs:     9960,
-			ProgressPct:      58.6,
-			PlayMethod:       "DirectPlay",
-			Container:        "MKV",
-			VideoCodec:       "HEVC",
-			VideoResolution:  "4K UHD",
-			VideoRange:       "Dolby Vision",
-			VideoFramerate:   23.976,
-			IsVideoDirect:    true,
-			AudioCodec:       "TRUEHD",
-			AudioChannels:    8,
-			AudioLayout:      "7.1 Atmos",
-			AudioLanguage:    "ENG",
-			IsAudioDirect:    true,
-			SubtitleCodec:    "PGS",
-			SubtitleLanguage: "ENG",
-			TranscodeReasons: []string{},
+			SessionID:             "demo-session-1",
+			Provider:              "jellyfin",
+			ServerName:            "AetherFlow Jellyfin",
+			UserID:                "usr-alex",
+			UserName:              "alex_mercer",
+			ClientName:            "Infuse 7",
+			DeviceName:            "Apple TV 4K (Living Room)",
+			DeviceID:              "atv4k-01",
+			AppVersion:            "7.8.2",
+			IPAddress:             "192.168.1.44",
+			IsLAN:                 true,
+			ItemID:                "item-dune-2",
+			ItemName:              "Dune: Part Two",
+			ItemType:              "Movie",
+			ProductionYear:        2024,
+			State:                 "playing",
+			PositionSecs:          5840,
+			DurationSecs:          9960,
+			ProgressPct:           58.6,
+			PlayMethod:            "DirectPlay",
+			Container:             "MKV",
+			VideoCodec:            "HEVC",
+			VideoResolution:       "4K UHD",
+			VideoRange:            "Dolby Vision",
+			VideoFramerate:        23.976,
+			IsVideoDirect:         true,
+			AudioCodec:            "TRUEHD",
+			AudioChannels:         8,
+			AudioLayout:           "7.1 Atmos",
+			AudioLanguage:         "ENG",
+			IsAudioDirect:         true,
+			SubtitleCodec:         "PGS",
+			SubtitleLanguage:      "ENG",
+			TranscodeReasons:      []string{},
 			BitrateBps:            42_500_000,
 			BandwidthMbps:         42.5,
 			SessionDataBytes:      31_025_000_000,
@@ -2069,95 +2069,95 @@ func SeedStreamingDemoData() error {
 			CanSendMessage:        true,
 		},
 		{
-			SessionID:            "demo-session-2",
-			Provider:             "jellyfin",
-			ServerName:           "AetherFlow Jellyfin",
-			UserID:               "usr-elena",
-			UserName:             "elena_vance",
-			ClientName:           "Jellyfin Web",
-			DeviceName:           "Chrome 130 (MacBook Pro)",
-			DeviceID:             "chrome-mbp",
-			AppVersion:           "10.10.3",
-			IPAddress:            "198.51.100.78",
-			IsLAN:                false,
-			ItemID:               "item-severance-s2e4",
-			ItemName:             "Woe's Hollow",
-			ItemType:             "Episode",
-			SeriesName:           "Severance",
-			SeasonNumber:         2,
-			EpisodeNumber:        4,
-			ProductionYear:       2025,
-			State:                "playing",
-			PositionSecs:         1680,
-			DurationSecs:         3120,
-			ProgressPct:          53.8,
-			PlayMethod:           "Transcode",
-			Container:            "MKV",
-			TargetContainer:      "TS",
-			VideoCodec:           "AV1",
-			TargetVideoCodec:     "H264",
-			VideoResolution:      "1080p FHD",
-			VideoRange:           "HDR10",
-			VideoFramerate:       23.976,
-			IsVideoDirect:        false,
-			AudioCodec:           "EAC3",
-			TargetAudioCodec:     "AAC",
-			AudioChannels:        6,
-			AudioLayout:          "5.1",
-			AudioLanguage:        "ENG",
-			IsAudioDirect:        false,
-			HWAccel:              "VAAPI",
-			TranscodeReasons:     []string{"VideoCodecNotSupported", "ContainerBitrateExceedsLimit"},
-			TranscodeProgressPct: 74.2,
-			TranscodeFps:         118.4,
-			BitrateBps:           12_400_000,
-			BandwidthMbps:        12.4,
-			SessionDataBytes:     2_604_000_000,
-			StartedAt:            time.Now().UTC().Add(-28 * time.Minute).Format(time.RFC3339),
+			SessionID:             "demo-session-2",
+			Provider:              "jellyfin",
+			ServerName:            "AetherFlow Jellyfin",
+			UserID:                "usr-elena",
+			UserName:              "elena_vance",
+			ClientName:            "Jellyfin Web",
+			DeviceName:            "Chrome 130 (MacBook Pro)",
+			DeviceID:              "chrome-mbp",
+			AppVersion:            "10.10.3",
+			IPAddress:             "198.51.100.78",
+			IsLAN:                 false,
+			ItemID:                "item-severance-s2e4",
+			ItemName:              "Woe's Hollow",
+			ItemType:              "Episode",
+			SeriesName:            "Severance",
+			SeasonNumber:          2,
+			EpisodeNumber:         4,
+			ProductionYear:        2025,
+			State:                 "playing",
+			PositionSecs:          1680,
+			DurationSecs:          3120,
+			ProgressPct:           53.8,
+			PlayMethod:            "Transcode",
+			Container:             "MKV",
+			TargetContainer:       "TS",
+			VideoCodec:            "AV1",
+			TargetVideoCodec:      "H264",
+			VideoResolution:       "1080p FHD",
+			VideoRange:            "HDR10",
+			VideoFramerate:        23.976,
+			IsVideoDirect:         false,
+			AudioCodec:            "EAC3",
+			TargetAudioCodec:      "AAC",
+			AudioChannels:         6,
+			AudioLayout:           "5.1",
+			AudioLanguage:         "ENG",
+			IsAudioDirect:         false,
+			HWAccel:               "VAAPI",
+			TranscodeReasons:      []string{"VideoCodecNotSupported", "ContainerBitrateExceedsLimit"},
+			TranscodeProgressPct:  74.2,
+			TranscodeFps:          118.4,
+			BitrateBps:            12_400_000,
+			BandwidthMbps:         12.4,
+			SessionDataBytes:      2_604_000_000,
+			StartedAt:             time.Now().UTC().Add(-28 * time.Minute).Format(time.RFC3339),
 			SupportsMediaControl:  true,
 			SupportsRemoteControl: true,
 			CanSendMessage:        true,
 		},
 		{
-			SessionID:        "demo-session-3",
-			Provider:         "jellyfin",
-			ServerName:       "AetherFlow Jellyfin",
-			UserID:           "usr-marcus",
-			UserName:         "marcus_chen",
-			ClientName:       "Swiftfin",
-			DeviceName:       "iPad Pro 13\" (M4)",
-			DeviceID:         "ipad-m4",
-			AppVersion:       "1.3.0",
-			IPAddress:        "203.0.113.19",
-			IsLAN:            false,
-			ItemID:           "item-shogun-s1e9",
-			ItemName:         "Crimson Sky",
-			ItemType:         "Episode",
-			SeriesName:       "Shōgun",
-			SeasonNumber:     1,
-			EpisodeNumber:    9,
-			ProductionYear:   2024,
-			State:            "playing",
-			PositionSecs:     2490,
-			DurationSecs:     3660,
-			ProgressPct:      68.0,
-			PlayMethod:       "DirectStream",
-			Container:        "MKV",
-			TargetContainer:  "MP4",
-			VideoCodec:       "HEVC",
-			VideoResolution:  "4K UHD",
-			VideoRange:       "HDR10",
-			VideoFramerate:   23.976,
-			IsVideoDirect:    true,
-			AudioCodec:       "EAC3",
-			TargetAudioCodec: "AAC",
-			AudioChannels:    2,
-			AudioLayout:      "Stereo",
-			AudioLanguage:    "JPN",
-			IsAudioDirect:    false,
-			SubtitleCodec:    "SRT",
-			SubtitleLanguage: "ENG",
-			TranscodeReasons: []string{"AudioCodecNotSupported"},
+			SessionID:             "demo-session-3",
+			Provider:              "jellyfin",
+			ServerName:            "AetherFlow Jellyfin",
+			UserID:                "usr-marcus",
+			UserName:              "marcus_chen",
+			ClientName:            "Swiftfin",
+			DeviceName:            "iPad Pro 13\" (M4)",
+			DeviceID:              "ipad-m4",
+			AppVersion:            "1.3.0",
+			IPAddress:             "203.0.113.19",
+			IsLAN:                 false,
+			ItemID:                "item-shogun-s1e9",
+			ItemName:              "Crimson Sky",
+			ItemType:              "Episode",
+			SeriesName:            "Shōgun",
+			SeasonNumber:          1,
+			EpisodeNumber:         9,
+			ProductionYear:        2024,
+			State:                 "playing",
+			PositionSecs:          2490,
+			DurationSecs:          3660,
+			ProgressPct:           68.0,
+			PlayMethod:            "DirectStream",
+			Container:             "MKV",
+			TargetContainer:       "MP4",
+			VideoCodec:            "HEVC",
+			VideoResolution:       "4K UHD",
+			VideoRange:            "HDR10",
+			VideoFramerate:        23.976,
+			IsVideoDirect:         true,
+			AudioCodec:            "EAC3",
+			TargetAudioCodec:      "AAC",
+			AudioChannels:         2,
+			AudioLayout:           "Stereo",
+			AudioLanguage:         "JPN",
+			IsAudioDirect:         false,
+			SubtitleCodec:         "SRT",
+			SubtitleLanguage:      "ENG",
+			TranscodeReasons:      []string{"AudioCodecNotSupported"},
 			BitrateBps:            18_200_000,
 			BandwidthMbps:         18.2,
 			SessionDataBytes:      5_664_750_000,
@@ -2170,28 +2170,28 @@ func SeedStreamingDemoData() error {
 	streamingMu.Unlock()
 
 	type demoEntry struct {
-		daysAgo        int
-		user           string
-		client         string
-		device         string
-		ip             string
-		itemID         string
-		title          string
-		itemType       string
-		series         string
-		season, ep     int
-		year           int
-		method         string
-		container      string
-		vCodec         string
-		res            string
-		aCodec         string
-		aCh            int
-		hwAccel        string
-		bitrate        int64
-		durSecs        int
-		watchedSecs    int
-		completionPct  float64
+		daysAgo       int
+		user          string
+		client        string
+		device        string
+		ip            string
+		itemID        string
+		title         string
+		itemType      string
+		series        string
+		season, ep    int
+		year          int
+		method        string
+		container     string
+		vCodec        string
+		res           string
+		aCodec        string
+		aCh           int
+		hwAccel       string
+		bitrate       int64
+		durSecs       int
+		watchedSecs   int
+		completionPct float64
 	}
 
 	samples := []demoEntry{

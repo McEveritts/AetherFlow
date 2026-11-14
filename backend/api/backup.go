@@ -50,12 +50,12 @@ func getActiveDbPath() string {
 	baseDir := filepath.Dir(exePath)
 
 	paths := []string{
-		filepath.Join(baseDir, "data", "aetherflow.sqlite"),                                   // Canonical: backend/data/
-		filepath.Join(baseDir, "..", "backend", "data", "aetherflow.sqlite"),                  // From project root
-		filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"),          // Production absolute path
-		filepath.Join(baseDir, "..", "dashboard", "db", "aetherflow.sqlite"),                  // Legacy fallback
-		filepath.Join(baseDir, "dashboard", "db", "aetherflow.sqlite"),                        // Legacy fallback (alt)
-		filepath.Join(baseDir, "aetherflow.sqlite"),                                           // Base directory fallback
+		filepath.Join(baseDir, "data", "aetherflow.sqlite"),                         // Canonical: backend/data/
+		filepath.Join(baseDir, "..", "backend", "data", "aetherflow.sqlite"),        // From project root
+		filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"), // Production absolute path
+		filepath.Join(baseDir, "..", "dashboard", "db", "aetherflow.sqlite"),        // Legacy fallback
+		filepath.Join(baseDir, "dashboard", "db", "aetherflow.sqlite"),              // Legacy fallback (alt)
+		filepath.Join(baseDir, "aetherflow.sqlite"),                                 // Base directory fallback
 	}
 
 	for _, p := range paths {
@@ -63,7 +63,7 @@ func getActiveDbPath() string {
 			return p
 		}
 	}
-	
+
 	// Ultimate fallback strictly anchored to execution root
 	return filepath.Join(baseDir, "data", "aetherflow.sqlite")
 }

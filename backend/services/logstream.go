@@ -5,25 +5,45 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
 
+var (
+	logBearerSecretRe  = regexp.MustCompile(`(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token|digest)\s+|\b(?:bearer)\s+)([^\s"',;]+)`)
+	logURLCredSecretRe = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@)`)
+	logJSONSecretRe    = regexp.MustCompile(`(?is)("(?:[A-Za-z0-9_.-]*?(?:password|passwd|secret|token|api[_-]?key|apikey|client[_-]?secret|master[_-]?pass|rclone[_-]?(?:rc[_-]?)?pass|private[_-]?key|credential|jwt[_-]?secret)[A-Za-z0-9_.-]*)"\s*:\s*)("(?:\\.|[^"\\])*"|[^\s,}\]]+)`)
+	logKVSecretRe      = regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*?(?:password|passwd|secret|token|api[_-]?key|apikey|client[_-]?secret|master[_-]?pass|rclone[_-]?(?:rc[_-]?)?pass|private[_-]?key|credential|jwt[_-]?secret)[A-Za-z0-9_.-]*\b\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"',;&]+)`)
+)
+
+// RedactLogSecrets scrubs credentials, tokens, API keys, and URL passwords from log lines.
+func RedactLogSecrets(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	out := logBearerSecretRe.ReplaceAllString(msg, "${1}[REDACTED]")
+	out = logURLCredSecretRe.ReplaceAllString(out, "${1}[REDACTED]${3}")
+	out = logJSONSecretRe.ReplaceAllString(out, `${1}"[REDACTED]"`)
+	out = logKVSecretRe.ReplaceAllString(out, "${1}[REDACTED]")
+	return out
+}
+
 // LogEntry represents a single log line with metadata.
 type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"`    // "journald", "syslog", "auth.log", etc.
-	Unit     string    `json:"unit"`      // systemd unit name (if journald)
-	Priority string    `json:"priority"`  // "emerg","alert","crit","err","warning","notice","info","debug"
-	Message  string    `json:"message"`
-	Hostname string    `json:"hostname"`
+	Source    string    `json:"source"`   // "journald", "syslog", "auth.log", etc.
+	Unit      string    `json:"unit"`     // systemd unit name (if journald)
+	Priority  string    `json:"priority"` // "emerg","alert","crit","err","warning","notice","info","debug"
+	Message   string    `json:"message"`
+	Hostname  string    `json:"hostname"`
 }
 
 // LogFilter specifies search criteria for querying logs.
 type LogFilter struct {
-	Source    string    `json:"source"`
+	Source   string    `json:"source"`
 	Unit     string    `json:"unit"`
 	Priority string    `json:"priority"`
 	Keyword  string    `json:"keyword"`
@@ -85,6 +105,7 @@ func (la *LogAggregator) Unsubscribe(ch chan LogEntry) {
 
 // push adds a log entry to the ring buffer and broadcasts to listeners.
 func (la *LogAggregator) push(entry LogEntry) {
+	entry.Message = RedactLogSecrets(entry.Message)
 	la.mu.Lock()
 	if len(la.buffer) >= la.maxSize {
 		// Remove oldest 10% to avoid constant shifting
@@ -169,6 +190,7 @@ func (la *LogAggregator) Query(filter LogFilter) []LogEntry {
 			continue
 		}
 
+		entry.Message = RedactLogSecrets(entry.Message)
 		results = append(results, entry)
 	}
 

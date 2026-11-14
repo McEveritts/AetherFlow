@@ -388,7 +388,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		hours := duration / time.Hour
 		duration -= hours * time.Hour
 		minutes := duration / time.Minute
-		
+
 		if days > 0 {
 			uptimeStr = fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
 		} else if hours > 0 {
@@ -572,8 +572,8 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			"used":  swapUsed,
 		},
 		Network: map[string]interface{}{
-			"down": downSpeed,
-			"up": upSpeed,
+			"down":               downSpeed,
+			"up":                 upSpeed,
 			"active_connections": activeConnections,
 		},
 		TotalNetBytes: map[string]uint64{
@@ -919,7 +919,7 @@ func GetDetailedHardware() models.HardwareReport {
 
 			vendor := "Unknown"
 			product := "Unknown"
-			
+
 			if nic.PCIAddress != nil {
 				pci, err := ghw.PCI()
 				if err == nil && pci != nil {
@@ -949,10 +949,10 @@ func GetDetailedHardware() models.HardwareReport {
 	if err == nil && block != nil {
 		for _, disk := range block.Disks {
 			report.Storage = append(report.Storage, models.StorageInfo{
-				Name:       disk.Name,
-				Model:      disk.Model,
-				SizeBytes:  disk.SizeBytes,
-				DriveType:  disk.DriveType.String(),
+				Name:        disk.Name,
+				Model:       disk.Model,
+				SizeBytes:   disk.SizeBytes,
+				DriveType:   disk.DriveType.String(),
 				IsRemovable: disk.IsRemovable,
 			})
 		}
