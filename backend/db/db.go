@@ -24,8 +24,7 @@ var DB *sql.DB
 func migrate(version int, description string, stmts ...string) {
 	var count int
 	if err := DB.QueryRow("SELECT COUNT(*) FROM schema_versions WHERE version = ?", version).Scan(&count); err != nil {
-		slog.Error("migration: failed to query schema_versions", "version", version, "error", err)
-		return
+		log.Fatalf("CRITICAL: migration v%d failed to query schema_versions: %v", version, err)
 	}
 	if count > 0 {
 		return // already applied
@@ -33,20 +32,19 @@ func migrate(version int, description string, stmts ...string) {
 
 	for _, stmt := range stmts {
 		if _, err := DB.Exec(stmt); err != nil {
-			if strings.Contains(err.Error(), "duplicate column name") {
-				slog.Info("migration already applied (duplicate column)", "version", version)
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists") {
+				slog.Info("migration DDL already present", "version", version)
 				continue
 			}
-			slog.Error("migration failed", "version", version, "error", err)
-			return // stop this migration; do not mark as applied
+			log.Fatalf("CRITICAL: migration v%d (%s) failed: %v", version, description, err)
 		}
 	}
 
 	if _, err := DB.Exec("INSERT INTO schema_versions (version, description) VALUES (?, ?)", version, description); err != nil {
-		slog.Warn("migration: applied SQL but failed to record version", "version", version, "error", err)
-	} else {
-		slog.Info("migration applied", "version", version, "description", description)
+		log.Fatalf("CRITICAL: migration v%d applied SQL but failed to record schema_versions: %v", version, err)
 	}
+	slog.Info("migration applied", "version", version, "description", description)
 }
 
 func InitDB() {
@@ -86,11 +84,15 @@ func InitDB() {
 		}
 	}
 
-	// SQLite DSN configuration ensuring concurrent WAL journal mode and busy timeout:
-	// Connection string parameter _journal_mode=WAL and _busy_timeout=5000
+	// SQLite DSN configuration ensuring concurrent WAL journal mode, busy timeout,
+	// foreign-key enforcement, and BEGIN IMMEDIATE write locks on every transaction.
 	dsn := dbPath
-	if !strings.Contains(dsn, "?") && dsn != ":memory:" {
-		dsn += "?_journal_mode=WAL&_busy_timeout=5000"
+	if dsn != ":memory:" {
+		if !strings.Contains(dsn, "?") {
+			dsn += "?_journal_mode=WAL&_busy_timeout=5000&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
+		} else if !strings.Contains(dsn, "_txlock=") {
+			dsn += "&_txlock=immediate"
+		}
 	}
 
 	var err error
@@ -694,6 +696,86 @@ func InitDB() {
 		_, _ = DB.Exec("DELETE FROM schema_versions WHERE version = 20 AND description = 'Durable token revocation table and OIDC auth code nonce'")
 	}
 
+	// v20: Canonical streaming provenance, query indexes and evidence (matching Rust 020_streaming_history.sql)
+	migrate(20, "Canonical streaming provenance, query indexes and evidence",
+		"ALTER TABLE streaming_history ADD COLUMN provenance TEXT NOT NULL DEFAULT 'legacy_unverified' CHECK(provenance IN ('legacy_unverified', 'observed_session', 'imported_event', 'item_summary'));",
+		"ALTER TABLE streaming_history ADD COLUMN server_id TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE streaming_history ADD COLUMN source_event_id TEXT;",
+		"ALTER TABLE streaming_history ADD COLUMN timestamp_certainty TEXT NOT NULL DEFAULT 'legacy_unverified' CHECK(timestamp_certainty IN ('legacy_unverified', 'observed', 'source_event', 'last_played', 'unrecorded'));",
+		"ALTER TABLE streaming_history ADD COLUMN byte_accuracy TEXT NOT NULL DEFAULT 'legacy_unverified' CHECK(byte_accuracy IN ('legacy_unverified', 'estimated', 'unrecorded'));",
+		"ALTER TABLE streaming_history ADD COLUMN policy_status TEXT NOT NULL DEFAULT 'included' CHECK(policy_status IN ('included', 'excluded', 'duplicate', 'ambiguous'));",
+		"ALTER TABLE streaming_history ADD COLUMN event_unix INTEGER GENERATED ALWAYS AS (CAST(strftime('%s', NULLIF(started_at, '')) AS INTEGER)) VIRTUAL;",
+		"ALTER TABLE streaming_history ADD COLUMN event_missing INTEGER GENERATED ALWAYS AS (CASE WHEN event_unix IS NULL THEN 1 ELSE 0 END) VIRTUAL;",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_archive_desc ON streaming_history(event_missing ASC, event_unix DESC, id DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_archive_asc ON streaming_history(event_missing ASC, event_unix ASC, id ASC);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_archive_user ON streaming_history(provider, server_id, user_id, event_unix DESC, id DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_archive_item ON streaming_history(provider, item_id, event_unix DESC, id DESC);",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_streaming_source_event ON streaming_history(provider, server_id, source_event_id) WHERE source_event_id IS NOT NULL AND source_event_id != '';",
+		"CREATE TABLE IF NOT EXISTS streaming_history_revision (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL DEFAULT 0);",
+		"INSERT OR IGNORE INTO streaming_history_revision(id, revision) VALUES(1, 0);",
+		"CREATE TRIGGER IF NOT EXISTS streaming_history_changed AFTER UPDATE ON streaming_history BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_history_deleted AFTER DELETE ON streaming_history BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TABLE IF NOT EXISTS streaming_history_labels (history_id INTEGER NOT NULL REFERENCES streaming_history(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('library', 'genre')), value TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(history_id, kind, value));",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_labels ON streaming_history_labels(kind, value, history_id);",
+		"CREATE TABLE IF NOT EXISTS streaming_user_links (af_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, provider TEXT NOT NULL, server_id TEXT NOT NULL DEFAULT '', provider_user_id TEXT NOT NULL, PRIMARY KEY(af_user_id, provider, server_id, provider_user_id));",
+		"CREATE TABLE IF NOT EXISTS streaming_tracking_policies (id INTEGER PRIMARY KEY CHECK(id = 1), minimum_watch_secs INTEGER NOT NULL DEFAULT 0 CHECK(minimum_watch_secs BETWEEN 0 AND 86400), excluded_users TEXT NOT NULL DEFAULT '[]', excluded_libraries TEXT NOT NULL DEFAULT '[]', reconnect_window_secs INTEGER NOT NULL DEFAULT 0 CHECK(reconnect_window_secs BETWEEN 0 AND 300), revision INTEGER NOT NULL DEFAULT 0);",
+		"INSERT OR IGNORE INTO streaming_tracking_policies(id) VALUES(1);",
+		"CREATE TRIGGER IF NOT EXISTS streaming_policies_changed AFTER UPDATE ON streaming_tracking_policies BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_links_inserted AFTER INSERT ON streaming_user_links BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_links_updated AFTER UPDATE ON streaming_user_links BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_links_deleted AFTER DELETE ON streaming_user_links BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_labels_inserted AFTER INSERT ON streaming_history_labels BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_labels_updated AFTER UPDATE ON streaming_history_labels BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_labels_deleted AFTER DELETE ON streaming_history_labels BEGIN UPDATE streaming_history_revision SET revision = revision + 1 WHERE id = 1; END;",
+		"CREATE TABLE IF NOT EXISTS streaming_import_checkpoints (provider TEXT NOT NULL, server_id TEXT NOT NULL, source TEXT NOT NULL, checkpoint TEXT NOT NULL DEFAULT '', imported INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(provider, server_id, source));",
+		"CREATE TABLE IF NOT EXISTS streaming_history_audit (id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL, operation TEXT NOT NULL, preview_hash TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at TEXT NOT NULL);",
+		"CREATE TABLE IF NOT EXISTS streaming_session_samples (history_id INTEGER NOT NULL REFERENCES streaming_history(id) ON DELETE CASCADE, sampled_at INTEGER NOT NULL, observed_secs INTEGER NOT NULL CHECK(observed_secs BETWEEN 0 AND 60), playing INTEGER NOT NULL CHECK(playing IN (0, 1)), bitrate_bps INTEGER NOT NULL CHECK(bitrate_bps >= 0), PRIMARY KEY(history_id, sampled_at));",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_session_samples_time ON streaming_session_samples(sampled_at, history_id);",
+	)
+
+	// v24: Streaming historical read epoch (matching Rust 024_streaming_read_epoch.sql)
+	_, _ = DB.Exec("DELETE FROM schema_versions WHERE version = 21 AND description = 'Streaming historical read epoch; destructive revision retained'")
+	migrate(24, "Streaming historical read epoch; destructive revision retained",
+		"CREATE TABLE IF NOT EXISTS streaming_history_read_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0);",
+		"INSERT OR IGNORE INTO streaming_history_read_revision(id,revision) VALUES(1,0);",
+		`CREATE TRIGGER IF NOT EXISTS streaming_read_changed AFTER UPDATE ON streaming_history
+WHEN OLD.provider IS NOT NEW.provider OR OLD.server_id IS NOT NEW.server_id
+ OR OLD.user_id IS NOT NEW.user_id OR OLD.user_name IS NOT NEW.user_name
+ OR OLD.item_id IS NOT NEW.item_id OR OLD.item_name IS NOT NEW.item_name
+ OR OLD.item_type IS NOT NEW.item_type OR OLD.series_name IS NOT NEW.series_name
+ OR OLD.client_name IS NOT NEW.client_name OR OLD.device_name IS NOT NEW.device_name
+ OR OLD.play_method IS NOT NEW.play_method OR OLD.started_at IS NOT NEW.started_at
+ OR OLD.provenance IS NOT NEW.provenance OR OLD.policy_status IS NOT NEW.policy_status
+ OR OLD.timestamp_certainty IS NOT NEW.timestamp_certainty OR OLD.byte_accuracy IS NOT NEW.byte_accuracy
+ OR OLD.source_event_id IS NOT NEW.source_event_id
+ OR ((OLD.watched_secs >= (SELECT minimum_watch_secs FROM streaming_tracking_policies WHERE id=1))
+     IS NOT (NEW.watched_secs >= (SELECT minimum_watch_secs FROM streaming_tracking_policies WHERE id=1)))
+BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;`,
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_deleted AFTER DELETE ON streaming_history BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_policy AFTER UPDATE ON streaming_tracking_policies BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_links_insert AFTER INSERT ON streaming_user_links BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_links_update AFTER UPDATE ON streaming_user_links BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_links_delete AFTER DELETE ON streaming_user_links BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_labels_insert AFTER INSERT ON streaming_history_labels BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_labels_update AFTER UPDATE ON streaming_history_labels BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+		"CREATE TRIGGER IF NOT EXISTS streaming_read_labels_delete AFTER DELETE ON streaming_history_labels BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;",
+	)
+
+	// v21: Rust plugin platform lifecycle state registry
+	migrate(21, "Add plugins_registry table for Rust plugin platform lifecycle state",
+		`CREATE TABLE IF NOT EXISTS plugins_registry (
+			plugin_id TEXT PRIMARY KEY,
+			enabled BOOLEAN NOT NULL DEFAULT 0,
+			allocated_port INTEGER NOT NULL DEFAULT 0,
+			token_epoch INTEGER NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'stopped',
+			last_health_at DATETIME,
+			last_error TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_plugins_registry_enabled ON plugins_registry(enabled);",
+	)
+
 	// v22: Align with Rust schema_versions v22 (MFA replay guards, OIDC nonces, durable token revocation)
 	var totpStepColumnCount, nonceColumnCount int
 	_ = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'last_totp_step'").Scan(&totpStepColumnCount)
@@ -719,6 +801,12 @@ func InitDB() {
 		m22Stmts = append(m22Stmts, "ALTER TABLE oidc_auth_codes ADD COLUMN nonce TEXT NOT NULL DEFAULT '';")
 	}
 	migrate(22, "Persist MFA replay guards and OIDC nonces", m22Stmts...)
+
+	// v23: Persist installed local AI model and runtime separately
+	migrate(23, "Persist installed local AI model and runtime separately",
+		"ALTER TABLE settings ADD COLUMN local_provider TEXT DEFAULT '';",
+		"ALTER TABLE settings ADD COLUMN local_model TEXT DEFAULT '';",
+	)
 
 	// ─── Auth/OIDC family & revocation floor schema parity (no schema_versions bump) ───
 	ensureColumnIfMissing("users", "sessions_revoked_after",
@@ -825,7 +913,7 @@ func PruneExpiredData() {
 		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
 		// Retain revoked = 1 refresh-token tombstones until expires_at for RFC 9700 reuse detection.
 		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?"},
-		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')"},
+		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')"},
 		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
 		{"mfa_challenges", "DELETE FROM mfa_challenges WHERE expires_at <= strftime('%s', 'now')"},
 		// Keep 90 days of metrics history

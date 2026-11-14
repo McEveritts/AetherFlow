@@ -218,7 +218,9 @@ pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'st
 
     if let Ok(master_psk) = env::var("CLUSTER_PSK") {
         let master_trimmed = master_psk.trim();
-        if !master_trimmed.is_empty() && constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes()) {
+        if !master_trimmed.is_empty()
+            && constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes())
+        {
             return Ok(());
         }
     }
@@ -522,7 +524,12 @@ pub fn process_worker_heartbeat(
         .system_info
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok())
-        .or_else(|| previous.as_ref().and_then(|p| p.get("system_info")).cloned())
+        .or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|p| p.get("system_info"))
+                .cloned()
+        })
         .unwrap_or(serde_json::Value::Null);
 
     let metrics_val = if req.metrics.is_null() {
@@ -675,7 +682,8 @@ fn extract_usage_Rollups(req: &WorkerHeartbeatRequest) -> (f64, f64, f64) {
 async fn handle_master_connection(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut reader = BufReader::new(&mut stream);
     let mut first_line = String::new();
-    let n = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut first_line)).await??;
+    let n =
+        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut first_line)).await??;
     if n == 0 {
         return Ok(());
     }
@@ -719,7 +727,10 @@ async fn handle_master_connection(mut stream: TcpStream) -> anyhow::Result<()> {
             } else if key == "x-cluster-psk" {
                 header_psk = val.to_string();
             } else if key == "authorization" {
-                if let Some(token) = val.strip_prefix("Bearer ").or_else(|| val.strip_prefix("bearer ")) {
+                if let Some(token) = val
+                    .strip_prefix("Bearer ")
+                    .or_else(|| val.strip_prefix("bearer "))
+                {
                     header_psk = token.trim().to_string();
                 }
             }
@@ -859,7 +870,8 @@ fn handle_raw_json_rpc(raw_line: &str) -> serde_json::Value {
             }
         }
         "heartbeat" | "/cluster/v1/heartbeat" | "Heartbeat" => {
-            let req: WorkerHeartbeatRequest = serde_json::from_value(params_val).unwrap_or_default();
+            let req: WorkerHeartbeatRequest =
+                serde_json::from_value(params_val).unwrap_or_default();
             match process_worker_heartbeat(&req) {
                 Ok(resp) => serde_json::to_value(resp).unwrap_or_default(),
                 Err(e) => serde_json::json!({ "acknowledged": false, "error": e.to_string() }),
@@ -1018,12 +1030,16 @@ fn build_worker_heartbeat_payload(
         total_disk_bytes: (disk_total_gb * 1024.0 * 1024.0 * 1024.0) as i64,
     };
 
-    let mut rich_metrics = serde_json::to_value(&sys_metrics).unwrap_or_else(|_| serde_json::json!({}));
+    let mut rich_metrics =
+        serde_json::to_value(&sys_metrics).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = rich_metrics.as_object_mut() {
         obj.insert("mem_used_gb".to_string(), serde_json::json!(mem_used_gb));
         obj.insert("mem_total_gb".to_string(), serde_json::json!(mem_total_gb));
         obj.insert("disk_used_gb".to_string(), serde_json::json!(disk_used_gb));
-        obj.insert("disk_total_gb".to_string(), serde_json::json!(disk_total_gb));
+        obj.insert(
+            "disk_total_gb".to_string(),
+            serde_json::json!(disk_total_gb),
+        );
         obj.insert("ram_usage".to_string(), serde_json::json!(ram_pct));
         obj.insert("disk_usage".to_string(), serde_json::json!(disk_pct));
         obj.insert(
@@ -1454,8 +1470,14 @@ mod tests {
 
     #[test]
     fn test_constant_time_eq() {
-        assert!(constant_time_eq(b"super-secret-psk-1234567890123456", b"super-secret-psk-1234567890123456"));
-        assert!(!constant_time_eq(b"super-secret-psk-1234567890123456", b"super-secret-psk-1234567890123457"));
+        assert!(constant_time_eq(
+            b"super-secret-psk-1234567890123456",
+            b"super-secret-psk-1234567890123456"
+        ));
+        assert!(!constant_time_eq(
+            b"super-secret-psk-1234567890123456",
+            b"super-secret-psk-1234567890123457"
+        ));
         assert!(!constant_time_eq(b"short", b"longer"));
     }
 

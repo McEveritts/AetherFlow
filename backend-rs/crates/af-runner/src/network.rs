@@ -1182,7 +1182,10 @@ impl Manager {
                     "backend_state":"NeedsMachineAuth"}),
                 );
             }
-            if !matches!(after["BackendState"].as_str(), Some("NeedsLogin" | "NoState")) {
+            if !matches!(
+                after["BackendState"].as_str(),
+                Some("NeedsLogin" | "NoState")
+            ) {
                 bail!(
                     "Tailscale up did not reach Running state ({}). {}",
                     after["BackendState"].as_str().unwrap_or("Unknown"),
@@ -1241,8 +1244,10 @@ impl Manager {
         }
         self.run(
             "tailscale",
-            &["set".into(),
-                format!("--advertise-routes={}", normalized.join(","))],
+            &[
+                "set".into(),
+                format!("--advertise-routes={}", normalized.join(",")),
+            ],
             None,
         )
         .await?;

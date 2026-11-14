@@ -16,16 +16,55 @@ fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_s
     crate::init_db().expect("empty full schema initializes");
     let plugin_description: String = {
         let connection = crate::get_conn().unwrap();
-        connection.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
-        connection.execute("INSERT INTO plugins_registry(plugin_id,enabled) VALUES('retained-fixture',1)", []).unwrap();
-        connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get(0)).unwrap()
+        connection
+            .query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plugins_registry(plugin_id,enabled) VALUES('retained-fixture',1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .query_row(
+                "SELECT description FROM schema_versions WHERE version=21",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     };
     for _ in 0..2 {
         crate::init_db().expect("reopening complete schema succeeds");
         let connection = crate::get_conn().unwrap();
-        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get::<_, String>(0)).unwrap(), plugin_description);
-        assert!(connection.query_row("SELECT enabled FROM plugins_registry WHERE plugin_id='retained-fixture'", [], |row| row.get::<_, bool>(0)).unwrap());
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM schema_versions WHERE version=24", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT description FROM schema_versions WHERE version=21",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            plugin_description
+        );
+        assert!(connection
+            .query_row(
+                "SELECT enabled FROM plugins_registry WHERE plugin_id='retained-fixture'",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_versions WHERE version=24",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
     {
         let connection = crate::get_conn().unwrap();
@@ -39,19 +78,46 @@ fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_s
     crate::init_db().expect("bad21 cleanup also precedes the already-applied24 return");
     {
         let connection = crate::get_conn().unwrap();
-        connection.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
-        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get::<_, String>(0)).unwrap(), plugin_description);
+        connection
+            .query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT description FROM schema_versions WHERE version=21",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            plugin_description
+        );
         connection.execute("UPDATE schema_versions SET description='unrelated-future-migration' WHERE version=24", []).unwrap();
     }
     let error = crate::init_db().unwrap_err();
     assert!(format!("{error:#}").contains("version24 collision"));
     {
         let connection = crate::get_conn().unwrap();
-        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=24", [], |row| row.get::<_, String>(0)).unwrap(), "unrelated-future-migration");
-        connection.execute("DELETE FROM schema_versions WHERE version=24", []).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT description FROM schema_versions WHERE version=24",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "unrelated-future-migration"
+        );
+        connection
+            .execute("DELETE FROM schema_versions WHERE version=24", [])
+            .unwrap();
     }
     crate::init_db().expect("full initialization remains repeatable after marker repair");
-    match previous { Some(value) => std::env::set_var("DB_PATH", value), None => std::env::remove_var("DB_PATH") }
+    match previous {
+        Some(value) => std::env::set_var("DB_PATH", value),
+        None => std::env::remove_var("DB_PATH"),
+    }
 }
 
 struct TempTestDir {
@@ -290,7 +356,11 @@ fn migration_v20_preserves_v19_legacy_records_as_unverified_and_sets_defaults() 
 
     // Verify revision and tracking policies singleton rows initialized
     let rev: i64 = conn
-        .query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT revision FROM streaming_history_revision WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .expect("revision singleton");
     assert_eq!(rev, 0);
 
@@ -312,7 +382,11 @@ fn migration_v20_preserves_v19_legacy_records_as_unverified_and_sets_defaults() 
     )
     .expect("insert link");
     let rev_after_link: i64 = conn
-        .query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT revision FROM streaming_history_revision WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(rev_after_link, 1);
 
@@ -322,7 +396,11 @@ fn migration_v20_preserves_v19_legacy_records_as_unverified_and_sets_defaults() 
     )
     .expect("insert label");
     let rev_after_label: i64 = conn
-        .query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT revision FROM streaming_history_revision WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(rev_after_label, 2);
 
@@ -332,7 +410,11 @@ fn migration_v20_preserves_v19_legacy_records_as_unverified_and_sets_defaults() 
     )
     .expect("update policy");
     let rev_after_policy: i64 = conn
-        .query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT revision FROM streaming_history_revision WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(rev_after_policy, 3);
 }
@@ -357,7 +439,11 @@ fn migration_v20_is_idempotent_across_repeated_invocations() {
     let backups_after_first: Vec<_> = fs::read_dir(&dir.path)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("streaming-backup-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("streaming-backup-")
+        })
         .collect();
     assert_eq!(
         backups_after_first.len(),
@@ -378,7 +464,11 @@ fn migration_v20_is_idempotent_across_repeated_invocations() {
     let backups_after_repeat: Vec<_> = fs::read_dir(&dir.path)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("streaming-backup-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("streaming-backup-")
+        })
         .collect();
     assert_eq!(
         backups_after_repeat.len(),
@@ -402,7 +492,10 @@ fn migration_v20_is_idempotent_across_repeated_invocations() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(rev, 1, "revision incremented once by update, untouched by idempotent re-runs");
+    assert_eq!(
+        rev, 1,
+        "revision incremented once by update, untouched by idempotent re-runs"
+    );
 }
 
 #[test]
@@ -410,9 +503,16 @@ fn verified_backup_removes_unverified_files_on_failure() {
     let directory = TempTestDir::new("backup_failure");
     let db_path = directory.db_file("invalid.sqlite");
     let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch("CREATE TABLE unrelated(id INTEGER PRIMARY KEY)").unwrap();
+    conn.execute_batch("CREATE TABLE unrelated(id INTEGER PRIMARY KEY)")
+        .unwrap();
     assert!(verified_backup(&conn, db_path.to_str().unwrap()).is_err());
-    assert!(!fs::read_dir(&directory.path).unwrap().filter_map(Result::ok).any(|entry| entry.file_name().to_string_lossy().starts_with("streaming-backup-")));
+    assert!(!fs::read_dir(&directory.path)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("streaming-backup-")));
 }
 
 #[test]
@@ -431,7 +531,8 @@ fn migration_v20_rolls_back_atomically_on_schema_failure() {
     conn.execute_batch("CREATE TABLE streaming_history_labels (conflict_col INTEGER);")
         .expect("create conflicting table");
 
-    let err = migrate_history(&conn, ":memory:").expect_err("migration should fail on schema conflict");
+    let err =
+        migrate_history(&conn, ":memory:").expect_err("migration should fail on schema conflict");
     assert!(
         err.to_string().contains("streaming_history_labels"),
         "expected failure mentioning conflicting table, got: {err}"

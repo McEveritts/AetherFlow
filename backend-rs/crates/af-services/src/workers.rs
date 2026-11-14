@@ -684,10 +684,7 @@ pub fn start_smart_backup_scheduler() {
     }
 
     tokio::spawn(async move {
-        tracing::info!(
-            interval_mins = 30,
-            "smart backup scheduler initialized"
-        );
+        tracing::info!(interval_mins = 30, "smart backup scheduler initialized");
 
         ensure_smart_backup_columns();
 
@@ -854,7 +851,11 @@ pub struct PackageUpdateRecord {
     pub checked_at: String,
     #[serde(alias = "update_url")]
     pub release_url: String,
-    #[serde(alias = "last_error", default, serialize_with = "serialize_update_error")]
+    #[serde(
+        alias = "last_error",
+        default,
+        serialize_with = "serialize_update_error"
+    )]
     pub error: String,
     #[serde(default)]
     pub source_key: String,
@@ -935,7 +936,12 @@ pub fn sanitize_git_remote_url_for_display(raw_url: &str) -> String {
             } else {
                 user
             };
-            format!("ssh://{}@{}/{}", clean_user, host.to_ascii_lowercase(), clean_path)
+            format!(
+                "ssh://{}@{}/{}",
+                clean_user,
+                host.to_ascii_lowercase(),
+                clean_path
+            )
         } else {
             format!("ssh://{}/{}", user_host.to_ascii_lowercase(), clean_path)
         }
@@ -954,11 +960,18 @@ pub fn validate_release_url_origin(url: &str, expected_api_base: &str) -> bool {
         return false;
     };
     parsed.scheme() == expected.scheme()
-        && parsed.host_str().unwrap_or("").eq_ignore_ascii_case(expected.host_str().unwrap_or(""))
+        && parsed
+            .host_str()
+            .unwrap_or("")
+            .eq_ignore_ascii_case(expected.host_str().unwrap_or(""))
         && parsed.port_or_known_default() == expected.port_or_known_default()
 }
 
-pub fn validate_github_releases_next_url(next_url: &str, github_api_base: &str, clean_repo: &str) -> bool {
+pub fn validate_github_releases_next_url(
+    next_url: &str,
+    github_api_base: &str,
+    clean_repo: &str,
+) -> bool {
     if !validate_release_url_origin(next_url, github_api_base) {
         return false;
     }
@@ -996,7 +1009,9 @@ fn github_releases_next_request_url(
     if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
         return None;
     }
-    let suffix = parsed.path().strip_prefix(base.path().trim_end_matches('/'))?;
+    let suffix = parsed
+        .path()
+        .strip_prefix(base.path().trim_end_matches('/'))?;
     let numeric_alias = suffix
         .strip_prefix("/repositories/")
         .and_then(|s| s.trim_end_matches('/').strip_suffix("/releases"))
@@ -1005,23 +1020,34 @@ fn github_releases_next_request_url(
     if !numeric_alias && !validate_github_releases_next_url(next_url, github_api_base, clean_repo) {
         return None;
     }
-    let pages: Vec<_> = parsed.query_pairs().filter(|(key, _)| key == "page").collect();
+    let pages: Vec<_> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "page")
+        .collect();
     if pages.len() != 1 {
         return None;
     }
     let page = pages[0].1.parse::<u32>().ok().filter(|page| *page > 0)?;
-    let sizes: Vec<_> = parsed.query_pairs().filter(|(key, _)| key == "per_page").collect();
+    let sizes: Vec<_> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "per_page")
+        .collect();
     let size = match sizes.as_slice() {
         [] => GITHUB_RELEASE_PAGE_SIZE,
-        [(_, value)] => value.parse::<usize>().ok().filter(|size| (1..=100).contains(size))?,
+        [(_, value)] => value
+            .parse::<usize>()
+            .ok()
+            .filter(|size| (1..=100).contains(size))?,
         _ => return None,
     };
     let mut request = reqwest::Url::parse(&format!(
         "{}/repos/{}/releases",
         github_api_base.trim_end_matches('/'),
         clean_repo.trim_matches('/'),
-    )).ok()?;
-    request.query_pairs_mut()
+    ))
+    .ok()?;
+    request
+        .query_pairs_mut()
         .append_pair("per_page", &size.to_string())
         .append_pair("page", &page.to_string());
     Some(request.to_string())
@@ -1033,7 +1059,10 @@ fn extract_canonical_query_hash_suffix(raw: &str) -> (&str, Option<String>) {
             let hex = &raw[idx + 3..idx + 15];
             let after_ok = raw.len() == idx + 15 || raw.as_bytes()[idx + 15] == b'#';
             if hex.bytes().all(|b| b.is_ascii_hexdigit()) && after_ok {
-                return (&raw[..idx], Some(format!("?q#{}", hex.to_ascii_lowercase())));
+                return (
+                    &raw[..idx],
+                    Some(format!("?q#{}", hex.to_ascii_lowercase())),
+                );
             }
         }
     }
@@ -1042,7 +1071,8 @@ fn extract_canonical_query_hash_suffix(raw: &str) -> (&str, Option<String>) {
 
 fn split_git_repo_remote_and_branch(rest: &str) -> (&str, Option<&str>) {
     if let Some((left, right)) = rest.rsplit_once('#') {
-        if left.ends_with("?q") && right.len() == 12 && right.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if left.ends_with("?q") && right.len() == 12 && right.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return (rest, None);
         }
         return (left, Some(right));
@@ -1077,10 +1107,15 @@ pub fn normalize_git_remote_url_preserve_path_case(raw_url: &str) -> String {
                         };
                         let path = parsed.path();
                         let query_part = match parsed.query() {
-                            Some(q) if !q.is_empty() => format!("?q#{}", sha256_hex_12(q.as_bytes())),
+                            Some(q) if !q.is_empty() => {
+                                format!("?q#{}", sha256_hex_12(q.as_bytes()))
+                            }
                             _ => String::new(),
                         };
-                        return format!("{}://cred#{}@{}{}{}{}", scheme, hex, host, port_part, path, query_part);
+                        return format!(
+                            "{}://cred#{}@{}{}{}{}",
+                            scheme, hex, host, port_part, path, query_part
+                        );
                     }
                 }
             }
@@ -1113,7 +1148,10 @@ pub fn normalize_git_remote_url_preserve_path_case(raw_url: &str) -> String {
             Some(q) if !q.is_empty() => format!("?q#{}", sha256_hex_12(q.as_bytes())),
             _ => String::new(),
         };
-        format!("{}://{}{}{}{}{}", scheme, user_part, host, port_part, path, query_part)
+        format!(
+            "{}://{}{}{}{}{}",
+            scheme, user_part, host, port_part, path, query_part
+        )
     } else if let Some((user_host, path)) = trimmed.split_once(':') {
         let without_frag = path.split('#').next().unwrap_or(path);
         let (clean_path_raw, query_opt) = match without_frag.split_once('?') {
@@ -1135,9 +1173,20 @@ pub fn normalize_git_remote_url_preserve_path_case(raw_url: &str) -> String {
             } else {
                 format!("{}@", user)
             };
-            format!("ssh://{}{}/{}{}", user_part, host.to_ascii_lowercase(), clean_path, query_part)
+            format!(
+                "ssh://{}{}/{}{}",
+                user_part,
+                host.to_ascii_lowercase(),
+                clean_path,
+                query_part
+            )
         } else {
-            format!("ssh://{}/{}{}", user_host.to_ascii_lowercase(), clean_path, query_part)
+            format!(
+                "ssh://{}/{}{}",
+                user_host.to_ascii_lowercase(),
+                clean_path,
+                query_part
+            )
         }
     } else {
         let without_frag = trimmed.split('#').next().unwrap_or(trimmed);
@@ -1159,7 +1208,9 @@ pub fn normalize_git_remote_url_preserve_path_case(raw_url: &str) -> String {
         } else {
             clean_raw.to_string()
         };
-        let clean_path = clean_with_cred.trim_end_matches('/').trim_end_matches(".git");
+        let clean_path = clean_with_cred
+            .trim_end_matches('/')
+            .trim_end_matches(".git");
         format!("{}{}", clean_path, query_part)
     }
 }
@@ -1306,19 +1357,21 @@ pub fn sanitize_source_key_for_persistence(raw_key: &str) -> String {
                     return af_release::lifecycle::sanitize_persisted_lifecycle_text(&key);
                 }
             }
-            "git" | "git_tag" | "git_tags" | "git_commit" | "git_head"
-                if parts.len() >= 3 => {
-                    let api_base = sanitize_api_base_for_source_key(parts[0]);
-                    let norm_remote = normalize_git_remote_url_preserve_path_case(parts[1]);
-                    let repo_slug = parts[2].trim();
-                    let channel_suffix = if parts.len() >= 4 {
-                        format!("|{}", parts[3].trim().to_ascii_lowercase())
-                    } else {
-                        String::new()
-                    };
-                    let key = format!("{}:{}|{}|{}{}", src, api_base, norm_remote, repo_slug, channel_suffix);
-                    return af_release::lifecycle::sanitize_persisted_lifecycle_text(&key);
-                }
+            "git" | "git_tag" | "git_tags" | "git_commit" | "git_head" if parts.len() >= 3 => {
+                let api_base = sanitize_api_base_for_source_key(parts[0]);
+                let norm_remote = normalize_git_remote_url_preserve_path_case(parts[1]);
+                let repo_slug = parts[2].trim();
+                let channel_suffix = if parts.len() >= 4 {
+                    format!("|{}", parts[3].trim().to_ascii_lowercase())
+                } else {
+                    String::new()
+                };
+                let key = format!(
+                    "{}:{}|{}|{}{}",
+                    src, api_base, norm_remote, repo_slug, channel_suffix
+                );
+                return af_release::lifecycle::sanitize_persisted_lifecycle_text(&key);
+            }
             _ => {}
         }
     }
@@ -1347,7 +1400,10 @@ pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> Stri
             let effective_remote = if !pkg.update_repo_url.trim().is_empty() {
                 normalize_git_remote_url_preserve_path_case(pkg.update_repo_url.trim())
             } else if !pkg.update_repo.trim().is_empty() {
-                normalize_git_remote_url_preserve_path_case(&format!("https://github.com/{}.git", pkg.update_repo.trim()))
+                normalize_git_remote_url_preserve_path_case(&format!(
+                    "https://github.com/{}.git",
+                    pkg.update_repo.trim()
+                ))
             } else {
                 String::new()
             };
@@ -1378,7 +1434,12 @@ pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> Stri
             if !pkg.update_package.trim().is_empty() {
                 format!("{}:{}", src, pkg.update_package.trim().to_ascii_lowercase())
             } else if !pkg.update_repo.trim().is_empty() {
-                format!("{}:{}|{}", src, api_base, pkg.update_repo.trim().to_ascii_lowercase())
+                format!(
+                    "{}:{}|{}",
+                    src,
+                    api_base,
+                    pkg.update_repo.trim().to_ascii_lowercase()
+                )
             } else {
                 format!("{}:{}", src, pkg.name.trim().to_ascii_lowercase())
             }
@@ -1394,35 +1455,43 @@ pub fn canonical_update_source_key(github_api_base: &str, pkg: &Package) -> Stri
     af_release::lifecycle::sanitize_persisted_lifecycle_text(&full_key)
 }
 
-pub fn github_release_cache() -> std::sync::MutexGuard<'static, HashMap<String, (String, String, Instant, String)>> {
-    GITHUB_RELEASE_CACHE.lock().unwrap_or_else(|e| e.into_inner())
+pub fn github_release_cache(
+) -> std::sync::MutexGuard<'static, HashMap<String, (String, String, Instant, String)>> {
+    GITHUB_RELEASE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn git_remote_head_cache() -> std::sync::MutexGuard<'static, HashMap<String, (String, String, Instant, String)>> {
-    GIT_REMOTE_HEAD_CACHE.lock().unwrap_or_else(|e| e.into_inner())
+pub fn git_remote_head_cache(
+) -> std::sync::MutexGuard<'static, HashMap<String, (String, String, Instant, String)>> {
+    GIT_REMOTE_HEAD_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn git_head_cache_key(repo_url: &str, repo: &str) -> String {
     let effective_remote_url = if !repo_url.trim().is_empty() {
         normalize_git_remote_url_preserve_path_case(repo_url.trim())
     } else if !repo.trim().is_empty() {
-        normalize_git_remote_url_preserve_path_case(&format!("https://github.com/{}.git", repo.trim()))
+        normalize_git_remote_url_preserve_path_case(&format!(
+            "https://github.com/{}.git",
+            repo.trim()
+        ))
     } else {
         String::new()
     };
-    format!(
-        "{}|{}",
-        effective_remote_url,
-        repo.trim()
-    )
+    format!("{}|{}", effective_remote_url, repo.trim())
 }
-
 
 pub fn github_release_cache_key(github_api_base: &str, repo: &str) -> String {
     github_release_cache_key_for_channel(github_api_base, repo, "stable")
 }
 
-pub fn github_release_cache_key_for_channel(github_api_base: &str, repo: &str, channel: &str) -> String {
+pub fn github_release_cache_key_for_channel(
+    github_api_base: &str,
+    repo: &str,
+    channel: &str,
+) -> String {
     let effective_channel_owned = {
         let t = channel.trim().to_ascii_lowercase();
         if t.is_empty() {
@@ -1465,7 +1534,8 @@ pub fn get_cached_github_release_stale_for_channel(
         }
     };
     let effective_channel = effective_channel_owned.as_str();
-    let cache_key = github_release_cache_key_for_channel(github_api_base, &clean_repo, effective_channel);
+    let cache_key =
+        github_release_cache_key_for_channel(github_api_base, &clean_repo, effective_channel);
     let cache = github_release_cache();
     if let Some((ver, url, _, obs)) = cache.get(&cache_key) {
         if tag_allowed_by_channel(ver, effective_channel) {
@@ -1483,9 +1553,8 @@ static DEFAULT_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?[0-9]+(?:\.[0-9]+)*(?:~[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)")
         .unwrap()
 });
-static SYNTHETIC_COMMIT_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9a-fA-F]{7,40})$").unwrap()
-});
+static SYNTHETIC_COMMIT_VERSION_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)-([0-9a-fA-F]{7,40})$").unwrap());
 
 #[derive(Debug, Deserialize)]
 struct GitHubReleaseResponse {
@@ -1643,7 +1712,10 @@ pub fn sanitize_update_check_error(error: &str) -> String {
     }
 }
 
-fn serialize_update_error<S: serde::Serializer>(error: &str, serializer: S) -> Result<S::Ok, S::Error> {
+fn serialize_update_error<S: serde::Serializer>(
+    error: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&public_update_error(error))
 }
 
@@ -1914,7 +1986,10 @@ pub fn should_attach_github_token(request_url: &str, configured_api_base: &str) 
     };
 
     let is_loopback = {
-        let h = req_host.trim().trim_start_matches('[').trim_end_matches(']');
+        let h = req_host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
         h == "127.0.0.1" || h == "localhost" || h == "::1"
     };
 
@@ -1941,13 +2016,22 @@ pub fn should_attach_github_token(request_url: &str, configured_api_base: &str) 
     }
 
     // 1. Built-in GitHub hosts: ONLY trust when scheme == "https" AND effective_port == 443!
-    if req_scheme == "https" && req_port == 443 && matches!(req_host.as_str(), "api.github.com" | "github.com") {
+    if req_scheme == "https"
+        && req_port == 443
+        && matches!(req_host.as_str(), "api.github.com" | "github.com")
+    {
         return true;
     }
 
     // 2. Exact origin match with configured_api_base AND (https OR loopback)
-    if let Some((base_scheme, base_host, base_port)) = parse_effective_origin_str(configured_api_base) {
-        if req_scheme == base_scheme && req_host == base_host && req_port == base_port && (req_scheme == "https" || is_loopback) {
+    if let Some((base_scheme, base_host, base_port)) =
+        parse_effective_origin_str(configured_api_base)
+    {
+        if req_scheme == base_scheme
+            && req_host == base_host
+            && req_port == base_port
+            && (req_scheme == "https" || is_loopback)
+        {
             return true;
         }
     }
@@ -1960,7 +2044,8 @@ pub fn should_attach_github_token(request_url: &str, configured_api_base: &str) 
                 if entry_trimmed.is_empty() {
                     continue;
                 }
-                if let Some((e_scheme, e_host, e_port)) = parse_effective_origin_str(entry_trimmed) {
+                if let Some((e_scheme, e_host, e_port)) = parse_effective_origin_str(entry_trimmed)
+                {
                     if req_scheme == e_scheme && req_host == e_host && req_port == e_port {
                         return true;
                     }
@@ -1992,8 +2077,14 @@ async fn github_release_observation_follows_canonical_repository_redirect() {
             let mut request = vec![0; 4096];
             let length = socket.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..length]);
-            let repository = if redirect { "davidnewhall/unpackerr" } else { "Unpackerr/unpackerr" };
-            let (target_path, is_matched) = if request.starts_with(&format!("GET /repos/{repository}/releases?per_page=100 ")) {
+            let repository = if redirect {
+                "davidnewhall/unpackerr"
+            } else {
+                "Unpackerr/unpackerr"
+            };
+            let (target_path, is_matched) = if request
+                .starts_with(&format!("GET /repos/{repository}/releases?per_page=100 "))
+            {
                 ("releases?per_page=100", true)
             } else if request.starts_with(&format!("GET /repos/{repository}/releases/latest ")) {
                 ("releases/latest", true)
@@ -2011,8 +2102,12 @@ async fn github_release_observation_follows_canonical_repository_redirect() {
         }
     });
     let observed = detect_latest_github_release(
-        &build_github_http_client(), &format!("http://{address}"), "davidnewhall/unpackerr",
-    ).await.unwrap();
+        &build_github_http_client(),
+        &format!("http://{address}"),
+        "davidnewhall/unpackerr",
+    )
+    .await
+    .unwrap();
     server.await.unwrap();
     assert_eq!(observed.0, "0.14.2");
     assert!(observed.1.contains("Unpackerr/unpackerr"));
@@ -2054,7 +2149,10 @@ pub async fn probe_package_update(
 
     let installed_res = detect_installed_version(pkg).await;
     let installed_failed_early = installed_res.is_err()
-        || installed_res.as_ref().map(|v| v.trim().is_empty()).unwrap_or(false);
+        || installed_res
+            .as_ref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(false);
     let installed_err_msg = installed_res.as_ref().err().map(|e| e.to_string());
 
     let latest_res = detect_latest_version(client, github_api_base, pkg).await;
@@ -2094,8 +2192,13 @@ pub async fn probe_package_update(
         && (pkg.update_source == "github_release" || pkg.update_source == "github")
         && !pkg.update_repo.is_empty()
     {
-        if let Some((cached_v, cached_u, cached_obs)) = get_cached_github_release_stale_for_channel(github_api_base, &pkg.update_repo, &pkg.update_channel) {
-            if tag_allowed_by_channel_for_source(&cached_v, &pkg.update_channel, &pkg.update_source) {
+        if let Some((cached_v, cached_u, cached_obs)) = get_cached_github_release_stale_for_channel(
+            github_api_base,
+            &pkg.update_repo,
+            &pkg.update_channel,
+        ) {
+            if tag_allowed_by_channel_for_source(&cached_v, &pkg.update_channel, &pkg.update_source)
+            {
                 record.latest_version = cached_v;
                 if record.release_url.is_empty() {
                     record.release_url = cached_u;
@@ -2107,17 +2210,23 @@ pub async fn probe_package_update(
         }
     }
 
-    let is_retired = matches!(pkg.update_source.as_str(), "retired" | "legacy" | "pinned") || pkg.name == "readarr";
-    let is_readarr_404 = pkg.name == "readarr" && !record.installed_version.is_empty() && match &latest_res {
-        Err(e) => {
-            let msg = e.to_string();
-            msg.contains("404") || msg.contains("not found")
-        }
-        _ => false,
-    };
+    let is_retired = matches!(pkg.update_source.as_str(), "retired" | "legacy" | "pinned")
+        || pkg.name == "readarr";
+    let is_readarr_404 = pkg.name == "readarr"
+        && !record.installed_version.is_empty()
+        && match &latest_res {
+            Err(e) => {
+                let msg = e.to_string();
+                msg.contains("404") || msg.contains("not found")
+            }
+            _ => false,
+        };
 
     let installed_failed = installed_failed_early
-        || record.error.to_ascii_lowercase().contains("installed version");
+        || record
+            .error
+            .to_ascii_lowercase()
+            .contains("installed version");
 
     if is_retired || is_readarr_404 {
         if record.latest_version.is_empty() {
@@ -2131,7 +2240,8 @@ pub async fn probe_package_update(
             if let Some(ref e) = installed_err_msg {
                 record.error = format!("Installed version check failed: {e}");
             } else if record.error.is_empty() {
-                record.error = "Installed version check failed: probe returned no output".to_string();
+                record.error =
+                    "Installed version check failed: probe returned no output".to_string();
             }
             record.update_available = false;
         } else {
@@ -2307,7 +2417,10 @@ pub fn read_receipt_bounded_nofollow(path: &Path) -> Result<Option<String>, Stri
     let fstat_res = unsafe { libc::fstat(owned_file_fd.as_raw_fd(), &mut opened_stat) };
     if fstat_res < 0 {
         let err = std::io::Error::last_os_error();
-        return Err(format!("fstat failed on opened receipt {:?}: {}", path, err));
+        return Err(format!(
+            "fstat failed on opened receipt {:?}: {}",
+            path, err
+        ));
     }
     if (opened_stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
         return Err(format!(
@@ -2330,21 +2443,23 @@ pub fn read_receipt_bounded_nofollow(path: &Path) -> Result<Option<String>, Stri
         .map_err(|e| format!("reading receipt {:?}: {}", path, e))?;
 
     if content.len() > 64 * 1024 {
-        return Err(format!(
-            "receipt {:?} content exceeded 64 KiB limit",
-            path
-        ));
+        return Err(format!("receipt {:?} content exceeded 64 KiB limit", path));
     }
 
     Ok(Some(content))
 }
 
 fn read_af_version_receipt(pkg: &Package) -> Option<String> {
-    static AF_VER_PATH_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(/[A-Za-z0-9_./-]*/\.(?:af-version|af-components\.json))").unwrap());
+    static AF_VER_PATH_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(/[A-Za-z0-9_./-]*/\.(?:af-version|af-components\.json))").unwrap()
+    });
     let mut candidate_paths = Vec::new();
     let is_filebot = pkg.name.eq_ignore_ascii_case("filebot");
-    let opt_name = if is_filebot { "filebot-node" } else { pkg.name.as_str() };
+    let opt_name = if is_filebot {
+        "filebot-node"
+    } else {
+        pkg.name.as_str()
+    };
     if let Some(ref root) = resolve_configured_fs_root() {
         candidate_paths.push(root.join(format!("opt/{}/.af-version", opt_name)));
         candidate_paths.push(root.join(format!("opt/{}/.af-components.json", opt_name)));
@@ -2360,9 +2475,18 @@ fn read_af_version_receipt(pkg: &Package) -> Option<String> {
         }
     }
     candidate_paths.push(resolve_fs_path(&format!("/opt/{}/.af-version", opt_name)));
-    candidate_paths.push(resolve_fs_path(&format!("/opt/{}/.af-components.json", opt_name)));
-    candidate_paths.push(resolve_fs_path(&format!("/var/lib/{}/.af-version", pkg.name)));
-    candidate_paths.push(resolve_fs_path(&format!("/var/lib/{}/.af-components.json", pkg.name)));
+    candidate_paths.push(resolve_fs_path(&format!(
+        "/opt/{}/.af-components.json",
+        opt_name
+    )));
+    candidate_paths.push(resolve_fs_path(&format!(
+        "/var/lib/{}/.af-version",
+        pkg.name
+    )));
+    candidate_paths.push(resolve_fs_path(&format!(
+        "/var/lib/{}/.af-components.json",
+        pkg.name
+    )));
     for token in &pkg.version_command {
         for cap in AF_VER_PATH_RE.captures_iter(token) {
             if let Some(m) = cap.get(1) {
@@ -2373,7 +2497,8 @@ fn read_af_version_receipt(pkg: &Package) -> Option<String> {
     if is_filebot {
         candidate_paths.retain(|p| {
             let s = p.to_string_lossy();
-            !s.ends_with("opt/filebot/.af-version") && !s.ends_with("opt/filebot/.af-components.json")
+            !s.ends_with("opt/filebot/.af-version")
+                && !s.ends_with("opt/filebot/.af-components.json")
         });
     }
 
@@ -2409,7 +2534,10 @@ fn resolve_git_dir_for_probe(logical_path: &str) -> Option<PathBuf> {
     candidates.into_iter().flatten().find(|p| p.exists())
 }
 
-async fn probe_live_git_version(pkg: &Package, _budget: Duration) -> Option<Result<String, anyhow::Error>> {
+async fn probe_live_git_version(
+    pkg: &Package,
+    _budget: Duration,
+) -> Option<Result<String, anyhow::Error>> {
     if pkg.name == "piped" || pkg.update_repo.eq_ignore_ascii_case("TeamPiped/Piped") {
         let fe_dir = resolve_git_dir_for_probe("/opt/piped/frontend/.git")
             .or_else(|| resolve_git_dir_for_probe("/opt/piped/.git"));
@@ -2420,7 +2548,9 @@ async fn probe_live_git_version(pkg: &Package, _budget: Duration) -> Option<Resu
 
         if fe_dir.is_some() || be_dir.is_some() || pr_dir.is_some() {
             let (Some(fe), Some(be), Some(pr)) = (fe_dir, be_dir, pr_dir) else {
-                return Some(Err(anyhow::anyhow!("Incomplete or failed live git probe for piped components")));
+                return Some(Err(anyhow::anyhow!(
+                    "Incomplete or failed live git probe for piped components"
+                )));
             };
 
             let fe_res = af_runner::probe_metadata::resolve_git_head_commit_nofollow(&fe)
@@ -2431,23 +2561,26 @@ async fn probe_live_git_version(pkg: &Package, _budget: Duration) -> Option<Resu
                 .map_err(|e| anyhow::anyhow!("piped proxy git probe failed: {}", e));
 
             match (fe_res, be_res, pr_res) {
-                (Ok(fe_sha), Ok(be_sha), Ok(pr_sha)) => {
-                    Some(Ok(format!(
-                        "frontend:{},backend:{},proxy:{}",
-                        fe_sha.to_ascii_lowercase(),
-                        be_sha.to_ascii_lowercase(),
-                        pr_sha.to_ascii_lowercase()
-                    )))
-                }
-                _ => Some(Err(anyhow::anyhow!("Incomplete or failed live git probe for piped components"))),
+                (Ok(fe_sha), Ok(be_sha), Ok(pr_sha)) => Some(Ok(format!(
+                    "frontend:{},backend:{},proxy:{}",
+                    fe_sha.to_ascii_lowercase(),
+                    be_sha.to_ascii_lowercase(),
+                    pr_sha.to_ascii_lowercase()
+                ))),
+                _ => Some(Err(anyhow::anyhow!(
+                    "Incomplete or failed live git probe for piped components"
+                ))),
             }
         } else {
             None
         }
     } else if pkg.update_source.eq_ignore_ascii_case("git") {
         resolve_git_dir_for_probe(&format!("/opt/{}/source/.git", pkg.name))
-            .or_else(|| resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name))).map(|git_dir| af_runner::probe_metadata::resolve_git_head_commit_nofollow(&git_dir)
-                    .map_err(|e| anyhow::anyhow!("{}", e)))
+            .or_else(|| resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name)))
+            .map(|git_dir| {
+                af_runner::probe_metadata::resolve_git_head_commit_nofollow(&git_dir)
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
     } else {
         None
     }
@@ -2467,7 +2600,9 @@ fn is_regular_executable(path: &Path) -> bool {
             let path_str = path.to_string_lossy();
             if path_str.starts_with("/usr/bin/") || path_str.starts_with("/usr/local/bin/") {
                 if let Ok(target_meta) = fs::metadata(path) {
-                    if target_meta.file_type().is_file() && (target_meta.permissions().mode() & 0o111) != 0 {
+                    if target_meta.file_type().is_file()
+                        && (target_meta.permissions().mode() & 0o111) != 0
+                    {
                         if let Ok(canonical) = fs::canonicalize(path) {
                             let can_str = canonical.to_string_lossy();
                             if !can_str.starts_with("/tmp")
@@ -2499,7 +2634,8 @@ fn dir_has_runtime_files(dir_path: &Path) -> bool {
         let name_str = name.to_string_lossy();
         let lower = name_str.to_ascii_lowercase();
 
-        if lower == ".af-version" || lower == ".af-components.json" || lower == "." || lower == ".." {
+        if lower == ".af-version" || lower == ".af-components.json" || lower == "." || lower == ".."
+        {
             continue;
         }
 
@@ -2619,10 +2755,9 @@ pub fn is_valid_systemd_service_unit(resolved_unit_path: &Path, pkg: &Package) -
         let key = raw_key.trim();
         let val = raw_val.trim();
 
-        if (key == "ExecStart" || key == "WorkingDirectory")
-            && current_section != "Service" {
-                return false;
-            }
+        if (key == "ExecStart" || key == "WorkingDirectory") && current_section != "Service" {
+            return false;
+        }
 
         if current_section != "Service" {
             continue;
@@ -2650,8 +2785,8 @@ pub fn is_valid_systemd_service_unit(resolved_unit_path: &Path, pkg: &Package) -
     }
 
     const INTERPRETERS: &[&str] = &[
-        "sh", "bash", "dash", "zsh", "env", "python", "python3", "python2",
-        "node", "nodejs", "java", "ruby", "perl", "php", "dotnet",
+        "sh", "bash", "dash", "zsh", "env", "python", "python3", "python2", "node", "nodejs",
+        "java", "ruby", "perl", "php", "dotnet",
     ];
 
     for cmd_str in &exec_commands {
@@ -2753,7 +2888,8 @@ pub fn is_valid_systemd_service_unit(resolved_unit_path: &Path, pkg: &Package) -
 
             if !secondary_evidence {
                 let (update_source, apt_pkg) = effective_update_source_and_apt_package(pkg);
-                if (update_source == "apt" || !pkg.update_package.is_empty()) && !apt_pkg.is_empty() {
+                if (update_source == "apt" || !pkg.update_package.is_empty()) && !apt_pkg.is_empty()
+                {
                     let mut cmd = std::process::Command::new("dpkg-query");
                     if let Some(ref root) = resolve_configured_fs_root() {
                         let dpkg_dir = root.join("var/lib/dpkg");
@@ -2915,7 +3051,8 @@ pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Re
     }
 
     let (update_source, _) = effective_update_source_and_apt_package(pkg);
-    let has_live_command = !cmd_only_reads_af_ver && (!pkg.version_command.is_empty() || update_source == "apt");
+    let has_live_command =
+        !cmd_only_reads_af_ver && (!pkg.version_command.is_empty() || update_source == "apt");
     let live_res = if has_live_command {
         Some(run_live_version_command(pkg, Duration::from_secs(10)).await)
     } else {
@@ -2942,12 +3079,17 @@ pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Re
         (Some(Err(e)), _) => Err(e),
         (None, Some(receipt_ver)) => {
             if !has_independent_runtime_evidence(pkg) {
-                anyhow::bail!("No independent runtime evidence found alongside .af-version receipt");
+                anyhow::bail!(
+                    "No independent runtime evidence found alongside .af-version receipt"
+                );
             }
             Ok(receipt_ver)
         }
         (None, None) => {
-            anyhow::bail!("no installed version probe configured or available for {}", pkg.name);
+            anyhow::bail!(
+                "no installed version probe configured or available for {}",
+                pkg.name
+            );
         }
     }
 }
@@ -3000,7 +3142,10 @@ fn build_package_update_record_for_source(
         Ok(_) => {
             let (fallback, fell_back) = resolve_installed_package_version(None, prev_record);
             if is_installed && fell_back {
-                tracing::warn!(package = pkg_name, "installed version probe returned empty output");
+                tracing::warn!(
+                    package = pkg_name,
+                    "installed version probe returned empty output"
+                );
             }
             (fallback, is_installed && fell_back)
         }
@@ -3014,7 +3159,10 @@ fn build_package_update_record_for_source(
     let resolved_expected_key = if !expected_source_key.trim().is_empty() {
         expected_source_key.trim().to_string()
     } else if let Ok(catalog) = crate::get_package_catalog() {
-        if let Some(pkg) = catalog.iter().find(|p| p.name.eq_ignore_ascii_case(pkg_name)) {
+        if let Some(pkg) = catalog
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(pkg_name))
+        {
             canonical_update_source_key(github_api_base, pkg)
         } else {
             let synth = Package {
@@ -3067,11 +3215,7 @@ fn build_package_update_record_for_source(
         ""
     };
 
-    let valid_prev_upstream = if source_matched {
-        prev_record
-    } else {
-        None
-    };
+    let valid_prev_upstream = if source_matched { prev_record } else { None };
 
     let mut stale_cache_observed_at: Option<String> = None;
     let mut used_prev_latest = false;
@@ -3082,7 +3226,14 @@ fn build_package_update_record_for_source(
             tracing::warn!(package = pkg_name, error = %e, "latest version observation failed");
             err_parts.push("Latest version could not be confirmed");
             let mut prev_ver = valid_prev_upstream
-                .filter(|r| !r.latest_version.trim().is_empty() && tag_allowed_by_channel_for_source(&r.latest_version, current_channel, effective_update_source))
+                .filter(|r| {
+                    !r.latest_version.trim().is_empty()
+                        && tag_allowed_by_channel_for_source(
+                            &r.latest_version,
+                            current_channel,
+                            effective_update_source,
+                        )
+                })
                 .map(|r| r.latest_version.clone())
                 .unwrap_or_default();
             let mut prev_url = if !prev_ver.is_empty() {
@@ -3097,14 +3248,26 @@ fn build_package_update_record_for_source(
             } else {
                 if let Ok(pkgs) = crate::get_packages() {
                     if let Some(pkg) = pkgs.iter().find(|p| p.name == pkg_name) {
-                        if (pkg.update_source == "github_release" || pkg.update_source == "github") && !pkg.update_repo.is_empty() {
+                        if (pkg.update_source == "github_release" || pkg.update_source == "github")
+                            && !pkg.update_repo.is_empty()
+                        {
                             let ch = if !pkg.update_channel.trim().is_empty() {
                                 &pkg.update_channel
                             } else {
                                 current_channel
                             };
-                            if let Some((cached_v, cached_u, cached_obs)) = get_cached_github_release_stale_for_channel(github_api_base, &pkg.update_repo, ch) {
-                                if tag_allowed_by_channel_for_source(&cached_v, ch, &pkg.update_source) {
+                            if let Some((cached_v, cached_u, cached_obs)) =
+                                get_cached_github_release_stale_for_channel(
+                                    github_api_base,
+                                    &pkg.update_repo,
+                                    ch,
+                                )
+                            {
+                                if tag_allowed_by_channel_for_source(
+                                    &cached_v,
+                                    ch,
+                                    &pkg.update_source,
+                                ) {
                                     prev_ver = cached_v;
                                     if prev_url.is_empty() {
                                         prev_url = cached_u;
@@ -3113,21 +3276,30 @@ fn build_package_update_record_for_source(
                                 }
                             }
                         }
-                        if prev_ver.is_empty()
-                            && pkg.name == "threadfin" {
-                                let fallback = af_runner::resolve_threadfin_target_version();
-                                if !fallback.is_empty() {
-                                    prev_ver = fallback.clone();
-                                    if prev_url.is_empty() {
-                                        prev_url = format!("https://github.com/Threadfin/Threadfin/releases/tag/{fallback}");
-                                    }
+                        if prev_ver.is_empty() && pkg.name == "threadfin" {
+                            let fallback = af_runner::resolve_threadfin_target_version();
+                            if !fallback.is_empty() {
+                                prev_ver = fallback.clone();
+                                if prev_url.is_empty() {
+                                    prev_url = format!("https://github.com/Threadfin/Threadfin/releases/tag/{fallback}");
                                 }
                             }
+                        }
                     }
                 }
                 if prev_ver.is_empty() {
-                    if let Some((cached_v, cached_u, cached_obs)) = get_cached_github_release_stale_for_channel(github_api_base, pkg_name, current_channel) {
-                        if tag_allowed_by_channel_for_source(&cached_v, current_channel, effective_update_source) {
+                    if let Some((cached_v, cached_u, cached_obs)) =
+                        get_cached_github_release_stale_for_channel(
+                            github_api_base,
+                            pkg_name,
+                            current_channel,
+                        )
+                    {
+                        if tag_allowed_by_channel_for_source(
+                            &cached_v,
+                            current_channel,
+                            effective_update_source,
+                        ) {
                             prev_ver = cached_v;
                             if prev_url.is_empty() {
                                 prev_url = cached_u;
@@ -3141,7 +3313,12 @@ fn build_package_update_record_for_source(
         }
     };
 
-    if installed_res.is_err() || installed_res.as_ref().map(|v| v.trim().is_empty()).unwrap_or(false) {
+    if installed_res.is_err()
+        || installed_res
+            .as_ref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(false)
+    {
         if is_installed && installed_fell_back && latest_res.is_ok() {
             err_parts.push("Installed version probe returned no output; retaining last known installed version");
         } else {
@@ -3152,21 +3329,43 @@ fn build_package_update_record_for_source(
     let update_available = if !is_installed {
         false
     } else if latest_res.is_ok() {
-        if installed_res.is_ok() && !installed_fell_back && !installed_version.is_empty() && !installed_version.eq_ignore_ascii_case("unknown") {
-            is_version_newer_for_source(&installed_version, &latest_version, effective_update_source)
+        if installed_res.is_ok()
+            && !installed_fell_back
+            && !installed_version.is_empty()
+            && !installed_version.eq_ignore_ascii_case("unknown")
+        {
+            is_version_newer_for_source(
+                &installed_version,
+                &latest_version,
+                effective_update_source,
+            )
         } else {
             // Installed probe failed/fell back; do not claim a confirmed update against fresh upstream
             false
         }
     } else if used_prev_latest {
         // Upstream latest_res failed, but previous latest_version was retained
-        if installed_res.is_ok() && !installed_fell_back && !installed_version.is_empty() && !installed_version.eq_ignore_ascii_case("unknown") {
+        if installed_res.is_ok()
+            && !installed_fell_back
+            && !installed_version.is_empty()
+            && !installed_version.eq_ignore_ascii_case("unknown")
+        {
             // Fresh installed observation succeeded: recompute availability against retained latest_version!
-            is_version_newer_for_source(&installed_version, &latest_version, effective_update_source)
+            is_version_newer_for_source(
+                &installed_version,
+                &latest_version,
+                effective_update_source,
+            )
         } else {
             // Installed probe also failed/fell back: preserve previous availability if channel allowed
             valid_prev_upstream
-                .filter(|r| tag_allowed_by_channel_for_source(&r.latest_version, current_channel, effective_update_source))
+                .filter(|r| {
+                    tag_allowed_by_channel_for_source(
+                        &r.latest_version,
+                        current_channel,
+                        effective_update_source,
+                    )
+                })
                 .map(|record| record.update_available)
                 .unwrap_or(false)
         }
@@ -3212,10 +3411,7 @@ async fn update_probe_output(
 
 fn effective_update_source_and_apt_package(pkg: &Package) -> (&str, &str) {
     if af_runner::select_package_engine(&pkg.name) == af_runner::PackageEngineMode::DeclarativeRust
-        && matches!(
-            pkg.name.as_str(),
-            "prometheus" | "netdata" | "mergerfs"
-        )
+        && matches!(pkg.name.as_str(), "prometheus" | "netdata" | "mergerfs")
     {
         let apt_pkg = if pkg.update_package.is_empty() {
             pkg.name.as_str()
@@ -3406,7 +3602,8 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                                 if idx1 < idx2 {
                                     let mut inner = clean[idx1 + 7..idx2].trim();
                                     if inner.starts_with("bash -lc ") {
-                                        inner = inner[9..].trim().trim_matches('\'').trim_matches('"');
+                                        inner =
+                                            inner[9..].trim().trim_matches('\'').trim_matches('"');
                                     }
                                     clean = inner;
                                 }
@@ -3474,8 +3671,14 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
 pub async fn detect_latest_piped_manifest() -> anyhow::Result<(String, String, String)> {
     let (fe, be, px) = tokio::try_join!(
         detect_latest_git_head("https://github.com/TeamPiped/Piped.git", "TeamPiped/Piped"),
-        detect_latest_git_head("https://github.com/TeamPiped/Piped-Backend.git", "TeamPiped/Piped-Backend"),
-        detect_latest_git_head("https://github.com/TeamPiped/Piped-Proxy.git", "TeamPiped/Piped-Proxy"),
+        detect_latest_git_head(
+            "https://github.com/TeamPiped/Piped-Backend.git",
+            "TeamPiped/Piped-Backend"
+        ),
+        detect_latest_git_head(
+            "https://github.com/TeamPiped/Piped-Proxy.git",
+            "TeamPiped/Piped-Proxy"
+        ),
     )?;
     let manifest = format!("frontend:{},backend:{},proxy:{}", fe.0, be.0, px.0);
     let oldest = [&fe.2, &be.2, &px.2]
@@ -3483,7 +3686,11 @@ pub async fn detect_latest_piped_manifest() -> anyhow::Result<(String, String, S
         .min_by_key(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .unwrap()
         .clone();
-    Ok((manifest, "https://github.com/TeamPiped/Piped/commits/HEAD".to_string(), oldest))
+    Ok((
+        manifest,
+        "https://github.com/TeamPiped/Piped/commits/HEAD".to_string(),
+        oldest,
+    ))
 }
 
 async fn detect_latest_version(
@@ -3513,11 +3720,18 @@ async fn detect_latest_version(
         } else {
             pkg.update_repo.trim()
         };
-        return detect_latest_github_release_for_channel(client, github_api_base, repo, &pkg.update_channel).await;
+        return detect_latest_github_release_for_channel(
+            client,
+            github_api_base,
+            repo,
+            &pkg.update_channel,
+        )
+        .await;
     }
     if pkg.name == "piped"
         && pkg.update_repo == "TeamPiped/Piped"
-        && (pkg.update_repo_url.is_empty() || pkg.update_repo_url.contains("github.com/TeamPiped/Piped"))
+        && (pkg.update_repo_url.is_empty()
+            || pkg.update_repo_url.contains("github.com/TeamPiped/Piped"))
     {
         return detect_latest_piped_manifest().await;
     }
@@ -3545,7 +3759,13 @@ async fn detect_latest_version(
         }
         "apt" => detect_latest_apt_version(apt_package).await,
         "github" | "github_release" => {
-            detect_latest_github_release_for_channel(client, github_api_base, &pkg.update_repo, &pkg.update_channel).await
+            detect_latest_github_release_for_channel(
+                client,
+                github_api_base,
+                &pkg.update_repo,
+                &pkg.update_channel,
+            )
+            .await
         }
         "git_tags" | "git" | "git_commit" | "git_head" => {
             let repo_url = if !pkg.update_repo_url.is_empty() {
@@ -3555,10 +3775,14 @@ async fn detect_latest_version(
             } else {
                 String::new()
             };
-            if update_source == "git" || update_source == "git_commit" || update_source == "git_head" {
+            if update_source == "git"
+                || update_source == "git_commit"
+                || update_source == "git_head"
+            {
                 detect_latest_git_head(&repo_url, &pkg.update_repo).await
             } else {
-                detect_latest_git_tag_for_channel(&repo_url, &pkg.update_repo, &pkg.update_channel).await
+                detect_latest_git_tag_for_channel(&repo_url, &pkg.update_repo, &pkg.update_channel)
+                    .await
             }
         }
         other => anyhow::bail!("unsupported update source {:?}", other),
@@ -3605,12 +3829,21 @@ pub async fn detect_latest_pypi_version(
                 .or_else(|| urls.get("source"))
         })
         .cloned()
-        .unwrap_or_else(|| format!("https://pypi.org/project/{}/{}/", package_name.trim(), version));
+        .unwrap_or_else(|| {
+            format!(
+                "https://pypi.org/project/{}/{}/",
+                package_name.trim(),
+                version
+            )
+        });
 
     Ok((version, homepage, Utc::now().to_rfc3339()))
 }
 
-pub async fn detect_latest_git_head(repo_url: &str, repo: &str) -> anyhow::Result<(String, String, String)> {
+pub async fn detect_latest_git_head(
+    repo_url: &str,
+    repo: &str,
+) -> anyhow::Result<(String, String, String)> {
     let url = if !repo_url.trim().is_empty() {
         repo_url.trim().to_string()
     } else if !repo.trim().is_empty() {
@@ -3647,16 +3880,30 @@ pub async fn detect_latest_git_head(repo_url: &str, repo: &str) -> anyhow::Resul
     }
     let res = (
         head,
-        af_release::lifecycle::sanitize_persisted_lifecycle_text(&format!("{}/commits/HEAD", clean_url)),
+        af_release::lifecycle::sanitize_persisted_lifecycle_text(&format!(
+            "{}/commits/HEAD",
+            clean_url
+        )),
     );
     let now_rfc3339 = Utc::now().to_rfc3339();
     if let Ok(mut cache) = GIT_REMOTE_HEAD_CACHE.lock() {
-        cache.insert(cache_key.clone(), (res.0.clone(), res.1.clone(), Instant::now(), now_rfc3339.clone()));
+        cache.insert(
+            cache_key.clone(),
+            (
+                res.0.clone(),
+                res.1.clone(),
+                Instant::now(),
+                now_rfc3339.clone(),
+            ),
+        );
     }
     Ok((res.0, res.1, now_rfc3339))
 }
 
-pub async fn detect_git_remote_head(repo_url: &str, repo: &str) -> anyhow::Result<(String, String, String)> {
+pub async fn detect_git_remote_head(
+    repo_url: &str,
+    repo: &str,
+) -> anyhow::Result<(String, String, String)> {
     detect_latest_git_head(repo_url, repo).await
 }
 
@@ -3735,14 +3982,16 @@ pub async fn detect_latest_github_release_for_channel(
         }
     };
     let effective_channel = effective_channel_owned.as_str();
-    let cache_key = github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
+    let cache_key =
+        github_release_cache_key_for_channel(github_api_base, clean_repo, effective_channel);
 
     if let Ok(cache) = GITHUB_RELEASE_CACHE.lock() {
         if let Some((ver, url, timestamp, observed_at)) = cache.get(&cache_key) {
             if timestamp.elapsed() < Duration::from_secs(15 * 60)
-                && tag_allowed_by_channel(ver, effective_channel) {
-                    return Ok((ver.clone(), url.clone(), observed_at.clone()));
-                }
+                && tag_allowed_by_channel(ver, effective_channel)
+            {
+                return Ok((ver.clone(), url.clone(), observed_at.clone()));
+            }
         }
     }
 
@@ -3753,7 +4002,11 @@ pub async fn detect_latest_github_release_for_channel(
 
     let is_stable = effective_channel == "stable";
     let mut all_releases: Vec<GitHubReleaseResponse> = Vec::new();
-    let mut current_url = format!("{}/repos/{}/releases?per_page={GITHUB_RELEASE_PAGE_SIZE}", github_api_base.trim_end_matches('/'), clean_repo);
+    let mut current_url = format!(
+        "{}/repos/{}/releases?per_page={GITHUB_RELEASE_PAGE_SIZE}",
+        github_api_base.trim_end_matches('/'),
+        clean_repo
+    );
     let mut page_count = 0;
     const MAX_RELEASE_PAGES: usize = 10;
 
@@ -3768,7 +4021,10 @@ pub async fn detect_latest_github_release_for_channel(
             if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")) {
                 let trimmed = token.trim();
                 if !trimmed.is_empty() {
-                    req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", trimmed));
+                    req = req.header(
+                        reqwest::header::AUTHORIZATION,
+                        format!("Bearer {}", trimmed),
+                    );
                 }
             }
         }
@@ -3778,16 +4034,24 @@ pub async fn detect_latest_github_release_for_channel(
         let status_code = status.as_u16();
 
         if page_count == 1 && status == reqwest::StatusCode::NOT_FOUND {
-            let fb_url = format!("{}/repos/{}/releases/latest", github_api_base.trim_end_matches('/'), clean_repo);
+            let fb_url = format!(
+                "{}/repos/{}/releases/latest",
+                github_api_base.trim_end_matches('/'),
+                clean_repo
+            );
             let mut fb_req = client
                 .get(&fb_url)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "AetherFlow-Updater");
             if is_trusted_github_api_url(&fb_url, github_api_base) {
-                if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")) {
+                if let Ok(token) = env::var("AF_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN"))
+                {
                     let trimmed = token.trim();
                     if !trimmed.is_empty() {
-                        fb_req = fb_req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", trimmed));
+                        fb_req = fb_req.header(
+                            reqwest::header::AUTHORIZATION,
+                            format!("Bearer {}", trimmed),
+                        );
                     }
                 }
             }
@@ -3825,7 +4089,8 @@ pub async fn detect_latest_github_release_for_channel(
                 || fb_lower.contains("too many requests");
 
             let fb_is_rate_limit_resp = fb_status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || (fb_status == reqwest::StatusCode::FORBIDDEN && (fb_rem_zero || fb_ra_hdr.is_some() || fb_has_rate_limit));
+                || (fb_status == reqwest::StatusCode::FORBIDDEN
+                    && (fb_rem_zero || fb_ra_hdr.is_some() || fb_has_rate_limit));
 
             if fb_is_rate_limit_resp {
                 let mut cooldown = Duration::from_secs(60);
@@ -3852,7 +4117,10 @@ pub async fn detect_latest_github_release_for_channel(
                 record_github_api_rate_limit(github_api_base, "core", cooldown);
                 record_github_api_rate_limit(github_api_base, "default", cooldown);
 
-                anyhow::bail!("GitHub API rate limit exceeded for {clean_repo} (status {})", fb_status.as_u16());
+                anyhow::bail!(
+                    "GitHub API rate limit exceeded for {clean_repo} (status {})",
+                    fb_status.as_u16()
+                );
             }
 
             if !fb_status.is_success() {
@@ -3904,7 +4172,8 @@ pub async fn detect_latest_github_release_for_channel(
             || body_lower.contains("too many requests");
 
         let is_rate_limit_resp = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || (status == reqwest::StatusCode::FORBIDDEN && (rem_zero || ra_hdr.is_some() || body_has_rate_limit));
+            || (status == reqwest::StatusCode::FORBIDDEN
+                && (rem_zero || ra_hdr.is_some() || body_has_rate_limit));
 
         if is_rate_limit_resp {
             let mut cooldown = Duration::from_secs(60);
@@ -3941,14 +4210,15 @@ pub async fn detect_latest_github_release_for_channel(
             anyhow::bail!("GitHub API returned {}", status);
         }
 
-        let page_releases: Vec<GitHubReleaseResponse> = match serde_json::from_slice::<Vec<GitHubReleaseResponse>>(&body_bytes) {
-            Ok(list) => list,
-            Err(_) => {
-                let single = serde_json::from_slice::<GitHubReleaseResponse>(&body_bytes)
-                    .map_err(|e| anyhow::anyhow!("decode GitHub releases: {}", e))?;
-                vec![single]
-            }
-        };
+        let page_releases: Vec<GitHubReleaseResponse> =
+            match serde_json::from_slice::<Vec<GitHubReleaseResponse>>(&body_bytes) {
+                Ok(list) => list,
+                Err(_) => {
+                    let single = serde_json::from_slice::<GitHubReleaseResponse>(&body_bytes)
+                        .map_err(|e| anyhow::anyhow!("decode GitHub releases: {}", e))?;
+                    vec![single]
+                }
+            };
 
         let page_len = page_releases.len();
         all_releases.extend(page_releases);
@@ -3964,7 +4234,9 @@ pub async fn detect_latest_github_release_for_channel(
         }
 
         if let Some(next_url) = next_from_link {
-            if let Some(request_url) = github_releases_next_request_url(&next_url, github_api_base, clean_repo) {
+            if let Some(request_url) =
+                github_releases_next_request_url(&next_url, github_api_base, clean_repo)
+            {
                 current_url = request_url;
                 continue;
             }
@@ -4010,7 +4282,8 @@ pub async fn detect_latest_github_release_for_channel(
             continue;
         }
 
-        let is_pre = rel.prerelease || !tag_allowed_by_channel_for_source(&rel.tag_name, "stable", "github");
+        let is_pre =
+            rel.prerelease || !tag_allowed_by_channel_for_source(&rel.tag_name, "stable", "github");
         match &best_candidate {
             None => {
                 best_candidate = Some((version, rel.html_url, is_pre));
@@ -4045,7 +4318,15 @@ pub async fn detect_latest_github_release_for_channel(
     );
     let now_rfc3339 = Utc::now().to_rfc3339();
     if let Ok(mut cache) = GITHUB_RELEASE_CACHE.lock() {
-        cache.insert(cache_key.clone(), (result.0.clone(), result.1.clone(), Instant::now(), now_rfc3339.clone()));
+        cache.insert(
+            cache_key.clone(),
+            (
+                result.0.clone(),
+                result.1.clone(),
+                Instant::now(),
+                now_rfc3339.clone(),
+            ),
+        );
     }
     Ok((result.0, result.1, now_rfc3339))
 }
@@ -4178,7 +4459,10 @@ pub async fn detect_latest_git_tag_for_channel(
     };
 
     if best_allowed.is_empty() {
-        if tag_count == 0 && (repo.trim() == "ccf-2012/seedcross" || clean_repo_url.contains("ccf-2012/seedcross")) {
+        if tag_count == 0
+            && (repo.trim() == "ccf-2012/seedcross"
+                || clean_repo_url.contains("ccf-2012/seedcross"))
+        {
             return detect_latest_git_head(&clean_repo_url, repo).await;
         }
         if tag_count > 0 {
@@ -4192,14 +4476,20 @@ pub async fn detect_latest_git_tag_for_channel(
     }
 
     let sanitized_repo_url = sanitize_git_remote_url_for_display(&clean_repo_url);
-    let mut display_url = sanitized_repo_url.trim().trim_end_matches(".git").to_string();
+    let mut display_url = sanitized_repo_url
+        .trim()
+        .trim_end_matches(".git")
+        .to_string();
     if display_url.is_empty() && !repo.trim().is_empty() {
         display_url = format!("https://github.com/{}", repo.trim());
     }
 
     Ok((
         best_allowed,
-        af_release::lifecycle::sanitize_persisted_lifecycle_text(&format!("{}/releases", display_url)),
+        af_release::lifecycle::sanitize_persisted_lifecycle_text(&format!(
+            "{}/releases",
+            display_url
+        )),
         Utc::now().to_rfc3339(),
     ))
 }
@@ -4213,18 +4503,42 @@ pub async fn detect_latest_git_tag(
 
 pub fn strip_trailing_version_punctuation(s: &str) -> &str {
     let mut trimmed = s.trim_end_matches(|c: char| {
-        c == '.' || c == ',' || c == ';' || c == ':' || c == ')' || c == ']' || c == '}' || c == '"' || c == '\''
+        c == '.'
+            || c == ','
+            || c == ';'
+            || c == ':'
+            || c == ')'
+            || c == ']'
+            || c == '}'
+            || c == '"'
+            || c == '\''
     });
     if trimmed.ends_with('+') {
         trimmed = trimmed[..trimmed.len() - 1].trim_end_matches(|c: char| {
-            c == '.' || c == ',' || c == ';' || c == ':' || c == ')' || c == ']' || c == '}' || c == '"' || c == '\''
+            c == '.'
+                || c == ','
+                || c == ';'
+                || c == ':'
+                || c == ')'
+                || c == ']'
+                || c == '}'
+                || c == '"'
+                || c == '\''
         });
     }
     if trimmed.ends_with('-') {
         let prefix = &trimmed[..trimmed.len() - 1];
         if !prefix.contains('-') && !prefix.contains('+') && !prefix.contains('~') {
             trimmed = prefix.trim_end_matches(|c: char| {
-                c == '.' || c == ',' || c == ';' || c == ':' || c == ')' || c == ']' || c == '}' || c == '"' || c == '\''
+                c == '.'
+                    || c == ','
+                    || c == ';'
+                    || c == ':'
+                    || c == ')'
+                    || c == ']'
+                    || c == '}'
+                    || c == '"'
+                    || c == '\''
             });
         }
     }
@@ -4413,8 +4727,7 @@ pub fn dpkg_verrevcmp(a: &str, b: &str) -> std::cmp::Ordering {
     let mut j = 0;
 
     while i < ab.len() || j < bb.len() {
-        while (i < ab.len() && !ab[i].is_ascii_digit())
-            || (j < bb.len() && !bb[j].is_ascii_digit())
+        while (i < ab.len() && !ab[i].is_ascii_digit()) || (j < bb.len() && !bb[j].is_ascii_digit())
         {
             let ac = if i < ab.len() && !ab[i].is_ascii_digit() {
                 Some(ab[i])
@@ -4629,9 +4942,15 @@ fn compare_semver_versions(a: &str, b: &str) -> std::cmp::Ordering {
                     (PrereleaseIdentifier::Numeric(na), PrereleaseIdentifier::Numeric(nb)) => {
                         na.len().cmp(&nb.len()).then_with(|| na.cmp(nb))
                     }
-                    (PrereleaseIdentifier::Numeric(_), PrereleaseIdentifier::Alpha(_)) => std::cmp::Ordering::Less,
-                    (PrereleaseIdentifier::Alpha(_), PrereleaseIdentifier::Numeric(_)) => std::cmp::Ordering::Greater,
-                    (PrereleaseIdentifier::Alpha(sa), PrereleaseIdentifier::Alpha(sb)) => sa.cmp(sb),
+                    (PrereleaseIdentifier::Numeric(_), PrereleaseIdentifier::Alpha(_)) => {
+                        std::cmp::Ordering::Less
+                    }
+                    (PrereleaseIdentifier::Alpha(_), PrereleaseIdentifier::Numeric(_)) => {
+                        std::cmp::Ordering::Greater
+                    }
+                    (PrereleaseIdentifier::Alpha(sa), PrereleaseIdentifier::Alpha(sb)) => {
+                        sa.cmp(sb)
+                    }
                 };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
@@ -4665,7 +4984,8 @@ pub fn is_remote_version_newer_for_source(local: &str, remote: &str, update_sour
     let r_manifest = parse_component_manifest(r_trim);
 
     if l_manifest.is_some() || r_manifest.is_some() {
-        if let (Some(installed_map), Some(latest_map)) = (l_manifest.as_ref(), r_manifest.as_ref()) {
+        if let (Some(installed_map), Some(latest_map)) = (l_manifest.as_ref(), r_manifest.as_ref())
+        {
             if latest_map.len() != installed_map.len() {
                 return true;
             }
@@ -4673,8 +4993,14 @@ pub fn is_remote_version_newer_for_source(local: &str, remote: &str, update_sour
                 let Some(inst_val) = installed_map.get(comp) else {
                     return true;
                 };
-                let is_hex_pair = (af_release::lifecycle::is_hex_digits_7_to_40(latest_val) || af_release::lifecycle::is_hex_digits_7_to_40(af_release::lifecycle::normalize_version(latest_val)))
-                    && (af_release::lifecycle::is_hex_digits_7_to_40(inst_val) || af_release::lifecycle::is_hex_digits_7_to_40(af_release::lifecycle::normalize_version(inst_val)));
+                let is_hex_pair = (af_release::lifecycle::is_hex_digits_7_to_40(latest_val)
+                    || af_release::lifecycle::is_hex_digits_7_to_40(
+                        af_release::lifecycle::normalize_version(latest_val),
+                    ))
+                    && (af_release::lifecycle::is_hex_digits_7_to_40(inst_val)
+                        || af_release::lifecycle::is_hex_digits_7_to_40(
+                            af_release::lifecycle::normalize_version(inst_val),
+                        ));
                 if is_hex_pair {
                     if !af_release::lifecycle::commits_match_prefix(latest_val, inst_val, true) {
                         return true;
@@ -4734,7 +5060,9 @@ pub fn is_newer_version_scalar_for_source(local: &str, remote: &str, update_sour
     let r_norm = af_release::lifecycle::normalize_version(remote);
 
     if l_norm == r_norm
-        || (is_git_commit_sha(l_norm) && is_git_commit_sha(r_norm) && l_norm.eq_ignore_ascii_case(r_norm))
+        || (is_git_commit_sha(l_norm)
+            && is_git_commit_sha(r_norm)
+            && l_norm.eq_ignore_ascii_case(r_norm))
     {
         return false;
     }
@@ -4775,23 +5103,32 @@ pub fn is_newer_version_scalar_for_source(local: &str, remote: &str, update_sour
     // 3. Short & full git commit SHAs
     let l_clean = af_release::lifecycle::normalize_version(l_trim);
     let r_clean = af_release::lifecycle::normalize_version(r_trim);
-    let l_is_hex_sha = af_release::lifecycle::is_hex_digits_7_to_40(l_clean) && !l_clean.contains('.');
-    let r_is_hex_sha = af_release::lifecycle::is_hex_digits_7_to_40(r_clean) && !r_clean.contains('.');
+    let l_is_hex_sha =
+        af_release::lifecycle::is_hex_digits_7_to_40(l_clean) && !l_clean.contains('.');
+    let r_is_hex_sha =
+        af_release::lifecycle::is_hex_digits_7_to_40(r_clean) && !r_clean.contains('.');
     let l_is_sha = is_git_commit_sha(l_clean) && !l_clean.bytes().all(|b| b.is_ascii_digit());
     let r_is_sha = is_git_commit_sha(r_clean) && !r_clean.bytes().all(|b| b.is_ascii_digit());
 
-    let both_all_digits = l_clean.bytes().all(|b| b.is_ascii_digit()) && r_clean.bytes().all(|b| b.is_ascii_digit());
-    let unequal_digit_tags = both_all_digits && l_clean.len() != r_clean.len() && l_clean.len() != 40 && r_clean.len() != 40;
+    let both_all_digits =
+        l_clean.bytes().all(|b| b.is_ascii_digit()) && r_clean.bytes().all(|b| b.is_ascii_digit());
+    let unequal_digit_tags = both_all_digits
+        && l_clean.len() != r_clean.len()
+        && l_clean.len() != 40
+        && r_clean.len() != 40;
 
-    if l_is_hex_sha && r_is_hex_sha && !unequal_digit_tags && (is_commit_source || l_is_sha || r_is_sha) {
+    if l_is_hex_sha
+        && r_is_hex_sha
+        && !unequal_digit_tags
+        && (is_commit_source || l_is_sha || r_is_sha)
+    {
         return !af_release::lifecycle::commits_match_prefix(l_clean, r_clean, true);
     }
 
     // Untagged branch SHA installed on a release-tag-tracked package
-    if l_is_sha && !r_is_sha
-        && parse_semver(r_trim).is_some() {
-            return true;
-        }
+    if l_is_sha && !r_is_sha && parse_semver(r_trim).is_some() {
+        return true;
+    }
 
     compare_semver_versions(l_trim, r_trim) == std::cmp::Ordering::Less
 }
@@ -4808,7 +5145,9 @@ pub fn compare_versions_for_source(a: &str, b: &str, update_source: &str) -> std
     let a_norm = af_release::lifecycle::normalize_version(a);
     let b_norm = af_release::lifecycle::normalize_version(b);
     if a_norm == b_norm
-        || (is_git_commit_sha(a_norm) && is_git_commit_sha(b_norm) && a_norm.eq_ignore_ascii_case(b_norm))
+        || (is_git_commit_sha(a_norm)
+            && is_git_commit_sha(b_norm)
+            && a_norm.eq_ignore_ascii_case(b_norm))
     {
         return std::cmp::Ordering::Equal;
     }
@@ -4816,10 +5155,15 @@ pub fn compare_versions_for_source(a: &str, b: &str, update_source: &str) -> std
     if af_release::lifecycle::commits_match_prefix(a_norm, b_norm, false) {
         return std::cmp::Ordering::Equal;
     }
-    if is_git_commit_sha(a_norm) && is_git_commit_sha(b_norm)
-        && !(a_norm.bytes().all(|b| b.is_ascii_digit()) && b_norm.bytes().all(|b| b.is_ascii_digit())) {
-            return a_norm.to_ascii_lowercase().cmp(&b_norm.to_ascii_lowercase());
-        }
+    if is_git_commit_sha(a_norm)
+        && is_git_commit_sha(b_norm)
+        && !(a_norm.bytes().all(|b| b.is_ascii_digit())
+            && b_norm.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return a_norm
+            .to_ascii_lowercase()
+            .cmp(&b_norm.to_ascii_lowercase());
+    }
 
     compare_semver_versions(a, b)
 }
@@ -4834,8 +5178,10 @@ pub fn persist_package_update_record(record: &PackageUpdateRecord) {
         &public_update_error(&safe_record.error),
     );
     safe_record.source_key = sanitize_source_key_for_persistence(&safe_record.source_key);
-    safe_record.latest_version = af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.latest_version);
-    safe_record.installed_version = af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.installed_version);
+    safe_record.latest_version =
+        af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.latest_version);
+    safe_record.installed_version =
+        af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.installed_version);
     let record = &safe_record;
 
     if let Ok(conn) = af_db::get_conn() {
@@ -5017,9 +5363,7 @@ pub async fn process_next_mediaflow_job() -> bool {
 
     match Command::new("ffmpeg").args(&args).output().await {
         Ok(output) if output.status.success() => {
-            let new_size = fs::metadata(&out_path)
-                .map(|m| m.len() as i64)
-                .unwrap_or(0);
+            let new_size = fs::metadata(&out_path).map(|m| m.len() as i64).unwrap_or(0);
 
             let trash_dir = parent_dir.join(".mediaflow_trash");
             let _ = fs::create_dir_all(&trash_dir);
@@ -5393,8 +5737,9 @@ mod tests {
                     std::fs::read_to_string(format!("/proc/{pid}/stat"))
                         .ok()
                         .and_then(|stat| {
-                            stat.rsplit_once(") ")
-                                .map(|(_, fields)| !fields.starts_with('Z') && !fields.starts_with('X'))
+                            stat.rsplit_once(") ").map(|(_, fields)| {
+                                !fields.starts_with('Z') && !fields.starts_with('X')
+                            })
                         })
                         .unwrap_or(false)
                 })
@@ -5482,7 +5827,8 @@ signal.pause()'
     #[tokio::test]
     async fn version_probe_cancellation_and_overflow_retain_cleanup_ownership() {
         use crate::inventory_regressions::{isolated, Fixture};
-        let name = "workers::tests::version_probe_cancellation_and_overflow_retain_cleanup_ownership";
+        let name =
+            "workers::tests::version_probe_cancellation_and_overflow_retain_cleanup_ownership";
         if !isolated(name) {
             return;
         }
@@ -5505,7 +5851,8 @@ signal.pause()'
         }
         assert!(cleanup.live().is_empty(), "cancelled helper survived");
         std::env::set_var("AF_UPDATE_PROBE_OVERFLOW", "1");
-        let result = update_probe_output(Command::new("fixture-version"), Duration::from_secs(5)).await;
+        let result =
+            update_probe_output(Command::new("fixture-version"), Duration::from_secs(5)).await;
         assert!(result.is_err());
         assert!(cleanup.live().is_empty(), "oversized helper survived");
     }
@@ -5532,7 +5879,10 @@ signal.pause()'
     fn test_git_head_tracking() {
         let local = "a".repeat(40);
         let remote = "b".repeat(40);
-        assert_eq!(parse_git_head(&format!("{}\tHEAD\n", remote)).unwrap(), remote);
+        assert_eq!(
+            parse_git_head(&format!("{}\tHEAD\n", remote)).unwrap(),
+            remote
+        );
         for invalid in ["", "v1.2.3", "abc123 HEAD", &"g".repeat(40)] {
             assert!(parse_git_head(invalid).is_err());
         }
@@ -5609,31 +5959,53 @@ signal.pause()'
     #[test]
     fn update_failures_never_copy_command_diagnostics_into_status() {
         let record = build_package_update_record(
-            "fixture", true,
-            Err(anyhow::anyhow!("SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config")),
-            Err(anyhow::anyhow!("remote endpoint returned SYNTHETIC_PRIVATE_DIAGNOSTIC")),
-            None, "2026-11-06T00:00:00Z".into(),
+            "fixture",
+            true,
+            Err(anyhow::anyhow!(
+                "SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config"
+            )),
+            Err(anyhow::anyhow!(
+                "remote endpoint returned SYNTHETIC_PRIVATE_DIAGNOSTIC"
+            )),
+            None,
+            "2026-11-06T00:00:00Z".into(),
         );
-        assert_eq!(record.error, "Installed version could not be confirmed; Latest version could not be confirmed");
-        assert!(!serde_json::to_string(&record).unwrap().contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
+        assert_eq!(
+            record.error,
+            "Installed version could not be confirmed; Latest version could not be confirmed"
+        );
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
     }
 
     #[cfg(unix)]
     #[test]
     fn legacy_update_errors_are_sanitized_from_database_and_cache() {
         use crate::inventory_regressions::{isolated, Fixture};
-        if !isolated("workers::tests::legacy_update_errors_are_sanitized_from_database_and_cache") { return; }
+        if !isolated("workers::tests::legacy_update_errors_are_sanitized_from_database_and_cache") {
+            return;
+        }
         let _fixture = Fixture::new();
         af_db::init_db().unwrap();
         af_db::get_conn().unwrap().execute(
             "INSERT INTO app_updates(package_name,installed_version,latest_version,update_available,last_error) VALUES('fixture','1.0','1.1',1,'SYNTHETIC_PRIVATE_DIAGNOSTIC')", [],
         ).unwrap();
-        assert_eq!(get_package_update_map()["fixture"].error, "Update status could not be confirmed");
+        assert_eq!(
+            get_package_update_map()["fixture"].error,
+            "Update status could not be confirmed"
+        );
         let mut raw = get_package_update_map()["fixture"].clone();
         raw.error = "different SYNTHETIC_PRIVATE_DIAGNOSTIC".into();
-        PACKAGE_UPDATE_CACHE.lock().unwrap().insert("fixture".into(), raw);
+        PACKAGE_UPDATE_CACHE
+            .lock()
+            .unwrap()
+            .insert("fixture".into(), raw);
         let safe = get_package_update_map();
-        assert_eq!(safe["fixture"].error, "Update status could not be confirmed");
+        assert_eq!(
+            safe["fixture"].error,
+            "Update status could not be confirmed"
+        );
         assert!(safe["fixture"].update_available);
     }
 
@@ -5667,7 +6039,10 @@ signal.pause()'
         );
         assert_eq!(failed.checked_at, "2026-11-01T00:00:00Z");
         assert!(failed.update_available);
-        assert_eq!(failed.error, "Installed version could not be confirmed; Latest version could not be confirmed");
+        assert_eq!(
+            failed.error,
+            "Installed version could not be confirmed; Latest version could not be confirmed"
+        );
     }
 
     #[test]
@@ -5704,15 +6079,21 @@ signal.pause()'
 
     #[test]
     fn test_component_manifest_requirements_and_equality() {
-        assert!(parse_component_manifest("frontend:111111a,backend:222222b,proxy:333333c,frontend:444444d").is_none());
+        assert!(parse_component_manifest(
+            "frontend:111111a,backend:222222b,proxy:333333c,frontend:444444d"
+        )
+        .is_none());
         assert!(parse_component_manifest("frontend:111111a").is_none());
         assert!(parse_component_manifest("frontend:111111a,backend:222222b").is_none());
         assert!(parse_component_manifest("backend:222222b,proxy:333333c").is_none());
         assert!(parse_component_manifest("frontend:111111a,proxy:333333c").is_none());
-        assert!(parse_component_manifest("frontend:111111a,backend:222222b,proxy:333333c").is_some());
+        assert!(
+            parse_component_manifest("frontend:111111a,backend:222222b,proxy:333333c").is_some()
+        );
         assert!(parse_component_manifest("ui:111111a,server:222222b").is_some());
 
-        let raw = "frontend:6e840acbda8d1234567890abcdef1234567890ab,backend:dd032e1d7bb2,proxy:1a2b3c4";
+        let raw =
+            "frontend:6e840acbda8d1234567890abcdef1234567890ab,backend:dd032e1d7bb2,proxy:1a2b3c4";
         assert_eq!(extract_version(raw, "git"), raw);
 
         let m1 = "frontend:111111a,backend:222222b,proxy:333333c";
@@ -5733,7 +6114,8 @@ signal.pause()'
             latest_version: "4.6.1".to_string(),
             update_available: true,
             checked_at: "2026-11-01T12:00:00Z".to_string(),
-            release_url: "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.1".to_string(),
+            release_url: "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.1"
+                .to_string(),
             error: String::new(),
             source_key: "github:https://api.github.com|qbittorrent/qbittorrent".to_string(),
         };
@@ -5742,7 +6124,10 @@ signal.pause()'
             "qbittorrent",
             true,
             Err(anyhow::anyhow!("probe timed out")),
-            Ok(("4.6.2".to_string(), "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.2".to_string())),
+            Ok((
+                "4.6.2".to_string(),
+                "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.2".to_string(),
+            )),
             Some(&prev),
             "2026-11-08T12:00:00Z".to_string(),
         );
@@ -5783,7 +6168,12 @@ signal.pause()'
             let mut cache = github_release_cache();
             cache.insert(
                 cache_key.clone(),
-                ("1.0.0".to_string(), "https://github.com/testowner/testrepo/releases/tag/v1.0.0".to_string(), Instant::now() - Duration::from_secs(3600), "2026-11-08T11:00:00Z".to_string()),
+                (
+                    "1.0.0".to_string(),
+                    "https://github.com/testowner/testrepo/releases/tag/v1.0.0".to_string(),
+                    Instant::now() - Duration::from_secs(3600),
+                    "2026-11-08T11:00:00Z".to_string(),
+                ),
             );
         }
 
@@ -5812,7 +6202,8 @@ signal.pause()'
     #[test]
     fn test_component_manifest_newer_comparison() {
         let local = "frontend:6e840ac,backend:dd032e1,proxy:1a2b3c4";
-        let remote_same = "frontend:6e840acbda8d1234567890abcdef1234567890ab,backend:dd032e1d7bb2,proxy:1a2b3c4";
+        let remote_same =
+            "frontend:6e840acbda8d1234567890abcdef1234567890ab,backend:dd032e1d7bb2,proxy:1a2b3c4";
         assert!(!is_remote_version_newer(local, remote_same));
 
         let remote_diff = "frontend:6e840ac,backend:ffffff1,proxy:1a2b3c4";
@@ -5894,7 +6285,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_stale_af_version_receipt_contradicting_live_runtime_fails() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-stale-ver-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-stale-ver-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/test-stale-pkg");
         std::fs::create_dir_all(&opt_dir).unwrap();
         std::fs::write(opt_dir.join(".af-version"), "1.0.0").unwrap();
@@ -5911,7 +6303,10 @@ signal.pause()'
         let res = probe_installed_package_version_strict(&pkg).await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("Stale or mismatched .af-version receipt"), "actual error: {err_msg}");
+        assert!(
+            err_msg.contains("Stale or mismatched .af-version receipt"),
+            "actual error: {err_msg}"
+        );
 
         // Now fix .af-version to match live runtime
         std::fs::write(opt_dir.join(".af-version"), "2.0.0").unwrap();
@@ -5954,7 +6349,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_piped_strict_probe_verifies_all_three_git_repos_against_receipt() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-piped-git-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-piped-git-{}", uuid::Uuid::new_v4()));
         let opt_piped = temp_dir.join("opt/piped");
         let opt_frontend = opt_piped.join("frontend");
         let opt_backend = opt_piped.join("backend");
@@ -5999,7 +6395,9 @@ signal.pause()'
                 .output()
                 .unwrap();
             assert!(out.status.success());
-            String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase()
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_ascii_lowercase()
         };
 
         let fe_sha = init_repo(&opt_frontend, "piped-frontend");
@@ -6020,11 +6418,18 @@ signal.pause()'
 
         // 1. Success when .af-version matches all 3 repos in installer layout
         let res_ok = probe_installed_package_version_strict(&pkg).await;
-        assert!(res_ok.is_ok(), "Expected success when .af-version matches: {:?}", res_ok.err());
+        assert!(
+            res_ok.is_ok(),
+            "Expected success when .af-version matches: {:?}",
+            res_ok.err()
+        );
         assert_eq!(res_ok.unwrap(), manifest);
 
         // 2. Fails when any of the 3 repos is on a different commit than .af-version
-        let mismatched = format!("frontend:{fe_sha},backend:{},proxy:{pr_sha}", "0".repeat(40));
+        let mismatched = format!(
+            "frontend:{fe_sha},backend:{},proxy:{pr_sha}",
+            "0".repeat(40)
+        );
         std::fs::write(opt_piped.join(".af-version"), &mismatched).unwrap();
         let res_mismatch = probe_installed_package_version_strict(&pkg).await;
         assert!(res_mismatch.is_err());
@@ -6048,7 +6453,8 @@ signal.pause()'
         let _ = std::fs::remove_dir_all(&temp_dir);
 
         // 4. Verify flat layout fallback (/opt/piped/.git, /opt/piped-backend/.git, /opt/piped-proxy/.git)
-        let flat_temp_dir = std::env::temp_dir().join(format!("af-test-piped-flat-{}", uuid::Uuid::new_v4()));
+        let flat_temp_dir =
+            std::env::temp_dir().join(format!("af-test-piped-flat-{}", uuid::Uuid::new_v4()));
         let flat_piped = flat_temp_dir.join("opt/piped");
         let flat_backend = flat_temp_dir.join("opt/piped-backend");
         let flat_proxy = flat_temp_dir.join("opt/piped-proxy");
@@ -6059,7 +6465,11 @@ signal.pause()'
         std::fs::write(flat_piped.join(".af-version"), &flat_manifest).unwrap();
         std::env::set_var("AETHERFLOW_FS_ROOT", &flat_temp_dir);
         let res_flat = probe_installed_package_version_strict(&pkg).await;
-        assert!(res_flat.is_ok(), "Expected success with flat layout fallback: {:?}", res_flat.err());
+        assert!(
+            res_flat.is_ok(),
+            "Expected success with flat layout fallback: {:?}",
+            res_flat.err()
+        );
         assert_eq!(res_flat.unwrap(), flat_manifest);
         std::env::remove_var("AETHERFLOW_FS_ROOT");
         let _ = std::fs::remove_dir_all(&flat_temp_dir);
@@ -6077,11 +6487,21 @@ signal.pause()'
             let mut cache = github_release_cache();
             cache.insert(
                 github_release_cache_key(api_base, repo_a),
-                ("1.0.0".to_string(), format!("https://github.com/{repo_a}/releases/tag/v1.0.0"), Instant::now(), cached_time_a.to_string()),
+                (
+                    "1.0.0".to_string(),
+                    format!("https://github.com/{repo_a}/releases/tag/v1.0.0"),
+                    Instant::now(),
+                    cached_time_a.to_string(),
+                ),
             );
             cache.insert(
                 github_release_cache_key(api_base, repo_b),
-                ("2.0.0".to_string(), format!("https://github.com/{repo_b}/releases/tag/v2.0.0"), Instant::now(), cached_time_b.to_string()),
+                (
+                    "2.0.0".to_string(),
+                    format!("https://github.com/{repo_b}/releases/tag/v2.0.0"),
+                    Instant::now(),
+                    cached_time_b.to_string(),
+                ),
             );
         }
 
@@ -6131,15 +6551,36 @@ signal.pause()'
             let mut cache = git_remote_head_cache();
             cache.insert(
                 git_head_cache_key("https://github.com/TeamPiped/Piped.git", "TeamPiped/Piped"),
-                (sha_fe.to_string(), "https://github.com/TeamPiped/Piped/commits/HEAD".to_string(), Instant::now(), time_fe.to_string()),
+                (
+                    sha_fe.to_string(),
+                    "https://github.com/TeamPiped/Piped/commits/HEAD".to_string(),
+                    Instant::now(),
+                    time_fe.to_string(),
+                ),
             );
             cache.insert(
-                git_head_cache_key("https://github.com/TeamPiped/Piped-Backend.git", "TeamPiped/Piped-Backend"),
-                (sha_be.to_string(), "https://github.com/TeamPiped/Piped-Backend/commits/HEAD".to_string(), Instant::now(), time_be.to_string()),
+                git_head_cache_key(
+                    "https://github.com/TeamPiped/Piped-Backend.git",
+                    "TeamPiped/Piped-Backend",
+                ),
+                (
+                    sha_be.to_string(),
+                    "https://github.com/TeamPiped/Piped-Backend/commits/HEAD".to_string(),
+                    Instant::now(),
+                    time_be.to_string(),
+                ),
             );
             cache.insert(
-                git_head_cache_key("https://github.com/TeamPiped/Piped-Proxy.git", "TeamPiped/Piped-Proxy"),
-                (sha_px.to_string(), "https://github.com/TeamPiped/Piped-Proxy/commits/HEAD".to_string(), Instant::now(), time_px.to_string()),
+                git_head_cache_key(
+                    "https://github.com/TeamPiped/Piped-Proxy.git",
+                    "TeamPiped/Piped-Proxy",
+                ),
+                (
+                    sha_px.to_string(),
+                    "https://github.com/TeamPiped/Piped-Proxy/commits/HEAD".to_string(),
+                    Instant::now(),
+                    time_px.to_string(),
+                ),
             );
         }
 
@@ -6157,48 +6598,113 @@ signal.pause()'
         // SemVer 2.0.0 build metadata is ignored for version precedence
         assert!(!is_remote_version_newer("1.0.0", "1.0.0+build.2"));
         assert!(!is_remote_version_newer("1.0.0+build.2", "1.0.0"));
-        assert_eq!(compare_versions("1.0.0", "1.0.0+build.2"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("1.0.0+build.2", "1.0.0"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0+build.2"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("1.0.0+build.2", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
 
         // Prereleases with letter suffix are strictly OLDER than bare release
         assert!(is_remote_version_newer("1.0.0-foo", "1.0.0"));
         assert!(!is_remote_version_newer("1.0.0", "1.0.0-foo"));
-        assert_eq!(compare_versions("1.0.0-foo", "1.0.0"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions("1.0.0", "1.0.0-foo"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("1.0.0-foo", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0-foo"),
+            std::cmp::Ordering::Greater
+        );
 
         assert!(is_remote_version_newer("1.0.0-alpha.1", "1.0.0"));
-        assert_eq!(compare_versions("1.0.0-alpha.1", "1.0.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("1.0.0-alpha.1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
 
         assert!(is_remote_version_newer("1.0.0-rc.1", "1.0.0"));
-        assert_eq!(compare_versions("1.0.0-rc.1", "1.0.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("1.0.0-rc.1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
 
         // SemVer 2.0.0: numeric prereleases after hyphen (like 1.0.0-1, 1.0.0-0.3.7) are prereleases (LOWER precedence than 1.0.0)
         assert!(is_remote_version_newer("1.0.0-1", "1.0.0"));
         assert!(!is_remote_version_newer("1.0.0", "1.0.0-1"));
-        assert_eq!(compare_versions("1.0.0-1", "1.0.0"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions("1.0.0", "1.0.0-1"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("1.0.0-1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0-1"),
+            std::cmp::Ordering::Greater
+        );
 
         assert!(is_remote_version_newer("1.0.0-0.3.7", "1.0.0"));
-        assert_eq!(compare_versions("1.0.0-0.3.7", "1.0.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("1.0.0-0.3.7", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
 
         // Apt mode: Debian package revisions (-1 > bare, +deb11u1 < +deb11u2, +b1 < +b2)
-        assert!(is_remote_version_newer_for_source("1.0.0", "1.0.0-1", "apt"));
-        assert!(!is_remote_version_newer_for_source("1.0.0-1", "1.0.0", "apt"));
-        assert_eq!(compare_versions_for_source("1.0.0", "1.0.0-1", "apt"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions_for_source("1.0.0-1", "1.0.0", "apt"), std::cmp::Ordering::Greater);
+        assert!(is_remote_version_newer_for_source(
+            "1.0.0", "1.0.0-1", "apt"
+        ));
+        assert!(!is_remote_version_newer_for_source(
+            "1.0.0-1", "1.0.0", "apt"
+        ));
+        assert_eq!(
+            compare_versions_for_source("1.0.0", "1.0.0-1", "apt"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions_for_source("1.0.0-1", "1.0.0", "apt"),
+            std::cmp::Ordering::Greater
+        );
 
-        assert!(is_remote_version_newer_for_source("1.2.3-1ubuntu1", "1.2.3-2ubuntu1", "apt"));
-        assert_eq!(compare_versions_for_source("1.2.3-1ubuntu1", "1.2.3-2ubuntu1", "apt"), std::cmp::Ordering::Less);
+        assert!(is_remote_version_newer_for_source(
+            "1.2.3-1ubuntu1",
+            "1.2.3-2ubuntu1",
+            "apt"
+        ));
+        assert_eq!(
+            compare_versions_for_source("1.2.3-1ubuntu1", "1.2.3-2ubuntu1", "apt"),
+            std::cmp::Ordering::Less
+        );
 
-        assert!(is_remote_version_newer_for_source("1.2.3+deb11u1", "1.2.3+deb11u2", "apt"));
-        assert_eq!(compare_versions_for_source("1.2.3+deb11u1", "1.2.3+deb11u2", "apt"), std::cmp::Ordering::Less);
-        assert!(is_remote_version_newer_for_source("1.2.3+b1", "1.2.3+b2", "apt"));
-        assert_eq!(compare_versions_for_source("1.2.3+b1", "1.2.3+b2", "apt"), std::cmp::Ordering::Less);
+        assert!(is_remote_version_newer_for_source(
+            "1.2.3+deb11u1",
+            "1.2.3+deb11u2",
+            "apt"
+        ));
+        assert_eq!(
+            compare_versions_for_source("1.2.3+deb11u1", "1.2.3+deb11u2", "apt"),
+            std::cmp::Ordering::Less
+        );
+        assert!(is_remote_version_newer_for_source(
+            "1.2.3+b1", "1.2.3+b2", "apt"
+        ));
+        assert_eq!(
+            compare_versions_for_source("1.2.3+b1", "1.2.3+b2", "apt"),
+            std::cmp::Ordering::Less
+        );
 
         // Release prefixes normalized
-        assert_eq!(compare_versions("release_1.0.0", "v1.0.0"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("rel_1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("release-1.0.0", "1.0.0+build.1"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("release_1.0.0", "v1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("rel_1.0.0", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("release-1.0.0", "1.0.0+build.1"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
@@ -6236,7 +6742,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_detect_installed_version_fails_closed_when_live_cmd_fails_with_af_version() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-fail-closed-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-fail-closed-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/test-fail-pkg");
         std::fs::create_dir_all(&opt_dir).unwrap();
         std::fs::write(opt_dir.join(".af-version"), "1.0.0").unwrap();
@@ -6253,7 +6760,10 @@ signal.pause()'
         // Even though .af-version exists with "1.0.0", the configured live probe failed,
         // so detect_installed_version MUST fail closed (Err)
         let res = detect_installed_version(&pkg).await;
-        assert!(res.is_err(), "Expected detect_installed_version to fail closed when live cmd fails");
+        assert!(
+            res.is_err(),
+            "Expected detect_installed_version to fail closed when live cmd fails"
+        );
 
         let rec = build_package_update_record(
             "test-fail-pkg",
@@ -6366,7 +6876,10 @@ signal.pause()'
             &expected_key_a,
         );
         assert_eq!(rec_matching.latest_version, "1.1.0");
-        assert_eq!(rec_matching.release_url, "https://github.com/owner/repo-a/releases/tag/v1.1.0");
+        assert_eq!(
+            rec_matching.release_url,
+            "https://github.com/owner/repo-a/releases/tag/v1.1.0"
+        );
         assert_eq!(rec_matching.checked_at, "2026-11-01T00:00:00Z");
         assert!(rec_matching.update_available);
 
@@ -6496,7 +7009,10 @@ signal.pause()'
             checked_at: "2026-11-01T10:00:00Z".to_string(),
             release_url: "".to_string(),
             error: "failed previously".to_string(),
-            source_key: format!("github:{}|Threadfin/Threadfin", normalize_api_origin(origin)),
+            source_key: format!(
+                "github:{}|Threadfin/Threadfin",
+                normalize_api_origin(origin)
+            ),
         };
 
         let rec_static = build_package_update_record_for_source(
@@ -6508,7 +7024,10 @@ signal.pause()'
             Err(anyhow::anyhow!("GitHub API down")),
             Some(&prev_threadfin_empty),
             "2026-11-08T18:00:00Z".to_string(),
-            &format!("github:{}|Threadfin/Threadfin", normalize_api_origin(origin)),
+            &format!(
+                "github:{}|Threadfin/Threadfin",
+                normalize_api_origin(origin)
+            ),
         );
         assert!(!rec_static.latest_version.is_empty());
         assert_eq!(rec_static.checked_at, ""); // MUST NOT copy prev.checked_at!
@@ -6566,7 +7085,10 @@ signal.pause()'
         // WITHOUT hitting the server, because "core" cooldown is active and shared across buckets!
         let res_a2 = detect_latest_github_release(&client, &origin_a, "owner/repo").await;
         assert!(res_a2.is_err());
-        assert!(res_a2.unwrap_err().to_string().contains("rate limit backoff active"));
+        assert!(res_a2
+            .unwrap_err()
+            .to_string()
+            .contains("rate limit backoff active"));
         assert_eq!(req_count_a.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Cooldown checks across origin A buckets
@@ -6581,7 +7103,11 @@ signal.pause()'
         assert!(!is_github_api_rate_limited(&origin_b, "default"));
 
         let res_b = detect_latest_github_release(&client, &origin_b, "owner/repo").await;
-        assert!(res_b.is_ok(), "Origin B request must succeed despite Origin A rate limit: {:?}", res_b);
+        assert!(
+            res_b.is_ok(),
+            "Origin B request must succeed despite Origin A rate limit: {:?}",
+            res_b
+        );
         let (ver_b, url_b, _) = res_b.unwrap();
         assert_eq!(ver_b, "2.0.0");
         assert_eq!(url_b, "http://mock-b/release");
@@ -6653,7 +7179,13 @@ signal.pause()'
         assert_eq!(rec_uptodate.error, "");
 
         // Pinned version returned without querying upstream GitHub
-        let detected = detect_latest_version(&client, "https://invalid-host-unreachable.example.com", &pkg).await.unwrap();
+        let detected = detect_latest_version(
+            &client,
+            "https://invalid-host-unreachable.example.com",
+            &pkg,
+        )
+        .await
+        .unwrap();
         assert_eq!(detected.0, "0.4.18.2805");
     }
 
@@ -6666,7 +7198,8 @@ signal.pause()'
             latest_version: "4.6.1".to_string(),
             update_available: true,
             checked_at: "2026-11-01T12:00:00Z".to_string(),
-            release_url: "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.1".to_string(),
+            release_url: "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.1"
+                .to_string(),
             error: String::new(),
             source_key: "github:https://api.github.com|qbittorrent/qbittorrent|stable".to_string(),
         };
@@ -6675,7 +7208,10 @@ signal.pause()'
             "qbittorrent",
             true,
             Err(anyhow::anyhow!("probe timed out")),
-            Ok(("4.6.2".to_string(), "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.2".to_string())),
+            Ok((
+                "4.6.2".to_string(),
+                "https://github.com/qbittorrent/qBittorrent/releases/tag/release-4.6.2".to_string(),
+            )),
             Some(&prev),
             "2026-11-08T12:00:00Z".to_string(),
         );
@@ -6691,8 +7227,16 @@ signal.pause()'
 
     #[test]
     fn test_debian_version_preservation_and_comparison() {
-        assert!(is_remote_version_newer_for_source("1.0.0", "1.0.0+git1", "apt"));
-        assert!(!is_remote_version_newer_for_source("1.0.0+git1", "1.0.0", "apt"));
+        assert!(is_remote_version_newer_for_source(
+            "1.0.0",
+            "1.0.0+git1",
+            "apt"
+        ));
+        assert!(!is_remote_version_newer_for_source(
+            "1.0.0+git1",
+            "1.0.0",
+            "apt"
+        ));
         assert_eq!(
             compare_debian_versions_str("1.0.0", "1.0.0+git1"),
             std::cmp::Ordering::Less
@@ -6792,7 +7336,8 @@ signal.pause()'
 
     #[tokio::test]
     async fn test_git_tag_channel_filtering_and_prerelease_rules() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-git-channel-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-git-channel-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let run_git = |args: &[&str]| {
@@ -6801,7 +7346,12 @@ signal.pause()'
                 .current_dir(&temp_dir)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
 
         run_git(&["init", "-b", "main"]);
@@ -6823,7 +7373,11 @@ signal.pause()'
 
         // 1. On "stable" (or ""), numeric prerelease v1.0.0-0.1 and v1.0.0-nightly are ignored -> selects 0.9.0!
         let res_stable = detect_latest_git_tag_for_channel(repo_url, "", "stable").await;
-        assert!(res_stable.is_ok(), "Expected stable tag: {:?}", res_stable.err());
+        assert!(
+            res_stable.is_ok(),
+            "Expected stable tag: {:?}",
+            res_stable.err()
+        );
         assert_eq!(res_stable.unwrap().0, "0.9.0");
 
         let res_default = detect_latest_git_tag_for_channel(repo_url, "", "").await;
@@ -6842,9 +7396,15 @@ signal.pause()'
 
         // On "stable", no stable candidate exists -> MUST RETURN Err (never fall back to prerelease!)
         let res_no_stable = detect_latest_git_tag_for_channel(repo_url, "", "stable").await;
-        assert!(res_no_stable.is_err(), "Expected Err when only prerelease tags exist on stable channel");
+        assert!(
+            res_no_stable.is_err(),
+            "Expected Err when only prerelease tags exist on stable channel"
+        );
         let err_msg = res_no_stable.unwrap_err().to_string();
-        assert!(err_msg.contains("No stable release tags found"), "actual error: {err_msg}");
+        assert!(
+            err_msg.contains("No stable release tags found"),
+            "actual error: {err_msg}"
+        );
 
         // On "rc" or "beta", selects v1.0.0-rc.1
         let res_rc = detect_latest_git_tag_for_channel(repo_url, "", "rc").await;
@@ -6888,7 +7448,10 @@ signal.pause()'
         let res1 = detect_latest_github_release(&client, &origin, repo).await;
         assert!(res1.is_err());
         let err1 = res1.unwrap_err().to_string();
-        assert!(err1.contains("rate limit"), "expected rate limit error, got: {err1}");
+        assert!(
+            err1.contains("rate limit"),
+            "expected rate limit error, got: {err1}"
+        );
         assert_eq!(req_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Cooldown must be recorded across both "releases" and "core"/"default"
@@ -6900,7 +7463,10 @@ signal.pause()'
         let res2 = detect_latest_github_release(&client, &origin, repo).await;
         assert!(res2.is_err());
         let err2 = res2.unwrap_err().to_string();
-        assert!(err2.contains("rate limit backoff active"), "expected backoff error, got: {err2}");
+        assert!(
+            err2.contains("rate limit backoff active"),
+            "expected backoff error, got: {err2}"
+        );
         assert_eq!(
             req_count.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -7007,14 +7573,22 @@ signal.pause()'
 
         // Verify last_error / error preserves the installed version check failure
         assert!(
-            rec.error.to_ascii_lowercase().contains("installed version check failed")
-                || rec.error.to_ascii_lowercase().contains("installed version could not be confirmed"),
+            rec.error
+                .to_ascii_lowercase()
+                .contains("installed version check failed")
+                || rec
+                    .error
+                    .to_ascii_lowercase()
+                    .contains("installed version could not be confirmed"),
             "Expected installed check failure in error, got: {}",
             rec.error
         );
 
         // Crucial requirement: update_available MUST BE FALSE when installed probe fails!
-        assert!(!rec.update_available, "Failed installed probe must NOT allow update_available = true!");
+        assert!(
+            !rec.update_available,
+            "Failed installed probe must NOT allow update_available = true!"
+        );
 
         // Also check DB persisted state:
         let conn = af_db::get_conn().unwrap();
@@ -7025,7 +7599,10 @@ signal.pause()'
         ).unwrap();
         assert!(!db_avail);
         assert!(
-            db_err.unwrap_or_default().to_ascii_lowercase().contains("installed version check failed"),
+            db_err
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("installed version check failed"),
             "Database last_error must preserve failure"
         );
     }
@@ -7208,7 +7785,10 @@ signal.pause()'
         ));
 
         // 5. AF_TRUSTED_GITHUB_ORIGINS environment variable
-        std::env::set_var("AF_TRUSTED_GITHUB_ORIGINS", "https://extra-ghe.corp.local, https://custom.github.net");
+        std::env::set_var(
+            "AF_TRUSTED_GITHUB_ORIGINS",
+            "https://extra-ghe.corp.local, https://custom.github.net",
+        );
         assert!(should_attach_github_token(
             "https://extra-ghe.corp.local/api/v3/repos/a/b",
             "https://api.github.com"
@@ -7226,15 +7806,18 @@ signal.pause()'
 
     #[test]
     fn test_exact_default_https_port_for_builtin_github_origins() {
-        assert!(
-            !should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com")
-        );
-        assert!(
-            should_attach_github_token("https://api.github.com:443/repos/a/b", "https://api.github.com")
-        );
-        assert!(
-            should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com:8443")
-        );
+        assert!(!should_attach_github_token(
+            "https://api.github.com:8443/repos/a/b",
+            "https://api.github.com"
+        ));
+        assert!(should_attach_github_token(
+            "https://api.github.com:443/repos/a/b",
+            "https://api.github.com"
+        ));
+        assert!(should_attach_github_token(
+            "https://api.github.com:8443/repos/a/b",
+            "https://api.github.com:8443"
+        ));
     }
 
     #[test]
@@ -7244,16 +7827,29 @@ signal.pause()'
         assert_eq!(v1, "1.0.0+build--old");
         assert_eq!(v2, "1.0.0+build--new");
         assert_ne!(v1, v2);
-        assert_eq!(extract_version_from_text("1.0.0+build--old"), "1.0.0+build--old");
-        assert_eq!(extract_version_from_text("1.0.0+build--new"), "1.0.0+build--new");
-        assert!(!af_release::lifecycle::versions_match_target("1.0.0+build--old", "1.0.0+build--new"));
-        assert!(!versions_match_target_internal("1.0.0+build--old", "1.0.0+build--new"));
+        assert_eq!(
+            extract_version_from_text("1.0.0+build--old"),
+            "1.0.0+build--old"
+        );
+        assert_eq!(
+            extract_version_from_text("1.0.0+build--new"),
+            "1.0.0+build--new"
+        );
+        assert!(!af_release::lifecycle::versions_match_target(
+            "1.0.0+build--old",
+            "1.0.0+build--new"
+        ));
+        assert!(!versions_match_target_internal(
+            "1.0.0+build--old",
+            "1.0.0+build--new"
+        ));
     }
 
     #[tokio::test]
     async fn test_probe_installed_package_version_strict_requires_independent_runtime_evidence() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-isolated-receipt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-isolated-receipt-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/isolated-pkg");
         std::fs::create_dir_all(&opt_dir).unwrap();
         // Only .af-version exists in isolation, no lock file, no binaries, no systemd units
@@ -7269,7 +7865,10 @@ signal.pause()'
         };
 
         let res = probe_installed_package_version_strict(&pkg).await;
-        assert!(res.is_err(), "Expected probe_installed_package_version_strict to fail without runtime evidence");
+        assert!(
+            res.is_err(),
+            "Expected probe_installed_package_version_strict to fail without runtime evidence"
+        );
         let err_msg = res.unwrap_err().to_string();
         assert!(
             err_msg.contains("No independent runtime evidence found alongside .af-version receipt"),
@@ -7287,7 +7886,10 @@ signal.pause()'
         assert_eq!(extract_version("1.0.0-rc1-", ""), "1.0.0-rc1-");
         assert_eq!(extract_version_from_text("1.0.0+build-"), "1.0.0+build-");
         assert_eq!(extract_version_from_text("1.0.0+build--"), "1.0.0+build--");
-        assert!(!af_release::lifecycle::versions_match_target("1.0.0+build-", "1.0.0+build--"));
+        assert!(!af_release::lifecycle::versions_match_target(
+            "1.0.0+build-",
+            "1.0.0+build--"
+        ));
     }
 
     #[tokio::test]
@@ -7316,23 +7918,39 @@ signal.pause()'
 
         // 1. Stable channel discovery must reject "v2.0.0-rc1"
         let res = detect_latest_github_release_for_channel(&client, &origin, repo, "stable").await;
-        assert!(res.is_err(), "Stable channel must reject prerelease tag: {:?}", res);
+        assert!(
+            res.is_err(),
+            "Stable channel must reject prerelease tag: {:?}",
+            res
+        );
         server.await.unwrap();
 
         // 2. Must NOT store under "stable" cache
         let stable_key = github_release_cache_key_for_channel(&origin, repo, "stable");
         let cached = github_release_cache().get(&stable_key).cloned();
-        assert!(cached.is_none(), "Stable cache must not contain rejected prerelease: {:?}", cached);
+        assert!(
+            cached.is_none(),
+            "Stable cache must not contain rejected prerelease: {:?}",
+            cached
+        );
 
         // 3. Stale cache fallback for stable channel must return None even if prerelease is in cache
         {
             let mut cache = github_release_cache();
             cache.insert(
                 stable_key.clone(),
-                ("2.0.0-rc1".to_string(), "http://mock/url".to_string(), Instant::now() - Duration::from_secs(3600), "2026-11-08T00:00:00Z".to_string()),
+                (
+                    "2.0.0-rc1".to_string(),
+                    "http://mock/url".to_string(),
+                    Instant::now() - Duration::from_secs(3600),
+                    "2026-11-08T00:00:00Z".to_string(),
+                ),
             );
         }
-        assert_eq!(get_cached_github_release_stale_for_channel(&origin, repo, "stable"), None);
+        assert_eq!(
+            get_cached_github_release_stale_for_channel(&origin, repo, "stable"),
+            None
+        );
 
         // 4. Fresh cache lookup via detect_latest_github_release_for_channel must also reject cached 2.0.0-rc1
         let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7343,10 +7961,16 @@ signal.pause()'
             let mut cache = github_release_cache();
             cache.insert(
                 stable_key2.clone(),
-                ("2.0.0-rc1".to_string(), "http://mock/url".to_string(), Instant::now(), "2026-11-08T00:00:00Z".to_string()),
+                (
+                    "2.0.0-rc1".to_string(),
+                    "http://mock/url".to_string(),
+                    Instant::now(),
+                    "2026-11-08T00:00:00Z".to_string(),
+                ),
             );
         }
-        let res_cached = detect_latest_github_release_for_channel(&client, &origin2, repo, "stable").await;
+        let res_cached =
+            detect_latest_github_release_for_channel(&client, &origin2, repo, "stable").await;
         assert!(res_cached.is_err());
     }
 
@@ -7375,17 +7999,31 @@ signal.pause()'
         let origin = format!("http://{addr}");
         let repo = "owner/mixedcase-stable-repo";
 
-        let res_mixed = detect_latest_github_release_for_channel(&client, &origin, repo, "Stable").await;
-        assert!(res_mixed.is_err(), "Stable channel (mixed-case) must reject prerelease:true: {:?}", res_mixed);
+        let res_mixed =
+            detect_latest_github_release_for_channel(&client, &origin, repo, "Stable").await;
+        assert!(
+            res_mixed.is_err(),
+            "Stable channel (mixed-case) must reject prerelease:true: {:?}",
+            res_mixed
+        );
 
-        let res_upper = detect_latest_github_release_for_channel(&client, &origin, repo, "STABLE").await;
-        assert!(res_upper.is_err(), "STABLE channel (upper-case) must reject prerelease:true: {:?}", res_upper);
+        let res_upper =
+            detect_latest_github_release_for_channel(&client, &origin, repo, "STABLE").await;
+        assert!(
+            res_upper.is_err(),
+            "STABLE channel (upper-case) must reject prerelease:true: {:?}",
+            res_upper
+        );
 
         server.await.unwrap();
 
         let stable_key = github_release_cache_key_for_channel(&origin, repo, "stable");
         let cached = github_release_cache().get(&stable_key).cloned();
-        assert!(cached.is_none(), "Stable cache must not contain rejected prerelease: {:?}", cached);
+        assert!(
+            cached.is_none(),
+            "Stable cache must not contain rejected prerelease: {:?}",
+            cached
+        );
     }
 
     #[test]
@@ -7404,7 +8042,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_runtime_evidence_rejects_non_runtime_and_receipt_rejects_symlink_fifo() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-runtime-evidence-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-runtime-evidence-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/evidence-pkg");
         std::fs::create_dir_all(&opt_dir).unwrap();
 
@@ -7422,9 +8061,14 @@ signal.pause()'
         };
 
         let res = probe_installed_package_version_strict(&pkg).await;
-        assert!(res.is_err(), "Expected failure without executable runtime files");
         assert!(
-            res.unwrap_err().to_string().contains("No independent runtime evidence found"),
+            res.is_err(),
+            "Expected failure without executable runtime files"
+        );
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("No independent runtime evidence found"),
             "Should reject non-runtime files as evidence"
         );
 
@@ -7434,19 +8078,30 @@ signal.pause()'
         std::fs::set_permissions(&non_exec_bin, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let res2 = probe_installed_package_version_strict(&pkg).await;
-        assert!(res2.is_err(), "Expected failure when binary is not executable (0o644)");
+        assert!(
+            res2.is_err(),
+            "Expected failure when binary is not executable (0o644)"
+        );
 
         let symlink_receipt = opt_dir.join("symlink_receipt");
         std::os::unix::fs::symlink(&version_file, &symlink_receipt).unwrap();
         let sym_res = read_receipt_bounded_nofollow(&symlink_receipt);
-        assert!(sym_res.is_err(), "read_receipt_bounded_nofollow must reject symlinks: {:?}", sym_res);
+        assert!(
+            sym_res.is_err(),
+            "read_receipt_bounded_nofollow must reject symlinks: {:?}",
+            sym_res
+        );
 
         let fifo_receipt = opt_dir.join("fifo_receipt");
         let c_fifo = std::ffi::CString::new(fifo_receipt.to_str().unwrap()).unwrap();
         let mkfifo_ret = unsafe { af_release::lifecycle::libc::mkfifo(c_fifo.as_ptr(), 0o644) };
         assert_eq!(mkfifo_ret, 0, "mkfifo failed");
         let fifo_res = read_receipt_bounded_nofollow(&fifo_receipt);
-        assert!(fifo_res.is_err(), "read_receipt_bounded_nofollow must reject FIFOs: {:?}", fifo_res);
+        assert!(
+            fifo_res.is_err(),
+            "read_receipt_bounded_nofollow must reject FIFOs: {:?}",
+            fifo_res
+        );
 
         std::env::remove_var("AETHERFLOW_FS_ROOT");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -7455,7 +8110,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_stale_or_empty_service_unit_file_rejected_as_runtime_evidence() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-stale-unit-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-stale-unit-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/stale-service-pkg");
         let systemd_dir = temp_dir.join("etc/systemd/system");
         std::fs::create_dir_all(&opt_dir).unwrap();
@@ -7590,24 +8246,40 @@ signal.pause()'
         let repo = "owner/prerelease-discovery-repo";
 
         // 1. Beta channel queries /releases?per_page=100, skips draft v3.0.0-draft, discovers v2.0.0-beta.1 over v1.9.0
-        let res_beta = detect_latest_github_release_for_channel(&client, &origin, repo, "beta").await;
-        assert!(res_beta.is_ok(), "Beta channel discovery failed: {:?}", res_beta.err());
+        let res_beta =
+            detect_latest_github_release_for_channel(&client, &origin, repo, "beta").await;
+        assert!(
+            res_beta.is_ok(),
+            "Beta channel discovery failed: {:?}",
+            res_beta.err()
+        );
         let (ver_beta, url_beta, _) = res_beta.unwrap();
         assert_eq!(ver_beta, "2.0.0-beta.1");
         assert_eq!(url_beta, "http://mock/release/v2.0.0-beta.1");
 
         // 2. Nightly channel queries /releases?per_page=100, skips draft, discovers v2.0.0-beta.1 over v1.9.0
         let repo_nightly = "owner/prerelease-discovery-nightly";
-        let res_nightly = detect_latest_github_release_for_channel(&client, &origin, repo_nightly, "nightly").await;
-        assert!(res_nightly.is_ok(), "Nightly channel discovery failed: {:?}", res_nightly.err());
+        let res_nightly =
+            detect_latest_github_release_for_channel(&client, &origin, repo_nightly, "nightly")
+                .await;
+        assert!(
+            res_nightly.is_ok(),
+            "Nightly channel discovery failed: {:?}",
+            res_nightly.err()
+        );
         let (ver_nightly, url_nightly, _) = res_nightly.unwrap();
         assert_eq!(ver_nightly, "2.0.0-beta.1");
         assert_eq!(url_nightly, "http://mock/release/v2.0.0-beta.1");
 
         // 3. Stable channel queries /releases/latest and selects v1.9.0
         let repo_stable = "owner/prerelease-discovery-stable";
-        let res_stable = detect_latest_github_release_for_channel(&client, &origin, repo_stable, "stable").await;
-        assert!(res_stable.is_ok(), "Stable channel discovery failed: {:?}", res_stable.err());
+        let res_stable =
+            detect_latest_github_release_for_channel(&client, &origin, repo_stable, "stable").await;
+        assert!(
+            res_stable.is_ok(),
+            "Stable channel discovery failed: {:?}",
+            res_stable.err()
+        );
         let (ver_stable, url_stable, _) = res_stable.unwrap();
         assert_eq!(ver_stable, "1.9.0");
         assert_eq!(url_stable, "http://mock/release/v1.9.0");
@@ -7623,7 +8295,10 @@ signal.pause()'
 
         let key_a = git_head_cache_key(remote_a, repo);
         let key_b = git_head_cache_key(remote_b, repo);
-        assert_ne!(key_a, key_b, "Cache keys must be isolated across different remote URLs");
+        assert_ne!(
+            key_a, key_b,
+            "Cache keys must be isolated across different remote URLs"
+        );
 
         let sha_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let sha_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -7632,8 +8307,24 @@ signal.pause()'
 
         {
             let mut cache = GIT_REMOTE_HEAD_CACHE.lock().unwrap();
-            cache.insert(key_a.clone(), (sha_a.to_string(), "http://remote-a/commit".to_string(), now, ts.clone()));
-            cache.insert(key_b.clone(), (sha_b.to_string(), "http://remote-b/commit".to_string(), now, ts.clone()));
+            cache.insert(
+                key_a.clone(),
+                (
+                    sha_a.to_string(),
+                    "http://remote-a/commit".to_string(),
+                    now,
+                    ts.clone(),
+                ),
+            );
+            cache.insert(
+                key_b.clone(),
+                (
+                    sha_b.to_string(),
+                    "http://remote-b/commit".to_string(),
+                    now,
+                    ts.clone(),
+                ),
+            );
         }
 
         let cached_a = GIT_REMOTE_HEAD_CACHE.lock().unwrap().get(&key_a).cloned();
@@ -7722,7 +8413,8 @@ signal.pause()'
     #[tokio::test]
     async fn test_systemd_unit_validation_execstart_reset_and_missing_script() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-systemd-reset-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-systemd-reset-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/test-svc");
         let systemd_dir = temp_dir.join("etc/systemd/system");
         std::fs::create_dir_all(&opt_dir).unwrap();
@@ -7807,23 +8499,63 @@ signal.pause()'
         let origin = format!("http://{addr}");
 
         // 1. Channel "prerelease" with v1.9.0-beta and v2.0.0
-        let res_pre = detect_latest_github_release_for_channel(&client, &origin, "test-owner/repo-pre", "prerelease").await.unwrap();
-        assert_eq!(res_pre.0, "2.0.0", "prerelease channel must select higher version 2.0.0 over 1.9.0-beta");
+        let res_pre = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/repo-pre",
+            "prerelease",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res_pre.0, "2.0.0",
+            "prerelease channel must select higher version 2.0.0 over 1.9.0-beta"
+        );
         assert_ne!(res_pre.0, "1.9.0-beta");
 
         // 2. Channel "beta" with v1.9.0-beta and v2.0.0
-        let res_beta = detect_latest_github_release_for_channel(&client, &origin, "test-owner/repo-beta", "beta").await.unwrap();
-        assert_eq!(res_beta.0, "2.0.0", "beta channel must select higher version 2.0.0 over 1.9.0-beta");
+        let res_beta = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/repo-beta",
+            "beta",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res_beta.0, "2.0.0",
+            "beta channel must select higher version 2.0.0 over 1.9.0-beta"
+        );
         assert_ne!(res_beta.0, "1.9.0-beta");
 
         // 3. Channel "all" with v1.9.0-beta and v2.0.0
-        let res_all = detect_latest_github_release_for_channel(&client, &origin, "test-owner/repo-all", "all").await.unwrap();
-        assert_eq!(res_all.0, "2.0.0", "all channel must select higher version 2.0.0 over 1.9.0-beta");
+        let res_all = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/repo-all",
+            "all",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res_all.0, "2.0.0",
+            "all channel must select higher version 2.0.0 over 1.9.0-beta"
+        );
         assert_ne!(res_all.0, "1.9.0-beta");
 
         // 4. Channel "prerelease" with v1.9.0-beta and v2.0.0-beta.1
-        let res_pre_beta = detect_latest_github_release_for_channel(&client, &origin, "test-owner/repo-pre-beta", "prerelease").await.unwrap();
-        assert_eq!(res_pre_beta.0, "2.0.0-beta.1", "prerelease channel must select higher version 2.0.0-beta.1 over 1.9.0-beta");
+        let res_pre_beta = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/repo-pre-beta",
+            "prerelease",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res_pre_beta.0, "2.0.0-beta.1",
+            "prerelease channel must select higher version 2.0.0-beta.1 over 1.9.0-beta"
+        );
 
         server.abort();
     }
@@ -7841,7 +8573,10 @@ signal.pause()'
         let key3 = git_head_cache_key(url3, "team/App");
         let key4 = git_head_cache_key(url4, "team/App");
 
-        assert_ne!(key1, key2, "team/App.git and team/app.git must produce distinct git_head_cache_key values");
+        assert_ne!(
+            key1, key2,
+            "team/App.git and team/app.git must produce distinct git_head_cache_key values"
+        );
         assert_eq!(key1, key3, "HTTPS://GIT.EXAMPLE.COM:443/team/App.git and https://Git.Example.com/team/App.git must normalize to same key");
         assert_eq!(key1, key4);
 
@@ -7880,8 +8615,14 @@ signal.pause()'
         let ckey3 = canonical_update_source_key("", &pkg3);
         let ckey4 = canonical_update_source_key("", &pkg4);
 
-        assert_ne!(ckey1, ckey2, "canonical_update_source_key must preserve path case and distinguish App vs app");
-        assert_eq!(ckey1, ckey3, "canonical_update_source_key must normalize authority and default port :443");
+        assert_ne!(
+            ckey1, ckey2,
+            "canonical_update_source_key must preserve path case and distinguish App vs app"
+        );
+        assert_eq!(
+            ckey1, ckey3,
+            "canonical_update_source_key must normalize authority and default port :443"
+        );
         assert_eq!(ckey1, ckey4);
     }
 
@@ -7894,10 +8635,26 @@ signal.pause()'
         assert!(!tag_allowed_by_channel("1.2.3-1.2", "stable"));
 
         // Source-aware for github and git:
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-foo-1", "stable", "github"));
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-1.2", "stable", "github"));
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-foo-1", "stable", "git"));
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-1.2", "stable", "git"));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-foo-1",
+            "stable",
+            "github"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-1.2",
+            "stable",
+            "github"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-foo-1",
+            "stable",
+            "git"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-1.2",
+            "stable",
+            "git"
+        ));
 
         // 2. Allowed on stable for APT / retained targets
         assert!(!is_prerelease_version_for_channel("1:1.2.3-1+b1"));
@@ -7905,10 +8662,24 @@ signal.pause()'
         assert!(!is_prerelease_version_for_channel("1.0.0-1deb12u1"));
         assert!(!is_prerelease_version_for_channel("1.2.3-1"));
 
-        assert!(tag_allowed_by_channel_for_source("1:1.2.3-1+b1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("2.4.5-1ubuntu1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("1.0.0-1deb12u1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("1.2.3-1", "stable", "apt"));
+        assert!(tag_allowed_by_channel_for_source(
+            "1:1.2.3-1+b1",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "2.4.5-1ubuntu1",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "1.0.0-1deb12u1",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "1.2.3-1", "stable", "apt"
+        ));
 
         assert!(tag_allowed_by_channel("1:1.2.3-1+b1", "stable"));
         assert!(tag_allowed_by_channel("2.4.5-1ubuntu1", "stable"));
@@ -7918,13 +8689,15 @@ signal.pause()'
 
     #[test]
     fn test_systemd_unit_execstart_under_unit_rejected() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-systemd-unit-sec-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-systemd-unit-sec-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let service_file = temp_dir.join("test-invalid.service");
         std::fs::write(
             &service_file,
             "[Unit]\nDescription=Test Service\nExecStart=/bin/true\n[Service]\nTimeoutSec=30\n",
-        ).unwrap();
+        )
+        .unwrap();
         let pkg = Package {
             name: "test-invalid".into(),
             ..Default::default()
@@ -7938,9 +8711,13 @@ signal.pause()'
             std::fs::write(
                 &valid_file,
                 "[Unit]\nDescription=Test Service\n[Service]\nExecStart=/bin/true\n",
-            ).unwrap();
+            )
+            .unwrap();
             let is_valid_ok = is_valid_systemd_service_unit(&valid_file, &pkg);
-            assert!(is_valid_ok, "systemd unit with ExecStart under [Service] must be accepted");
+            assert!(
+                is_valid_ok,
+                "systemd unit with ExecStart under [Service] must be accepted"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -7953,7 +8730,10 @@ signal.pause()'
 
         let k1 = git_head_cache_key(u1, "team/App");
         let k2 = git_head_cache_key(u2, "team/App");
-        assert_ne!(k1, k2, "Deploy@host and deploy@host must produce distinct git_head_cache_key values");
+        assert_ne!(
+            k1, k2,
+            "Deploy@host and deploy@host must produce distinct git_head_cache_key values"
+        );
 
         let pkg1 = Package {
             name: "app".into(),
@@ -7971,7 +8751,10 @@ signal.pause()'
         };
         let ck1 = canonical_update_source_key("", &pkg1);
         let ck2 = canonical_update_source_key("", &pkg2);
-        assert_ne!(ck1, ck2, "Deploy@host and deploy@host must produce distinct canonical_update_source_key values");
+        assert_ne!(
+            ck1, ck2,
+            "Deploy@host and deploy@host must produce distinct canonical_update_source_key values"
+        );
 
         let cred_url = "https://admin:super_secret_token@git.example.com/team/App.git";
         let pkg_cred = Package {
@@ -7985,11 +8768,20 @@ signal.pause()'
         let head_key_cred = git_head_cache_key(cred_url, "team/App");
         let disp_url = sanitize_git_remote_url_for_display(cred_url);
 
-        assert!(!ckey_cred.contains("super_secret_token"), "canonical key must not leak password");
+        assert!(
+            !ckey_cred.contains("super_secret_token"),
+            "canonical key must not leak password"
+        );
         assert!(!ckey_cred.contains("admin:super_secret_token"));
-        assert!(!head_key_cred.contains("super_secret_token"), "cache key must not leak password");
+        assert!(
+            !head_key_cred.contains("super_secret_token"),
+            "cache key must not leak password"
+        );
         assert!(!head_key_cred.contains("admin:super_secret_token"));
-        assert!(!disp_url.contains("super_secret_token"), "display url must not leak password");
+        assert!(
+            !disp_url.contains("super_secret_token"),
+            "display url must not leak password"
+        );
         assert!(!disp_url.contains("admin:super_secret_token"));
         assert_eq!(disp_url, "https://git.example.com/team/App.git");
 
@@ -8002,7 +8794,9 @@ signal.pause()'
         };
         persist_package_update_record(&rec);
         if let Ok(conn) = af_db::get_conn() {
-            let mut stmt = conn.prepare("SELECT update_url, last_error FROM app_updates WHERE package_name = ?1").unwrap();
+            let mut stmt = conn
+                .prepare("SELECT update_url, last_error FROM app_updates WHERE package_name = ?1")
+                .unwrap();
             let mut rows = stmt.query(params!["test-cred-pkg"]).unwrap();
             if let Some(row) = rows.next().unwrap() {
                 let saved_url: String = row.get(0).unwrap();
@@ -8016,7 +8810,8 @@ signal.pause()'
 
     #[test]
     fn test_systemd_unit_validation_case_sensitive_and_no_execstartpre() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-systemd-unit-pre-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-systemd-unit-pre-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let pkg = Package {
@@ -8029,16 +8824,24 @@ signal.pause()'
         std::fs::write(
             &pre_only,
             "[Unit]\nDescription=Pre Only\n[Service]\nExecStartPre=/bin/true\n",
-        ).unwrap();
-        assert!(!is_valid_systemd_service_unit(&pre_only, &pkg), "ExecStartPre alone must not satisfy is_valid_systemd_service_unit");
+        )
+        .unwrap();
+        assert!(
+            !is_valid_systemd_service_unit(&pre_only, &pkg),
+            "ExecStartPre alone must not satisfy is_valid_systemd_service_unit"
+        );
 
         // 2. Lowercase execstart= in [Service] -> invalid!
         let lower_only = temp_dir.join("lower-only.service");
         std::fs::write(
             &lower_only,
             "[Unit]\nDescription=Lower Only\n[Service]\nexecstart=/bin/true\n",
-        ).unwrap();
-        assert!(!is_valid_systemd_service_unit(&lower_only, &pkg), "lowercase execstart= must not satisfy is_valid_systemd_service_unit");
+        )
+        .unwrap();
+        assert!(
+            !is_valid_systemd_service_unit(&lower_only, &pkg),
+            "lowercase execstart= must not satisfy is_valid_systemd_service_unit"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -8051,7 +8854,8 @@ signal.pause()'
                 "https://api.github.com/repositories/17803236/releases?per_page=30&page=2",
                 base,
                 "rclone/rclone",
-            ).as_deref(),
+            )
+            .as_deref(),
             Some("https://api.github.com/repos/rclone/rclone/releases?per_page=30&page=2"),
         );
         assert_eq!(
@@ -8059,7 +8863,8 @@ signal.pause()'
                 "https://ghe.internal/api/v3/repositories/123/releases?page=3",
                 "https://ghe.internal/api/v3",
                 "org/repo",
-            ).as_deref(),
+            )
+            .as_deref(),
             Some("https://ghe.internal/api/v3/repos/org/repo/releases?per_page=100&page=3"),
         );
         for url in [
@@ -8075,7 +8880,10 @@ signal.pause()'
             "https://api.github.com/repositories/17803236/releases?page=2#fragment",
             "https://user@api.github.com/repositories/17803236/releases?page=2",
         ] {
-            assert!(github_releases_next_request_url(url, base, "rclone/rclone").is_none(), "{url}");
+            assert!(
+                github_releases_next_request_url(url, base, "rclone/rclone").is_none(),
+                "{url}"
+            );
         }
     }
 
@@ -8093,10 +8901,13 @@ signal.pause()'
                 let expected = if page == 1 {
                     "GET /repos/owner/numeric-links/releases?per_page=100 HTTP/1.1".to_string()
                 } else {
-                    "GET /repos/owner/numeric-links/releases?per_page=100&page=2 HTTP/1.1".to_string()
+                    "GET /repos/owner/numeric-links/releases?per_page=100&page=2 HTTP/1.1"
+                        .to_string()
                 };
                 assert!(request.starts_with(&expected), "{request}");
-                let body = format!(r#"[{{"tag_name":"v{page}.0.0","html_url":"https://github.com/owner/numeric-links/releases/tag/v{page}.0.0"}}]"#);
+                let body = format!(
+                    r#"[{{"tag_name":"v{page}.0.0","html_url":"https://github.com/owner/numeric-links/releases/tag/v{page}.0.0"}}]"#
+                );
                 let link = if page == 1 {
                     format!("Link: <http://{addr}/repositories/123/releases?per_page=100&page=2>; rel=\"next\"\r\n")
                 } else {
@@ -8109,8 +8920,13 @@ signal.pause()'
             }
         });
         let result = detect_latest_github_release_for_channel(
-            &build_github_http_client(), &format!("http://{addr}"), "owner/numeric-links", "stable",
-        ).await.unwrap();
+            &build_github_http_client(),
+            &format!("http://{addr}"),
+            "owner/numeric-links",
+            "stable",
+        )
+        .await
+        .unwrap();
         assert_eq!(result.0, "2.0.0");
         server.await.unwrap();
     }
@@ -8156,8 +8972,18 @@ signal.pause()'
         let client = build_github_http_client();
         let origin = format!("http://{addr}");
 
-        let res = detect_latest_github_release_for_channel(&client, &origin, "test-owner/multi-page-repo", "prerelease").await.unwrap();
-        assert_eq!(res.0, "2.1.0-beta.1", "Pagination must fetch page 2 and discover higher 2.1.0-beta.1 over page 1's v1.9.100");
+        let res = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/multi-page-repo",
+            "prerelease",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res.0, "2.1.0-beta.1",
+            "Pagination must fetch page 2 and discover higher 2.1.0-beta.1 over page 1's v1.9.100"
+        );
 
         server.abort();
     }
@@ -8165,20 +8991,56 @@ signal.pause()'
     #[test]
     fn test_retained_git_tags_and_apt_dotted_revisions() {
         // Git tags: 1.2.3-1 is a SemVer prerelease, rejected on stable
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-1", "stable", "git_tags"));
-        assert!(!tag_allowed_by_channel_for_source("1.0.0-0.1", "stable", "git_tags"));
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-1.2", "stable", "git_tags"));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-1", "stable", "git_tags"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.0.0-0.1",
+            "stable",
+            "git_tags"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-1.2",
+            "stable",
+            "git_tags"
+        ));
 
         // APT: 1.0.0-0.1, 1.2.3-1.2, 1:1.2.3-1+b1, 1.2.3-1 are valid Debian NMU revisions, preserved on stable!
-        assert!(tag_allowed_by_channel_for_source("1.0.0-0.1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("1.2.3-1.2", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("1:1.2.3-1+b1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("1.2.3-1", "stable", "apt"));
-        assert!(tag_allowed_by_channel_for_source("2.4.5-1ubuntu1", "stable", "apt"));
+        assert!(tag_allowed_by_channel_for_source(
+            "1.0.0-0.1",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "1.2.3-1.2",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "1:1.2.3-1+b1",
+            "stable",
+            "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "1.2.3-1", "stable", "apt"
+        ));
+        assert!(tag_allowed_by_channel_for_source(
+            "2.4.5-1ubuntu1",
+            "stable",
+            "apt"
+        ));
 
         // APT rejects prerelease tags
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-rc1", "stable", "apt"));
-        assert!(!tag_allowed_by_channel_for_source("1.2.3-foo-1", "stable", "apt"));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-rc1",
+            "stable",
+            "apt"
+        ));
+        assert!(!tag_allowed_by_channel_for_source(
+            "1.2.3-foo-1",
+            "stable",
+            "apt"
+        ));
     }
 
     #[tokio::test]
@@ -8227,7 +9089,14 @@ signal.pause()'
         let client = build_github_http_client();
         let origin = format!("http://{addr}");
 
-        let res = detect_latest_github_release_for_channel(&client, &origin, "test-owner/backport-repo", "stable").await.unwrap();
+        let res = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/backport-repo",
+            "stable",
+        )
+        .await
+        .unwrap();
         assert_eq!(res.0, "2.0.0", "Stable release discovery must scan releases and select higher 2.0.0 over backport 1.9.4");
         assert_eq!(res.1, "https://github.com/org/repo/releases/v2.0.0");
 
@@ -8251,7 +9120,10 @@ signal.pause()'
                 let req_str = String::from_utf8_lossy(&buf[..n]);
 
                 let (status, body) = if req_str.contains("page=2") {
-                    ("HTTP/1.1 500 Internal Server Error", r#"{"message": "Server Error"}"#.to_string())
+                    (
+                        "HTTP/1.1 500 Internal Server Error",
+                        r#"{"message": "Server Error"}"#.to_string(),
+                    )
                 } else {
                     let mut items = Vec::new();
                     for i in 1..=GITHUB_RELEASE_PAGE_SIZE {
@@ -8278,13 +9150,22 @@ signal.pause()'
         let repo = "test-owner/fail-page2-repo";
 
         let res = detect_latest_github_release_for_channel(&client, &origin, repo, "stable").await;
-        assert!(res.is_err(), "Must fail closed when page 2 returns HTTP 500");
+        assert!(
+            res.is_err(),
+            "Must fail closed when page 2 returns HTTP 500"
+        );
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("GitHub API returned 500") || err_msg.contains("on page 2"), "error: {err_msg}");
+        assert!(
+            err_msg.contains("GitHub API returned 500") || err_msg.contains("on page 2"),
+            "error: {err_msg}"
+        );
 
         let cache_key = github_release_cache_key_for_channel(&origin, repo, "stable");
         let cached = github_release_cache().get(&cache_key).cloned();
-        assert!(cached.is_none(), "Incomplete discovery result must NOT be cached!");
+        assert!(
+            cached.is_none(),
+            "Incomplete discovery result must NOT be cached!"
+        );
 
         server.abort();
     }
@@ -8302,13 +9183,26 @@ signal.pause()'
         };
 
         let key = canonical_update_source_key(dirty_api, &pkg_github);
-        assert!(!key.contains("super_secret_pass"), "Key must not contain password: {key}");
-        assert!(!key.contains("user:"), "Key must not contain userinfo: {key}");
-        assert!(!key.contains("secret_query"), "Key must not contain query parameters: {key}");
-        assert_eq!(key, "github:https://api.github.internal.com/v3|myorg/myapp|stable");
+        assert!(
+            !key.contains("super_secret_pass"),
+            "Key must not contain password: {key}"
+        );
+        assert!(
+            !key.contains("user:"),
+            "Key must not contain userinfo: {key}"
+        );
+        assert!(
+            !key.contains("secret_query"),
+            "Key must not contain query parameters: {key}"
+        );
+        assert_eq!(
+            key,
+            "github:https://api.github.internal.com/v3|myorg/myapp|stable"
+        );
 
         // 2. Git remote URL with query parameters containing secret tokens
-        let dirty_git_url = "https://git.example.com/team/App.git?token=secret123&access_token=xyz#frag";
+        let dirty_git_url =
+            "https://git.example.com/team/App.git?token=secret123&access_token=xyz#frag";
         let pkg_git = Package {
             name: "myapp-git".into(),
             update_source: "git".into(),
@@ -8319,8 +9213,14 @@ signal.pause()'
         };
 
         let git_key = canonical_update_source_key("", &pkg_git);
-        assert!(!git_key.contains("secret123"), "Git source key must not contain token: {git_key}");
-        assert!(!git_key.contains("access_token"), "Git source key must not contain access_token: {git_key}");
+        assert!(
+            !git_key.contains("secret123"),
+            "Git source key must not contain token: {git_key}"
+        );
+        assert!(
+            !git_key.contains("access_token"),
+            "Git source key must not contain access_token: {git_key}"
+        );
 
         let disp_git = sanitize_git_remote_url_for_display(dirty_git_url);
         assert_eq!(disp_git, "https://git.example.com/team/App.git");
@@ -8337,7 +9237,8 @@ signal.pause()'
             checked_at: "2026-11-09T00:00:00Z".into(),
             release_url: "https://git.example.com/repo.git?secret=leak".into(),
             error: "curl -u admin:super_secret_curl https://example.com".into(),
-            source_key: "github:https://api.github.com|myorg/myapp|stable?token=secret_in_key".into(),
+            source_key: "github:https://api.github.com|myorg/myapp|stable?token=secret_in_key"
+                .into(),
         };
 
         persist_package_update_record(&dirty_record);
@@ -8351,11 +9252,26 @@ signal.pause()'
                 let saved_err: String = row.get(3).unwrap();
                 let saved_key: String = row.get(4).unwrap();
 
-                assert!(!saved_inst.contains("secret_in_version"), "installed_version must redact secrets");
-                assert!(!saved_latest.contains("secret_in_latest"), "latest_version must redact secrets");
-                assert!(!saved_url.contains("leak"), "update_url must redact secrets");
-                assert!(!saved_err.contains("super_secret_curl"), "last_error must redact curl user credentials");
-                assert!(!saved_key.contains("secret_in_key"), "source_key must redact secrets");
+                assert!(
+                    !saved_inst.contains("secret_in_version"),
+                    "installed_version must redact secrets"
+                );
+                assert!(
+                    !saved_latest.contains("secret_in_latest"),
+                    "latest_version must redact secrets"
+                );
+                assert!(
+                    !saved_url.contains("leak"),
+                    "update_url must redact secrets"
+                );
+                assert!(
+                    !saved_err.contains("super_secret_curl"),
+                    "last_error must redact curl user credentials"
+                );
+                assert!(
+                    !saved_key.contains("secret_in_key"),
+                    "source_key must redact secrets"
+                );
             }
         }
     }
@@ -8424,17 +9340,31 @@ signal.pause()'
 
         let client = build_github_http_client();
         let origin = format!("http://{addr}");
-        let res = detect_latest_github_release_for_channel(&client, &origin, "test-owner/overflow-repo", "stable").await;
-        assert!(res.is_err(), "Must fail closed when release pagination exceeds MAX_RELEASE_PAGES without exhaustion");
+        let res = detect_latest_github_release_for_channel(
+            &client,
+            &origin,
+            "test-owner/overflow-repo",
+            "stable",
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "Must fail closed when release pagination exceeds MAX_RELEASE_PAGES without exhaustion"
+        );
         let err_str = res.err().unwrap().to_string();
         assert!(
             err_str.contains("GitHub release pagination exceeded maximum page limit (10) for 'test-owner/overflow-repo'; refusing to cache incomplete release set"),
             "Error message mismatch: {err_str}"
         );
 
-        let cache_key = github_release_cache_key_for_channel(&origin, "test-owner/overflow-repo", "stable");
+        let cache_key =
+            github_release_cache_key_for_channel(&origin, "test-owner/overflow-repo", "stable");
         assert!(
-            GITHUB_RELEASE_CACHE.lock().unwrap().get(&cache_key).is_none(),
+            GITHUB_RELEASE_CACHE
+                .lock()
+                .unwrap()
+                .get(&cache_key)
+                .is_none(),
             "Incomplete release scan must not be cached"
         );
         server.abort();
@@ -8452,7 +9382,10 @@ signal.pause()'
         let fallback_input = "invalid url ://Git.Example.com/TeamA/api?foo=bar#frag";
         assert_eq!(
             sanitize_api_base_for_source_key(fallback_input),
-            format!("invalid url ://git.example.com/TeamA/api?q#{}", sha256_hex_12(b"foo=bar"))
+            format!(
+                "invalid url ://git.example.com/TeamA/api?q#{}",
+                sha256_hex_12(b"foo=bar")
+            )
         );
 
         // Finding 4: sanitize_git_remote_url_for_display and normalize_git_remote_url_preserve_path_case
@@ -8461,15 +9394,26 @@ signal.pause()'
             "ssh://git@github.com/Org/Repo.git"
         );
         assert_eq!(
-            normalize_git_remote_url_preserve_path_case("git@github.com:Org/Repo.git?token=secret#readme"),
-            format!("ssh://git@github.com/Org/Repo?q#{}", sha256_hex_12(b"token=secret"))
+            normalize_git_remote_url_preserve_path_case(
+                "git@github.com:Org/Repo.git?token=secret#readme"
+            ),
+            format!(
+                "ssh://git@github.com/Org/Repo?q#{}",
+                sha256_hex_12(b"token=secret")
+            )
         );
 
         // Finding 3: persist_package_update_record / sanitize_source_key_for_persistence preserves ssh:// and cred#...
         let canonical_ssh_key = "git-repo:ssh://Deploy@git.example.com/Team/App.git#main";
         let canonical_cred_key = "git-repo:https://cred#0123456789ab@github.com/org/repo.git#main";
-        assert_eq!(sanitize_source_key_for_persistence(canonical_ssh_key), canonical_ssh_key);
-        assert_eq!(sanitize_source_key_for_persistence(canonical_cred_key), canonical_cred_key);
+        assert_eq!(
+            sanitize_source_key_for_persistence(canonical_ssh_key),
+            canonical_ssh_key
+        );
+        assert_eq!(
+            sanitize_source_key_for_persistence(canonical_cred_key),
+            canonical_cred_key
+        );
         assert_eq!(
             af_release::lifecycle::sanitize_persisted_lifecycle_text(canonical_ssh_key),
             canonical_ssh_key
@@ -8492,29 +9436,61 @@ signal.pause()'
         };
         persist_package_update_record(&rec);
         if let Ok(conn) = af_db::get_conn() {
-            let saved_key: String = conn.query_row(
-                "SELECT source_key FROM app_updates WHERE package_name = ?1",
-                params!["test-ssh-key-pkg"],
-                |r| r.get(0),
-            ).unwrap();
-            assert_eq!(saved_key, canonical_ssh_key, "Persisted source_key must match canonical SSH key");
+            let saved_key: String = conn
+                .query_row(
+                    "SELECT source_key FROM app_updates WHERE package_name = ?1",
+                    params!["test-ssh-key-pkg"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                saved_key, canonical_ssh_key,
+                "Persisted source_key must match canonical SSH key"
+            );
         }
 
         // Finding 7: compare_versions and compare_versions_for_source with 7+ digit tags
-        assert_eq!(compare_versions("10000000", "9000000"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions("v10000000", "v9000000"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions_for_source("10000000", "9000000", "git"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions_for_source("v10000000", "v9000000", "git"), std::cmp::Ordering::Greater);
-        assert!(is_newer_version_scalar_for_source("9000000", "10000000", "git"));
-        assert!(!is_newer_version_scalar_for_source("10000000", "9000000", "git"));
+        assert_eq!(
+            compare_versions("10000000", "9000000"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("v10000000", "v9000000"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions_for_source("10000000", "9000000", "git"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions_for_source("v10000000", "v9000000", "git"),
+            std::cmp::Ordering::Greater
+        );
+        assert!(is_newer_version_scalar_for_source(
+            "9000000", "10000000", "git"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "10000000", "9000000", "git"
+        ));
     }
 
     #[test]
     fn test_wave20_builder_b_regressions() {
         // 1. API base cache key and rate limit isolation across base paths (/TeamA/api/v3 vs /TeamB/api/v3)
-        let key_a = github_release_cache_key_for_channel("https://ghe.internal/TeamA/api/v3", "myorg/repo", "stable");
-        let key_b = github_release_cache_key_for_channel("https://ghe.internal/TeamB/api/v3", "myorg/repo", "stable");
-        assert_ne!(key_a, key_b, "Cache keys for /TeamA/api/v3 and /TeamB/api/v3 must be distinct!");
+        let key_a = github_release_cache_key_for_channel(
+            "https://ghe.internal/TeamA/api/v3",
+            "myorg/repo",
+            "stable",
+        );
+        let key_b = github_release_cache_key_for_channel(
+            "https://ghe.internal/TeamB/api/v3",
+            "myorg/repo",
+            "stable",
+        );
+        assert_ne!(
+            key_a, key_b,
+            "Cache keys for /TeamA/api/v3 and /TeamB/api/v3 must be distinct!"
+        );
         assert!(key_a.contains("teama/api/v3") || key_a.contains("TeamA/api/v3"));
         assert!(key_b.contains("teamb/api/v3") || key_b.contains("TeamB/api/v3"));
 
@@ -8525,14 +9501,20 @@ signal.pause()'
         assert!(is_github_rate_limited_for_origin(base_a, "core"));
         assert!(github_rate_limit_remaining_secs_for_origin(base_a, "core") > 0);
         assert!(!is_github_rate_limited_for_origin(base_b, "core"));
-        assert_eq!(github_rate_limit_remaining_secs_for_origin(base_b, "core"), 0);
+        assert_eq!(
+            github_rate_limit_remaining_secs_for_origin(base_b, "core"),
+            0
+        );
         clear_github_rate_limits();
 
         // 2. Query-bearing Git source keys (?q#<12-hex>) idempotence on persistence
         let q_key_bare = "git-repo:https://github.com/org/repo.git?q#0123456789ab";
         assert_eq!(sanitize_source_key_for_persistence(q_key_bare), q_key_bare);
         let q_key_branch = "git-repo:https://github.com/org/repo.git?q#0123456789ab#main";
-        assert_eq!(sanitize_source_key_for_persistence(q_key_branch), q_key_branch);
+        assert_eq!(
+            sanitize_source_key_for_persistence(q_key_branch),
+            q_key_branch
+        );
         // Repeated persistence calls are strictly idempotent
         assert_eq!(
             sanitize_source_key_for_persistence(&sanitize_source_key_for_persistence(q_key_branch)),
@@ -8577,23 +9559,36 @@ signal.pause()'
         let num_sha2 = "1234567";
 
         // "9999999" vs "123456abcdef..." on "git"
-        assert!(is_newer_version_scalar_for_source(num_sha1, full_sha, "git"));
-        assert!(is_newer_version_scalar_for_source(full_sha, num_sha1, "git"));
+        assert!(is_newer_version_scalar_for_source(
+            num_sha1, full_sha, "git"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            full_sha, num_sha1, "git"
+        ));
 
         // "9999999" vs "1234567" on "git"
-        assert!(is_newer_version_scalar_for_source(num_sha1, num_sha2, "git"));
-        assert!(is_newer_version_scalar_for_source(num_sha2, num_sha1, "git"));
+        assert!(is_newer_version_scalar_for_source(
+            num_sha1, num_sha2, "git"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            num_sha2, num_sha1, "git"
+        ));
 
         // Prefix match is NOT an update
         let full_matching_9 = "9999999abcdef0123456789abcdef0123456789a";
-        assert!(!is_newer_version_scalar_for_source(num_sha1, full_matching_9, "git"));
-        assert!(!is_newer_version_scalar_for_source(full_matching_9, num_sha1, "git"));
+        assert!(!is_newer_version_scalar_for_source(
+            num_sha1,
+            full_matching_9,
+            "git"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            full_matching_9,
+            num_sha1,
+            "git"
+        ));
 
         // Synthetic commit version rejects pure-numeric short SHA (which are SemVer prereleases)
-        assert_eq!(
-            parse_synthetic_commit_version("0.1.0-1234567"),
-            None
-        );
+        assert_eq!(parse_synthetic_commit_version("0.1.0-1234567"), None);
         assert_eq!(
             parse_synthetic_commit_version("0.1.0-6e840ac"),
             Some(("0.1.0", "6e840ac"))
@@ -8623,33 +9618,90 @@ signal.pause()'
         ));
 
         // Finding 8: Numeric SemVer prereleases
-        assert!(is_newer_version_scalar_for_source("1.0.0-1234567", "2.0.0-1234567", ""));
-        assert!(!is_newer_version_scalar_for_source("2.0.0-1234567", "1.0.0-1234567", ""));
-        assert!(is_newer_version_scalar_for_source("1.0.0-1234567", "2.0.0-1234567", "false"));
-        assert!(!is_newer_version_scalar_for_source("2.0.0-1234567", "1.0.0-1234567", "false"));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-1234567",
+            "2.0.0-1234567",
+            ""
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "2.0.0-1234567",
+            "1.0.0-1234567",
+            ""
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-1234567",
+            "2.0.0-1234567",
+            "false"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "2.0.0-1234567",
+            "1.0.0-1234567",
+            "false"
+        ));
         assert!(is_newer_version_scalar("1.0.0-1234567", "2.0.0-1234567"));
         assert!(!is_newer_version_scalar("2.0.0-1234567", "1.0.0-1234567"));
 
         // Finding 8: Synthetic commit versions comparing differing version bases
-        assert!(is_newer_version_scalar_for_source("1.0.0-6e840ac", "2.0.0-6e840ac", ""));
-        assert!(!is_newer_version_scalar_for_source("2.0.0-6e840ac", "1.0.0-deadbeef", ""));
-        assert!(is_newer_version_scalar_for_source("1.0.0-6e840ac", "2.0.0-6e840ac", "false"));
-        assert!(!is_newer_version_scalar_for_source("2.0.0-6e840ac", "1.0.0-deadbeef", "false"));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-6e840ac",
+            "2.0.0-6e840ac",
+            ""
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "2.0.0-6e840ac",
+            "1.0.0-deadbeef",
+            ""
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-6e840ac",
+            "2.0.0-6e840ac",
+            "false"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "2.0.0-6e840ac",
+            "1.0.0-deadbeef",
+            "false"
+        ));
         assert!(is_newer_version_scalar("1.0.0-6e840ac", "2.0.0-6e840ac"));
         assert!(!is_newer_version_scalar("2.0.0-6e840ac", "1.0.0-deadbeef"));
 
         // Finding 8: Same version base compares commit SHAs on git provenance
-        assert!(!is_newer_version_scalar_for_source("1.0.0-6e840ac", "1.0.0-6e840ac", "git"));
-        assert!(is_newer_version_scalar_for_source("1.0.0-6e840ac", "1.0.0-deadbeef", "git"));
-        assert!(!is_newer_version_scalar_for_source("1.0.0-abcdef1", "1.0.0-abcdef0", "github"));
-        assert!(is_newer_version_scalar_for_source("1.0.0-abcdef0", "1.0.0-abcdef1", "github"));
-        assert!(!is_newer_version_scalar_for_source("1.0.0-abcdef1", "1.0.0-abcdef0", ""));
-        assert!(is_newer_version_scalar_for_source("1.0.0-abcdef0", "1.0.0-abcdef1", ""));
+        assert!(!is_newer_version_scalar_for_source(
+            "1.0.0-6e840ac",
+            "1.0.0-6e840ac",
+            "git"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-6e840ac",
+            "1.0.0-deadbeef",
+            "git"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "1.0.0-abcdef1",
+            "1.0.0-abcdef0",
+            "github"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-abcdef0",
+            "1.0.0-abcdef1",
+            "github"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "1.0.0-abcdef1",
+            "1.0.0-abcdef0",
+            ""
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-abcdef0",
+            "1.0.0-abcdef1",
+            ""
+        ));
     }
 
     #[tokio::test]
     async fn test_wave22_filebot_version_detection_and_update_check() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-filebot-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-filebot-{}", uuid::Uuid::new_v4()));
         let opt_filebot_node = temp_dir.join("opt/filebot-node");
         let server_dir = opt_filebot_node.join("server");
         let opt_filebot = temp_dir.join("opt/filebot");
@@ -8659,7 +9711,11 @@ signal.pause()'
 
         // Node component files
         std::fs::write(server_dir.join("app.js"), "console.log('filebot-node');").unwrap();
-        std::fs::write(server_dir.join("package.json"), r#"{"name":"filebot-node","version":"0.4.7.0"}"#).unwrap();
+        std::fs::write(
+            server_dir.join("package.json"),
+            r#"{"name":"filebot-node","version":"0.4.7.0"}"#,
+        )
+        .unwrap();
         std::fs::write(opt_filebot_node.join(".af-version"), "0.4.7.0").unwrap();
 
         // Separate CLI files in /opt/filebot with version 5.1.6
@@ -8694,27 +9750,45 @@ signal.pause()'
 
         // 3. Strict installed version probe detects 0.4.7.0
         let installed = probe_installed_package_version_strict(&pkg).await;
-        assert!(installed.is_ok(), "Failed to probe installed version: {:?}", installed.err());
+        assert!(
+            installed.is_ok(),
+            "Failed to probe installed version: {:?}",
+            installed.err()
+        );
         assert_eq!(installed.unwrap(), "0.4.7.0");
 
         // 4. Live version command executes python probe with active fs_root
         let live_ver = run_live_version_command(&pkg, Duration::from_secs(5)).await;
-        assert!(live_ver.is_ok(), "Live version probe failed: {:?}", live_ver.err());
+        assert!(
+            live_ver.is_ok(),
+            "Live version probe failed: {:?}",
+            live_ver.err()
+        );
         assert_eq!(live_ver.unwrap().trim(), "0.4.7.0");
 
         // 5. Update availability: 0.4.8.1 is newer than 0.4.7.0
-        assert!(is_remote_version_newer_for_source("0.4.7.0", "0.4.8.1", "github"));
+        assert!(is_remote_version_newer_for_source(
+            "0.4.7.0", "0.4.8.1", "github"
+        ));
 
         // 6. Certification match for 0.4.8.1 target
-        assert!(af_release::lifecycle::versions_match_target("0.4.8.1", "0.4.8.1"));
+        assert!(af_release::lifecycle::versions_match_target(
+            "0.4.8.1", "0.4.8.1"
+        ));
 
         // 7. Update to 0.4.8.1
-        std::fs::write(server_dir.join("package.json"), r#"{"name":"filebot-node","version":"0.4.8.1"}"#).unwrap();
+        std::fs::write(
+            server_dir.join("package.json"),
+            r#"{"name":"filebot-node","version":"0.4.8.1"}"#,
+        )
+        .unwrap();
         std::fs::write(opt_filebot_node.join(".af-version"), "0.4.8.1").unwrap();
 
         let updated_installed = probe_installed_package_version_strict(&pkg).await.unwrap();
         assert_eq!(updated_installed, "0.4.8.1");
-        assert!(!is_remote_version_newer_for_source("0.4.8.1", "0.4.8.1", "github"));
+        assert!(!is_remote_version_newer_for_source(
+            "0.4.8.1", "0.4.8.1", "github"
+        ));
 
         std::env::remove_var("AETHERFLOW_FS_ROOT");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -8723,19 +9797,43 @@ signal.pause()'
     #[test]
     fn test_wave22_semver_prerelease_provenance_and_numeric() {
         // GitHub release source: SemVer ordering is enforced (downgrades are false)
-        assert!(!is_newer_version_scalar_for_source("1.0.0-abcdef1", "1.0.0-abcdef0", "github"));
-        assert!(is_newer_version_scalar_for_source("1.0.0-abcdef0", "1.0.0-abcdef1", "github"));
-        assert!(!is_newer_version_scalar_for_source("1.0.0-abcdef1", "1.0.0-abcdef0", ""));
-        assert!(is_newer_version_scalar_for_source("1.0.0-abcdef0", "1.0.0-abcdef1", ""));
+        assert!(!is_newer_version_scalar_for_source(
+            "1.0.0-abcdef1",
+            "1.0.0-abcdef0",
+            "github"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-abcdef0",
+            "1.0.0-abcdef1",
+            "github"
+        ));
+        assert!(!is_newer_version_scalar_for_source(
+            "1.0.0-abcdef1",
+            "1.0.0-abcdef0",
+            ""
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-abcdef0",
+            "1.0.0-abcdef1",
+            ""
+        ));
 
         // Explicit git source: different commit hashes are treated as newer
-        assert!(is_newer_version_scalar_for_source("1.0.0-abcdef1", "1.0.0-abcdef0", "git"));
+        assert!(is_newer_version_scalar_for_source(
+            "1.0.0-abcdef1",
+            "1.0.0-abcdef0",
+            "git"
+        ));
 
         // 40-digit numeric prereleases: must not be treated as commit SHAs and must not overflow
         let num40_hi = "1.0.0-1234567890123456789012345678901234567899";
         let num40_lo = "1.0.0-1234567890123456789012345678901234567898";
-        assert!(!is_newer_version_scalar_for_source(num40_hi, num40_lo, "github"));
-        assert!(is_newer_version_scalar_for_source(num40_lo, num40_hi, "github"));
+        assert!(!is_newer_version_scalar_for_source(
+            num40_hi, num40_lo, "github"
+        ));
+        assert!(is_newer_version_scalar_for_source(
+            num40_lo, num40_hi, "github"
+        ));
         assert!(!is_newer_version_scalar_for_source(num40_hi, num40_lo, ""));
         assert!(is_newer_version_scalar_for_source(num40_lo, num40_hi, ""));
 
@@ -8746,21 +9844,32 @@ signal.pause()'
         assert!(!is_newer_version_scalar_for_source(num40, num39, ""));
 
         // is_git_commit_sha rejects pure decimal strings of length 40
-        assert!(!is_git_commit_sha("1234567890123456789012345678901234567890"));
-        assert!(is_git_commit_sha("123456789012345678901234567890123456789a"));
+        assert!(!is_git_commit_sha(
+            "1234567890123456789012345678901234567890"
+        ));
+        assert!(is_git_commit_sha(
+            "123456789012345678901234567890123456789a"
+        ));
         assert!(!is_git_commit_sha("1234567"));
         assert!(is_git_commit_sha("6e840ac"));
 
         // parse_synthetic_commit_version rejects pure numeric suffixes
-        assert_eq!(parse_synthetic_commit_version("1.0.0-1234567890123456789012345678901234567890"), None);
+        assert_eq!(
+            parse_synthetic_commit_version("1.0.0-1234567890123456789012345678901234567890"),
+            None
+        );
         assert_eq!(parse_synthetic_commit_version("1.0.0-1234567"), None);
-        assert_eq!(parse_synthetic_commit_version("1.0.0-6e840ac"), Some(("1.0.0", "6e840ac")));
+        assert_eq!(
+            parse_synthetic_commit_version("1.0.0-6e840ac"),
+            Some(("1.0.0", "6e840ac"))
+        );
     }
 
     #[tokio::test]
     async fn test_github_package_with_git_checkout_uses_version_command_not_git_head() {
         let _env_guard = TEST_ENV_MUTEX.lock().await;
-        let temp_dir = std::env::temp_dir().join(format!("af-test-gh-git-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-gh-git-{}", uuid::Uuid::new_v4()));
         let opt_dir = temp_dir.join("opt/demo-gh");
         std::fs::create_dir_all(&opt_dir).unwrap();
         assert!(std::process::Command::new("git")
@@ -8822,9 +9931,7 @@ signal.pause()'
             "1:1.9.1-1+b1"
         ));
         assert!(!apt_receipt_matches_live_debian_revision(
-            "apt",
-            "1.9.1",
-            "1.9.2-1"
+            "apt", "1.9.1", "1.9.2-1"
         ));
         assert!(!apt_receipt_matches_live_debian_revision(
             "apt",
@@ -8842,5 +9949,4 @@ signal.pause()'
             "1.9.1-2+deb13u1"
         ));
     }
-
 }

@@ -23,8 +23,7 @@ fn read_asset(rel_path: &str) -> Option<Vec<u8>> {
             }
         }
     }
-    EmbeddedNeutralDist::get(rel_path)
-        .map(|f| f.data.into_owned())
+    EmbeddedNeutralDist::get(rel_path).map(|f| f.data.into_owned())
 }
 
 fn has_index_bundle() -> bool {
@@ -56,8 +55,10 @@ fn build_file_response(path_key: &str, bytes: Vec<u8>, cache_control: &'static s
     if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
         resp.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
     resp
 }
 
@@ -154,11 +155,7 @@ pub async fn spa_fallback_handler(req: Request) -> Response {
     // Step 2: Clean route match for Next.js static export (`/login` -> `login.html`)
     let html_candidate = format!("{}.html", clean_path);
     if let Some(data) = read_asset(&html_candidate) {
-        return build_file_response(
-            &html_candidate,
-            data,
-            "no-cache, no-store, must-revalidate",
-        );
+        return build_file_response(&html_candidate, data, "no-cache, no-store, must-revalidate");
     }
 
     // Step 3: Directory index match (`/login/` -> `login/index.html`)

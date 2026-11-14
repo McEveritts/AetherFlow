@@ -10,17 +10,20 @@ use std::path::{Path, PathBuf};
 const SENSITIVE_DIAGNOSTIC_KEY_PATTERN: &str = r"(?:[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credentials?|bearer|passphrase|cookies?|session(?:[_-]?(?:id|key|token|secret))?|webhook(?:[_-]?(?:url|secret|token|key))?|master[_-]?pass|rclone[_-]?(?:rc[_-]?)?pass|jwt[_-]?secret)[A-Za-z0-9_.-]*|\b(?:[A-Za-z0-9]*[_.-])?pass(?:[_.-][A-Za-z0-9]*)*\b)";
 
 pub static SENSITIVE_ASSIGNMENT_PREFIX_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(&[
-        r#"(?i)((?:\\*['"])?"#,
-        SENSITIVE_DIAGNOSTIC_KEY_PATTERN,
-        r#"(?:\\*['"])?\s*[:=]\s*)"#,
-    ].concat()).unwrap()
+    Regex::new(
+        &[
+            r#"(?i)((?:\\*['"])?"#,
+            SENSITIVE_DIAGNOSTIC_KEY_PATTERN,
+            r#"(?:\\*['"])?\s*[:=]\s*)"#,
+        ]
+        .concat(),
+    )
+    .unwrap()
 });
 
 pub fn is_sensitive_diagnostic_key(key: &str) -> bool {
-    static SENSITIVE_KEY_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(&format!(r"(?i)^{}$", SENSITIVE_DIAGNOSTIC_KEY_PATTERN)).unwrap()
-    });
+    static SENSITIVE_KEY_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(&format!(r"(?i)^{}$", SENSITIVE_DIAGNOSTIC_KEY_PATTERN)).unwrap());
     SENSITIVE_KEY_RE.is_match(key)
 }
 
@@ -36,11 +39,15 @@ pub static SENSITIVE_JSON_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)((?:\\?['"])?(?:[A-Za-z0-9_.-]*?(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credential(?:s)?|passphrase|rclone[_-]?(?:rc[_-]?)?pass|jwt[_-]?secret|master[_-]?pass)[A-Za-z0-9_.-]*|\b(?:[A-Za-z0-9]*[_.\-])?pass(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?cookies?(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?session(?:[_.\-]?(?:id|key|token|secret))?(?:[_.\-][A-Za-z0-9]*)*\b|\b(?:[A-Za-z0-9]*[_.\-])?webhook(?:[_.\-]?(?:url|secret|token|key))?(?:[_.\-][A-Za-z0-9]*)*\b)(?:\\?['"])?)(\s*:\s*)(?:\\"(?:\\\\\\"|\\\\\\\\|\\\\[^"]|[^"\\])*\\"?|"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|\{(?:[^{}\r\n]|\{[^{}\r\n]*\})*\}|\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\]|[^\s,;{}\x5b\x5d]+(?:,[^\s,;\"{}\x5b\x5d]+)*)"#).unwrap()
 });
 static SENSITIVE_CONTAINER_KEY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(&[
-        r#"(?i)(?:\\*["'])?\b"#,
-        SENSITIVE_DIAGNOSTIC_KEY_PATTERN,
-        r#"\b(?:\\*["'])?\s*[:=]\s*([\{\[])"#,
-    ].concat()).unwrap()
+    Regex::new(
+        &[
+            r#"(?i)(?:\\*["'])?\b"#,
+            SENSITIVE_DIAGNOSTIC_KEY_PATTERN,
+            r#"\b(?:\\*["'])?\s*[:=]\s*([\{\[])"#,
+        ]
+        .concat(),
+    )
+    .unwrap()
 });
 
 pub fn redact_sensitive_nested_containers(input: &str) -> String {
@@ -101,9 +108,8 @@ pub fn redact_sensitive_nested_containers(input: &str) -> String {
 }
 
 fn is_diagnostic_command_tail(value: &str) -> bool {
-    static COMMAND_TAIL_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^-{1,2}[A-Za-z][A-Za-z0-9-]*(?:\s|=|$)").unwrap()
-    });
+    static COMMAND_TAIL_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"^-{1,2}[A-Za-z][A-Za-z0-9-]*(?:\s|=|$)").unwrap());
     COMMAND_TAIL_RE.is_match(value)
 }
 
@@ -194,7 +200,10 @@ pub fn has_matching_secret_quote(bytes: &[u8], quote_index: usize, escape_depth:
             backslashes += 1;
             continue;
         }
-        if next == quote && ((escape_depth == 0 && backslashes % 2 == 0) || (escape_depth > 0 && backslashes == escape_depth)) {
+        if next == quote
+            && ((escape_depth == 0 && backslashes % 2 == 0)
+                || (escape_depth > 0 && backslashes == escape_depth))
+        {
             return true;
         }
         backslashes = 0;
@@ -232,7 +241,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                 || matches!(after, Some(b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&'));
             // `[REDACTED]",` / `[REDACTED]\" https://...` closes an enclosing string.
             // `[REDACTED]"secret"` / `[REDACTED]\"secret\"` is a glued quote segment.
-            if closes_enclosing && (!after.is_some_and(|next| next.is_ascii_whitespace()) || !has_matching_secret_quote(bytes, i + bs0, bs0)) {
+            if closes_enclosing
+                && (!after.is_some_and(|next| next.is_ascii_whitespace())
+                    || !has_matching_secret_quote(bytes, i + bs0, bs0))
+            {
                 return i;
             }
         } else if bytes[i].is_ascii_whitespace()
@@ -269,7 +281,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                             }
                         };
                     // `{"stage": "token=SECRET\""}` — the backslash-quote closes the JSON string.
-                    if closes_outer && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !has_matching_secret_quote(bytes, q_idx, bs)) {
+                    if closes_outer
+                        && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                            || !has_matching_secret_quote(bytes, q_idx, bs))
+                    {
                         break;
                     }
                     let mut j = q_idx + 1;
@@ -329,7 +344,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                     }
                 };
                 // `{"stage": "token=SECRET", "rc": 1}` — this quote closes the enclosing string.
-                if closes_outer && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !has_matching_secret_quote(bytes, i, 0)) {
+                if closes_outer
+                    && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                        || !has_matching_secret_quote(bytes, i, 0))
+                {
                     break;
                 }
             }
@@ -488,26 +506,46 @@ pub fn is_complete_redacted_header(prefix: &str, value: &str) -> bool {
     if prefix.contains('=') || !prefix.contains(':') {
         return false;
     }
-    let key = prefix.split(':').next().unwrap_or(prefix).trim()
+    let key = prefix
+        .split(':')
+        .next()
+        .unwrap_or(prefix)
+        .trim()
         .trim_matches(|character: char| matches!(character, '"' | '\'' | '\\'));
-    if !matches!(key.to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "x-auth-token") {
+    if !matches!(
+        key.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "x-auth-token"
+    ) {
         return false;
     }
-    let Some(suffix) = value.strip_prefix("[REDACTED]") else { return false; };
+    let Some(suffix) = value.strip_prefix("[REDACTED]") else {
+        return false;
+    };
     if suffix.trim().is_empty() {
         return true;
     }
     let quoted_prefix = prefix.trim().trim_start_matches('\\');
-    let Some(opening_quote @ ('\'' | '"')) = quoted_prefix.chars().next() else { return false; };
+    let Some(opening_quote @ ('\'' | '"')) = quoted_prefix.chars().next() else {
+        return false;
+    };
     let suffix = suffix.trim_start_matches('\\');
-    let Some(quote @ ('\'' | '"')) = suffix.chars().next() else { return false; };
+    let Some(quote @ ('\'' | '"')) = suffix.chars().next() else {
+        return false;
+    };
     if quote != opening_quote {
         return false;
     }
     let following = suffix[quote.len_utf8()..].trim_start();
-    following.is_empty() || is_diagnostic_command_tail(following) || following.starts_with("https://")
-        || following.starts_with("http://") || following.starts_with([',', '}', ']'])
+    following.is_empty()
+        || is_diagnostic_command_tail(following)
+        || following.starts_with("https://")
+        || following.starts_with("http://")
+        || following.starts_with([',', '}', ']'])
 }
 
 fn redact_prefixed_secrets(text: &str, prefix_re: &Regex, allow_comma_list: bool) -> String {
@@ -526,7 +564,9 @@ fn redact_prefixed_secrets(text: &str, prefix_re: &Regex, allow_comma_list: bool
             continue;
         }
         let value = &slice[mat.end()..];
-        if is_complete_redacted_header(&slice[mat.start()..mat.end()], value) || scalar_value_is_container(value) {
+        if is_complete_redacted_header(&slice[mat.start()..mat.end()], value)
+            || scalar_value_is_container(value)
+        {
             out.push_str(&slice[..mat.end()]);
             cursor += mat.end();
             continue;
@@ -2167,12 +2207,11 @@ pub fn validate_single_version_token(ver: &str) -> bool {
         let sha = &trimmed[idx + 1..];
         if is_hex_sha_7_to_64(sha) && !prefix.is_empty() {
             let prefix_lower = prefix.to_ascii_lowercase();
-            if prefix
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
-                && (prefix.starts_with(|character: char| character.is_ascii_digit())
-                    || (!FORBIDDEN_TOKENS.contains(&prefix_lower.as_str())
-                        && !is_sensitive_key_name(&prefix_lower)))
+            if prefix.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+            }) && (prefix.starts_with(|character: char| character.is_ascii_digit())
+                || (!FORBIDDEN_TOKENS.contains(&prefix_lower.as_str())
+                    && !is_sensitive_key_name(&prefix_lower)))
             {
                 return true;
             }

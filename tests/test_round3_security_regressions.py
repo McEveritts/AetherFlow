@@ -214,6 +214,155 @@ class Round3SecurityRegressionTests(unittest.TestCase):
             )
             self.assertIn("export[[:space:]]+", modern)
 
+    def test_common_sh_keeps_last_aes_master_key_and_validates_tar_archives(self) -> None:
+        import tarfile
+        import io
+
+        with tempfile.TemporaryDirectory(prefix="af-r5-common-") as tmp:
+            root = Path(tmp)
+            env_file = root / "aetherflow.env"
+            stale_hex = bytes([0x11] * 32).hex()
+            active_hex = bytes([0x22] * 32).hex()
+            env_file.write_text(
+                f"AES_MASTER_KEY={stale_hex}\nexport AES_MASTER_KEY={active_hex}\n",
+                encoding="utf-8",
+            )
+            creds_file = root / ".master.creds"
+            lock_dir = root / "lock"
+            lock_dir.mkdir()
+            env = {
+                **os.environ,
+                "AETHERFLOW_ENV_FILE": str(env_file),
+                "AETHERFLOW_MASTER_CREDS_FILE": str(creds_file),
+                "LOCK_DIR": str(lock_dir),
+                "LOGFILE": "/dev/null",
+            }
+            for k in ("AES_MASTER_KEY", "MASTER_USER", "MASTER_PASS"):
+                env.pop(k, None)
+
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{ROOT / "packages/common.sh"}" && '
+                    'load_master_credentials && printf "%s" "$MASTER_PASS"',
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            generated_pass = proc.stdout
+            self.assertGreaterEqual(len(generated_pass), 16)
+            # Removing stale_hex and keeping only active_hex must still decrypt cleanly
+            env_file.write_text(f"AES_MASTER_KEY={active_hex}\n", encoding="utf-8")
+            proc2 = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{ROOT / "packages/common.sh"}" && load_master_credentials && printf "%s" "$MASTER_PASS"',
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(proc2.stdout, generated_pass)
+
+            # Verify af_validate_tar_archive rejects traversal & symlink archives
+            bad_tar = root / "traversal.tar.gz"
+            with tarfile.open(bad_tar, "w:gz") as tf:
+                info = tarfile.TarInfo(name="../escaped.py")
+                payload = b"print('bad')\n"
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+            bad_res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{ROOT / "packages/common.sh"}" && af_validate_tar_archive "{bad_tar}"',
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_res.returncode, 0)
+
+    def test_log_retention_preserves_late_append_before_ftruncate(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "af_log_retention_r5", ROOT / "deploy/log-retention.py"
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory(prefix="af-r5-logret-") as tmp:
+            log_dir = Path(tmp)
+            os.chmod(log_dir, 0o750)
+            log_path = log_dir / "install-test.log"
+            log_path.write_bytes(b"A" * 2048)
+            os.chmod(log_path, 0o640)
+
+            orig_fsync = mod.os.fsync
+            orig_lseek = mod.os.lseek
+            state = {"seeded": False, "late": False}
+
+            def hook_fsync(fd: int) -> None:
+                orig_fsync(fd)
+                if not state["seeded"] and log_path.stat().st_size == 2048:
+                    state["seeded"] = True
+                    with open(log_path, "ab") as writer1:
+                        writer1.write(b"INITIAL_LIVE_TAIL\n")
+
+            def hook_lseek(fd: int, pos: int, how: int) -> int:
+                res = orig_lseek(fd, pos, how)
+                if state["seeded"] and not state["late"] and pos == 0 and how == os.SEEK_SET:
+                    state["late"] = True
+                    with open(log_path, "ab") as late_writer:
+                        late_writer.write(b"LATE_APPEND_CANARY\n")
+                return res
+
+            mod.os.fsync = hook_fsync
+            mod.os.lseek = hook_lseek
+            try:
+                mod.retain_logs(str(log_dir), max_bytes=512, keep=2)
+            finally:
+                mod.os.fsync = orig_fsync
+                mod.os.lseek = orig_lseek
+
+            final_bytes = log_path.read_bytes()
+            self.assertIn(b"INITIAL_LIVE_TAIL\n", final_bytes)
+            self.assertIn(b"LATE_APPEND_CANARY\n", final_bytes)
+
+    def test_verify_provenance_strips_auth_on_cross_origin_redirect(self) -> None:
+        import importlib.util
+        import urllib.request
+
+        spec = importlib.util.spec_from_file_location(
+            "af_verify_prov_r5", ROOT / "deploy/verify-provenance.py"
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod._is_trusted_github_https_url("https://api.github.com/repos/a/b"))
+        self.assertFalse(mod._is_trusted_github_https_url("http://api.github.com/repos/a/b"))
+        self.assertFalse(mod._is_trusted_github_https_url("https://evil.example.com/repos/a/b"))
+
+        handler = mod._StripAuthCrossOriginRedirectHandler()
+        orig_req = urllib.request.Request(
+            "https://api.github.com/repos/McEveritts/AetherFlow/attestations/sha256:" + ("a" * 64),
+            headers={"Authorization": "Bearer test-token"},
+        )
+        redirected = handler.redirect_request(
+            orig_req, None, 302, "Found", {}, "https://s3.amazonaws.com/bucket/blob"
+        )
+        assert redirected is not None
+        self.assertNotIn("Authorization", redirected.headers)
+        self.assertNotIn("Authorization", redirected.unredirected_hdrs)
+
 
 if __name__ == "__main__":
     unittest.main()

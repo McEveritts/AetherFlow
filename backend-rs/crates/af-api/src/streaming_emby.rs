@@ -1,6 +1,4 @@
-use af_services::{
-    ActiveStreamSession, StreamingLibraryCounts, StreamingServerStatus,
-};
+use af_services::{ActiveStreamSession, StreamingLibraryCounts, StreamingServerStatus};
 use axum::http::{header, StatusCode};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
@@ -379,7 +377,7 @@ struct EmbyNowPlayingItemRaw {
     #[serde(default)]
     image_tags: HashMap<String, String>,
     #[serde(default)]
-     primary_image_tag: String,
+    primary_image_tag: String,
     #[serde(default)]
     primary_image_item_id: String,
     #[serde(default)]
@@ -897,9 +895,11 @@ pub fn resolve_emby_session_capabilities(s: &EmbySessionRaw) -> EmbySessionCapab
         }
     }
 
-    let explicit_media_ctrl = s
-        .supports_media_control
-        .or_else(|| s.capabilities.as_ref().and_then(|c| c.supports_media_control));
+    let explicit_media_ctrl = s.supports_media_control.or_else(|| {
+        s.capabilities
+            .as_ref()
+            .and_then(|c| c.supports_media_control)
+    });
 
     // In Emby's SessionInfo serializer, `Capabilities` has [IgnoreDataMember] and top-level
     // `SupportsRemoteControl` + `SupportedCommands` are serialized, whereas some Emby builds/proxies
@@ -930,8 +930,7 @@ pub fn resolve_emby_session_capabilities(s: &EmbySessionRaw) -> EmbySessionCapab
         .iter()
         .any(|c| c.eq_ignore_ascii_case("DisplayMessage"));
 
-    let can_send_message =
-        supports_media_control && supports_remote_control && has_display_message;
+    let can_send_message = supports_media_control && supports_remote_control && has_display_message;
 
     EmbySessionCapabilityEvidence {
         supports_media_control,
@@ -1061,11 +1060,11 @@ pub fn normalize_emby_session(
                 if s.play_state
                     .as_ref()
                     .and_then(|ps| ps.subtitle_stream_index)
-                    == Some(ms.index)
-                => {
-                    subtitle_codec = ms.codec.trim().to_uppercase();
-                    subtitle_language = ms.language.trim().to_uppercase();
-                }
+                    == Some(ms.index) =>
+            {
+                subtitle_codec = ms.codec.trim().to_uppercase();
+                subtitle_language = ms.language.trim().to_uppercase();
+            }
             _ => {}
         }
     }
@@ -1134,7 +1133,8 @@ pub fn normalize_emby_session(
             artwork_item_id = item.primary_image_item_id.trim().to_string();
         }
         has_artwork = true;
-    } else if !item.series_id.trim().is_empty() && !item.series_primary_image_tag.trim().is_empty() {
+    } else if !item.series_id.trim().is_empty() && !item.series_primary_image_tag.trim().is_empty()
+    {
         artwork_item_id = item.series_id.trim().to_string();
         has_artwork = true;
     } else if !item.backdrop_image_tags.is_empty() || !item.backdrop_image_tag.trim().is_empty() {
@@ -1145,7 +1145,10 @@ pub fn normalize_emby_session(
     }
 
     let state_str = if is_paused { "paused" } else { "playing" }.to_string();
-    let session_key = format!("{}:{}:{}", EMBY_PROVIDER_ID, clean_session_id, clean_item_id);
+    let session_key = format!(
+        "{}:{}:{}",
+        EMBY_PROVIDER_ID, clean_session_id, clean_item_id
+    );
     let mut session_data_bytes = 0i64;
     let mut started_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -1196,7 +1199,11 @@ pub fn normalize_emby_session(
         episode_number: item.index_number,
         production_year: item.production_year,
         has_artwork,
-        artwork_item_id: if has_artwork { artwork_item_id } else { String::new() },
+        artwork_item_id: if has_artwork {
+            artwork_item_id
+        } else {
+            String::new()
+        },
         state: state_str,
         position_secs: pos_secs,
         duration_secs: dur_secs,
@@ -1463,7 +1470,11 @@ pub async fn send_emby_session_command(
     api_key: &str,
     target: &EmbyCommandTarget,
 ) -> Result<EmbyCommandOutcome, EmbyAdapterError> {
-    if !target.provider.trim().eq_ignore_ascii_case(EMBY_PROVIDER_ID) {
+    if !target
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(EMBY_PROVIDER_ID)
+    {
         return Err(EmbyAdapterError::WrongIdentity(format!(
             "target provider {:?} does not match Emby adapter ({:?})",
             target.provider, EMBY_PROVIDER_ID
@@ -1487,8 +1498,7 @@ pub async fn send_emby_session_command(
     let msg = target.message.trim();
     if hdr.len() > 120 || msg.len() > 1000 {
         return Err(EmbyAdapterError::UnsupportedCommand(
-            "header (max 120 chars) or message (max 1000 chars) exceeds maximum length"
-                .to_string(),
+            "header (max 120 chars) or message (max 1000 chars) exceeds maximum length".to_string(),
         ));
     }
     if cmd_kind == EmbyCommandKind::Message && msg.is_empty() {
@@ -1664,16 +1674,16 @@ pub async fn send_emby_session_command(
     if cmd_code == StatusCode::UNAUTHORIZED || cmd_code == StatusCode::FORBIDDEN {
         return Err(EmbyAdapterError::AuthenticationFailed {
             status: cmd_code.as_u16(),
-            message: format!("Emby command {:?} rejected authentication", cmd_kind.as_str()),
+            message: format!(
+                "Emby command {:?} rejected authentication",
+                cmd_kind.as_str()
+            ),
         });
     }
     if !cmd_code.is_success() {
         return Err(EmbyAdapterError::UpstreamStatus {
             status: cmd_code.as_u16(),
-            message: format!(
-                "Emby command {:?} failed",
-                cmd_kind.as_str()
-            ),
+            message: format!("Emby command {:?} failed", cmd_kind.as_str()),
         });
     }
 
@@ -2068,11 +2078,10 @@ pub async fn fetch_emby_item_summaries(
                                 pos_secs
                             };
                             if dur_secs > 0 {
-                                completion_pct = (((watched_secs as f64 / dur_secs as f64)
-                                    * 1000.0)
-                                    .round()
-                                    / 10.0)
-                                    .min(100.0);
+                                completion_pct =
+                                    (((watched_secs as f64 / dur_secs as f64) * 1000.0).round()
+                                        / 10.0)
+                                        .min(100.0);
                             } else if ud.played_percentage > 0.0 {
                                 completion_pct =
                                     ((ud.played_percentage * 10.0).round() / 10.0).min(100.0);
@@ -2081,9 +2090,8 @@ pub async fn fetch_emby_item_summaries(
                             completion_pct =
                                 ((ud.played_percentage * 10.0).round() / 10.0).min(100.0);
                             if dur_secs > 0 {
-                                watched_secs = ((dur_secs as f64) * (completion_pct / 100.0))
-                                    .round()
-                                    as i64;
+                                watched_secs =
+                                    ((dur_secs as f64) * (completion_pct / 100.0)).round() as i64;
                             }
                         }
 
@@ -2361,12 +2369,8 @@ mod tests {
         .unwrap();
 
         // Wrong expected_server_id must fail with WrongIdentity
-        let mismatch = normalize_emby_session(
-            raw.clone(),
-            "Emby Vault",
-            Some("srv-other-instance"),
-            None,
-        );
+        let mismatch =
+            normalize_emby_session(raw.clone(), "Emby Vault", Some("srv-other-instance"), None);
         assert!(matches!(mismatch, Err(EmbyAdapterError::WrongIdentity(_))));
 
         // Matching expected_server_id normalizes cleanly into ActiveStreamSession
@@ -2375,14 +2379,10 @@ mod tests {
             "emby:emby-sess-42:ep-101".to_string(),
             (125_000_000i64, "2026-11-01 22:00:00".to_string()),
         );
-        let session = normalize_emby_session(
-            raw,
-            "Emby Vault",
-            Some("srv-emby-prod"),
-            Some(&tracked),
-        )
-        .unwrap()
-        .expect("active session");
+        let session =
+            normalize_emby_session(raw, "Emby Vault", Some("srv-emby-prod"), Some(&tracked))
+                .unwrap()
+                .expect("active session");
 
         assert_eq!(session.provider, "emby");
         assert_eq!(session.server_name, "Emby Vault");
@@ -2430,7 +2430,9 @@ mod tests {
                         .get("X-Emby-Authorization")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");
-                    if token != "valid-emby-key-9876" || !auth.contains("Token=\"valid-emby-key-9876\"") {
+                    if token != "valid-emby-key-9876"
+                        || !auth.contains("Token=\"valid-emby-key-9876\"")
+                    {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                     Json(serde_json::json!({
@@ -2519,115 +2521,124 @@ mod tests {
         let state = Arc::new(MockEmbyState::default());
         let app_state = state.clone();
 
-        let app = Router::new()
-            .route(
-                "/Sessions",
-                get(|State(st): State<Arc<MockEmbyState>>, headers: HeaderMap| async move {
-                    if headers.get("X-Emby-Token").and_then(|v| v.to_str().ok()) != Some("emby-secret") {
-                        return StatusCode::UNAUTHORIZED.into_response();
-                    }
-                    if st.sessions_fail.load(Ordering::SeqCst) {
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    }
-                    Json(serde_json::json!([
-                        {
-                            "Id": "sess-full",
-                            "ServerId": "srv-emby-1",
-                            "UserId": "u1",
-                            "UserName": "alex",
-                            "Client": "Emby Web",
-                            "DeviceName": "Chrome",
-                            "DeviceId": "dev-chrome-1",
-                            "SupportsRemoteControl": true,
-                            "SupportedCommands": ["DisplayMessage"],
-                            "PlayState": {
-                                "PositionTicks": 100_000_000,
-                                "IsPaused": false,
-                                "PlayMethod": "Transcode",
-                                "PlaySessionId": "ps-transcode-1"
-                            },
-                            "NowPlayingItem": {
-                                "Id": "item-1",
-                                "Name": "Interstellar",
-                                "Type": "Movie"
-                            },
-                            "TranscodingInfo": {
-                                "IsVideoDirect": false,
-                                "IsAudioDirect": true,
-                                "VideoCodec": "h264"
+        let app =
+            Router::new()
+                .route(
+                    "/Sessions",
+                    get(
+                        |State(st): State<Arc<MockEmbyState>>, headers: HeaderMap| async move {
+                            if headers.get("X-Emby-Token").and_then(|v| v.to_str().ok())
+                                != Some("emby-secret")
+                            {
+                                return StatusCode::UNAUTHORIZED.into_response();
                             }
+                            if st.sessions_fail.load(Ordering::SeqCst) {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            Json(serde_json::json!([
+                                {
+                                    "Id": "sess-full",
+                                    "ServerId": "srv-emby-1",
+                                    "UserId": "u1",
+                                    "UserName": "alex",
+                                    "Client": "Emby Web",
+                                    "DeviceName": "Chrome",
+                                    "DeviceId": "dev-chrome-1",
+                                    "SupportsRemoteControl": true,
+                                    "SupportedCommands": ["DisplayMessage"],
+                                    "PlayState": {
+                                        "PositionTicks": 100_000_000,
+                                        "IsPaused": false,
+                                        "PlayMethod": "Transcode",
+                                        "PlaySessionId": "ps-transcode-1"
+                                    },
+                                    "NowPlayingItem": {
+                                        "Id": "item-1",
+                                        "Name": "Interstellar",
+                                        "Type": "Movie"
+                                    },
+                                    "TranscodingInfo": {
+                                        "IsVideoDirect": false,
+                                        "IsAudioDirect": true,
+                                        "VideoCodec": "h264"
+                                    }
+                                },
+                                {
+                                    "Id": "sess-no-msg",
+                                    "ServerId": "srv-emby-1",
+                                    "UserId": "u2",
+                                    "UserName": "maya",
+                                    "Client": "Emby Roku",
+                                    "DeviceName": "Roku Ultra",
+                                    "DeviceId": "dev-roku",
+                                    "SupportsRemoteControl": true,
+                                    "SupportedCommands": ["Mute"],
+                                    "PlayState": {
+                                        "PositionTicks": 50_000_000,
+                                        "IsPaused": false,
+                                        "PlayMethod": "DirectPlay"
+                                    },
+                                    "NowPlayingItem": {
+                                        "Id": "item-2",
+                                        "Name": "Silo",
+                                        "Type": "Episode"
+                                    }
+                                },
+                                {
+                                    "Id": "sess-no-ctrl",
+                                    "ServerId": "srv-emby-1",
+                                    "UserId": "u3",
+                                    "UserName": "liam",
+                                    "Client": "DLNA",
+                                    "DeviceName": "TV",
+                                    "DeviceId": "dev-tv",
+                                    "SupportsRemoteControl": false,
+                                    "SupportedCommands": [],
+                                    "NowPlayingItem": {
+                                        "Id": "item-3",
+                                        "Name": "Track 1",
+                                        "Type": "Audio"
+                                    }
+                                }
+                            ]))
+                            .into_response()
                         },
-                        {
-                            "Id": "sess-no-msg",
-                            "ServerId": "srv-emby-1",
-                            "UserId": "u2",
-                            "UserName": "maya",
-                            "Client": "Emby Roku",
-                            "DeviceName": "Roku Ultra",
-                            "DeviceId": "dev-roku",
-                            "SupportsRemoteControl": true,
-                            "SupportedCommands": ["Mute"],
-                            "PlayState": {
-                                "PositionTicks": 50_000_000,
-                                "IsPaused": false,
-                                "PlayMethod": "DirectPlay"
-                            },
-                            "NowPlayingItem": {
-                                "Id": "item-2",
-                                "Name": "Silo",
-                                "Type": "Episode"
-                            }
+                    ),
+                )
+                .route(
+                    "/Sessions/:id/Playing/:cmd",
+                    post(
+                        |State(st): State<Arc<MockEmbyState>>,
+                         axum::extract::Path((_id, _cmd)): axum::extract::Path<(
+                            String,
+                            String,
+                        )>| async move {
+                            st.command_hits.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::NO_CONTENT
                         },
-                        {
-                            "Id": "sess-no-ctrl",
-                            "ServerId": "srv-emby-1",
-                            "UserId": "u3",
-                            "UserName": "liam",
-                            "Client": "DLNA",
-                            "DeviceName": "TV",
-                            "DeviceId": "dev-tv",
-                            "SupportsRemoteControl": false,
-                            "SupportedCommands": [],
-                            "NowPlayingItem": {
-                                "Id": "item-3",
-                                "Name": "Track 1",
-                                "Type": "Audio"
-                            }
-                        }
-                    ]))
-                    .into_response()
-                }),
-            )
-            .route(
-                "/Sessions/:id/Playing/:cmd",
-                post(
-                    |State(st): State<Arc<MockEmbyState>>,
-                     axum::extract::Path((_id, _cmd)): axum::extract::Path<(String, String)>| async move {
-                        st.command_hits.fetch_add(1, Ordering::SeqCst);
+                    ),
+                )
+                .route(
+                    "/Sessions/:id/Message",
+                    post(
+                        |State(st): State<Arc<MockEmbyState>>,
+                         axum::extract::Path(_id): axum::extract::Path<String>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            assert_eq!(body["Text"], "Maintenance soon");
+                            st.command_hits.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::NO_CONTENT
+                        },
+                    ),
+                )
+                .route(
+                    "/Videos/ActiveEncodings",
+                    delete(|State(st): State<Arc<MockEmbyState>>| async move {
+                        st.active_encoding_delete_hits
+                            .fetch_add(1, Ordering::SeqCst);
                         StatusCode::NO_CONTENT
-                    },
-                ),
-            )
-            .route(
-                "/Sessions/:id/Message",
-                post(
-                    |State(st): State<Arc<MockEmbyState>>,
-                     axum::extract::Path(_id): axum::extract::Path<String>,
-                     Json(body): Json<serde_json::Value>| async move {
-                        assert_eq!(body["Text"], "Maintenance soon");
-                        st.command_hits.fetch_add(1, Ordering::SeqCst);
-                        StatusCode::NO_CONTENT
-                    },
-                ),
-            )
-            .route(
-                "/Videos/ActiveEncodings",
-                delete(|State(st): State<Arc<MockEmbyState>>| async move {
-                    st.active_encoding_delete_hits.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::NO_CONTENT
-                }),
-            )
-            .with_state(app_state);
+                    }),
+                )
+                .with_state(app_state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_url = format!("http://{}", listener.local_addr().unwrap());
@@ -2932,35 +2943,39 @@ mod tests {
             )
             .route(
                 "/Users/usr-1/Items",
-                get(|axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| async move {
-                    if params.get("Filters").map(String::as_str) == Some("IsPlayed") {
-                        Json(serde_json::json!({
-                            "TotalRecordCount": 1,
-                            "Items": [
-                                {
-                                    "Id": "mov-99",
-                                    "Name": "Oppenheimer",
-                                    "Type": "Movie",
-                                    "ProductionYear": 2023,
-                                    "RunTimeTicks": 108_000_000_000i64,
-                                    "Container": "mkv",
-                                    "Bitrate": 24_000_000i64,
-                                    "Width": 3840,
-                                    "Height": 2160,
-                                    "UserData": {
-                                        "Played": true,
-                                        "LastPlayedDate": "2026-10-31T21:30:00Z"
+                get(
+                    |axum::extract::Query(params): axum::extract::Query<
+                        HashMap<String, String>,
+                    >| async move {
+                        if params.get("Filters").map(String::as_str) == Some("IsPlayed") {
+                            Json(serde_json::json!({
+                                "TotalRecordCount": 1,
+                                "Items": [
+                                    {
+                                        "Id": "mov-99",
+                                        "Name": "Oppenheimer",
+                                        "Type": "Movie",
+                                        "ProductionYear": 2023,
+                                        "RunTimeTicks": 108_000_000_000i64,
+                                        "Container": "mkv",
+                                        "Bitrate": 24_000_000i64,
+                                        "Width": 3840,
+                                        "Height": 2160,
+                                        "UserData": {
+                                            "Played": true,
+                                            "LastPlayedDate": "2026-10-31T21:30:00Z"
+                                        }
                                     }
-                                }
-                            ]
-                        }))
-                    } else {
-                        Json(serde_json::json!({
-                            "TotalRecordCount": 0,
-                            "Items": []
-                        }))
-                    }
-                }),
+                                ]
+                            }))
+                        } else {
+                            Json(serde_json::json!({
+                                "TotalRecordCount": 0,
+                                "Items": []
+                            }))
+                        }
+                    },
+                ),
             )
             .route(
                 "/Items/mov-99/Images/Primary",
@@ -3000,7 +3015,10 @@ mod tests {
         .await
         .expect("item summaries");
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].session_key, "emby:emby-srv-hist:sync:usr-1:mov-99");
+        assert_eq!(
+            summaries[0].session_key,
+            "emby:emby-srv-hist:sync:usr-1:mov-99"
+        );
         assert_eq!(summaries[0].provenance, "item_summary");
         assert_eq!(summaries[0].timestamp_certainty, "last_played");
         assert_eq!(summaries[0].byte_accuracy, "unrecorded");

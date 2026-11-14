@@ -193,7 +193,9 @@ async fn main() -> anyhow::Result<()> {
             match tokio::task::spawn_blocking(af_services::reconcile_package_jobs).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "package lifecycle reconciliation failed"),
-                Err(error) => tracing::warn!(%error, "package lifecycle reconciliation task failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "package lifecycle reconciliation task failed")
+                }
             }
         }
     });

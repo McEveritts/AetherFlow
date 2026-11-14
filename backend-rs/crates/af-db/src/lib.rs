@@ -35,19 +35,25 @@ const CIPHERTEXT_PREFIX: &str = "enc:v1:";
 static AES_MASTER_KEY: Lazy<RwLock<Option<[u8; 32]>>> = Lazy::new(|| RwLock::new(None));
 
 pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
-    if let Ok(decoded) = BASE64_STD.decode(raw) {
+    let trimmed = raw.trim();
+    if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut arr = [0u8; 32];
+        for (idx, dst) in arr.iter_mut().enumerate() {
+            let hex_pair = &trimmed[idx * 2..idx * 2 + 2];
+            *dst = u8::from_str_radix(hex_pair, 16)?;
+        }
+        return Ok(arr);
+    }
+    if let Ok(decoded) = BASE64_STD.decode(trimmed) {
         if decoded.len() == 32 {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&decoded);
             return Ok(arr);
         }
     }
-    if raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if trimmed.len() == 32 {
         let mut arr = [0u8; 32];
-        for (idx, dst) in arr.iter_mut().enumerate() {
-            let hex_pair = &raw[idx * 2..idx * 2 + 2];
-            *dst = u8::from_str_radix(hex_pair, 16)?;
-        }
+        arr.copy_from_slice(trimmed.as_bytes());
         return Ok(arr);
     }
     if raw.len() == 32 {
@@ -57,7 +63,7 @@ pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
     }
     anyhow::bail!(
         "FATAL: AES_MASTER_KEY must decode to 32 bytes (32-byte raw, base64, or 64-char hex). Got {} chars.",
-        raw.len()
+        trimmed.len()
     )
 }
 
@@ -81,6 +87,7 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/etc/aetherflow/aetherflow.env".to_string());
     if let Ok(contents) = fs::read_to_string(env_file) {
+        let mut last_raw: Option<String> = None;
         for line in contents.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -90,10 +97,13 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
             if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
                 let clean = val.trim().trim_matches('"').trim_matches('\'');
                 if !clean.is_empty() {
-                    if let Ok(key) = parse_aes_key_bytes(clean) {
-                        return Some(key);
-                    }
+                    last_raw = Some(clean.to_string());
                 }
+            }
+        }
+        if let Some(clean) = last_raw {
+            if let Ok(key) = parse_aes_key_bytes(&clean) {
+                return Some(key);
             }
         }
     }
@@ -145,8 +155,9 @@ pub fn encrypt_secret_if_configured(plaintext: &str) -> anyhow::Result<String> {
 
 pub fn decrypt_secret_if_needed(value: &str) -> anyhow::Result<String> {
     if let Some(payload) = value.strip_prefix(CIPHERTEXT_PREFIX) {
-        let key = resolve_runtime_aes_key()
-            .ok_or_else(|| anyhow::anyhow!("AES_MASTER_KEY is required to decrypt enc:v1: secret"))?;
+        let key = resolve_runtime_aes_key().ok_or_else(|| {
+            anyhow::anyhow!("AES_MASTER_KEY is required to decrypt enc:v1: secret")
+        })?;
         return decrypt_with_key(payload, &key);
     }
     Ok(value.to_string())
@@ -351,35 +362,39 @@ fn apply_pragmas(conn: &Connection) {
     }
 }
 
-fn migrate(conn: &Connection, version: i32, description: &str, stmts: &[&str]) {
-    let count: i32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
-            params![version],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+fn migrate(
+    conn: &Connection,
+    version: i32,
+    description: &str,
+    stmts: &[&str],
+) -> anyhow::Result<()> {
+    let count: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+        params![version],
+        |r| r.get(0),
+    )?;
     if count > 0 {
-        return;
+        return Ok(());
     }
 
     for stmt in stmts {
         if let Err(err) = conn.execute_batch(stmt) {
-            let msg = err.to_string();
-            if msg.contains("duplicate column name") {
-                tracing::info!(version, "migration already applied (duplicate column)");
+            let msg = err.to_string().to_ascii_lowercase();
+            if msg.contains("duplicate column name") || msg.contains("already exists") {
+                tracing::info!(version, "migration DDL already applied");
                 continue;
             }
-            tracing::error!(version, error = %msg, "migration failed");
-            return;
+            tracing::error!(version, error = %err, "migration failed");
+            return Err(err.into());
         }
     }
 
-    let _ = conn.execute(
+    conn.execute(
         "INSERT INTO schema_versions (version, description) VALUES (?1, ?2)",
         params![version, description],
-    );
+    )?;
     tracing::info!(version, description, "migration applied");
+    Ok(())
 }
 
 pub fn init_db() -> anyhow::Result<()> {
@@ -634,19 +649,19 @@ pub fn init_db() -> anyhow::Result<()> {
         1,
         "Add setup_completed to settings",
         &["ALTER TABLE settings ADD COLUMN setup_completed BOOLEAN DEFAULT 0;"],
-    );
+    )?;
     migrate(
         &conn,
         2,
         "Add gemini_api_key to settings",
         &["ALTER TABLE settings ADD COLUMN gemini_api_key TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         3,
         "Add password_hash to users",
         &["ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         4,
@@ -655,7 +670,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN backup_schedule_mode TEXT DEFAULT 'manual';",
             "ALTER TABLE settings ADD COLUMN backup_optimal_window TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         5,
@@ -679,13 +694,13 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_billing_provider_event ON billing_webhook_events(provider, event_id);",
             "CREATE INDEX IF NOT EXISTS idx_log_bookmarks_user ON log_bookmarks(user_id);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         6,
         "Persist smart backup next run time",
         &["ALTER TABLE settings ADD COLUMN backup_next_run_at TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         7,
@@ -701,7 +716,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_oidc_consents_user_client ON oidc_consents(user_id, client_id);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         8,
@@ -718,7 +733,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id);",
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_expires ON active_sessions(expires_at);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         9,
@@ -738,7 +753,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         10,
@@ -758,7 +773,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_delivery_log_channel ON notification_delivery_log(channel_id);",
             "CREATE INDEX IF NOT EXISTS idx_delivery_log_status ON notification_delivery_log(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         11,
@@ -780,7 +795,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_audit_log_action ON admin_audit_log(action);",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         12,
@@ -790,7 +805,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN lm_studio_endpoint TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN ollama_endpoint TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         13,
@@ -799,7 +814,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN anthropic_api_key TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN anthropic_endpoint TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         14,
@@ -808,7 +823,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT '';",
             "ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0;",
         ],
-    );
+    )?;
     migrate(
         &conn,
         15,
@@ -821,7 +836,7 @@ pub fn init_db() -> anyhow::Result<()> {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );"#],
-    );
+    )?;
     migrate(
         &conn,
         16,
@@ -841,7 +856,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         17,
@@ -858,13 +873,13 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ingress_configs_app_name ON app_ingress_configs(app_name);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         18,
         "Add base_domain to settings for automatic app subdomain provisioning",
         &["ALTER TABLE settings ADD COLUMN base_domain TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         19,
@@ -940,7 +955,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);",
         ],
-    );
+    )?;
 
     streaming::migrate_history(&conn, &db_path)?;
     migrate(
@@ -960,7 +975,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_plugins_registry_enabled ON plugins_registry(enabled);",
         ],
-    );
+    )?;
 
     migrate(&conn, 22, "Persist MFA replay guards and OIDC nonces", &[
         "ALTER TABLE users ADD COLUMN last_totp_step INTEGER NOT NULL DEFAULT -1;",
@@ -968,7 +983,7 @@ pub fn init_db() -> anyhow::Result<()> {
         "CREATE TABLE IF NOT EXISTS mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL);",
         "CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expiry ON mfa_challenges(expires_at);",
         "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
-    ]);
+    ])?;
 
     let security_migration: i64 = conn.query_row(
         "SELECT COUNT(*) FROM schema_versions WHERE version = 22",
@@ -989,7 +1004,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN local_provider TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN local_model TEXT DEFAULT '';",
         ],
-    );
+    )?;
     let local_settings_migration: i64 = conn.query_row(
         "SELECT COUNT(*) FROM schema_versions WHERE version = 23",
         [],
@@ -1208,6 +1223,7 @@ pub fn prune_expired_data() {
     );
 
     let static_queries = [
+        "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
         "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
         "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')",
         "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
@@ -1328,7 +1344,10 @@ fn parse_sqlite_dt(s: &str) -> DateTime<Utc> {
 }
 
 pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
-    let generation = INGRESS_CACHE.read().map(|guard| guard.generation).unwrap_or(0);
+    let generation = INGRESS_CACHE
+        .read()
+        .map(|guard| guard.generation)
+        .unwrap_or(0);
     if let Ok(guard) = INGRESS_CACHE.read() {
         if let (Some(ref cfgs), Some(at)) = (&guard.configs, guard.configs_at) {
             if at.elapsed() < INGRESS_CACHE_TTL {
@@ -1739,8 +1758,18 @@ fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
     {
         return false;
     }
-    let _ = ensure_column(conn, "revoked_tokens", "family_id", "TEXT NOT NULL DEFAULT ''");
-    let _ = ensure_column(conn, "revoked_tokens", "user_id", "INTEGER NOT NULL DEFAULT 0");
+    let _ = ensure_column(
+        conn,
+        "revoked_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    );
+    let _ = ensure_column(
+        conn,
+        "revoked_tokens",
+        "user_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    );
     true
 }
 
@@ -1838,10 +1867,13 @@ pub fn record_revoked_token_lineage_in_tx(
         params![family_id.trim(), user_id, jti],
     ) {
         Ok(_) => Ok(()),
-        Err(e)
-            if e.to_string().contains("family_id") || e.to_string().contains("user_id") =>
-        {
-            let _ = ensure_column(conn, "revoked_tokens", "family_id", "TEXT NOT NULL DEFAULT ''");
+        Err(e) if e.to_string().contains("family_id") || e.to_string().contains("user_id") => {
+            let _ = ensure_column(
+                conn,
+                "revoked_tokens",
+                "family_id",
+                "TEXT NOT NULL DEFAULT ''",
+            );
             let _ = ensure_column(
                 conn,
                 "revoked_tokens",
@@ -1877,11 +1909,7 @@ pub fn resolve_revoked_token_family_in_tx(
     };
     let fam: Option<String> = match query() {
         Ok(v) => v,
-        Err(e)
-            if e.to_string().contains("family_id") || e.to_string().contains("user_id") =>
-        {
-            None
-        }
+        Err(e) if e.to_string().contains("family_id") || e.to_string().contains("user_id") => None,
         Err(e) => return Err(e.into()),
     };
     Ok(fam.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
@@ -1896,7 +1924,7 @@ pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
     let conn = get_conn()?;
     revoke_token_in_tx(&conn, jti, ttl)?;
     let _ = conn.execute(
-        "DELETE FROM revoked_tokens WHERE expires_at IS NULL OR TRIM(expires_at) = '' OR datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now')",
+        "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
         [],
     );
     cache_revoked_token(jti, ttl);

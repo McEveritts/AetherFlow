@@ -1065,19 +1065,39 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
                 map.insert("name".to_string(), serde_json::Value::String(p.label));
                 map.insert("desc".to_string(), serde_json::Value::String(p.description));
                 map.insert("hits".to_string(), serde_json::json!(p.hits));
-                map.insert("category".to_string(), serde_json::Value::String(p.category));
-                map.insert("status".to_string(), serde_json::Value::String("not_installed".to_string()));
+                map.insert(
+                    "category".to_string(),
+                    serde_json::Value::String(p.category),
+                );
+                map.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("not_installed".to_string()),
+                );
                 if p.default_port > 0 {
-                    map.insert("default_port".to_string(), serde_json::json!(p.default_port));
+                    map.insert(
+                        "default_port".to_string(),
+                        serde_json::json!(p.default_port),
+                    );
                 }
                 if !p.web_path.is_empty() {
-                    map.insert("web_path".to_string(), serde_json::Value::String(p.web_path));
+                    map.insert(
+                        "web_path".to_string(),
+                        serde_json::Value::String(p.web_path),
+                    );
                 }
-                map.insert("inventory_known".to_string(), serde_json::Value::Bool(false));
-                map.insert("inventory_authenticated".to_string(), serde_json::Value::Bool(false));
+                map.insert(
+                    "inventory_known".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+                map.insert(
+                    "inventory_authenticated".to_string(),
+                    serde_json::Value::Bool(false),
+                );
                 map.insert(
                     "inventory_mode".to_string(),
-                    serde_json::Value::String(af_models::INVENTORY_MODE_PUBLIC_REDACTED.to_string()),
+                    serde_json::Value::String(
+                        af_models::INVENTORY_MODE_PUBLIC_REDACTED.to_string(),
+                    ),
                 );
                 serde_json::Value::Object(map)
             })
@@ -1090,7 +1110,9 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
                     axum::http::HeaderValue::from_static(af_models::INVENTORY_MODE_PUBLIC_REDACTED),
                 ),
                 (
-                    axum::http::header::HeaderName::from_static("x-aetherflow-inventory-authenticated"),
+                    axum::http::header::HeaderName::from_static(
+                        "x-aetherflow-inventory-authenticated",
+                    ),
                     axum::http::HeaderValue::from_static("false"),
                 ),
             ],
@@ -1108,7 +1130,6 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
 
     let mut apps = Vec::with_capacity(pkgs.len());
     for p in pkgs {
-
         let mut active_port = p.default_port;
         let internal_domain = af_services::get_blueprint(&p.name)
             .map(|bp| bp.internal_domain)
@@ -1155,7 +1176,9 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
             update_available: p.update_available,
             update_checked_at: p.update_checked_at,
             update_url: sanitize_url_or_source_key_for_api(&p.update_url),
-            update_error: sanitize_url_or_source_key_for_api(&af_services::workers::public_update_error(&p.update_error)),
+            update_error: sanitize_url_or_source_key_for_api(
+                &af_services::workers::public_update_error(&p.update_error),
+            ),
             inventory_known: true,
             inventory_authenticated: is_authenticated,
             inventory_mode: if is_authenticated {
@@ -1171,12 +1194,28 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
                         status: outcome.status,
                         started_at: outcome.started_at,
                         finished_at: outcome.finished_at,
-                        expected_target_version: outcome.expected_target_version.map(|v| sanitize_url_or_source_key_for_api(&v)),
-                        achieved_version: outcome.achieved_version.map(|v| sanitize_url_or_source_key_for_api(&v)),
-                        failed_stage: if diagnostics_allowed { outcome.failed_stage.map(|s| sanitize_url_or_source_key_for_api(&s)) } else { None },
-                        exit_code: if diagnostics_allowed { outcome.exit_code } else { None },
+                        expected_target_version: outcome
+                            .expected_target_version
+                            .map(|v| sanitize_url_or_source_key_for_api(&v)),
+                        achieved_version: outcome
+                            .achieved_version
+                            .map(|v| sanitize_url_or_source_key_for_api(&v)),
+                        failed_stage: if diagnostics_allowed {
+                            outcome
+                                .failed_stage
+                                .map(|s| sanitize_url_or_source_key_for_api(&s))
+                        } else {
+                            None
+                        },
+                        exit_code: if diagnostics_allowed {
+                            outcome.exit_code
+                        } else {
+                            None
+                        },
                         sanitized_summary: if diagnostics_allowed {
-                            outcome.sanitized_summary.map(|s| sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&s)))
+                            outcome.sanitized_summary.map(|s| {
+                                sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&s))
+                            })
                         } else {
                             None
                         },
@@ -1191,7 +1230,9 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
             app.progress = job.progress;
             app.job_id = Some(job.job_id);
             app.started_at = Some(job.started_at);
-            app.log_line = sanitize_url_or_source_key_for_api(af_services::package_job_progress_summary(&job.status));
+            app.log_line = sanitize_url_or_source_key_for_api(
+                af_services::package_job_progress_summary(&job.status),
+            );
         }
 
         apps.push(app);
@@ -1244,7 +1285,8 @@ fn package_progress_payload(
         if !diagnostics_allowed {
             job.last_line = af_services::package_job_progress_summary(&job.status).into();
         } else {
-            job.last_line = sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&job.last_line));
+            job.last_line =
+                sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&job.last_line));
         }
         return serde_json::to_value(job).unwrap_or_default();
     }
@@ -1257,12 +1299,20 @@ fn package_progress_payload(
             outcome.exit_code = None;
             outcome.sanitized_summary = None;
         } else {
-            outcome.message = sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&outcome.message));
-            outcome.sanitized_summary =
-                outcome.sanitized_summary.map(|s| sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&s)));
-            outcome.failed_stage = outcome.failed_stage.map(|s| sanitize_url_or_source_key_for_api(&s));
-            outcome.expected_target_version = outcome.expected_target_version.map(|v| sanitize_url_or_source_key_for_api(&v));
-            outcome.achieved_version = outcome.achieved_version.map(|v| sanitize_url_or_source_key_for_api(&v));
+            outcome.message =
+                sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&outcome.message));
+            outcome.sanitized_summary = outcome
+                .sanitized_summary
+                .map(|s| sanitize_url_or_source_key_for_api(&af_services::redact_secrets(&s)));
+            outcome.failed_stage = outcome
+                .failed_stage
+                .map(|s| sanitize_url_or_source_key_for_api(&s));
+            outcome.expected_target_version = outcome
+                .expected_target_version
+                .map(|v| sanitize_url_or_source_key_for_api(&v));
+            outcome.achieved_version = outcome
+                .achieved_version
+                .map(|v| sanitize_url_or_source_key_for_api(&v));
         }
         return serde_json::json!({
             "package_id": id,
@@ -1350,8 +1400,9 @@ fn extract_expected_target_version(bytes: &[u8]) -> Result<Option<String>, Statu
         }
     }
 
-    let parsed: PackageTargetPayload = serde_json::from_value(serde_json::Value::Object(obj.clone()))
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed: PackageTargetPayload =
+        serde_json::from_value(serde_json::Value::Object(obj.clone()))
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
     let res = parsed
         .expected_target_version
         .or(parsed.target_version)
@@ -1372,7 +1423,13 @@ async fn install_package(
             .or_else(|| query.expected_target_version.or(query.target_version))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        Err(code) => return api_error(code, "BAD_REQUEST", "Malformed JSON or invalid expected_target_version"),
+        Err(code) => {
+            return api_error(
+                code,
+                "BAD_REQUEST",
+                "Malformed JSON or invalid expected_target_version",
+            )
+        }
     };
     let clean_id = id.trim_start_matches("package-");
     let action = if af_services::is_package_installed(clean_id) {
@@ -1380,7 +1437,16 @@ async fn install_package(
     } else {
         "install"
     };
-    dispatch_package_lifecycle_with_target(id, action, "installing", false, target, auth_user, headers).await
+    dispatch_package_lifecycle_with_target(
+        id,
+        action,
+        "installing",
+        false,
+        target,
+        auth_user,
+        headers,
+    )
+    .await
 }
 
 pub(crate) async fn reinstall_package(
@@ -1395,9 +1461,24 @@ pub(crate) async fn reinstall_package(
             .or_else(|| query.expected_target_version.or(query.target_version))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        Err(code) => return api_error(code, "BAD_REQUEST", "Malformed JSON or invalid expected_target_version"),
+        Err(code) => {
+            return api_error(
+                code,
+                "BAD_REQUEST",
+                "Malformed JSON or invalid expected_target_version",
+            )
+        }
     };
-    dispatch_package_lifecycle_with_target(id, "reinstall", "installing", false, target, auth_user, headers).await
+    dispatch_package_lifecycle_with_target(
+        id,
+        "reinstall",
+        "installing",
+        false,
+        target,
+        auth_user,
+        headers,
+    )
+    .await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1429,7 +1510,16 @@ async fn uninstall_package(
         Ok(purge) => purge,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message),
     };
-    dispatch_package_lifecycle_with_target(id, "remove", "uninstalling", purge, None, auth_user, headers).await
+    dispatch_package_lifecycle_with_target(
+        id,
+        "remove",
+        "uninstalling",
+        purge,
+        None,
+        auth_user,
+        headers,
+    )
+    .await
 }
 
 async fn update_package(
@@ -1444,9 +1534,18 @@ async fn update_package(
             .or_else(|| query.expected_target_version.or(query.target_version))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        Err(code) => return api_error(code, "BAD_REQUEST", "Malformed JSON or invalid expected_target_version"),
+        Err(code) => {
+            return api_error(
+                code,
+                "BAD_REQUEST",
+                "Malformed JSON or invalid expected_target_version",
+            )
+        }
     };
-    dispatch_package_lifecycle_with_target(id, "update", "updating", false, target, auth_user, headers).await
+    dispatch_package_lifecycle_with_target(
+        id, "update", "updating", false, target, auth_user, headers,
+    )
+    .await
 }
 
 /// Appends diagnostic lines to the active job record if present.
@@ -1740,7 +1839,10 @@ fn emit_package_progress(
 }
 
 fn is_oneshot_service_unit(unit: &str) -> bool {
-    let lower = unit.trim().trim_end_matches(".service").to_ascii_lowercase();
+    let lower = unit
+        .trim()
+        .trim_end_matches(".service")
+        .to_ascii_lowercase();
     matches!(lower.as_str(), "recyclarr" | "scrutiny-collector")
 }
 
@@ -1763,8 +1865,8 @@ where
     ControlFut: std::future::Future<Output = anyhow::Result<()>>,
 {
     let mut stopped_units: Vec<String> = Vec::new();
-    let is_reinstall =
-        action == "reinstall" || (action == "install" && af_services::is_package_installed(clean_id));
+    let is_reinstall = action == "reinstall"
+        || (action == "install" && af_services::is_package_installed(clean_id));
     if (action == "update" || is_reinstall)
         && af_services::should_pre_stop_on_update(clean_id)
         && fs_root_override.trim().is_empty()
@@ -2023,7 +2125,8 @@ impl PostOperationRefreshResult for Option<String> {
 
 impl PostOperationRefreshResult for Option<af_services::workers::PackageUpdateRecord> {
     fn into_installed_version(self) -> Option<String> {
-        self.map(|r| r.installed_version).filter(|s| !s.trim().is_empty())
+        self.map(|r| r.installed_version)
+            .filter(|s| !s.trim().is_empty())
     }
 }
 
@@ -2040,7 +2143,11 @@ fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
     let fs_root = std::env::var("AETHERFLOW_FS_ROOT")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("AF_PACKAGE_ROOT").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("AF_PACKAGE_ROOT")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .map(PathBuf::from);
 
     let resolve = |rel: &str| -> PathBuf {
@@ -2068,7 +2175,10 @@ fn resolve_candidate_receipt_paths(pkg_name: &str) -> Vec<PathBuf> {
         }
     }
     if pkg_name.eq_ignore_ascii_case("piped") {
-        for extra in ["/opt/piped/.af-components.json", "/var/lib/piped/.af-components.json"] {
+        for extra in [
+            "/opt/piped/.af-components.json",
+            "/var/lib/piped/.af-components.json",
+        ] {
             let p = resolve(extra);
             if !paths.contains(&p) {
                 paths.push(p);
@@ -2099,7 +2209,10 @@ fn open_dir_nofollow_stepwise_ext(
     create_missing: bool,
 ) -> Result<Option<OwnedFd>, String> {
     if !dir_path.is_absolute() {
-        return Err(format!("Directory path {} is not absolute", dir_path.display()));
+        return Err(format!(
+            "Directory path {} is not absolute",
+            dir_path.display()
+        ));
     }
 
     let root_fd = unsafe {
@@ -2118,7 +2231,10 @@ fn open_dir_nofollow_stepwise_ext(
     for comp in dir_path.components() {
         match comp {
             std::path::Component::Prefix(_) => {
-                return Err(format!("Unsupported prefix component in path {}", dir_path.display()));
+                return Err(format!(
+                    "Unsupported prefix component in path {}",
+                    dir_path.display()
+                ));
             }
             std::path::Component::RootDir => {
                 continue;
@@ -2135,9 +2251,8 @@ fn open_dir_nofollow_stepwise_ext(
             std::path::Component::Normal(part) => {
                 current_path.push(part);
                 let part_bytes = part.as_bytes();
-                let part_cstr = std::ffi::CString::new(part_bytes).map_err(|e| {
-                    format!("Invalid directory component {:?}: {}", part, e)
-                })?;
+                let part_cstr = std::ffi::CString::new(part_bytes)
+                    .map_err(|e| format!("Invalid directory component {:?}: {}", part, e))?;
 
                 let next_fd = unsafe {
                     libc::openat(
@@ -2170,7 +2285,10 @@ fn open_dir_nofollow_stepwise_ext(
                             libc::openat(
                                 curr_fd.as_raw_fd(),
                                 part_cstr.as_ptr(),
-                                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                libc::O_RDONLY
+                                    | libc::O_DIRECTORY
+                                    | libc::O_NOFOLLOW
+                                    | libc::O_CLOEXEC,
                             )
                         };
                         if opened_fd < 0 {
@@ -2292,15 +2410,17 @@ fn snapshot_candidate_receipts(
     let mut snapshots = Vec::new();
     for path in paths {
         let parent = path.parent().ok_or_else(|| {
-            format!("Candidate receipt {} has no parent directory", path.display())
+            format!(
+                "Candidate receipt {} has no parent directory",
+                path.display()
+            )
         })?;
 
-        let file_name = path.file_name().ok_or_else(|| {
-            format!("Candidate receipt {} has no file name", path.display())
-        })?;
-        let file_cstr = std::ffi::CString::new(file_name.as_bytes()).map_err(|e| {
-            format!("Invalid receipt filename {}: {}", path.display(), e)
-        })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| format!("Candidate receipt {} has no file name", path.display()))?;
+        let file_cstr = std::ffi::CString::new(file_name.as_bytes())
+            .map_err(|e| format!("Invalid receipt filename {}: {}", path.display(), e))?;
 
         let is_version_or_components = matches!(
             file_name.to_str(),
@@ -2433,9 +2553,10 @@ fn snapshot_candidate_receipts(
         // 5. Read bounded at most max_size
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let mut buf = Vec::new();
-        file.by_ref().take((max_size as u64) + 1).read_to_end(&mut buf).map_err(|e| {
-            format!("Failed to read receipt {}: {}", path.display(), e)
-        })?;
+        file.by_ref()
+            .take((max_size as u64) + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("Failed to read receipt {}: {}", path.display(), e))?;
 
         if buf.len() > max_size as usize {
             return Err(format!(
@@ -2481,7 +2602,11 @@ fn restore_candidate_receipts(
         let file_cstr = match std::ffi::CString::new(file_name.as_bytes()) {
             Ok(c) => c,
             Err(e) => {
-                errors.push(format!("Invalid receipt filename {}: {}", path.display(), e));
+                errors.push(format!(
+                    "Invalid receipt filename {}: {}",
+                    path.display(),
+                    e
+                ));
                 continue;
             }
         };
@@ -2497,7 +2622,11 @@ fn restore_candidate_receipts(
                     continue;
                 }
                 Err(e) => {
-                    errors.push(format!("Refusing to restore receipt {}: {}", path.display(), e));
+                    errors.push(format!(
+                        "Refusing to restore receipt {}: {}",
+                        path.display(),
+                        e
+                    ));
                     continue;
                 }
             }
@@ -2553,7 +2682,11 @@ fn restore_candidate_receipts(
                 libc::openat(
                     dir_fd.as_raw_fd(),
                     tmp_cstr.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
                     0o600,
                 )
             };
@@ -2598,7 +2731,8 @@ fn restore_candidate_receipts(
                 continue;
             }
 
-            let chown_res = unsafe { libc::fchown(tmp_fd, entry.uid as libc::uid_t, entry.gid as libc::gid_t) };
+            let chown_res =
+                unsafe { libc::fchown(tmp_fd, entry.uid as libc::uid_t, entry.gid as libc::gid_t) };
             if chown_res < 0 {
                 let err = std::io::Error::last_os_error();
                 unsafe {
@@ -2866,9 +3000,8 @@ fn sanitize_git_repo_remote(remote: &str) -> String {
         return String::new();
     }
 
-    static HEX_12_QUERY_RE: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new(r"^\?q#[0-9a-fA-F]{12}$").unwrap()
-    });
+    static HEX_12_QUERY_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"^\?q#[0-9a-fA-F]{12}$").unwrap());
 
     // Mask cred#<12-hex> and ?q#<12-hex> so Url::parse does not treat '#' as URL fragment delimiter
     let masked = if trimmed.contains("cred#") || trimmed.contains("?q#") {
@@ -2972,9 +3105,8 @@ pub fn sanitize_url_or_source_key_for_api(raw: &str) -> String {
         };
     }
 
-    static URL_USERINFO_RE: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/?#@\s]+@").unwrap()
-    });
+    static URL_USERINFO_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/?#@\s]+@").unwrap());
     static SENSITIVE_QUERY_RE: Lazy<regex::Regex> = Lazy::new(|| {
         regex::Regex::new(r#"(?i)([?&;])([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credential(?:s)?|passphrase|cookies?|session(?:[_-]?(?:id|key|token|secret))?|webhook(?:[_-]?(?:url|secret|token|key))?|master[_-]?pass|rclone[_-]?(?:rc[_-]?)?pass|jwt[_-]?secret)[A-Za-z0-9_.-]*|\b(?:[A-Za-z0-9]*[_.-])?pass(?:[_.-][A-Za-z0-9]*)*\b)=([^&#|\s]+)"#).unwrap()
     });
@@ -2984,7 +3116,11 @@ pub fn sanitize_url_or_source_key_for_api(raw: &str) -> String {
     // If reqwest::Url::parse succeeds on a display URL, strip credentials, query string, and fragment.
     if let Ok(mut parsed) = reqwest::Url::parse(&stripped) {
         let scheme = parsed.scheme();
-        if (scheme == "http" || scheme == "https" || scheme == "ssh" || scheme == "git" || scheme == "ftp")
+        if (scheme == "http"
+            || scheme == "https"
+            || scheme == "ssh"
+            || scheme == "git"
+            || scheme == "ftp")
             && parsed.has_host()
         {
             let _ = parsed.set_username("");
@@ -2993,10 +3129,13 @@ pub fn sanitize_url_or_source_key_for_api(raw: &str) -> String {
             parsed.set_fragment(None);
             let mut out = parsed.to_string();
             let base_before = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-            if !trimmed.ends_with('/') && out.ends_with('/') && !base_before.ends_with('/')
-                && parsed.path() == "/" {
-                    out.pop();
-                }
+            if !trimmed.ends_with('/')
+                && out.ends_with('/')
+                && !base_before.ends_with('/')
+                && parsed.path() == "/"
+            {
+                out.pop();
+            }
             return out;
         }
     }
@@ -3025,12 +3164,18 @@ pub fn sanitize_package_update_record(
     record.source_key = sanitize_url_or_source_key_for_api(&record.source_key);
     record.installed_version = sanitize_url_or_source_key_for_api(&record.installed_version);
     record.latest_version = sanitize_url_or_source_key_for_api(&record.latest_version);
-    record.error = sanitize_url_or_source_key_for_api(&af_services::workers::public_update_error(&record.error));
+    record.error = sanitize_url_or_source_key_for_api(&af_services::workers::public_update_error(
+        &record.error,
+    ));
     record
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_with<ControlFn, ControlFut, StatusFn>(
+pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_with<
+    ControlFn,
+    ControlFut,
+    StatusFn,
+>(
     clean_id: &str,
     quiesce_units: &[String],
     restart_units: &[String],
@@ -3067,7 +3212,9 @@ where
                     );
                 } else {
                     tracing::error!(unit = %unit, error = %e, "Failed to quiesce unit before receipt restoration");
-                    quiesce_failures.push(format!("Failed to quiesce unit '{unit}' before receipt restoration: {e}"));
+                    quiesce_failures.push(format!(
+                        "Failed to quiesce unit '{unit}' before receipt restoration: {e}"
+                    ));
                 }
             }
         }
@@ -3100,7 +3247,8 @@ where
         if let Err(rt_err) = rt.restore() {
             if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty() {
                 restart_failures.push(
-                    "Refusing to restart pre-stopped service after runtime restoration failure".to_string(),
+                    "Refusing to restart pre-stopped service after runtime restoration failure"
+                        .to_string(),
                 );
             }
             return (Some(rt_err), restart_failures);
@@ -3118,7 +3266,8 @@ where
     if receipt_restore_error.is_some() {
         if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty() {
             restart_failures.push(
-                "Refusing to restart pre-stopped service after receipt restoration failure".to_string(),
+                "Refusing to restart pre-stopped service after receipt restoration failure"
+                    .to_string(),
             );
         }
         return (receipt_restore_error, restart_failures);
@@ -3135,10 +3284,12 @@ where
         // Step 5: Verify restart_units active
         for unit in restart_units {
             let st = query_status(unit);
-            if st != "running" && st != "idle"
-                && !restart_failures.iter().any(|f| f.starts_with(unit)) {
-                    restart_failures.push(format!("{unit} is {st}"));
-                }
+            if st != "running"
+                && st != "idle"
+                && !restart_failures.iter().any(|f| f.starts_with(unit))
+            {
+                restart_failures.push(format!("{unit} is {st}"));
+            }
         }
     }
 
@@ -3251,7 +3402,10 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts(
     .await
 }
 
-pub(crate) fn should_rollback_post_certification_failure(action: &str, kind: af_services::PackageJobFailure) -> bool {
+pub(crate) fn should_rollback_post_certification_failure(
+    action: &str,
+    kind: af_services::PackageJobFailure,
+) -> bool {
     matches!(action, "install" | "reinstall" | "update")
         && matches!(
             kind,
@@ -3262,7 +3416,11 @@ pub(crate) fn should_rollback_post_certification_failure(action: &str, kind: af_
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_post_certification_finalization_failure_with<ControlFn, ControlFut, StatusFn>(
+pub(crate) async fn handle_post_certification_finalization_failure_with<
+    ControlFn,
+    ControlFut,
+    StatusFn,
+>(
     action: &str,
     mut required_err: PackageLifecycleFailure,
     clean_id: &str,
@@ -3305,10 +3463,15 @@ where
             )
             .await;
         if let Some(ref r_err) = receipt_restore_error {
-            required_err.message.push_str(&format!("; receipt restoration error: {}", r_err));
+            required_err
+                .message
+                .push_str(&format!("; receipt restoration error: {}", r_err));
         }
         if !restart_failures.is_empty() {
-            required_err.message.push_str(&format!("; post-restoration restart failures: {}", restart_failures.join("; ")));
+            required_err.message.push_str(&format!(
+                "; post-restoration restart failures: {}",
+                restart_failures.join("; ")
+            ));
         }
         if required_err.kind == af_services::PackageJobFailure::Configuration
             && (receipt_restore_error.is_some() || !restart_failures.is_empty())
@@ -3496,9 +3659,13 @@ async fn dispatch_package_lifecycle_with_target(
 
     if is_retired {
         if let Some(ref explicit_target) = expected_target_version {
-            if !af_runner::af_release::lifecycle::versions_match_target(explicit_target, "0.4.18.2805")
-                && !af_runner::af_release::lifecycle::versions_match_target("0.4.18.2805", explicit_target)
-            {
+            if !af_runner::af_release::lifecycle::versions_match_target(
+                explicit_target,
+                "0.4.18.2805",
+            ) && !af_runner::af_release::lifecycle::versions_match_target(
+                "0.4.18.2805",
+                explicit_target,
+            ) {
                 return api_error(
                     StatusCode::CONFLICT,
                     "CONFLICT",
@@ -3516,7 +3683,9 @@ async fn dispatch_package_lifecycle_with_target(
         }
 
         af_services::workers::ensure_app_updates_columns();
-        let db_update: Option<(String, String, bool, String, String, String)> = if let Ok(conn) = af_db::get_conn() {
+        let db_update: Option<(String, String, bool, String, String, String)> = if let Ok(conn) =
+            af_db::get_conn()
+        {
             conn.query_row(
                 "SELECT COALESCE(installed_version, ''), COALESCE(latest_version, ''), COALESCE(update_available, 0), COALESCE(checked_at, ''), COALESCE(last_error, ''), COALESCE(source_key, '') FROM app_updates WHERE package_name = ?1",
                 rusqlite::params![&clean_id],
@@ -3527,7 +3696,8 @@ async fn dispatch_package_lifecycle_with_target(
             None
         };
 
-        let Some((installed, latest, update_available, checked_at, err, source_key)) = db_update else {
+        let Some((installed, latest, update_available, checked_at, err, source_key)) = db_update
+        else {
             return api_error(
                 StatusCode::CONFLICT,
                 "CONFLICT",
@@ -3546,21 +3716,22 @@ async fn dispatch_package_lifecycle_with_target(
 
         if is_retired
             && !af_runner::af_release::lifecycle::versions_match_target(db_latest, "0.4.18.2805")
-                && !af_runner::af_release::lifecycle::versions_match_target("0.4.18.2805", db_latest)
-            {
-                return api_error(
-                    StatusCode::CONFLICT,
-                    "CONFLICT",
-                    "Retired package can only target pinned version 0.4.18.2805",
-                );
-            }
+            && !af_runner::af_release::lifecycle::versions_match_target("0.4.18.2805", db_latest)
+        {
+            return api_error(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Retired package can only target pinned version 0.4.18.2805",
+            );
+        }
 
         let github_api_base = std::env::var("AETHERFLOW_GITHUB_API_BASE_URL")
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "https://api.github.com".to_string());
-        let expected_source_key = af_services::workers::canonical_update_source_key(&github_api_base, &pkg);
+        let expected_source_key =
+            af_services::workers::canonical_update_source_key(&github_api_base, &pkg);
 
         if source_key.trim().is_empty() || source_key.trim() != expected_source_key {
             return api_error(
@@ -3576,9 +3747,7 @@ async fn dispatch_package_lifecycle_with_target(
         let installed_confirmed = !db_installed.is_empty()
             && !db_installed.eq_ignore_ascii_case("unknown")
             && !err.to_ascii_lowercase().contains("installed version");
-        let has_provenance = has_valid_checked_at
-            && installed_confirmed
-            && update_available;
+        let has_provenance = has_valid_checked_at && installed_confirmed && update_available;
 
         if !installed_confirmed {
             return api_error(
@@ -3604,7 +3773,10 @@ async fn dispatch_package_lifecycle_with_target(
                 );
             };
             if !af_runner::af_release::lifecycle::versions_match_target(explicit_target, db_latest)
-                && !af_runner::af_release::lifecycle::versions_match_target(db_latest, explicit_target)
+                && !af_runner::af_release::lifecycle::versions_match_target(
+                    db_latest,
+                    explicit_target,
+                )
             {
                 return api_error(
                     StatusCode::CONFLICT,
@@ -3614,9 +3786,13 @@ async fn dispatch_package_lifecycle_with_target(
             }
         } else {
             if let Some(ref explicit_target) = expected_target_version {
-                if !af_runner::af_release::lifecycle::versions_match_target(explicit_target, db_latest)
-                    && !af_runner::af_release::lifecycle::versions_match_target(db_latest, explicit_target)
-                {
+                if !af_runner::af_release::lifecycle::versions_match_target(
+                    explicit_target,
+                    db_latest,
+                ) && !af_runner::af_release::lifecycle::versions_match_target(
+                    db_latest,
+                    explicit_target,
+                ) {
                     return api_error(
                         StatusCode::CONFLICT,
                         "CONFLICT",
@@ -3628,7 +3804,12 @@ async fn dispatch_package_lifecycle_with_target(
             }
         }
 
-        if expected_target_version.as_deref().unwrap_or("").trim().is_empty() {
+        if expected_target_version
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return api_error(
                 StatusCode::CONFLICT,
                 "CONFLICT",
@@ -4429,7 +4610,12 @@ async fn check_package_updates() -> Response {
     let pkg_repo_urls: HashMap<String, String> = af_services::get_packages()
         .unwrap_or_default()
         .into_iter()
-        .map(|p| (p.name, sanitize_url_or_source_key_for_api(&p.update_repo_url)))
+        .map(|p| {
+            (
+                p.name,
+                sanitize_url_or_source_key_for_api(&p.update_repo_url),
+            )
+        })
         .collect();
 
     let updates: Vec<serde_json::Value> = records
@@ -4438,9 +4624,15 @@ async fn check_package_updates() -> Response {
             let sanitized = sanitize_package_update_record(r);
             let mut val = serde_json::to_value(&sanitized).unwrap_or_default();
             if let Some(obj) = val.as_object_mut() {
-                let repo_url = pkg_repo_urls.get(&sanitized.package_id).cloned().unwrap_or_default();
+                let repo_url = pkg_repo_urls
+                    .get(&sanitized.package_id)
+                    .cloned()
+                    .unwrap_or_default();
                 if !repo_url.is_empty() {
-                    obj.insert("update_repo_url".to_string(), serde_json::Value::String(repo_url));
+                    obj.insert(
+                        "update_repo_url".to_string(),
+                        serde_json::Value::String(repo_url),
+                    );
                 }
                 if !sanitized.source_key.is_empty() {
                     obj.insert(
@@ -4913,7 +5105,9 @@ async fn update_profile(
     if local.is_empty()
         || domain.is_empty()
         || domain.contains('@')
-        || trimmed.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        || trimmed
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
     {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -4931,7 +5125,8 @@ async fn update_profile(
                 "Database error",
             );
         };
-        let Ok(tx) = conn.transaction() else {
+        let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        else {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
@@ -5003,6 +5198,17 @@ async fn update_password(
             "Database error",
         );
     };
+    let pre_revoked_after =
+        if crate::auth::column_exists(&conn, "users", "sessions_revoked_after").unwrap_or(false) {
+            conn.query_row(
+                "SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1",
+                params![auth_user.user_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        };
     let Ok(existing_hash) = conn.query_row(
         "SELECT COALESCE(password_hash, '') FROM users WHERE id = ?1",
         params![auth_user.user_id],
@@ -5042,10 +5248,27 @@ async fn update_password(
     let tx_outcome = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
         let mut conn = af_db::get_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let changed = tx.execute(
-            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
-            params![new_hash, auth_user.user_id],
-        )?;
+        let changed = if crate::auth::column_exists(&tx, "users", "sessions_revoked_after")
+            .unwrap_or(false)
+        {
+            tx.execute(
+                "UPDATE users SET password_hash = ?1 \
+                 WHERE id = ?2 AND COALESCE(password_hash, '') = ?3 \
+                   AND COALESCE(sessions_revoked_after, 0) <= ?4",
+                params![
+                    new_hash,
+                    auth_user.user_id,
+                    existing_hash,
+                    pre_revoked_after
+                ],
+            )?
+        } else {
+            tx.execute(
+                "UPDATE users SET password_hash = ?1 \
+                 WHERE id = ?2 AND COALESCE(password_hash, '') = ?3",
+                params![new_hash, auth_user.user_id, existing_hash],
+            )?
+        };
         if changed == 0 {
             return Ok(None);
         }
@@ -5065,7 +5288,14 @@ async fn update_password(
 
     let (new_token, revoked_jtis) = match tx_outcome {
         Ok(Some(pair)) => pair,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "SESSION_EXPIRED",
+                "Credentials changed concurrently; please re-authenticate",
+            );
+        }
+        Err(_) => {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
@@ -6532,7 +6762,9 @@ mod update_error_regressions {
             .await
             .unwrap();
         assert_eq!(unauth_resp.status(), StatusCode::OK);
-        let unauth_body = to_bytes(unauth_resp.into_body(), 1024 * 1024).await.unwrap();
+        let unauth_body = to_bytes(unauth_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let unauth_text = String::from_utf8(unauth_body.to_vec()).unwrap();
         assert!(!unauth_text.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
         assert!(!unauth_text.contains("/etc/private/config"));
@@ -7089,8 +7321,14 @@ mod tests {
             "https://github.com/Radarr/Radarr/releases/tag/v5.15.0"
         );
         assert_eq!(body["checked_at"], "2026-11-02T12:00:00Z");
-        assert_eq!(body["last_error"], "GitHub API rate limit reached; retaining last confirmed version");
-        assert_eq!(body["error"], "GitHub API rate limit reached; retaining last confirmed version");
+        assert_eq!(
+            body["last_error"],
+            "GitHub API rate limit reached; retaining last confirmed version"
+        );
+        assert_eq!(
+            body["error"],
+            "GitHub API rate limit reached; retaining last confirmed version"
+        );
         assert_eq!(body["update"]["package_id"], "radarr");
     }
 
@@ -7434,11 +7672,7 @@ mod tests {
             lock_file: "/install/.fixture.lock".into(),
             ..Default::default()
         };
-        std::fs::write(
-            &catalog,
-            serde_json::to_vec(&vec![package]).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&catalog, serde_json::to_vec(&vec![package]).unwrap()).unwrap();
         std::fs::write(&automation, "{}").unwrap();
         std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", catalog);
         std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", automation);
@@ -7450,16 +7684,18 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        assert!(af_services::try_start_package_job(af_services::PackageJobInfo {
-            job_id: "inventory-privilege-fixture".into(),
-            package_id: "fixture".into(),
-            expected_target_version: Some("2.0.0".into()),
-            action: "update".into(),
-            status: "updating".into(),
-            progress: 42,
-            started_at: chrono::Utc::now().to_rfc3339(),
-            last_line: "PRIVATE_INSTALLER_DETAILS".into(),
-        }));
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: "inventory-privilege-fixture".into(),
+                package_id: "fixture".into(),
+                expected_target_version: Some("2.0.0".into()),
+                action: "update".into(),
+                status: "updating".into(),
+                progress: 42,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                last_line: "PRIVATE_INSTALLER_DETAILS".into(),
+            }
+        ));
         af_services::finish_package_job_with_diagnostics(
             "fixture",
             "update",
@@ -7473,12 +7709,18 @@ mod tests {
             Some("1.0.0".into()),
         )
         .unwrap();
-        let (admin_token, admin_claims) = crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
+        let (admin_token, admin_claims) =
+            crate::auth::create_standard_jwt(1, &HeaderMap::new()).unwrap();
         let (user_token, _) = crate::auth::create_standard_jwt(2, &HeaderMap::new()).unwrap();
         let mut cases = vec![
             ("human-admin".to_string(), admin_token, true, true),
             ("human-user".to_string(), user_token, true, false),
-            ("invalid".to_string(), "invalid-token".to_string(), false, false),
+            (
+                "invalid".to_string(),
+                "invalid-token".to_string(),
+                false,
+                false,
+            ),
         ];
         for (scope, authenticated) in [
             ("/api/v1/admin/packages", true),
@@ -7504,7 +7746,8 @@ mod tests {
                 frontend: Default::default(),
                 plugin_dir: root.join("plugins/inventory-reader"),
             };
-            let (token, _) = crate::plugins::mint_scoped_plugin_token(&manifest, Some(300)).unwrap();
+            let (token, _) =
+                crate::plugins::mint_scoped_plugin_token(&manifest, Some(300)).unwrap();
             assert!(crate::plugins::decode_and_verify_plugin_token(&token).is_ok());
             cases.push((format!("dedicated {scope}"), token, authenticated, false));
             for plugin_id in ["inventory-reader", ""] {
@@ -7519,13 +7762,21 @@ mod tests {
                 )
                 .unwrap();
                 assert!(crate::auth::decode_session_claims(&token, false).is_ok());
-                cases.push((format!("legacy {plugin_id:?} {scope}"), token, authenticated, false));
+                cases.push((
+                    format!("legacy {plugin_id:?} {scope}"),
+                    token,
+                    authenticated,
+                    false,
+                ));
             }
         }
         let router = build_router();
         for (label, token, authenticated, diagnostics_allowed) in cases {
             let mut headers = HeaderMap::new();
-            headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
             assert_eq!(
                 get_marketplace_auth_info(&headers),
                 (authenticated, diagnostics_allowed),
@@ -7557,20 +7808,40 @@ mod tests {
                     if authenticated { "true" } else { "false" },
                     "{label}"
                 );
-                let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+                let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap();
                 let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 let app = &payload[0];
                 assert_eq!(app["inventory_known"], authenticated, "{label}");
                 if authenticated {
-                    assert_eq!(app["last_job"]["job_id"], "inventory-privilege-fixture", "{label}");
+                    assert_eq!(
+                        app["last_job"]["job_id"], "inventory-privilege-fixture",
+                        "{label}"
+                    );
                     assert_eq!(app["last_job"]["status"], "failed", "{label}");
-                    assert_eq!(app["last_job"]["expected_target_version"], "2.0.0", "{label}");
+                    assert_eq!(
+                        app["last_job"]["expected_target_version"], "2.0.0",
+                        "{label}"
+                    );
                 }
                 for field in ["failed_stage", "exit_code", "sanitized_summary"] {
-                    assert_eq!(app["last_job"].get(field).is_some(), diagnostics_allowed, "{label} {field}");
+                    assert_eq!(
+                        app["last_job"].get(field).is_some(),
+                        diagnostics_allowed,
+                        "{label} {field}"
+                    );
                 }
-                assert_eq!(payload.to_string().contains("PRIVATE_INSTALLER_DETAILS"), diagnostics_allowed, "{label}");
-                assert_eq!(payload.to_string().contains("/home/fixture/internal-path"), diagnostics_allowed, "{label}");
+                assert_eq!(
+                    payload.to_string().contains("PRIVATE_INSTALLER_DETAILS"),
+                    diagnostics_allowed,
+                    "{label}"
+                );
+                assert_eq!(
+                    payload.to_string().contains("/home/fixture/internal-path"),
+                    diagnostics_allowed,
+                    "{label}"
+                );
             }
         }
         drop(connection);
@@ -8322,7 +8593,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_lifecycle_action_dispatch_does_not_block_install_reinstall_or_remove_on_update_errors_or_retirement() {
+    async fn test_lifecycle_action_dispatch_does_not_block_install_reinstall_or_remove_on_update_errors_or_retirement(
+    ) {
         if crate::plugins::tests::run_plugin_test_in_subprocess() {
             return;
         }
@@ -8359,7 +8631,12 @@ mod tests {
         let automation = root.join("automation.json");
         std::fs::write(
             &catalog,
-            serde_json::to_vec(&vec![test_pkg.clone(), retired_pkg.clone(), uninstalled_pkg.clone()]).unwrap(),
+            serde_json::to_vec(&vec![
+                test_pkg.clone(),
+                retired_pkg.clone(),
+                uninstalled_pkg.clone(),
+            ])
+            .unwrap(),
         )
         .unwrap();
         std::fs::write(&automation, "{}").unwrap();
@@ -8389,7 +8666,8 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&inst_file, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&inst_file, std::fs::Permissions::from_mode(0o755));
                 let _ = std::fs::set_permissions(&rem_file, std::fs::Permissions::from_mode(0o755));
                 let _ = std::fs::set_permissions(&upd_file, std::fs::Permissions::from_mode(0o755));
             }
@@ -8419,7 +8697,11 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(res_remove.status(), StatusCode::OK, "remove must not be blocked by app_updates last_error");
+        assert_eq!(
+            res_remove.status(),
+            StatusCode::OK,
+            "remove must not be blocked by app_updates last_error"
+        );
         af_services::clear_package_job_info("test-err-pkg");
 
         // B. Verify 'install' succeeds on uninstalled package without app_updates record
@@ -8433,7 +8715,11 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(res_install.status(), StatusCode::OK, "install must not require app_updates or confirmed target");
+        assert_eq!(
+            res_install.status(),
+            StatusCode::OK,
+            "install must not require app_updates or confirmed target"
+        );
         af_services::clear_package_job_info("test-fresh-pkg");
 
         // C. Verify 'reinstall' succeeds even when app_updates has last_error
@@ -8447,7 +8733,11 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(res_reinstall.status(), StatusCode::OK, "reinstall must not be blocked by app_updates last_error");
+        assert_eq!(
+            res_reinstall.status(),
+            StatusCode::OK,
+            "reinstall must not be blocked by app_updates last_error"
+        );
         af_services::clear_package_job_info("test-err-pkg");
 
         // D. Verify 'remove' succeeds unconditionally on a retired package (readarr)
@@ -8461,7 +8751,11 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(res_retired_remove.status(), StatusCode::OK, "remove on retired package must succeed unconditionally");
+        assert_eq!(
+            res_retired_remove.status(),
+            StatusCode::OK,
+            "remove on retired package must succeed unconditionally"
+        );
         af_services::clear_package_job_info("readarr");
 
         // E. Verify 'update' on test-err-pkg IS blocked by app_updates last_error
@@ -8475,7 +8769,11 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(res_update_blocked.status(), StatusCode::CONFLICT, "update MUST be blocked by app_updates error");
+        assert_eq!(
+            res_update_blocked.status(),
+            StatusCode::CONFLICT,
+            "update MUST be blocked by app_updates error"
+        );
 
         drop(connection);
         std::env::set_current_dir(previous_directory).unwrap();
@@ -8535,7 +8833,14 @@ mod tests {
         let automation = root.join("automation.json");
         std::fs::write(
             &catalog,
-            serde_json::to_vec(&vec![pkg.clone(), rem_pkg.clone(), reinst_pkg.clone(), inst_pkg.clone(), readarr_pkg.clone()]).unwrap(),
+            serde_json::to_vec(&vec![
+                pkg.clone(),
+                rem_pkg.clone(),
+                reinst_pkg.clone(),
+                inst_pkg.clone(),
+                readarr_pkg.clone(),
+            ])
+            .unwrap(),
         )
         .unwrap();
         std::fs::write(&automation, "{}").unwrap();
@@ -8555,14 +8860,21 @@ mod tests {
         std::fs::create_dir_all(&update_scripts).unwrap();
         std::fs::create_dir_all(&install_scripts).unwrap();
         std::fs::create_dir_all(&remove_scripts).unwrap();
-        for id in ["test-target-pkg", "test-remove-pkg", "test-reinstall-pkg", "test-install-pkg", "readarr"] {
+        for id in [
+            "test-target-pkg",
+            "test-remove-pkg",
+            "test-reinstall-pkg",
+            "test-install-pkg",
+            "readarr",
+        ] {
             for dir in [&update_scripts, &install_scripts, &remove_scripts] {
                 let script = dir.join(format!("updatepackage-{id}"));
                 let _ = std::fs::write(&script, "#!/bin/sh\nexit 0\n");
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+                    let _ =
+                        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
                 }
             }
             let inst_script = install_scripts.join(format!("installpackage-{id}"));
@@ -8572,8 +8884,10 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&inst_script, std::fs::Permissions::from_mode(0o755));
-                let _ = std::fs::set_permissions(&rem_script, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&inst_script, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&rem_script, std::fs::Permissions::from_mode(0o755));
             }
         }
 
@@ -8602,7 +8916,8 @@ mod tests {
         assert_eq!(res_missing.status(), StatusCode::CONFLICT);
         af_services::clear_package_job_info("test-target-pkg");
 
-        let expected_source = af_services::workers::canonical_update_source_key("https://api.github.com", &pkg);
+        let expected_source =
+            af_services::workers::canonical_update_source_key("https://api.github.com", &pkg);
         // Seed app_updates with db_latest = "v1.2.0" and last_error non-empty but WITHOUT prior confirmation provenance (checked_at = "", update_available = 0)
         {
             let conn = af_db::get_conn().unwrap();
@@ -8768,7 +9083,10 @@ mod tests {
         assert_eq!(res_retired_missing.status(), StatusCode::CONFLICT);
         af_services::clear_package_job_info("readarr");
 
-        let readarr_source = af_services::workers::canonical_update_source_key("https://api.github.com", &readarr_pkg);
+        let readarr_source = af_services::workers::canonical_update_source_key(
+            "https://api.github.com",
+            &readarr_pkg,
+        );
         // 7. Update on retired package (readarr) when app_updates has unconfirmed last_error -> 409 Conflict
         {
             let conn = af_db::get_conn().unwrap();
@@ -8964,16 +9282,18 @@ mod tests {
 
         // Test emit_package_progress ingests and stores redacted line
         let job_id = "secret-prog-job";
-        assert!(af_services::try_start_package_job(af_services::PackageJobInfo {
-            job_id: job_id.into(),
-            package_id: "sonarr".into(),
-            action: "update".into(),
-            status: "updating".into(),
-            progress: 10,
-            last_line: "init".into(),
-            started_at: "test-time".into(),
-            expected_target_version: None,
-        }));
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: job_id.into(),
+                package_id: "sonarr".into(),
+                action: "update".into(),
+                status: "updating".into(),
+                progress: 10,
+                last_line: "init".into(),
+                started_at: "test-time".into(),
+                expected_target_version: None,
+            }
+        ));
 
         emit_package_progress(
             "sonarr",
@@ -8995,7 +9315,15 @@ mod tests {
             "Cookie: [REDACTED] sid=FRAGMENT_CANARY",
             "Authorization: [REDACTED] FRAGMENT_CANARY",
         ] {
-            emit_package_progress("sonarr", "update", "updating", 50, line, "test-time", job_id);
+            emit_package_progress(
+                "sonarr",
+                "update",
+                "updating",
+                50,
+                line,
+                "test-time",
+                job_id,
+            );
             let current = af_services::get_package_job_info("sonarr").unwrap();
             assert!(!current.last_line.contains("FRAGMENT_CANARY"));
             let projected = package_progress_payload("sonarr", Some(current), None, true);
@@ -9032,16 +9360,18 @@ mod tests {
 
         // Test Authorization: Basic, curl -u, --pass, and JSON boundary redaction
         let job_id2 = "secret-prog-job-2";
-        assert!(af_services::try_start_package_job(af_services::PackageJobInfo {
-            job_id: job_id2.into(),
-            package_id: "sonarr".into(),
-            action: "update".into(),
-            status: "updating".into(),
-            progress: 10,
-            last_line: "init".into(),
-            started_at: "test-time".into(),
-            expected_target_version: None,
-        }));
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: job_id2.into(),
+                package_id: "sonarr".into(),
+                action: "update".into(),
+                status: "updating".into(),
+                progress: 10,
+                last_line: "init".into(),
+                started_at: "test-time".into(),
+                expected_target_version: None,
+            }
+        ));
         emit_package_progress(
             "sonarr",
             "update",
@@ -9124,7 +9454,9 @@ mod tests {
             .await
             .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let apps = payload.as_array().expect("public response must be an array");
+        let apps = payload
+            .as_array()
+            .expect("public response must be an array");
         assert!(!apps.is_empty(), "public catalog should return packages");
 
         for app in apps {
@@ -9140,24 +9472,69 @@ mod tests {
             assert_eq!(obj.get("inventory_mode").unwrap(), "public_redacted");
 
             // Private inventory and ingress fields that MUST be omitted:
-            assert!(!obj.contains_key("internal_domain"), "internal_domain must be omitted");
-            assert!(!obj.contains_key("external_access_enabled"), "external_access_enabled must be omitted");
-            assert!(!obj.contains_key("tls_enabled"), "tls_enabled must be omitted");
-            assert!(!obj.contains_key("latest_version"), "latest_version must be omitted");
-            assert!(!obj.contains_key("installed_version"), "installed_version must be omitted");
-            assert!(!obj.contains_key("checked_at"), "checked_at must be omitted");
-            assert!(!obj.contains_key("update_checked_at"), "update_checked_at must be omitted");
-            assert!(!obj.contains_key("update_url"), "update_url must be omitted");
-            assert!(!obj.contains_key("update_error"), "update_error must be omitted");
-            assert!(!obj.contains_key("update_available"), "update_available must be omitted");
-            assert!(!obj.contains_key("active_port"), "active_port must be omitted");
-            assert!(!obj.contains_key("public_domain"), "public_domain must be omitted");
-            assert!(!obj.contains_key("active_job"), "active_job must be omitted");
+            assert!(
+                !obj.contains_key("internal_domain"),
+                "internal_domain must be omitted"
+            );
+            assert!(
+                !obj.contains_key("external_access_enabled"),
+                "external_access_enabled must be omitted"
+            );
+            assert!(
+                !obj.contains_key("tls_enabled"),
+                "tls_enabled must be omitted"
+            );
+            assert!(
+                !obj.contains_key("latest_version"),
+                "latest_version must be omitted"
+            );
+            assert!(
+                !obj.contains_key("installed_version"),
+                "installed_version must be omitted"
+            );
+            assert!(
+                !obj.contains_key("checked_at"),
+                "checked_at must be omitted"
+            );
+            assert!(
+                !obj.contains_key("update_checked_at"),
+                "update_checked_at must be omitted"
+            );
+            assert!(
+                !obj.contains_key("update_url"),
+                "update_url must be omitted"
+            );
+            assert!(
+                !obj.contains_key("update_error"),
+                "update_error must be omitted"
+            );
+            assert!(
+                !obj.contains_key("update_available"),
+                "update_available must be omitted"
+            );
+            assert!(
+                !obj.contains_key("active_port"),
+                "active_port must be omitted"
+            );
+            assert!(
+                !obj.contains_key("public_domain"),
+                "public_domain must be omitted"
+            );
+            assert!(
+                !obj.contains_key("active_job"),
+                "active_job must be omitted"
+            );
             assert!(!obj.contains_key("last_job"), "last_job must be omitted");
-            assert!(!obj.contains_key("last_job_outcome"), "last_job_outcome must be omitted");
+            assert!(
+                !obj.contains_key("last_job_outcome"),
+                "last_job_outcome must be omitted"
+            );
             assert!(!obj.contains_key("progress"), "progress must be omitted");
             assert!(!obj.contains_key("log_line"), "log_line must be omitted");
-            assert!(!obj.contains_key("started_at"), "started_at must be omitted");
+            assert!(
+                !obj.contains_key("started_at"),
+                "started_at must be omitted"
+            );
             assert!(!obj.contains_key("job_id"), "job_id must be omitted");
         }
 
@@ -9170,7 +9547,8 @@ mod tests {
     #[test]
     fn test_candidate_receipt_snapshot_and_restoration_with_target_certification_failure() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-receipt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-receipt-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9183,8 +9561,12 @@ mod tests {
 
         // 1. Snapshot candidate receipts
         let snapshots = snapshot_candidate_receipts("syncthing").unwrap();
-        assert!(snapshots.iter().any(|(p, bytes)| p == &syncthing_ver && bytes.as_deref() == Some(b"v1.0.0")));
-        assert!(snapshots.iter().any(|(p, bytes)| p == &opt_syncthing && bytes.is_none()));
+        assert!(snapshots
+            .iter()
+            .any(|(p, bytes)| p == &syncthing_ver && bytes.as_deref() == Some(b"v1.0.0")));
+        assert!(snapshots
+            .iter()
+            .any(|(p, bytes)| p == &opt_syncthing && bytes.is_none()));
 
         // 2. Simulate installer making changes (overwriting existing, creating new)
         std::fs::write(&syncthing_ver, b"v2.0.0").unwrap();
@@ -9196,7 +9578,10 @@ mod tests {
 
         // 4. Verify previous receipt is restored and new receipt was removed
         assert_eq!(std::fs::read(&syncthing_ver).unwrap(), b"v1.0.0");
-        assert!(!opt_syncthing.exists(), "uncertified new receipt must be removed");
+        assert!(
+            !opt_syncthing.exists(),
+            "uncertified new receipt must be removed"
+        );
 
         // 5. Verify TargetVerification reports stage target_certification_after_install_commit
         let job_id = "test-target-cert-job";
@@ -9249,7 +9634,8 @@ mod tests {
     #[test]
     fn test_candidate_receipt_symlink_swap_restoration_does_not_overwrite_victim() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-symlink-swap-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-symlink-swap-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9263,7 +9649,9 @@ mod tests {
 
         // 1. Snapshot candidate receipts
         let snapshots = snapshot_candidate_receipts("radarr").unwrap();
-        assert!(snapshots.iter().any(|(p, bytes)| p == &receipt_path && bytes.as_deref() == Some(b"1.0.0")));
+        assert!(snapshots
+            .iter()
+            .any(|(p, bytes)| p == &receipt_path && bytes.as_deref() == Some(b"1.0.0")));
 
         // 2. Attacker swaps receipt for a symlink pointing to /tmp/victim
         std::fs::remove_file(&receipt_path).unwrap();
@@ -9272,7 +9660,11 @@ mod tests {
 
         // 3. Restore candidate receipts
         let restore_res = restore_candidate_receipts(&snapshots);
-        assert!(restore_res.is_ok(), "Restoration should succeed: {:?}", restore_res);
+        assert!(
+            restore_res.is_ok(),
+            "Restoration should succeed: {:?}",
+            restore_res
+        );
 
         // 4. Victim file must NOT be overwritten!
         let victim_content = std::fs::read(&victim_file).unwrap();
@@ -9280,8 +9672,14 @@ mod tests {
 
         // 5. Receipt file must be restored as a regular file (not a symlink) with original bytes
         let meta = std::fs::symlink_metadata(&receipt_path).unwrap();
-        assert!(meta.file_type().is_file(), "Receipt must be restored as a regular file");
-        assert!(!meta.file_type().is_symlink(), "Receipt must not be a symlink");
+        assert!(
+            meta.file_type().is_file(),
+            "Receipt must be restored as a regular file"
+        );
+        assert!(
+            !meta.file_type().is_symlink(),
+            "Receipt must not be a symlink"
+        );
         assert_eq!(std::fs::read(&receipt_path).unwrap(), b"1.0.0");
 
         if let Some(r) = orig_root {
@@ -9295,7 +9693,8 @@ mod tests {
     #[test]
     fn test_candidate_receipt_snapshot_fails_closed_on_symlink_fifo_or_oversized() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-bad-receipt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-bad-receipt-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9309,7 +9708,10 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&dummy_target, &receipt_path).unwrap();
         let sym_err = snapshot_candidate_receipts("sonarr");
-        assert!(sym_err.is_err(), "Snapshot must fail closed on symlink receipt");
+        assert!(
+            sym_err.is_err(),
+            "Snapshot must fail closed on symlink receipt"
+        );
         assert!(sym_err.unwrap_err().contains("symlink or non-regular file"));
         let _ = std::fs::remove_file(&receipt_path);
 
@@ -9320,8 +9722,13 @@ mod tests {
             let res = unsafe { libc::mkfifo(cstr.as_ptr(), 0o644) };
             assert_eq!(res, 0);
             let fifo_err = snapshot_candidate_receipts("sonarr");
-            assert!(fifo_err.is_err(), "Snapshot must fail closed on FIFO receipt");
-            assert!(fifo_err.unwrap_err().contains("symlink or non-regular file"));
+            assert!(
+                fifo_err.is_err(),
+                "Snapshot must fail closed on FIFO receipt"
+            );
+            assert!(fifo_err
+                .unwrap_err()
+                .contains("symlink or non-regular file"));
             let _ = std::fs::remove_file(&receipt_path);
         }
 
@@ -9329,7 +9736,10 @@ mod tests {
         let oversized = vec![b'X'; 64 * 1024 + 1];
         std::fs::write(&receipt_path, &oversized).unwrap();
         let size_err = snapshot_candidate_receipts("sonarr");
-        assert!(size_err.is_err(), "Snapshot must fail closed on oversized receipt");
+        assert!(
+            size_err.is_err(),
+            "Snapshot must fail closed on oversized receipt"
+        );
         assert!(size_err.unwrap_err().contains("exceeds 64 KiB limit"));
         let _ = std::fs::remove_file(&receipt_path);
 
@@ -9342,7 +9752,10 @@ mod tests {
         std::os::unix::fs::symlink(&real_dir, &ancestor_link).unwrap();
         std::fs::write(ancestor_link.join(".af-version"), b"1.0.0").unwrap();
         let ancestor_err = snapshot_candidate_receipts("sonarr");
-        assert!(ancestor_err.is_err(), "Snapshot must fail closed on symlink ancestor");
+        assert!(
+            ancestor_err.is_err(),
+            "Snapshot must fail closed on symlink ancestor"
+        );
         assert!(ancestor_err.unwrap_err().contains("is a symlink"));
 
         if let Some(r) = orig_root {
@@ -9356,7 +9769,10 @@ mod tests {
     #[test]
     fn test_candidate_receipt_intermediate_ancestor_symlink_fails_closed() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-intermediate-symlink-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-intermediate-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9373,21 +9789,33 @@ mod tests {
 
         // 1. Snapshot must fail closed because intermediate ancestor "lib" is a symlink
         let snap_err = snapshot_candidate_receipts("syncthing");
-        assert!(snap_err.is_err(), "Snapshot must fail closed when intermediate ancestor is a symlink");
+        assert!(
+            snap_err.is_err(),
+            "Snapshot must fail closed when intermediate ancestor is a symlink"
+        );
         assert!(snap_err.unwrap_err().contains("is a symlink"));
 
         // 2. Restore must also fail closed
         let receipt_path = temp_dir.join("var/lib/syncthing/.af-version");
-        let fake_snapshot: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> =
-            vec![(receipt_path.clone(), Some(ReceiptSnapshotEntry::from(b"2.0.0".to_vec())))];
+        let fake_snapshot: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> = vec![(
+            receipt_path.clone(),
+            Some(ReceiptSnapshotEntry::from(b"2.0.0".to_vec())),
+        )];
         let restore_err = restore_candidate_receipts(&fake_snapshot);
-        assert!(restore_err.is_err(), "Restore must fail closed when intermediate ancestor is a symlink");
+        assert!(
+            restore_err.is_err(),
+            "Restore must fail closed when intermediate ancestor is a symlink"
+        );
         assert!(restore_err.unwrap_err().contains("is a symlink"));
 
         // 3. Restore None (uncertified receipt removal) must also fail closed on symlink ancestor
-        let fake_snapshot_none: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> = vec![(receipt_path, None)];
+        let fake_snapshot_none: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> =
+            vec![(receipt_path, None)];
         let restore_none_err = restore_candidate_receipts(&fake_snapshot_none);
-        assert!(restore_none_err.is_err(), "Restore None must fail closed when intermediate ancestor is a symlink");
+        assert!(
+            restore_none_err.is_err(),
+            "Restore None must fail closed when intermediate ancestor is a symlink"
+        );
         assert!(restore_none_err.unwrap_err().contains("is a symlink"));
 
         if let Some(r) = orig_root {
@@ -9401,7 +9829,10 @@ mod tests {
     #[test]
     fn test_lifecycle_job_fails_closed_and_restores_receipts_on_service_restart_failure() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-service-restart-fail-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-service-restart-fail-{}",
+            uuid::Uuid::new_v4()
+        ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9414,8 +9845,12 @@ mod tests {
 
         // 1. Snapshot candidate receipts
         let snapshots = snapshot_candidate_receipts("syncthing").unwrap();
-        assert!(snapshots.iter().any(|(p, bytes)| p == &syncthing_ver && bytes.as_deref() == Some(b"v1.0.0")));
-        assert!(snapshots.iter().any(|(p, bytes)| p == &opt_syncthing && bytes.is_none()));
+        assert!(snapshots
+            .iter()
+            .any(|(p, bytes)| p == &syncthing_ver && bytes.as_deref() == Some(b"v1.0.0")));
+        assert!(snapshots
+            .iter()
+            .any(|(p, bytes)| p == &opt_syncthing && bytes.is_none()));
 
         // 2. Simulate installer making changes
         std::fs::write(&syncthing_ver, b"v2.0.0").unwrap();
@@ -9459,16 +9894,20 @@ mod tests {
         );
 
         let outcome = af_services::get_package_job_outcome("syncthing").unwrap();
-        assert_ne!(outcome.status, "completed", "Job must NEVER be completed if stopped unit failed to restart");
-        assert_eq!(outcome.status, "failed");
-        assert_eq!(
-            outcome.failed_stage.as_deref(),
-            Some("service_restore")
+        assert_ne!(
+            outcome.status, "completed",
+            "Job must NEVER be completed if stopped unit failed to restart"
         );
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.failed_stage.as_deref(), Some("service_restore"));
         assert!(
             outcome.message.contains("service")
                 || outcome.message.contains("stopped")
-                || outcome.sanitized_summary.as_ref().map(|s| s.contains("service") || s.contains("stopped")).unwrap_or(false)
+                || outcome
+                    .sanitized_summary
+                    .as_ref()
+                    .map(|s| s.contains("service") || s.contains("stopped"))
+                    .unwrap_or(false)
         );
 
         if let Some(r) = orig_root {
@@ -9487,13 +9926,15 @@ mod tests {
             "https://git.example.com/team/App.git"
         );
 
-        let url_with_query = "https://user:super_secret@git.example.com/team/App.git?token=secret123&branch=main";
+        let url_with_query =
+            "https://user:super_secret@git.example.com/team/App.git?token=secret123&branch=main";
         assert_eq!(
             sanitize_url_or_source_key_for_api(url_with_query),
             "https://git.example.com/team/App.git"
         );
 
-        let release_url_with_query = "https://github.com/org/repo/releases/v1.1.0?download=true&token=xyz";
+        let release_url_with_query =
+            "https://github.com/org/repo/releases/v1.1.0?download=true&token=xyz";
         assert_eq!(
             sanitize_url_or_source_key_for_api(release_url_with_query),
             "https://github.com/org/repo/releases/v1.1.0"
@@ -9534,9 +9975,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_candidate_receipt_restoration_quiesces_stopped_units_before_restoring_and_restarts_afterward() {
+    async fn test_candidate_receipt_restoration_quiesces_stopped_units_before_restoring_and_restarts_afterward(
+    ) {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-quiesce-order-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-quiesce-order-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9628,7 +10071,8 @@ mod tests {
     #[tokio::test]
     async fn test_candidate_receipt_quiesce_failure_skips_restoration_and_restart() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-quiesce-fail-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-quiesce-fail-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9666,14 +10110,22 @@ mod tests {
         )
         .await;
 
-        assert!(restore_err.is_some(), "Must return error when quiescence fails");
+        assert!(
+            restore_err.is_some(),
+            "Must return error when quiescence fails"
+        );
         let err_msg = restore_err.unwrap();
-        assert!(err_msg.contains("Skipped candidate receipt restoration because service quiescence failed"));
+        assert!(err_msg
+            .contains("Skipped candidate receipt restoration because service quiescence failed"));
         assert_eq!(restart_fails.len(), 1);
         assert!(restart_fails[0].contains("Failed to quiesce unit 'syncthing.service'"));
 
         let events = timeline.lock().unwrap().clone();
-        assert_eq!(events, vec!["stop syncthing.service"], "Must not attempt to start after quiesce failure");
+        assert_eq!(
+            events,
+            vec!["stop syncthing.service"],
+            "Must not attempt to start after quiesce failure"
+        );
 
         // Crucial: restore_candidate_receipts must NOT have been called, receipt remains v2.0.0
         assert_eq!(
@@ -9693,7 +10145,8 @@ mod tests {
     #[tokio::test]
     async fn test_quiesce_and_restore_candidate_receipts_absent_unit_allows_restoration() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-absent-unit-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-absent-unit-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9731,7 +10184,10 @@ mod tests {
             restore_err.is_none(),
             "Receipt restoration should succeed when absent unit is confirmed stopped: {restore_err:?}"
         );
-        assert!(restart_fails.is_empty(), "Expected no restart failures: {restart_fails:?}");
+        assert!(
+            restart_fails.is_empty(),
+            "Expected no restart failures: {restart_fails:?}"
+        );
         assert_eq!(
             std::fs::read(&receipt_file).unwrap(),
             b"v1.0.0",
@@ -9764,7 +10220,8 @@ mod tests {
             "Candidate receipt restoration must fail when query_status reports running"
         );
         let err_msg = restore_err_fail.unwrap();
-        assert!(err_msg.contains("Skipped candidate receipt restoration because service quiescence failed"));
+        assert!(err_msg
+            .contains("Skipped candidate receipt restoration because service quiescence failed"));
         assert_eq!(restart_fails_fail.len(), 1);
         assert!(restart_fails_fail[0].contains("Failed to quiesce unit 'radarr.service'"));
 
@@ -9785,7 +10242,8 @@ mod tests {
     #[tokio::test]
     async fn test_candidate_receipt_restoration_failure_skips_service_restart() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-restore-fail-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-restore-fail-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -9846,9 +10304,13 @@ mod tests {
             latest_version: "1.1.0".to_string(),
             update_available: true,
             checked_at: "2026-11-09T10:00:00Z".to_string(),
-            release_url: "https://user:secret_token@git.example.com/org/testapp/releases/v1.1.0".to_string(),
-            error: "connection failed with password=\"super_secret_pw\" to https://admin:pwd@host/repo".to_string(),
-            source_key: "git_head:https://user:secret_token@git.example.com/org/testapp.git|main".to_string(),
+            release_url: "https://user:secret_token@git.example.com/org/testapp/releases/v1.1.0"
+                .to_string(),
+            error:
+                "connection failed with password=\"super_secret_pw\" to https://admin:pwd@host/repo"
+                    .to_string(),
+            source_key: "git_head:https://user:secret_token@git.example.com/org/testapp.git|main"
+                .to_string(),
         };
 
         let sanitized_rec = sanitize_package_update_record(rec.clone());
@@ -9918,13 +10380,17 @@ mod tests {
         };
         let sanitized_kv = sanitize_package_update_record(rec_kv);
         assert_eq!(sanitized_kv.installed_version, "1.2.3 token=[REDACTED]");
-        assert!(!sanitized_kv.installed_version.contains("leak_secret_token_123"));
+        assert!(!sanitized_kv
+            .installed_version
+            .contains("leak_secret_token_123"));
     }
 
     #[test]
     fn test_sanitize_url_or_source_key_for_api_strips_fragments_and_queries() {
         assert_eq!(
-            sanitize_url_or_source_key_for_api("https://user:pass@github.com/org/repo?token=1#secret-frag"),
+            sanitize_url_or_source_key_for_api(
+                "https://user:pass@github.com/org/repo?token=1#secret-frag"
+            ),
             "https://github.com/org/repo"
         );
         assert_eq!(
@@ -9940,15 +10406,21 @@ mod tests {
             "https://example.com/download"
         );
         assert_eq!(
-            sanitize_url_or_source_key_for_api("git-repo:ssh://Deploy@git.example.com/Team/App.git#main"),
+            sanitize_url_or_source_key_for_api(
+                "git-repo:ssh://Deploy@git.example.com/Team/App.git#main"
+            ),
             "git-repo:ssh://Deploy@git.example.com/Team/App.git#main"
         );
         assert_eq!(
-            sanitize_url_or_source_key_for_api("git-repo:https://cred#a1b2c3d4e5f6@github.com/org/repo?q#123456789abc#main"),
+            sanitize_url_or_source_key_for_api(
+                "git-repo:https://cred#a1b2c3d4e5f6@github.com/org/repo?q#123456789abc#main"
+            ),
             "git-repo:https://cred#a1b2c3d4e5f6@github.com/org/repo?q#123456789abc#main"
         );
         assert_eq!(
-            sanitize_url_or_source_key_for_api("git-repo:https://user:pass@github.com/org/repo?bad_query#main"),
+            sanitize_url_or_source_key_for_api(
+                "git-repo:https://user:pass@github.com/org/repo?bad_query#main"
+            ),
             "git-repo:https://github.com/org/repo#main"
         );
     }
@@ -9956,7 +10428,8 @@ mod tests {
     #[tokio::test]
     async fn test_quiesce_and_restore_stops_inactive_units_and_restarts_only_active_units() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-quiesce-inactive-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-quiesce-inactive-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10027,7 +10500,8 @@ mod tests {
     #[tokio::test]
     async fn test_quiesce_and_restore_candidate_receipts_quiesces_oneshots_without_restart() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-oneshot-quiesce-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-oneshot-quiesce-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10055,13 +10529,23 @@ mod tests {
         assert!(restart_fails.is_empty());
         assert_eq!(std::fs::read(&recyclarr_receipt).unwrap(), b"v1.0.0");
 
-        let recorded = CANDIDATE_QUIESCE_RECORDER.lock().unwrap().take().unwrap_or_default();
+        let recorded = CANDIDATE_QUIESCE_RECORDER
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
         // Quiescence must stop both timer and oneshot service, with timer first
         assert!(recorded.contains(&"stop recyclarr.timer".to_string()));
         assert!(recorded.contains(&"stop recyclarr".to_string()));
-        let stop_timer_idx = recorded.iter().position(|r| r == "stop recyclarr.timer").unwrap();
+        let stop_timer_idx = recorded
+            .iter()
+            .position(|r| r == "stop recyclarr.timer")
+            .unwrap();
         let stop_service_idx = recorded.iter().position(|r| r == "stop recyclarr").unwrap();
-        assert!(stop_timer_idx < stop_service_idx, "timer must be stopped before oneshot");
+        assert!(
+            stop_timer_idx < stop_service_idx,
+            "timer must be stopped before oneshot"
+        );
         // Restart must only restart the timer, NEVER the oneshot
         assert!(recorded.contains(&"start recyclarr.timer".to_string()));
         assert!(!recorded.contains(&"start recyclarr".to_string()));
@@ -10079,7 +10563,10 @@ mod tests {
 
         let (restore_err, restart_fails) = quiesce_and_restore_candidate_receipts(
             "scrutiny",
-            &["scrutiny-collector.timer".to_string(), "scrutiny".to_string()],
+            &[
+                "scrutiny-collector.timer".to_string(),
+                "scrutiny".to_string(),
+            ],
             &scrutiny_snapshots,
             false,
         )
@@ -10089,14 +10576,27 @@ mod tests {
         assert!(restart_fails.is_empty());
         assert_eq!(std::fs::read(&scrutiny_receipt).unwrap(), b"v1.0.0");
 
-        let recorded = CANDIDATE_QUIESCE_RECORDER.lock().unwrap().take().unwrap_or_default();
+        let recorded = CANDIDATE_QUIESCE_RECORDER
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
         // Quiescence must stop scrutiny-collector.timer, scrutiny, and oneshot scrutiny-collector
         assert!(recorded.contains(&"stop scrutiny-collector.timer".to_string()));
         assert!(recorded.contains(&"stop scrutiny-collector".to_string()));
         assert!(recorded.contains(&"stop scrutiny".to_string()));
-        let stop_timer_idx = recorded.iter().position(|r| r == "stop scrutiny-collector.timer").unwrap();
-        let stop_collector_idx = recorded.iter().position(|r| r == "stop scrutiny-collector").unwrap();
-        assert!(stop_timer_idx < stop_collector_idx, "timer must be stopped before collector oneshot");
+        let stop_timer_idx = recorded
+            .iter()
+            .position(|r| r == "stop scrutiny-collector.timer")
+            .unwrap();
+        let stop_collector_idx = recorded
+            .iter()
+            .position(|r| r == "stop scrutiny-collector")
+            .unwrap();
+        assert!(
+            stop_timer_idx < stop_collector_idx,
+            "timer must be stopped before collector oneshot"
+        );
         // Restart must only restart scrutiny and timer, NEVER the oneshot collector
         assert!(recorded.contains(&"start scrutiny-collector.timer".to_string()));
         assert!(recorded.contains(&"start scrutiny".to_string()));
@@ -10111,7 +10611,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_package_lifecycle_dispatch_gate_with_quiesces_oneshots_and_excludes_from_restart() {
+    async fn test_run_package_lifecycle_dispatch_gate_with_quiesces_oneshots_and_excludes_from_restart(
+    ) {
         use std::sync::{Arc, Mutex};
 
         // 1. Recyclarr: pre-stop quiesces timer + oneshot, but stopped_units excludes oneshot
@@ -10135,7 +10636,11 @@ mod tests {
                     Ok(())
                 }
             },
-            |_port| async move { Err(anyhow::anyhow!("simulated script failure to trigger rollback")) },
+            |_port| async move {
+                Err(anyhow::anyhow!(
+                    "simulated script failure to trigger rollback"
+                ))
+            },
         )
         .await
         .expect("dispatch gate itself should complete");
@@ -10248,7 +10753,8 @@ mod tests {
     #[test]
     fn test_restore_candidate_receipts_creates_missing_directories_via_stepwise_mkdirat() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-mkdirat-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-mkdirat-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10257,18 +10763,28 @@ mod tests {
         let nested_receipt = temp_dir.join("var/lib/syncthing/.af-version");
         assert!(!nested_receipt.parent().unwrap().exists());
 
-        let snapshots: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> =
-            vec![(nested_receipt.clone(), Some(ReceiptSnapshotEntry::from(b"1.5.0".to_vec())))];
+        let snapshots: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> = vec![(
+            nested_receipt.clone(),
+            Some(ReceiptSnapshotEntry::from(b"1.5.0".to_vec())),
+        )];
         // Must succeed using stepwise descriptor-relative mkdirat + openat without std::fs::create_dir_all
         let res = restore_candidate_receipts(&snapshots);
-        assert!(res.is_ok(), "Restoration must create missing directories safely: {:?}", res);
+        assert!(
+            res.is_ok(),
+            "Restoration must create missing directories safely: {:?}",
+            res
+        );
         assert_eq!(std::fs::read(&nested_receipt).unwrap(), b"1.5.0");
 
         // None case where parent does not exist should cleanly succeed as no-op
         let non_existent_file = temp_dir.join("opt/nonexistent/.af-version");
-        let none_snapshots: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> = vec![(non_existent_file.clone(), None)];
+        let none_snapshots: Vec<(PathBuf, Option<ReceiptSnapshotEntry>)> =
+            vec![(non_existent_file.clone(), None)];
         let none_res = restore_candidate_receipts(&none_snapshots);
-        assert!(none_res.is_ok(), "None restoration with ENOENT parent must succeed as no-op");
+        assert!(
+            none_res.is_ok(),
+            "None restoration with ENOENT parent must succeed as no-op"
+        );
         assert!(!non_existent_file.exists());
 
         if let Some(r) = orig_root {
@@ -10280,7 +10796,8 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_package_lifecycle_appends_inactive_stopped_units_diagnostics_when_failure_already_present() {
+    fn test_finish_package_lifecycle_appends_inactive_stopped_units_diagnostics_when_failure_already_present(
+    ) {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
         let job_id = "test-inactive-diag-job";
         let pkg_id = "syncthing";
@@ -10317,7 +10834,8 @@ mod tests {
         assert_eq!(outcome.status, "failed");
         let summary = outcome.sanitized_summary.as_deref().unwrap_or("");
         assert!(
-            summary.contains("nonexistent-inactive-dummy.service") || summary.contains("stopped services failed to resume"),
+            summary.contains("nonexistent-inactive-dummy.service")
+                || summary.contains("stopped services failed to resume"),
             "Sanitized summary must contain inactive unit diagnostics: {summary}"
         );
     }
@@ -10325,14 +10843,19 @@ mod tests {
     #[test]
     fn test_candidate_receipt_paths_includes_blueprint_config_and_restores_atomically() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-bp-config-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-bp-config-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
 
-        let (pkg, cfg_path) = if let Some(bp) = af_services::get_blueprint("radarr").filter(|b| !b.config_file_path.trim().is_empty()) {
+        let (pkg, cfg_path) = if let Some(bp) =
+            af_services::get_blueprint("radarr").filter(|b| !b.config_file_path.trim().is_empty())
+        {
             ("radarr", bp.config_file_path.clone())
-        } else if let Some(bp) = af_services::get_blueprint("sonarr").filter(|b| !b.config_file_path.trim().is_empty()) {
+        } else if let Some(bp) =
+            af_services::get_blueprint("sonarr").filter(|b| !b.config_file_path.trim().is_empty())
+        {
             ("sonarr", bp.config_file_path.clone())
         } else {
             ("radarr", "/etc/radarr/config.xml".to_string())
@@ -10351,11 +10874,16 @@ mod tests {
 
         let snapshots = snapshot_candidate_receipts(pkg).unwrap();
         assert!(
-            snapshots.iter().any(|(p, b)| p == &expected_cfg && b.as_deref() == Some(b"<Config><Port>7878</Port></Config>")),
+            snapshots.iter().any(|(p, b)| p == &expected_cfg
+                && b.as_deref() == Some(b"<Config><Port>7878</Port></Config>")),
             "Blueprint config must be snapshotted"
         );
 
-        std::fs::write(&expected_cfg, b"<Config><Port>9999</Port><Corrupted/></Config>").unwrap();
+        std::fs::write(
+            &expected_cfg,
+            b"<Config><Port>9999</Port><Corrupted/></Config>",
+        )
+        .unwrap();
 
         restore_candidate_receipts(&snapshots).unwrap();
 
@@ -10376,7 +10904,8 @@ mod tests {
     #[test]
     fn test_candidate_receipt_preserves_mode_and_ownership_on_restoration() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-mode-restore-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-mode-restore-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10388,14 +10917,19 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
         }
 
         let initial_meta = std::fs::symlink_metadata(&receipt_path).unwrap();
         #[cfg(unix)]
         let (initial_mode, initial_uid, initial_gid) = {
             use std::os::unix::fs::MetadataExt;
-            (initial_meta.mode() & 0o7777, initial_meta.uid(), initial_meta.gid())
+            (
+                initial_meta.mode() & 0o7777,
+                initial_meta.uid(),
+                initial_meta.gid(),
+            )
         };
         #[cfg(unix)]
         assert_eq!(initial_mode, 0o600);
@@ -10421,7 +10955,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
         }
 
         let clobbered_meta = std::fs::symlink_metadata(&receipt_path).unwrap();
@@ -10486,7 +11021,8 @@ mod tests {
     #[tokio::test]
     async fn test_wave22_quiesce_and_restore_runtime_snapshot_restores_binary_and_state() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w22-rt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w22-rt-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10505,7 +11041,9 @@ mod tests {
         // 1. Snapshot candidate receipts
         let snapshots = snapshot_candidate_receipts("syncthing").unwrap();
         assert!(
-            snapshots.iter().any(|(p, bytes)| p == &receipt_file && bytes.as_deref() == Some(b"1.22.0")),
+            snapshots
+                .iter()
+                .any(|(p, bytes)| p == &receipt_file && bytes.as_deref() == Some(b"1.22.0")),
             "receipt must be snapshotted"
         );
 
@@ -10548,8 +11086,14 @@ mod tests {
         )
         .await;
 
-        assert!(restore_err.is_none(), "Expected no restore error: {restore_err:?}");
-        assert!(restart_fails.is_empty(), "Expected no restart failures: {restart_fails:?}");
+        assert!(
+            restore_err.is_none(),
+            "Expected no restore error: {restore_err:?}"
+        );
+        assert!(
+            restart_fails.is_empty(),
+            "Expected no restart failures: {restart_fails:?}"
+        );
 
         let events = timeline.lock().unwrap().clone();
         assert_eq!(
@@ -10574,17 +11118,39 @@ mod tests {
     #[tokio::test]
     async fn test_wave23_configuration_only_failure_triggers_runtime_and_receipt_rollback() {
         // 1. Verify should_rollback_post_certification_failure returns true for Configuration
-        assert!(should_rollback_post_certification_failure("update", af_services::PackageJobFailure::Configuration));
-        assert!(should_rollback_post_certification_failure("install", af_services::PackageJobFailure::Configuration));
-        assert!(should_rollback_post_certification_failure("reinstall", af_services::PackageJobFailure::Configuration));
-        assert!(should_rollback_post_certification_failure("update", af_services::PackageJobFailure::ServiceRestore));
-        assert!(should_rollback_post_certification_failure("update", af_services::PackageJobFailure::ConfigurationAndServiceRestore));
-        assert!(!should_rollback_post_certification_failure("remove", af_services::PackageJobFailure::Configuration));
-        assert!(!should_rollback_post_certification_failure("update", af_services::PackageJobFailure::Installer));
+        assert!(should_rollback_post_certification_failure(
+            "update",
+            af_services::PackageJobFailure::Configuration
+        ));
+        assert!(should_rollback_post_certification_failure(
+            "install",
+            af_services::PackageJobFailure::Configuration
+        ));
+        assert!(should_rollback_post_certification_failure(
+            "reinstall",
+            af_services::PackageJobFailure::Configuration
+        ));
+        assert!(should_rollback_post_certification_failure(
+            "update",
+            af_services::PackageJobFailure::ServiceRestore
+        ));
+        assert!(should_rollback_post_certification_failure(
+            "update",
+            af_services::PackageJobFailure::ConfigurationAndServiceRestore
+        ));
+        assert!(!should_rollback_post_certification_failure(
+            "remove",
+            af_services::PackageJobFailure::Configuration
+        ));
+        assert!(!should_rollback_post_certification_failure(
+            "update",
+            af_services::PackageJobFailure::Installer
+        ));
 
         // 2. Exercise handle_post_certification_finalization_failure_with with PackageJobFailure::Configuration
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w23-cfg-rb-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w23-cfg-rb-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10646,14 +11212,28 @@ mod tests {
             )
             .await;
 
-        assert!(receipt_restore_error.is_none(), "receipt_restore_error should be None: {:?}", receipt_restore_error);
-        assert!(restart_failures.is_empty(), "restart_failures should be empty: {:?}", restart_failures);
-        assert_eq!(final_err.kind, af_services::PackageJobFailure::Configuration);
+        assert!(
+            receipt_restore_error.is_none(),
+            "receipt_restore_error should be None: {:?}",
+            receipt_restore_error
+        );
+        assert!(
+            restart_failures.is_empty(),
+            "restart_failures should be empty: {:?}",
+            restart_failures
+        );
+        assert_eq!(
+            final_err.kind,
+            af_services::PackageJobFailure::Configuration
+        );
 
         // Verify units quiesced and restarted
         let events = timeline.lock().unwrap().clone();
         assert!(events.contains(&"stop sonarr.service".to_string()));
-        assert_eq!(events.last().map(|s| s.as_str()), Some("start sonarr.service"));
+        assert_eq!(
+            events.last().map(|s| s.as_str()),
+            Some("start sonarr.service")
+        );
 
         // Verify disk files rolled back
         assert_eq!(std::fs::read(&bin_file).unwrap(), b"bin-old");
@@ -10676,7 +11256,10 @@ mod tests {
             if let Some(p) = pkgs.into_iter().find(|p| p.name == clean_plex) {
                 let svc = p.service_name.trim().to_string();
                 if !svc.is_empty()
-                    && !matches!(svc.as_str(), "apache2" | "nginx" | "apache2.service" | "nginx.service")
+                    && !matches!(
+                        svc.as_str(),
+                        "apache2" | "nginx" | "apache2.service" | "nginx.service"
+                    )
                     && !plex_units.contains(&svc)
                 {
                     plex_units.push(svc);
@@ -10689,7 +11272,10 @@ mod tests {
             if let Some(p) = pkgs.into_iter().find(|p| p.name == clean_mcvnc) {
                 let svc = p.service_name.trim().to_string();
                 if !svc.is_empty()
-                    && !matches!(svc.as_str(), "apache2" | "nginx" | "apache2.service" | "nginx.service")
+                    && !matches!(
+                        svc.as_str(),
+                        "apache2" | "nginx" | "apache2.service" | "nginx.service"
+                    )
                     && !mcvnc_units.contains(&svc)
                 {
                     mcvnc_units.push(svc);
@@ -10697,7 +11283,10 @@ mod tests {
             }
         }
 
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w23-api-footprint-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-w23-api-footprint-{}",
+            uuid::Uuid::new_v4()
+        ));
         let mut env_cfg = af_runner::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -10724,7 +11313,8 @@ mod tests {
     #[tokio::test]
     async fn test_wave24_incomplete_rollback_keeps_candidate_receipt() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w24-receipt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w24-receipt-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10755,7 +11345,10 @@ mod tests {
             "{err}"
         );
         assert!(
-            restart_fails.iter().any(|f| f.contains("Refusing to restart pre-stopped service after incomplete rollback")),
+            restart_fails
+                .iter()
+                .any(|f| f
+                    .contains("Refusing to restart pre-stopped service after incomplete rollback")),
             "{restart_fails:?}"
         );
 
@@ -10770,7 +11363,8 @@ mod tests {
     #[tokio::test]
     async fn test_wave24_configuration_restore_error_upgrades_failure_kind() {
         let _env_lock = RECEIPT_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w24-kind-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w24-kind-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let orig_root = std::env::var("AETHERFLOW_FS_ROOT").ok();
         std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
@@ -10816,7 +11410,10 @@ mod tests {
             )
             .await;
 
-        assert!(receipt_restore_error.is_some(), "runtime restore failure must surface");
+        assert!(
+            receipt_restore_error.is_some(),
+            "runtime restore failure must surface"
+        );
         assert!(restart_failures.is_empty(), "{restart_failures:?}");
         assert_eq!(
             final_err.kind,
@@ -11082,8 +11679,14 @@ mod hillclimb_tests {
         .unwrap();
 
         let allocated = allocate_or_resolve_app_port("sonarr", 8989);
-        assert_ne!(allocated, 8989, "must not steal stopped app's persisted default port");
-        assert_ne!(allocated, 17000, "must not steal stopped app's persisted fallback port");
+        assert_ne!(
+            allocated, 8989,
+            "must not steal stopped app's persisted default port"
+        );
+        assert_ne!(
+            allocated, 17000,
+            "must not steal stopped app's persisted fallback port"
+        );
         assert!(
             (17001..=19999).contains(&allocated),
             "expected fallback port >= 17001, got {allocated}"
@@ -11147,10 +11750,14 @@ mod hillclimb_tests {
             "public_redacted"
         );
         assert_eq!(
-            res.headers().get("x-aetherflow-inventory-authenticated").unwrap(),
+            res.headers()
+                .get("x-aetherflow-inventory-authenticated")
+                .unwrap(),
             "false"
         );
-        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let items: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         if let Some(item) = items.first() {
             assert_eq!(item["inventory_known"], false);

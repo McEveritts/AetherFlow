@@ -3735,17 +3735,31 @@ fn deployment_ingress_config(
     config
 }
 
-fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+fn snapshot_deploy_files(
+    bp: &af_services::AppBlueprint,
+) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     let mut snapshots = Vec::new();
     let cfg_path = af_services::mutators::resolve_config_path(&bp.config_file_path);
     if !cfg_path.as_os_str().is_empty() {
         snapshots.push((cfg_path.clone(), std::fs::read(&cfg_path).ok()));
     }
     for vhost_rel in [
-        format!("/etc/apache2/sites-available/aetherflow-app-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-enabled/aetherflow-app-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-available/aetherflow-ext-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-enabled/aetherflow-ext-{}.conf", bp.app_name),
+        format!(
+            "/etc/apache2/sites-available/aetherflow-app-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-enabled/aetherflow-app-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-available/aetherflow-ext-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-enabled/aetherflow-ext-{}.conf",
+            bp.app_name
+        ),
     ] {
         let resolved = af_services::mutators::resolve_config_path(&vhost_rel);
         if !resolved.as_os_str().is_empty() {

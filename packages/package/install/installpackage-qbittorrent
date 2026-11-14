@@ -21,7 +21,15 @@ PACKAGE_NAME="qbittorrent"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8180}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-qbittorrent}"
@@ -47,7 +55,7 @@ if [[ ! -s /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf && -s /var/
     cp -a /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 fi
 if [[ ! -s /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf ]]; then
-cat <<EOF > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
+write_config_file /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf 0600 <<EOF
 [LegalNotice]
 Accepted=true
 
@@ -69,10 +77,10 @@ if [[ -s /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf ]]; th
 fi
 
 chown -hRP qbittorrent:qbittorrent /var/lib/qbittorrent
-chmod 600 /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
+set_config_file_mode 0600 /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 
 report_progress 85 "Configuring and starting qbittorrent.service on port ${APP_PORT}..."
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/qbittorrent.service
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file /etc/systemd/system/qbittorrent.service 0644
 [Unit]
 Description=qBittorrent-nox Daemon
 After=network-online.target

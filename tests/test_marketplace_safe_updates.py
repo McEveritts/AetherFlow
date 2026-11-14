@@ -151,6 +151,16 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
     info.mode = 0o755
     tf.addfile(info, io.BytesIO(script))
 PYEOF
+            elif [[ "$* $out" == *sabnzbd* ]] && [[ "$out" == *.tar.gz || "$out" == *.tgz ]]; then
+                /usr/bin/python3 - "$out" <<'PYEOF'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as tf:
+    for rel_name, body in (("SABnzbd-4.3.3/SABnzbd.py", b"print('fixture')\n"), ("SABnzbd-4.3.3/requirements.txt", b"")):
+        info = tarfile.TarInfo(name=rel_name)
+        info.size = len(body)
+        info.mode = 0o644
+        tf.addfile(info, io.BytesIO(body))
+PYEOF
             else
                 printf '#!/bin/sh\nexit 0\n' > "$out"
             fi
@@ -593,6 +603,8 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "_af_redact_ascii_fallback",
             "_af_truncate_receipt_field",
             "af_write_failure_receipt",
+            "af_prepare_logfile_path",
+            "af_validate_tar_archive",
             "report_progress",
             "check_disk_space",
         )

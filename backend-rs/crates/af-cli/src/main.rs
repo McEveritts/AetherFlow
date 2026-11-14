@@ -1,6 +1,6 @@
 //! Binary entrypoint (`af`) for the AetherFlow Unified Rust Administrative CLI (`af-cli`).
 
-use af_cli::{parse_cli_args, execute_invocation, UnixSocketRunnerClient};
+use af_cli::{execute_invocation, parse_cli_args, UnixSocketRunnerClient};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

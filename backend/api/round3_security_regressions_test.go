@@ -2,9 +2,15 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,14 +50,8 @@ func TestRound3_IngressAndAdminRBACAndCSRFAndSchema24(t *testing.T) {
 	if err := db.DB.QueryRow("SELECT MAX(version) FROM schema_versions").Scan(&maxVer); err != nil {
 		t.Fatalf("query schema_versions: %v", err)
 	}
-	if maxVer != 22 {
-		t.Fatalf("expected legacy Go fresh MAX(schema_versions.version) == 22 (<= 24), got %d", maxVer)
-	}
-	if _, err := db.DB.Exec("INSERT INTO schema_versions (version, description) VALUES (24, 'v4 schema ceiling')"); err != nil {
-		t.Fatalf("seed v24 row: %v", err)
-	}
-	if err := db.DB.QueryRow("SELECT MAX(version) FROM schema_versions").Scan(&maxVer); err != nil || maxVer != 24 {
-		t.Fatalf("expected MAX(schema_versions.version) == 24 preserved, got %d (err=%v)", maxVer, err)
+	if maxVer != 24 {
+		t.Fatalf("expected Go fresh MAX(schema_versions.version) == 24 matching Rust v4 schema ceiling, got %d", maxVer)
 	}
 
 	_, err := db.DB.Exec(
@@ -582,5 +582,191 @@ func TestRound3_WebSocketTicketTTLRoleScopingAndRevocationDisconnect(t *testing.
 
 	if _, open := <-adminClient.send; open {
 		t.Fatalf("expected revoked adminClient channel to be closed")
+	}
+}
+
+func TestRound5_AESMasterKeyHexPrecedenceAndLastLineEnv(t *testing.T) {
+	prevKey := append([]byte(nil), aesMasterKey...)
+	t.Cleanup(func() {
+		aesMasterKey = prevKey
+	})
+
+	firstHex := strings.Repeat("12", 32)
+	secondHex := strings.Repeat("ab", 32)
+	envPath := filepath.Join(t.TempDir(), "aetherflow.env")
+	content := "AES_MASTER_KEY=" + firstHex + "\nexport AES_MASTER_KEY=\"" + secondHex + "\"\n"
+	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	t.Setenv("AES_MASTER_KEY", "")
+	t.Setenv("AETHERFLOW_ENV_FILE", envPath)
+
+	InitAESKey()
+	if len(aesMasterKey) != 32 || aesMasterKey[0] != 0xab || aesMasterKey[31] != 0xab {
+		t.Fatalf("expected last-line 0xab key bytes, got len=%d", len(aesMasterKey))
+	}
+}
+
+func TestRound5_RustSha256RecoveryCodeAndMalformedRevokedRowAndHeaderScrub(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTestDB(t)
+	db.RedisClient = nil
+	t.Cleanup(func() {
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+
+	// 1. Fresh Go migrate() reaches canonical schema version 24
+	var maxVer int
+	if err := db.DB.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_versions`).Scan(&maxVer); err != nil {
+		t.Fatalf("query max schema version: %v", err)
+	}
+	if maxVer != 24 {
+		t.Fatalf("expected Go MAX(schema_versions.version) == 24, got %d", maxVer)
+	}
+
+	// 2. Malformed expires_at in revoked_tokens fails closed and survives PruneExpiredData
+	if _, err := db.DB.Exec(`INSERT INTO revoked_tokens (jti, expires_at) VALUES ('corrupt-jti-r5', 'not-a-timestamp')`); err != nil {
+		t.Fatalf("insert corrupt revoked_token: %v", err)
+	}
+	db.PruneExpiredData()
+	db.ClearLocalBlacklist()
+	if !db.IsTokenRevoked("corrupt-jti-r5") {
+		t.Fatalf("expected corrupt expires_at row in revoked_tokens to fail closed (revoked=true)")
+	}
+	if !db.IsTokenRevoked("") {
+		t.Fatalf("expected empty JTI to fail closed (revoked=true)")
+	}
+
+	// 3. Rust sha256:v1:<32-hex-salt>:<64-hex-digest> recovery code verifies in Go
+	plainCode := "ABCD-EFGH"
+	compact := "ABCDEFGH"
+	saltBytes := bytes.Repeat([]byte{0x5a}, 16) // 16 raw salt bytes (encoded as 32 hex chars in Rust)
+	h := sha256.New()
+	_, _ = h.Write([]byte("aetherflow-recovery-v1\x00"))
+	_, _ = h.Write(saltBytes)
+	_, _ = h.Write([]byte(compact))
+	rustFormattedHash := fmt.Sprintf("sha256:v1:%x:%x", saltBytes, h.Sum(nil))
+	if !verifyRecoveryCodeHash(rustFormattedHash, plainCode) {
+		t.Fatalf("expected Go verifyRecoveryCodeHash to accept Rust sha256:v1:<salt>:<digest> format")
+	}
+	if verifyRecoveryCodeHash(rustFormattedHash, "WRNG-CODE") {
+		t.Fatalf("expected wrong code to fail verifyRecoveryCodeHash")
+	}
+
+	// 4. AppSubdomainProxyMiddleware scrubs spoofed X-Aetherflow-* and X-Forwarded-User headers upstream
+	var gotUpstreamHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUpstreamHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	_, portStr, err := net.SplitHostPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+	var upstreamPort int
+	_, _ = fmt.Sscanf(portStr, "%d", &upstreamPort)
+
+	pwHash, _ := bcrypt.GenerateFromPassword([]byte("SecretPass!99"), bcrypt.MinCost)
+	if _, err := db.DB.Exec(
+		`INSERT INTO users (id, username, email, role, password_hash, sessions_revoked_after) VALUES (991, 'fwd_user', 'fwd@example.test', 'user', ?, 0)`,
+		string(pwHash),
+	); err != nil {
+		t.Fatalf("seed fwd_user: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`INSERT INTO app_ingress_configs (app_name, public_domain, listen_port, external_access_enabled) VALUES ('sonarr', 'sonarr.example.test', ?, 1)`,
+		upstreamPort,
+	); err != nil {
+		t.Fatalf("seed app_ingress_configs: %v", err)
+	}
+	tok := mintSessionTokenForTest(t, 991, "127.0.0.1:45001", "FwdUA/1.0")
+	r := gin.New()
+	r.Use(AppSubdomainProxyMiddleware())
+	r.GET("/ping", func(c *gin.Context) { c.Status(http.StatusTeapot) })
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://sonarr.example.test/ping", nil)
+	req.Host = "sonarr.example.test"
+	req.RemoteAddr = "127.0.0.1:45001"
+	req.Header.Set("User-Agent", "FwdUA/1.0")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("X-Aetherflow-Role", "admin")
+	req.Header.Set("X-Forwarded-User", "spoofed-admin")
+	req.Header.Set("Remote-User", "spoofed-root")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("AppSubdomainProxyMiddleware expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := gotUpstreamHeaders.Get("X-Aetherflow-User"); got != "fwd_user" {
+		t.Fatalf("expected upstream X-Aetherflow-User=fwd_user, got %q", got)
+	}
+	if got := gotUpstreamHeaders.Get("X-Aetherflow-Role"); got != "" {
+		t.Fatalf("expected spoofed X-Aetherflow-Role header to be scrubbed upstream, got %q", got)
+	}
+	if got := gotUpstreamHeaders.Get("X-Forwarded-User"); got != "" {
+		t.Fatalf("expected spoofed X-Forwarded-User header to be scrubbed upstream, got %q", got)
+	}
+	if got := gotUpstreamHeaders.Get("Remote-User"); got != "" {
+		t.Fatalf("expected spoofed Remote-User header to be scrubbed upstream, got %q", got)
+	}
+}
+
+func TestRound5_RotationGraceRevokesImmediatelyWhenSuccessorLogsOut(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTestDB(t)
+	db.RedisClient = nil
+	t.Cleanup(func() {
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+
+	_, _ = db.DB.Exec(
+		`INSERT INTO users (id, username, email, role, password_hash, sessions_revoked_after) VALUES (995, 'grace_u', 'grace@example.test', 'user', 'h', 0)`,
+	)
+
+	r := gin.New()
+	r.POST("/refresh", RefreshSession)
+	r.POST("/logout", AuthMiddleware(), Logout)
+	r.GET("/protected", AuthMiddleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	s1 := mintSessionTokenForTest(t, 995, "127.0.0.1:46001", "GraceUA/1.0")
+	wRot := httptest.NewRecorder()
+	reqRot := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	reqRot.RemoteAddr = "127.0.0.1:46001"
+	reqRot.Header.Set("User-Agent", "GraceUA/1.0")
+	reqRot.Header.Set("Authorization", "Bearer "+s1)
+	r.ServeHTTP(wRot, reqRot)
+	if wRot.Code != http.StatusOK {
+		t.Fatalf("refresh s1->s2 failed: %d", wRot.Code)
+	}
+	var out map[string]string
+	_ = json.Unmarshal(wRot.Body.Bytes(), &out)
+	s2 := out["token"]
+
+	// Logout successor s2
+	wOut := httptest.NewRecorder()
+	reqOut := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	reqOut.RemoteAddr = "127.0.0.1:46001"
+	reqOut.Header.Set("User-Agent", "GraceUA/1.0")
+	reqOut.Header.Set("Authorization", "Bearer "+s2)
+	r.ServeHTTP(wOut, reqOut)
+	if wOut.Code != http.StatusOK {
+		t.Fatalf("logout s2 failed: %d", wOut.Code)
+	}
+
+	// Predecessor s1 MUST NOT be accepted via the 15s grace window once leaf s2 is revoked!
+	wGrace := httptest.NewRecorder()
+	reqGrace := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	reqGrace.RemoteAddr = "127.0.0.1:46001"
+	reqGrace.Header.Set("User-Agent", "GraceUA/1.0")
+	reqGrace.Header.Set("Authorization", "Bearer "+s1)
+	r.ServeHTTP(wGrace, reqGrace)
+	if wGrace.Code != http.StatusUnauthorized {
+		t.Fatalf("expected predecessor s1 to be rejected (401) after successor s2 logged out, got %d", wGrace.Code)
 	}
 }

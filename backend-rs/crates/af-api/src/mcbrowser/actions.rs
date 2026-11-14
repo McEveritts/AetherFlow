@@ -2416,10 +2416,9 @@ fn rollback_partial_extraction(
     match bfs.remove_tree_with_size(destination_dir) {
         Ok(removed_bytes) => {
             let to_release = removed_bytes.min(reserved_quota_bytes);
-            if to_release > 0
-                && release_user_quota_conn(conn, user_id, to_release).is_err() {
-                    return false;
-                }
+            if to_release > 0 && release_user_quota_conn(conn, user_id, to_release).is_err() {
+                return false;
+            }
             removed_bytes >= reserved_quota_bytes
         }
         Err(removal_err) => {

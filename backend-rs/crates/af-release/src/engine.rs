@@ -180,13 +180,7 @@ where
     health_prober: H,
 }
 
-impl
-    ReleaseEngine<
-        GithubHttpArtifactProvider,
-        SystemdLifecycleController,
-        ReqwestHealthProber,
-    >
-{
+impl ReleaseEngine<GithubHttpArtifactProvider, SystemdLifecycleController, ReqwestHealthProber> {
     /// Constructs a production `ReleaseEngine` wired to GitHub Releases HTTP, bare-metal `systemctl`,
     /// and `/health/ready` probing.
     pub fn new_production(base_config: ReleaseConfig) -> Self {
@@ -239,11 +233,12 @@ where
             .and_then(|dir| fs::read_to_string(dir.join(".version")).ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let previous_release = fs::read_to_string(self.base_config.releases_dir.join(".previous_release"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
+        let previous_release =
+            fs::read_to_string(self.base_config.releases_dir.join(".previous_release"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
 
         let mut available_releases = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_config.releases_dir) {
@@ -541,7 +536,10 @@ where
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
-            &format!("=== STAGE 1: Release Scaffold (Channel: {}) ===", opts.channel),
+            &format!(
+                "=== STAGE 1: Release Scaffold (Channel: {}) ===",
+                opts.channel
+            ),
         );
         if let Err(err) = create_new_dir_exclusive(&release_dir, 0o755, 0o755) {
             recovery.phase = ReleasePhase::Failed;
@@ -855,7 +853,11 @@ where
                 return Err(err);
             }
         };
-        append_jsonl_log(&cfg.log_file, "INFO", &format!("SHA-256 OK {}", actual_digest));
+        append_jsonl_log(
+            &cfg.log_file,
+            "INFO",
+            &format!("SHA-256 OK {}", actual_digest),
+        );
 
         let extract_res =
             extract_and_validate_release_archive(&archive_path, release_dir, &target_tag, cfg);
@@ -1012,7 +1014,9 @@ where
                 let stop_error = if dry_run {
                     None
                 } else {
-                    self.lifecycle.stop_database_services(&resolved_db.path).err()
+                    self.lifecycle
+                        .stop_database_services(&resolved_db.path)
+                        .err()
                 };
                 let failure = match stop_error {
                     Some(stop_error) => format!(

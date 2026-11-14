@@ -13,8 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tar::{Archive, EntryType};
 
-const EMBEDDED_VERIFY_PROVENANCE_PY: &str =
-    include_str!("../../../../deploy/verify-provenance.py");
+const EMBEDDED_VERIFY_PROVENANCE_PY: &str = include_str!("../../../../deploy/verify-provenance.py");
 
 const PROVENANCE_VERIFIER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -232,12 +231,11 @@ pub fn select_release_tag_from_json(
             reason: "empty GitHub releases response".to_string(),
         });
     }
-    let parsed: Vec<GitHubReleaseItem> = serde_json::from_str(trimmed).map_err(|e| {
-        ReleaseError::TagResolution {
+    let parsed: Vec<GitHubReleaseItem> =
+        serde_json::from_str(trimmed).map_err(|e| ReleaseError::TagResolution {
             channel: channel.to_string(),
             reason: format!("invalid GitHub releases JSON: {}", e),
-        }
-    })?;
+        })?;
 
     match channel {
         ReleaseChannel::Nightly => {
@@ -400,11 +398,9 @@ pub fn extract_and_validate_release_archive(
         crate::fs_security::create_new_dir_exclusive(release_dir, 0o755, 0o755)?;
     }
 
-    let file = fs::File::open(archive_path).map_err(|e| {
-        ReleaseError::ArchiveExtraction {
-            archive: archive_path.to_path_buf(),
-            reason: format!("failed to open archive: {}", e),
-        }
+    let file = fs::File::open(archive_path).map_err(|e| ReleaseError::ArchiveExtraction {
+        archive: archive_path.to_path_buf(),
+        reason: format!("failed to open archive: {}", e),
     })?;
     let gz = GzDecoder::new(file);
     let mut archive = Archive::new(gz);
@@ -474,15 +470,13 @@ pub fn extract_and_validate_release_archive(
                 }
                 let raw_mode = entry.header().mode().unwrap_or(0o644) & 0o777;
                 let safe_mode = if raw_mode == 0 { 0o644 } else { raw_mode };
-                let mut out_file = crate::fs_security::open_exclusive_private_file(&dest, safe_mode)
-                    .map_err(|e| ReleaseError::ArchiveExtraction {
-                        archive: archive_path.to_path_buf(),
-                        reason: format!(
-                            "failed to create exclusive file {}: {}",
-                            dest.display(),
-                            e
-                        ),
-                    })?;
+                let mut out_file = crate::fs_security::open_exclusive_private_file(
+                    &dest, safe_mode,
+                )
+                .map_err(|e| ReleaseError::ArchiveExtraction {
+                    archive: archive_path.to_path_buf(),
+                    reason: format!("failed to create exclusive file {}: {}", dest.display(), e),
+                })?;
                 std::io::copy(&mut entry, &mut out_file).map_err(|e| {
                     ReleaseError::ArchiveExtraction {
                         archive: archive_path.to_path_buf(),
@@ -640,26 +634,26 @@ fn normalize_release_tree_permissions(dir: &Path) -> ReleaseResult<()> {
     crate::fs_security::set_dir_mode(dir, 0o755)?;
     let entries = fs::read_dir(dir).map_err(|e| {
         ReleaseError::io(
-            format!("reading release directory {} for permission normalization", dir.display()),
+            format!(
+                "reading release directory {} for permission normalization",
+                dir.display()
+            ),
             e,
         )
     })?;
 
     for entry_res in entries {
         let entry = entry_res.map_err(|e| {
-            ReleaseError::io(
-                format!("iterating release directory {}", dir.display()),
-                e,
-            )
+            ReleaseError::io(format!("iterating release directory {}", dir.display()), e)
         })?;
         let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(|e| {
-            ReleaseError::io(format!("stat release entry {}", path.display()), e)
-        })?;
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| ReleaseError::io(format!("stat release entry {}", path.display()), e))?;
         if meta.file_type().is_symlink() {
             return Err(ReleaseError::PathValidation {
                 path,
-                reason: "symlink entry rejected during release permission normalization".to_string(),
+                reason: "symlink entry rejected during release permission normalization"
+                    .to_string(),
             });
         }
         if meta.is_dir() {
@@ -693,7 +687,10 @@ fn sanitize_archive_entry_path(entry_path: &Path, archive_path: &Path) -> Releas
                 if s.contains('\0') {
                     return Err(ReleaseError::ArchiveExtraction {
                         archive: archive_path.to_path_buf(),
-                        reason: format!("NUL byte in archive entry path '{}'", entry_path.display()),
+                        reason: format!(
+                            "NUL byte in archive entry path '{}'",
+                            entry_path.display()
+                        ),
                     });
                 }
                 normalized.push(part);
@@ -750,7 +747,10 @@ pub fn resolve_managed_current_source_path(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(ReleaseError::io(
-                    format!("inspecting current release link {}", config.current_link.display()),
+                    format!(
+                        "inspecting current release link {}",
+                        config.current_link.display()
+                    ),
                     e,
                 ))
             }
@@ -759,7 +759,10 @@ pub fn resolve_managed_current_source_path(
         let target_release_dir = if current_meta.file_type().is_symlink() {
             let link_target = fs::read_link(&config.current_link).map_err(|e| {
                 ReleaseError::io(
-                    format!("reading current release link {}", config.current_link.display()),
+                    format!(
+                        "reading current release link {}",
+                        config.current_link.display()
+                    ),
                     e,
                 )
             })?;
@@ -1101,13 +1104,13 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
             MAX_RELEASE_ARCHIVE_BYTES,
         )?;
 
-        let manifest_content =
-            run_blocking_http_get_text(&checksum_url, Duration::from_secs(30)).map_err(|e| {
-                ReleaseError::ArtifactVerification(format!(
-                    "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
-                    tag, e
-                ))
-            })?;
+        let manifest_content = run_blocking_http_get_text(&checksum_url, Duration::from_secs(30))
+            .map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Missing SHA256SUMS manifest for release {} ({}). Refusing unverified binary.",
+                tag, e
+            ))
+        })?;
         let checksum_dest = staging_dir.join(&config.checksum_name);
         let _ = crate::fs_security::atomic_write_bytes_with_mode(
             &checksum_dest,
@@ -1145,9 +1148,7 @@ fn is_trusted_github_auth_url(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str().map(|h| h.to_ascii_lowercase()) else {
         return false;
     };
-    if host == "github.com"
-        || host == "api.github.com"
-        || host.ends_with(".githubusercontent.com")
+    if host == "github.com" || host == "api.github.com" || host.ends_with(".githubusercontent.com")
     {
         return true;
     }
@@ -1238,13 +1239,17 @@ fn run_blocking_http_get_bytes_capped(
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e)))?;
+            .map_err(|e| {
+                ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
+            })?;
         rt.block_on(async move {
             let client = reqwest::Client::builder()
                 .timeout(timeout)
                 .user_agent("AetherFlow-ReleaseEngine/4.0")
                 .build()
-                .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))?;
+                .map_err(|e| {
+                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
+                })?;
             let mut req = client.get(&url_owned);
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
@@ -1269,7 +1274,10 @@ fn run_blocking_http_get_bytes_capped(
             }
             let mut buf = Vec::new();
             while let Some(chunk) = resp.chunk().await.map_err(|e| {
-                ReleaseError::ArtifactVerification(format!("reading body from {}: {}", url_owned, e))
+                ReleaseError::ArtifactVerification(format!(
+                    "reading body from {}: {}",
+                    url_owned, e
+                ))
             })? {
                 if (buf.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
                     return Err(ReleaseError::ArtifactVerification(format!(
@@ -1300,13 +1308,17 @@ fn run_blocking_http_download_to_file(
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e)))?;
+            .map_err(|e| {
+                ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
+            })?;
         rt.block_on(async move {
             let client = reqwest::Client::builder()
                 .timeout(timeout)
                 .user_agent("AetherFlow-ReleaseEngine/4.0")
                 .build()
-                .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))?;
+                .map_err(|e| {
+                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
+                })?;
             let mut req = client.get(&url_owned);
             if let Some(ref tok) = token_opt {
                 req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
@@ -1437,16 +1449,27 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(script_mode & 0o111, 0o111, "staged script must be executable");
+        assert_eq!(
+            script_mode & 0o111,
+            0o111,
+            "staged script must be executable"
+        );
 
         let staged_verifier = next_release.join("deploy/verify-provenance.py");
-        assert!(staged_verifier.is_file(), "verify-provenance.py must be staged alongside release-manager.sh");
+        assert!(
+            staged_verifier.is_file(),
+            "verify-provenance.py must be staged alongside release-manager.sh"
+        );
         let verifier_mode = fs::symlink_metadata(&staged_verifier)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(verifier_mode & 0o111, 0o111, "staged verify-provenance.py must be executable");
+        assert_eq!(
+            verifier_mode & 0o111,
+            0o111,
+            "staged verify-provenance.py must be executable"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1456,9 +1479,7 @@ mod tests {
         let root = create_isolated_root("managed_symlink");
         let mut cfg = base_config(&root);
 
-        let active_release = cfg
-            .releases_dir
-            .join("v4-experimental-89017a6-1793518346");
+        let active_release = cfg.releases_dir.join("v4-experimental-89017a6-1793518346");
         let active_deploy = active_release.join("deploy");
         fs::create_dir_all(&active_deploy).unwrap();
         fs::write(
@@ -1573,8 +1594,12 @@ mod tests {
         stage_running_release_manager(&candidate_release, &cfg)
             .expect("missing optional source files should be a clean no-op");
         assert!(!candidate_release.join("deploy/release-manager.sh").exists());
-        assert!(!candidate_release.join("deploy/verify-provenance.py").exists());
-        assert!(!candidate_release.join("deploy/release-manager.conf").exists());
+        assert!(!candidate_release
+            .join("deploy/verify-provenance.py")
+            .exists());
+        assert!(!candidate_release
+            .join("deploy/release-manager.conf")
+            .exists());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1615,11 +1640,21 @@ mod tests {
         assert!(!is_v4_nightly_release_tag("v4.0.0"));
         assert!(!is_v4_nightly_release_tag("v3.2.7-nightly.1.1"));
 
-        let https_api = reqwest::Url::parse("https://api.github.com/repos/McEveritts/AetherFlow/releases").unwrap();
-        let https_gh = reqwest::Url::parse("https://github.com/McEveritts/AetherFlow/releases/latest").unwrap();
-        let https_obj = reqwest::Url::parse("https://objects.githubusercontent.com/github-production-release-asset/foo").unwrap();
-        let http_downgrade = reqwest::Url::parse("http://api.github.com/repos/McEveritts/AetherFlow/releases").unwrap();
-        let untrusted_host = reqwest::Url::parse("https://evil-mirror.example.com/aetherflow.tar.gz").unwrap();
+        let https_api =
+            reqwest::Url::parse("https://api.github.com/repos/McEveritts/AetherFlow/releases")
+                .unwrap();
+        let https_gh =
+            reqwest::Url::parse("https://github.com/McEveritts/AetherFlow/releases/latest")
+                .unwrap();
+        let https_obj = reqwest::Url::parse(
+            "https://objects.githubusercontent.com/github-production-release-asset/foo",
+        )
+        .unwrap();
+        let http_downgrade =
+            reqwest::Url::parse("http://api.github.com/repos/McEveritts/AetherFlow/releases")
+                .unwrap();
+        let untrusted_host =
+            reqwest::Url::parse("https://evil-mirror.example.com/aetherflow.tar.gz").unwrap();
 
         assert!(is_trusted_github_auth_url(&https_api));
         assert!(is_trusted_github_auth_url(&https_gh));

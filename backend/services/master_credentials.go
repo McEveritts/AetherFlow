@@ -47,21 +47,67 @@ func legacyDuplicateMasterCredsPaths() []string {
 	}
 }
 
+func readLastAESKeyFromEnvFile(path string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || !filepath.IsAbs(cleaned) {
+		return ""
+	}
+	lst, err := os.Lstat(cleaned) // #nosec G703 -- validated absolute operator env file path
+	if err != nil || lst.Mode()&os.ModeSymlink != 0 || !lst.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(cleaned) // #nosec G304,G703 -- validated regular non-symlink operator AETHERFLOW_ENV_FILE path
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fst, err := f.Stat(); err != nil || !fst.Mode().IsRegular() || !os.SameFile(lst, fst) {
+		return ""
+	}
+
+	var last string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		if strings.HasPrefix(line, "AES_MASTER_KEY=") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "AES_MASTER_KEY="))
+			val = strings.Trim(val, `"'`)
+			if val != "" {
+				last = val
+			}
+		}
+	}
+	return last
+}
+
 func resolveMasterCredsAESKey() ([]byte, bool) {
-	raw := strings.TrimSpace(os.Getenv("AES_MASTER_KEY"))
+	rawEnv := os.Getenv("AES_MASTER_KEY")
+	raw := strings.TrimSpace(rawEnv)
+	if raw == "" {
+		if envFile := strings.TrimSpace(os.Getenv("AETHERFLOW_ENV_FILE")); envFile != "" {
+			raw = readLastAESKeyFromEnvFile(envFile)
+		}
+	}
 	if raw == "" {
 		return nil, false
-	}
-	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
-		return decoded, true
 	}
 	if len(raw) == 64 {
 		if decodedHex, err := hex.DecodeString(raw); err == nil && len(decodedHex) == 32 {
 			return decodedHex, true
 		}
 	}
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return decoded, true
+	}
 	if len(raw) == 32 {
 		return []byte(raw), true
+	}
+	if len(rawEnv) == 32 {
+		return []byte(rawEnv), true
 	}
 	return nil, false
 }

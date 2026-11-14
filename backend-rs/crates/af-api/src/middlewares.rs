@@ -331,7 +331,10 @@ fn canonical_forwarded_headers(
             })
             .unwrap_or_default();
 
-        let mut xff_parts = existing_xff.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let mut xff_parts = existing_xff
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>();
         if let Some(ip) = peer_ip {
             let ip_s = ip.to_string();
             if xff_parts.last().map(|s| s.as_str()) != Some(ip_s.as_str()) {
@@ -365,6 +368,19 @@ fn canonical_forwarded_headers(
     out
 }
 
+fn is_spoofable_identity_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("x-aetherflow-")
+        || matches!(
+            lower.as_str(),
+            "remote-user"
+                | "x-remote-user"
+                | "x-forwarded-user"
+                | "x-forwarded-email"
+                | "x-forwarded-groups"
+        )
+}
+
 fn forward_proxy_http_headers(
     mut upstream_req: reqwest::RequestBuilder,
     incoming_headers: &axum::http::HeaderMap,
@@ -377,8 +393,8 @@ fn forward_proxy_http_headers(
         // Host is set once below; reqwest's header() appends values.
         if is_hop_by_hop_header(name_str)
             || is_forwarded_header_name(name_str)
+            || is_spoofable_identity_header(name_str)
             || name_str.eq_ignore_ascii_case("host")
-            || name_str.eq_ignore_ascii_case("x-aetherflow-user")
         {
             continue;
         }
@@ -393,7 +409,9 @@ fn forward_proxy_http_headers(
     if !raw_host.is_empty() {
         upstream_req = upstream_req.header("Host", raw_host);
     }
-    for (hn, hv) in canonical_forwarded_headers(incoming_headers, raw_host, peer_ip, trust_forwarded) {
+    for (hn, hv) in
+        canonical_forwarded_headers(incoming_headers, raw_host, peer_ip, trust_forwarded)
+    {
         if let (Ok(rk), Ok(rv)) = (
             reqwest::header::HeaderName::from_bytes(hn.as_str().as_bytes()),
             reqwest::header::HeaderValue::from_bytes(hv.as_bytes()),
@@ -686,8 +704,8 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 let name_str = k.as_str();
                 if is_hop_by_hop_header(name_str)
                     || is_forwarded_header_name(name_str)
+                    || is_spoofable_identity_header(name_str)
                     || name_str.eq_ignore_ascii_case("host")
-                    || name_str.eq_ignore_ascii_case("x-aetherflow-user")
                 {
                     continue;
                 }
@@ -846,7 +864,12 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 }
                 cur = e.source();
             }
-            if is_too_large || err.to_string().to_ascii_lowercase().contains("length limit") {
+            if is_too_large
+                || err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("length limit")
+            {
                 return (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(serde_json::json!({
@@ -976,8 +999,7 @@ fn matches_configured_env_host(clean_host: &str) -> bool {
     for key in ["AETHERFLOW_BASE_DOMAIN", "AETHERFLOW_DOMAIN"] {
         if let Ok(raw) = env::var(key) {
             let norm = af_db::normalize_base_domain(&raw);
-            if !norm.is_empty()
-                && (clean_host == norm || clean_host.ends_with(&format!(".{norm}")))
+            if !norm.is_empty() && (clean_host == norm || clean_host.ends_with(&format!(".{norm}")))
             {
                 return true;
             }
@@ -1024,7 +1046,8 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
     }
 
     let base_domain = query_settings_base_domain();
-    !base_domain.is_empty() && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
+    !base_domain.is_empty()
+        && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
 }
 
 pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {
@@ -1069,7 +1092,11 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
             .get("X-Forwarded-Host")
             .and_then(|v| v.to_str().ok())
         {
-            if let Some(first_hop) = xfh_val.split(',').next().map(str::trim).filter(|h| !h.is_empty())
+            if let Some(first_hop) = xfh_val
+                .split(',')
+                .next()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
             {
                 if !is_host_trusted(first_hop, &allowed_set) {
                     return api_error(
@@ -1591,22 +1618,17 @@ mod tests {
             untrusted_json["headers"]["x-forwarded-for"][0],
             "198.51.100.77"
         );
-        assert_eq!(
-            untrusted_json["headers"]["x-real-ip"][0],
-            "198.51.100.77"
-        );
+        assert_eq!(untrusted_json["headers"]["x-real-ip"][0], "198.51.100.77");
         assert_eq!(
             untrusted_json["headers"]["x-forwarded-host"][0],
             "jellyfin.example.test"
         );
-        assert_eq!(
-            untrusted_json["headers"]["x-forwarded-proto"][0],
-            "http"
-        );
+        assert_eq!(untrusted_json["headers"]["x-forwarded-proto"][0], "http");
 
-        let oversized_stream = futures::stream::iter((0..65).map(|_| {
-            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 1024 * 1024]))
-        }));
+        let oversized_stream =
+            futures::stream::iter((0..65).map(|_| {
+                Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 1024 * 1024]))
+            }));
         let oversized_req = axum::http::Request::builder()
             .method("POST")
             .uri("/Upload")

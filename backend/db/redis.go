@@ -82,7 +82,9 @@ func SweepExpiredAuthCaches(nowUnix int64) {
 	})
 	if DB != nil {
 		_, _ = DB.Exec("DELETE FROM mfa_challenges WHERE expires_at <= ?", nowUnix)
-		_, _ = DB.Exec("DELETE FROM revoked_tokens WHERE datetime(expires_at) <= datetime('now')")
+		_, _ = DB.Exec(
+			"DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
+		)
 	}
 }
 
@@ -195,7 +197,7 @@ func ResolveRevokedTokenFamilyInTx(tx *sql.Tx, userID int, jti string) string {
 // Returns (true, nil) exclusively for the single winning caller when the JTI was not already un-expired
 // in revoked_tokens; returns (false, nil) if already consumed/revoked.
 func TryConsumeTokenInTx(tx *sql.Tx, jti string, expiration time.Duration) (bool, error) {
-	if jti == "" || tx == nil {
+	if strings.TrimSpace(jti) == "" || tx == nil {
 		return false, fmt.Errorf("empty jti or nil transaction")
 	}
 	expiration = normalizeRevocationTTL(expiration)
@@ -203,10 +205,10 @@ func TryConsumeTokenInTx(tx *sql.Tx, jti string, expiration time.Duration) (bool
 	res, err := tx.Exec(
 		`INSERT INTO revoked_tokens (jti, expires_at) VALUES (?, ?)
 		 ON CONFLICT(jti) DO UPDATE SET expires_at = excluded.expires_at
-		 WHERE revoked_tokens.expires_at IS NULL
-		    OR TRIM(revoked_tokens.expires_at) = ''
-		    OR datetime(revoked_tokens.expires_at) IS NULL
-		    OR datetime(revoked_tokens.expires_at) <= datetime('now')`,
+		 WHERE revoked_tokens.expires_at IS NOT NULL
+		   AND TRIM(revoked_tokens.expires_at) != ''
+		   AND datetime(revoked_tokens.expires_at) IS NOT NULL
+		   AND datetime(revoked_tokens.expires_at) <= datetime('now')`,
 		jti, expiresAt,
 	)
 	if err != nil {
@@ -252,22 +254,66 @@ func RevokeToken(jti string, expiration time.Duration) error {
 
 // IsTokenRevokedCached checks only the in-memory and optional Redis revocation caches
 // without acquiring a SQLite connection (safe to call while holding an open *sql.Tx).
-func IsTokenRevokedCached(jti string) bool {
-	if jti == "" {
+func parseRevokedExpiresAt(raw string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// IsTokenRevokedInTx checks inside an open SQLite transaction whether jti is currently revoked,
+// failing closed (true) on empty jti, SQL errors, or malformed/empty expires_at timestamps.
+func IsTokenRevokedInTx(tx *sql.Tx, jti string) bool {
+	trimmed := strings.TrimSpace(jti)
+	if trimmed == "" || tx == nil {
+		return true
+	}
+	var rawExpires string
+	err := tx.QueryRow(
+		"SELECT COALESCE(expires_at, '') FROM revoked_tokens WHERE jti = ? LIMIT 1",
+		trimmed,
+	).Scan(&rawExpires)
+	if err == sql.ErrNoRows {
 		return false
 	}
+	if err != nil {
+		return true
+	}
+	parsedExp, ok := parseRevokedExpiresAt(rawExpires)
+	if !ok {
+		return true
+	}
+	return time.Now().UTC().Before(parsedExp)
+}
 
-	if expRaw, ok := localBlacklist.Load(jti); ok {
+func IsTokenRevokedCached(jti string) bool {
+	trimmed := strings.TrimSpace(jti)
+	if trimmed == "" {
+		return true
+	}
+
+	if expRaw, ok := localBlacklist.Load(trimmed); ok {
 		if exp, ok := expRaw.(int64); ok && time.Now().Unix() <= exp {
 			return true
 		}
-		localBlacklist.Delete(jti)
+		localBlacklist.Delete(trimmed)
 	}
 
 	if RedisClient != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		if RedisClient.Get(ctx, "blacklist:"+jti).Err() == nil {
+		if RedisClient.Get(ctx, "blacklist:"+trimmed).Err() == nil {
 			return true
 		}
 	}
@@ -275,30 +321,39 @@ func IsTokenRevokedCached(jti string) bool {
 	return false
 }
 
-// IsTokenRevoked checks if a JWT was blacklisted
+// IsTokenRevoked checks if a JWT was blacklisted, failing closed on empty JTI or corrupt timestamps.
 func IsTokenRevoked(jti string) bool {
-	if jti == "" {
-		return false
+	trimmed := strings.TrimSpace(jti)
+	if trimmed == "" {
+		return true
 	}
 
-	if IsTokenRevokedCached(jti) {
+	if IsTokenRevokedCached(trimmed) {
 		return true
 	}
 
 	if DB != nil {
-		var one int
+		var rawExpires string
 		err := DB.QueryRow(
-			"SELECT 1 FROM revoked_tokens WHERE jti = ? AND datetime(expires_at) > datetime('now') LIMIT 1",
-			jti,
-		).Scan(&one)
+			"SELECT COALESCE(expires_at, '') FROM revoked_tokens WHERE jti = ? LIMIT 1",
+			trimmed,
+		).Scan(&rawExpires)
 		if err == sql.ErrNoRows {
 			return false
 		}
 		if err != nil {
-			slog.Error("Revocation check failed closed due to SQLite error", "jti", jti, "error", err)
+			slog.Error("Revocation check failed closed due to SQLite error", "jti", trimmed, "error", err)
 			return true
 		}
-		localBlacklist.Store(jti, time.Now().Add(2*time.Hour).Unix())
+		parsedExp, ok := parseRevokedExpiresAt(rawExpires)
+		if !ok {
+			slog.Warn("Revocation check failed closed due to malformed expires_at", "jti", trimmed)
+			return true
+		}
+		if !time.Now().UTC().Before(parsedExp) {
+			return false
+		}
+		localBlacklist.Store(trimmed, parsedExp.Unix())
 		return true
 	}
 	return false

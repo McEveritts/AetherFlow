@@ -70,7 +70,10 @@ func lookupRotationGraceCached(jti string) (rotatedTokenGraceEntry, bool) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
-	if entry.successorJTI == "" || db.IsTokenRevokedCached(entry.successorJTI) {
+	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
+	if entry.successorJTI == "" || leafSucc == "" ||
+		db.IsTokenRevokedCached(entry.successorJTI) ||
+		(leafSucc != entry.successorJTI && db.IsTokenRevokedCached(leafSucc)) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -82,7 +85,10 @@ func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
 	if !ok {
 		return rotatedTokenGraceEntry{}, false
 	}
-	if entry.successorJTI == "" || db.IsTokenRevoked(entry.successorJTI) {
+	leafSucc := resolveCurrentSessionJTI(entry.successorJTI)
+	if entry.successorJTI == "" || leafSucc == "" ||
+		db.IsTokenRevoked(entry.successorJTI) ||
+		(leafSucc != entry.successorJTI && db.IsTokenRevoked(leafSucc)) {
 		rotatedTokenGrace.Delete(jti)
 		return rotatedTokenGraceEntry{}, false
 	}
@@ -116,7 +122,13 @@ func evictRotationGraceForFamily(familyID, targetJTI string) {
 	rotatedTokenGrace.Range(func(key, val interface{}) bool {
 		oldJTI, _ := key.(string)
 		entry, ok := val.(rotatedTokenGraceEntry)
-		if !ok || oldJTI == targetJTI || entry.successorJTI == targetJTI || (familyID != "" && entry.familyID == familyID) {
+		leafSucc := ""
+		if ok {
+			leafSucc = resolveCurrentSessionJTI(entry.successorJTI)
+		}
+		if !ok || oldJTI == targetJTI || entry.successorJTI == targetJTI ||
+			(targetJTI != "" && leafSucc == targetJTI) ||
+			(familyID != "" && entry.familyID == familyID) {
 			rotatedTokenGrace.Delete(key)
 		}
 		return true
@@ -1204,7 +1216,12 @@ func validateResolvedSessionClaimsStatus(c *gin.Context, claims jwt.MapClaims) (
 	}
 	userId := int(uid64)
 
-	if jti, hasJti := claims["jti"].(string); hasJti && jti != "" && db.IsTokenRevoked(jti) {
+	jti, hasJti := claims["jti"].(string)
+	jti = strings.TrimSpace(jti)
+	if !hasJti || jti == "" {
+		return activeHumanSubject{}, errUnauthorizedSession
+	}
+	if db.IsTokenRevoked(jti) {
 		if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
 			return activeHumanSubject{}, errSessionRevoked
 		}
@@ -1534,17 +1551,15 @@ func RefreshSession(c *gin.Context) {
 
 	if !consumed {
 		if graceEntry, ok := lookupRotationGraceCached(jti); ok && graceEntry.userID == subj.userID && graceEntry.newToken != "" {
-			var succRevoked int
-			revErr := tx.QueryRow(
-				"SELECT 1 FROM revoked_tokens WHERE jti = ? AND datetime(expires_at) > datetime('now') LIMIT 1",
-				graceEntry.successorJTI,
-			).Scan(&succRevoked)
+			leafSucc := resolveCurrentSessionJTI(graceEntry.successorJTI)
+			succRevoked := db.IsTokenRevokedInTx(tx, graceEntry.successorJTI) ||
+				(leafSucc != graceEntry.successorJTI && db.IsTokenRevokedInTx(tx, leafSucc))
 			var succActive int
 			actErr := tx.QueryRow(
 				"SELECT 1 FROM active_sessions WHERE jti = ? AND user_id = ? LIMIT 1",
-				graceEntry.successorJTI, subj.userID,
+				leafSucc, subj.userID,
 			).Scan(&succActive)
-			if errors.Is(revErr, sql.ErrNoRows) && actErr == nil && succActive == 1 {
+			if !succRevoked && actErr == nil && succActive == 1 {
 				_ = tx.Rollback()
 				c.SetSameSite(http.SameSiteLaxMode)
 				c.SetCookie("aetherflow_session", graceEntry.newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
@@ -1580,32 +1595,53 @@ func RefreshSession(c *gin.Context) {
 		}
 
 		var wipedJTIs []string
-		if rows, qErr := tx.Query(
+		rows, qErr := tx.Query(
 			"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
 			subj.userID, targetFamily, jti, resolvedSucc,
-		); qErr == nil {
-			for rows.Next() {
-				var wJTI string
-				if rows.Scan(&wJTI) == nil && wJTI != "" {
-					wipedJTIs = append(wipedJTIs, wJTI)
-				}
+		)
+		if qErr != nil {
+			InternalError(c, "Failed to revoke compromised session family")
+			return
+		}
+		for rows.Next() {
+			var wJTI string
+			if sErr := rows.Scan(&wJTI); sErr != nil {
+				_ = rows.Close()
+				InternalError(c, "Failed to revoke compromised session family")
+				return
 			}
+			if wJTI != "" {
+				wipedJTIs = append(wipedJTIs, wJTI)
+			}
+		}
+		if rErr := rows.Err(); rErr != nil {
 			_ = rows.Close()
+			InternalError(c, "Failed to revoke compromised session family")
+			return
 		}
+		_ = rows.Close()
 		for _, wJTI := range wipedJTIs {
-			_ = db.RecordRevokedTokenLineageInTx(tx, wJTI, targetFamily, subj.userID, minRevocationTTL)
+			if lErr := db.RecordRevokedTokenLineageInTx(tx, wJTI, targetFamily, subj.userID, minRevocationTTL); lErr != nil {
+				InternalError(c, "Failed to revoke compromised session family")
+				return
+			}
 		}
-		_, _ = tx.Exec(
+		if _, delErr := tx.Exec(
 			"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
 			subj.userID, targetFamily, jti, resolvedSucc,
-		)
-		if tx.Commit() == nil {
-			for _, wJTI := range wipedJTIs {
-				db.CacheRevokedToken(wJTI, minRevocationTTL)
-				evictRotationGraceForFamily(targetFamily, wJTI)
-			}
-			evictRotationGraceForFamily(targetFamily, jti)
+		); delErr != nil {
+			InternalError(c, "Failed to revoke compromised session family")
+			return
 		}
+		if cErr := tx.Commit(); cErr != nil {
+			InternalError(c, "Failed to commit session family revocation")
+			return
+		}
+		for _, wJTI := range wipedJTIs {
+			db.CacheRevokedToken(wJTI, minRevocationTTL)
+			evictRotationGraceForFamily(targetFamily, wJTI)
+		}
+		evictRotationGraceForFamily(targetFamily, jti)
 		Unauthorized(c, "Session has been revoked")
 		return
 	}
@@ -1624,7 +1660,10 @@ func RefreshSession(c *gin.Context) {
 		InternalError(c, "Failed to create new session")
 		return
 	}
-	_, _ = tx.Exec("DELETE FROM active_sessions WHERE jti = ?", jti)
+	if _, delErr := tx.Exec("DELETE FROM active_sessions WHERE jti = ?", jti); delErr != nil {
+		InternalError(c, "Failed to rotate session")
+		return
+	}
 
 	if err := tx.Commit(); err != nil {
 		InternalError(c, "Failed to commit rotated session")
@@ -2164,7 +2203,11 @@ func ChangePassword(c *gin.Context) {
 
 	var currentHash string
 	var username string
-	err := db.DB.QueryRow("SELECT username, COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &currentHash)
+	var preRevokedAfter int64
+	err := db.DB.QueryRow(
+		"SELECT username, COALESCE(password_hash, ''), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?",
+		userID,
+	).Scan(&username, &currentHash, &preRevokedAfter)
 	if err != nil {
 		NotFoundError(c, "User not found")
 		return
@@ -2195,8 +2238,16 @@ func ChangePassword(c *gin.Context) {
 		_ = tx.Rollback()
 	}()
 
-	if _, err := tx.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
+	updRes, err := tx.Exec(
+		"UPDATE users SET password_hash = ? WHERE id = ? AND COALESCE(password_hash, '') = ? AND COALESCE(sessions_revoked_after, 0) <= ?",
+		string(newHash), userID, currentHash, preRevokedAfter,
+	)
+	if err != nil {
 		InternalError(c, "Failed to update password")
+		return
+	}
+	if affected, rErr := updRes.RowsAffected(); rErr != nil || affected != 1 {
+		Unauthorized(c, "Credentials changed concurrently; please re-authenticate")
 		return
 	}
 

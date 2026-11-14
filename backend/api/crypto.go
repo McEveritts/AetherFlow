@@ -1,16 +1,19 @@
 package api
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"aetherflow/db"
@@ -20,30 +23,90 @@ import (
 
 var aesMasterKey []byte
 
-// InitAESKey loads the AES-256 master key from the AES_MASTER_KEY environment variable.
-// The key must be exactly 32 bytes (either raw or base64-encoded).
+func readLastAESKeyFromEnvFile(path string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || !filepath.IsAbs(cleaned) {
+		return ""
+	}
+	lst, err := os.Lstat(cleaned) // #nosec G703 -- validated absolute operator env file path
+	if err != nil || lst.Mode()&os.ModeSymlink != 0 || !lst.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(cleaned) // #nosec G304,G703 -- validated regular non-symlink operator AETHERFLOW_ENV_FILE path
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fst, err := f.Stat(); err != nil || !fst.Mode().IsRegular() || !os.SameFile(lst, fst) {
+		return ""
+	}
+
+	var last string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		if strings.HasPrefix(line, "AES_MASTER_KEY=") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "AES_MASTER_KEY="))
+			val = strings.Trim(val, `"'`)
+			if val != "" {
+				last = val
+			}
+		}
+	}
+	return last
+}
+
+// ParseAESKeyBytes decodes a 256-bit AES master key from 64-char hex, standard Base64, or 32-byte raw ASCII.
+// Precedence checks 64-char hex BEFORE Base64 because any 64-char hex string is also valid unpadded Base64 (48 bytes).
+func ParseAESKeyBytes(raw string) ([]byte, error) {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) == 64 {
+		if decodedHex, err := hex.DecodeString(trimmed); err == nil && len(decodedHex) == 32 {
+			return decodedHex, nil
+		}
+	}
+	if decodedB64, err := base64.StdEncoding.DecodeString(trimmed); err == nil && len(decodedB64) == 32 {
+		return decodedB64, nil
+	}
+	if len(trimmed) == 32 {
+		return []byte(trimmed), nil
+	}
+	if len(raw) == 32 {
+		return []byte(raw), nil
+	}
+	return nil, fmt.Errorf("AES_MASTER_KEY must decode to 32 bytes (64-char hex, base64, or 32-byte raw); got %d chars", len(trimmed))
+}
+
+// InitAESKey loads the AES-256 master key from AES_MASTER_KEY (or AETHERFLOW_ENV_FILE when explicitly configured).
+// The key must decode to 32 bytes (64-char hex, standard base64, or 32-byte raw).
 // In production (GIN_MODE=release), the server will refuse to start without it.
 // In dev/test modes, a warning is logged and encryption is disabled.
 func InitAESKey() {
-	raw := os.Getenv("AES_MASTER_KEY")
+	aesMasterKey = nil
+	raw := strings.TrimSpace(os.Getenv("AES_MASTER_KEY"))
+	if raw == "" {
+		if envFile := strings.TrimSpace(os.Getenv("AETHERFLOW_ENV_FILE")); envFile != "" {
+			raw = readLastAESKeyFromEnvFile(envFile)
+		}
+	}
 	if raw == "" {
 		if gin.Mode() == gin.ReleaseMode {
 			log.Fatal("FATAL: AES_MASTER_KEY is required in production (GIN_MODE=release). " +
-				"Set a 32-byte key (raw or base64-encoded) to enable API key encryption.")
+				"Set a 32-byte key (64-char hex, base64, or 32-byte raw) to enable API key encryption.")
 		}
 		slog.Info("WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only).")
 		return
 	}
 
-	// Try base64 first, then raw bytes.
-	decoded, err := base64.StdEncoding.DecodeString(raw)
-	if err == nil && len(decoded) == 32 {
-		aesMasterKey = decoded
-	} else if len(raw) == 32 {
-		aesMasterKey = []byte(raw)
-	} else {
-		log.Fatal("FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got ", len(raw), " raw bytes.")
+	parsed, err := ParseAESKeyBytes(raw)
+	if err != nil {
+		log.Fatal("FATAL: ", err)
 	}
+	aesMasterKey = parsed
 
 	slog.Info("AES-256-GCM encryption key loaded successfully.")
 }

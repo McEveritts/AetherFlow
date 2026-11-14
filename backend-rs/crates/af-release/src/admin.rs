@@ -25,7 +25,11 @@ pub fn validate_self_update_request(
     req: &SelfUpdateRequest,
 ) -> Result<ValidatedSelfUpdateRequest, RunnerResponse> {
     let raw_cmd = req.command.trim();
-    let command = match if raw_cmd.is_empty() { "deploy" } else { raw_cmd } {
+    let command = match if raw_cmd.is_empty() {
+        "deploy"
+    } else {
+        raw_cmd
+    } {
         "deploy" => ReleaseCommand::Deploy,
         "rollback" => ReleaseCommand::Rollback,
         _ => {
@@ -115,10 +119,7 @@ pub fn resolve_release_manager_conf() -> Option<PathBuf> {
     resolve_release_manager_conf_for_root(None)
 }
 
-fn map_default_release_lock_parent(
-    parent_dir: &Path,
-    isolated_root: Option<&Path>,
-) -> PathBuf {
+fn map_default_release_lock_parent(parent_dir: &Path, isolated_root: Option<&Path>) -> PathBuf {
     if let Some(iso) = isolated_root {
         let iso_var_lib = iso.join("var/lib/aetherflow");
         if parent_dir == iso_var_lib {
@@ -205,7 +206,8 @@ pub fn resolve_self_update_jobs_dir_from_process_env(
     let resolved_conf = conf_override
         .map(Path::to_path_buf)
         .or_else(|| resolve_release_manager_conf_for_root(explicit_root));
-    let cfg = ReleaseConfig::load_for_root_from_process_env(explicit_root, resolved_conf.as_deref())?;
+    let cfg =
+        ReleaseConfig::load_for_root_from_process_env(explicit_root, resolved_conf.as_deref())?;
     resolve_self_update_jobs_dir_for_config(&cfg)
 }
 
@@ -496,10 +498,7 @@ where
 
     if !opts.offline {
         if let Ok(env_offline) = std::env::var("AF_OFFLINE") {
-            if matches!(
-                env_offline.trim(),
-                "1" | "true" | "TRUE" | "yes" | "YES"
-            ) {
+            if matches!(env_offline.trim(), "1" | "true" | "TRUE" | "yes" | "YES") {
                 opts.offline = true;
             }
         }

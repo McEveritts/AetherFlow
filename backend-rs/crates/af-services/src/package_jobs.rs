@@ -305,7 +305,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                 || matches!(after, Some(b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&'));
             // `[REDACTED]",` / `[REDACTED]\" https://...` closes an enclosing string.
             // `[REDACTED]"secret"` / `[REDACTED]\"secret\"` is a glued quote segment.
-            if closes_enclosing && (!after.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, i + bs0, bs0)) {
+            if closes_enclosing
+                && (!after.is_some_and(|next| next.is_ascii_whitespace())
+                    || !af_release::lifecycle::has_matching_secret_quote(bytes, i + bs0, bs0))
+            {
                 return i;
             }
         } else if bytes[i].is_ascii_whitespace()
@@ -342,7 +345,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                             }
                         };
                     // `{"stage": "token=SECRET\""}` — the backslash-quote closes the JSON string.
-                    if closes_outer && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, q_idx, bs)) {
+                    if closes_outer
+                        && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                            || !af_release::lifecycle::has_matching_secret_quote(bytes, q_idx, bs))
+                    {
                         break;
                     }
                     let mut j = q_idx + 1;
@@ -402,7 +408,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                     }
                 };
                 // `{"stage": "token=SECRET", "rc": 1}` — this quote closes the enclosing string.
-                if closes_outer && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, i, 0)) {
+                if closes_outer
+                    && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                        || !af_release::lifecycle::has_matching_secret_quote(bytes, i, 0))
+                {
                     break;
                 }
             }
@@ -692,7 +701,11 @@ fn redact_sensitive_cli_flags(text: &str) -> String {
 }
 
 fn redact_sensitive_assignments(text: &str) -> String {
-    redact_prefixed_secrets(text, &af_release::lifecycle::SENSITIVE_ASSIGNMENT_PREFIX_RE, true)
+    redact_prefixed_secrets(
+        text,
+        &af_release::lifecycle::SENSITIVE_ASSIGNMENT_PREFIX_RE,
+        true,
+    )
 }
 
 fn scrub_scalar_secret_grammar(text: &str) -> String {
@@ -2909,11 +2922,19 @@ mod tests {
             let runner = af_runner::package_lifecycle::sanitize_lifecycle_field(sample);
             let persisted = af_release::lifecycle::sanitize_persisted_lifecycle_text(sample);
             let projected = redact_secrets(sample);
-            let chained = redact_secrets(&af_release::lifecycle::sanitize_persisted_lifecycle_text(&runner));
+            let chained = redact_secrets(
+                &af_release::lifecycle::sanitize_persisted_lifecycle_text(&runner),
+            );
             for result in [&runner, &persisted, &projected, &chained] {
-                assert!(!result.contains("QUOTED_CANARY"), "{sample:?} -> {result:?}");
+                assert!(
+                    !result.contains("QUOTED_CANARY"),
+                    "{sample:?} -> {result:?}"
+                );
                 assert!(!redact_secrets(result).contains("QUOTED_CANARY"));
-                assert!(!af_runner::package_lifecycle::sanitize_lifecycle_field(result).contains("QUOTED_CANARY"));
+                assert!(
+                    !af_runner::package_lifecycle::sanitize_lifecycle_field(result)
+                        .contains("QUOTED_CANARY")
+                );
             }
         }
     }
@@ -2926,20 +2947,43 @@ mod tests {
                     let encoded_key = if escape_depth == 0 {
                         key.to_string()
                     } else {
-                        format!("{}u00{:02x}{}", "\\".repeat(escape_depth), key.as_bytes()[0], &key[1..])
+                        format!(
+                            "{}u00{:02x}{}",
+                            "\\".repeat(escape_depth),
+                            key.as_bytes()[0],
+                            &key[1..]
+                        )
                     };
-                    for value in [r#""GRAMMAR_CANARY""#, r#"{"value":"GRAMMAR_CANARY"}"#, r#"["GRAMMAR_CANARY"]"#] {
+                    for value in [
+                        r#""GRAMMAR_CANARY""#,
+                        r#"{"value":"GRAMMAR_CANARY"}"#,
+                        r#"["GRAMMAR_CANARY"]"#,
+                    ] {
                         let mut input = format!(r#""{prefix}{encoded_key}Encoded":{value}"#);
                         for _ in 0..3 {
                             for (boundary, result) in [
-                                ("runner", af_runner::package_lifecycle::sanitize_lifecycle_field(&input)),
-                                ("persistence", af_release::lifecycle::sanitize_persisted_lifecycle_text(&input)),
+                                (
+                                    "runner",
+                                    af_runner::package_lifecycle::sanitize_lifecycle_field(&input),
+                                ),
+                                (
+                                    "persistence",
+                                    af_release::lifecycle::sanitize_persisted_lifecycle_text(
+                                        &input,
+                                    ),
+                                ),
                                 ("projection", redact_secrets(&input)),
                             ] {
-                                assert!(!result.contains("GRAMMAR_CANARY"), "{boundary}: {input:?} -> {result:?}");
+                                assert!(
+                                    !result.contains("GRAMMAR_CANARY"),
+                                    "{boundary}: {input:?} -> {result:?}"
+                                );
                                 assert!(!redact_secrets(&result).contains("GRAMMAR_CANARY"));
                             }
-                            input = format!("AF_DIAG_FAILURE={}", serde_json::json!({"summary": input}));
+                            input = format!(
+                                "AF_DIAG_FAILURE={}",
+                                serde_json::json!({"summary": input})
+                            );
                         }
                     }
                 }
@@ -2949,13 +2993,25 @@ mod tests {
 
     #[test]
     fn test_release_gate_receipt_preserves_closed_header_commands() {
-        for tail in ["--verbose", "--retry 2", "-X GET", "-H \"Accept: application/json\""] {
-            let command = format!("curl -H \"Authorization: [REDACTED]\" {tail} https://example.invalid");
+        for tail in [
+            "--verbose",
+            "--retry 2",
+            "-X GET",
+            "-H \"Accept: application/json\"",
+        ] {
+            let command =
+                format!("curl -H \"Authorization: [REDACTED]\" {tail} https://example.invalid");
             let mut input = command.clone();
             for _ in 0..3 {
                 let sanitized = redact_secrets(&input);
-                assert!(sanitized.contains("https://example.invalid"), "{input:?} -> {sanitized:?}");
-                assert!(sanitized.contains(tail.split_whitespace().next().unwrap()), "{sanitized:?}");
+                assert!(
+                    sanitized.contains("https://example.invalid"),
+                    "{input:?} -> {sanitized:?}"
+                );
+                assert!(
+                    sanitized.contains(tail.split_whitespace().next().unwrap()),
+                    "{sanitized:?}"
+                );
                 assert_eq!(redact_secrets(&sanitized), sanitized);
                 input = format!("AF_DIAG_FAILURE={}", serde_json::json!({"summary": input}));
             }
@@ -2964,7 +3020,10 @@ mod tests {
 
     #[test]
     fn test_final_gate_escaped_fragments_and_marked_headers() {
-        let long_key = format!(r#""{}Pass\u0077ordEncoded":"FRAGMENT_CANARY""#, "x".repeat(125));
+        let long_key = format!(
+            r#""{}Pass\u0077ordEncoded":"FRAGMENT_CANARY""#,
+            "x".repeat(125)
+        );
         let samples = [
             long_key.as_str(),
             r#""databaseCookieEncoded":"FRAGMENT_CANARY""#,
@@ -2985,16 +3044,29 @@ mod tests {
             "Cookie: [REDACTED]' https://example.invalid/FRAGMENT_CANARY",
         ];
         for sample in samples {
-            let receipt = format!("AF_DIAG_FAILURE={}", serde_json::json!({
-                "stage": "installer", "exit_code": 1, "summary": sample,
-            }));
+            let receipt = format!(
+                "AF_DIAG_FAILURE={}",
+                serde_json::json!({
+                    "stage": "installer", "exit_code": 1, "summary": sample,
+                })
+            );
             for input in [sample, receipt.as_str()] {
                 let runner = af_runner::package_lifecycle::sanitize_lifecycle_field(input);
                 let persisted = af_release::lifecycle::sanitize_persisted_lifecycle_text(input);
                 let projected = redact_secrets(input);
-                let chained = redact_secrets(&af_release::lifecycle::sanitize_persisted_lifecycle_text(&runner));
-                for (boundary, result) in [("runner", &runner), ("persistence", &persisted), ("projection", &projected), ("chain", &chained)] {
-                    assert!(!result.contains("FRAGMENT_CANARY"), "{boundary}: {input:?} -> {result:?}");
+                let chained = redact_secrets(
+                    &af_release::lifecycle::sanitize_persisted_lifecycle_text(&runner),
+                );
+                for (boundary, result) in [
+                    ("runner", &runner),
+                    ("persistence", &persisted),
+                    ("projection", &projected),
+                    ("chain", &chained),
+                ] {
+                    assert!(
+                        !result.contains("FRAGMENT_CANARY"),
+                        "{boundary}: {input:?} -> {result:?}"
+                    );
                     assert!(!redact_secrets(result).contains("FRAGMENT_CANARY"));
                 }
                 let connection = Connection::open_in_memory().unwrap();
@@ -3017,7 +3089,8 @@ mod tests {
                         finished_at: Some("fixture"),
                         ..Default::default()
                     },
-                ).unwrap();
+                )
+                .unwrap();
                 for query in [
                     "SELECT sanitized_summary FROM package_lifecycle_jobs WHERE job_id='fixture'",
                     "SELECT sanitized_summary FROM package_lifecycle_history WHERE job_id='fixture'",

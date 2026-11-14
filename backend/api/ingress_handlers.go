@@ -264,7 +264,17 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 					pr.Out.Header.Set("Upgrade", upgradeHeader)
 					pr.Out.Header.Set("Connection", "Upgrade")
 				}
-				pr.Out.Header.Del("X-Aetherflow-User")
+				for hdrName := range pr.Out.Header {
+					lower := strings.ToLower(hdrName)
+					if strings.HasPrefix(lower, "x-aetherflow-") ||
+						lower == "remote-user" ||
+						lower == "x-remote-user" ||
+						lower == "x-forwarded-user" ||
+						lower == "x-forwarded-email" ||
+						lower == "x-forwarded-groups" {
+						pr.Out.Header.Del(hdrName)
+					}
+				}
 				if authenticatedUser != "" {
 					pr.Out.Header.Set("X-Aetherflow-User", authenticatedUser)
 				}

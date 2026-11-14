@@ -160,6 +160,21 @@ func (h *Hub) fanout(env hubEnvelope) {
 	}
 }
 
+func (h *Hub) sendToClient(cl *Client, msg []byte) {
+	if cl == nil || len(msg) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.clients[cl] {
+		return
+	}
+	select {
+	case cl.send <- msg:
+	default:
+	}
+}
+
 func (h *Hub) run() {
 	for {
 		select {
@@ -298,6 +313,15 @@ func IssueWSTicket(c *gin.Context) {
 	}
 	jtiVal, _ := c.Get("session_jti")
 	sessionJTI, _ := jtiVal.(string)
+	sessionJTI = strings.TrimSpace(sessionJTI)
+	if sessionJTI == "" {
+		anonBytes := make([]byte, 16)
+		if _, err := rand.Read(anonBytes); err != nil {
+			InternalError(c, "Failed to generate WebSocket session binding")
+			return
+		}
+		sessionJTI = "ws-anon-" + hex.EncodeToString(anonBytes)
+	}
 	var sessionVer int64
 	if verVal, hasVer := c.Get("session_ver"); hasVer {
 		switch v := verVal.(type) {
@@ -444,10 +468,7 @@ func HandleWebSocket(c *gin.Context) {
 			},
 		}
 		if message, err := json.Marshal(payload); err == nil {
-			select {
-			case cl.send <- message:
-			default:
-			}
+			cl.hub.sendToClient(cl, message)
 		}
 	}(client)
 

@@ -2,8 +2,9 @@ use crate::auth::{api_error, AuthUser};
 use crate::ws::extract_client_ip;
 use af_services::{
     ActiveStreamSession, BreakdownEntry, StreamTypeDistribution, StreamingAnalytics,
-    StreamingDashboardResponse, StreamingHistoryEstimate, StreamingHistoryItem, StreamingLibraryCounts, StreamingLiveSummary,
-    StreamingServerStatus, StreamingTimeSeriesPoint, StreamingTitleStat, StreamingUserStat,
+    StreamingDashboardResponse, StreamingHistoryEstimate, StreamingHistoryItem,
+    StreamingLibraryCounts, StreamingLiveSummary, StreamingServerStatus, StreamingTimeSeriesPoint,
+    StreamingTitleStat, StreamingUserStat,
 };
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, Request};
@@ -432,8 +433,14 @@ async fn do_jellyfin_request(
     Ok((bytes, status, content_type))
 }
 
-async fn read_bounded_streaming_body(mut response: reqwest::Response, cap: usize) -> anyhow::Result<Vec<u8>> {
-    if response.content_length().is_some_and(|length| length > cap as u64) {
+async fn read_bounded_streaming_body(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > cap as u64)
+    {
         anyhow::bail!("Streaming upstream payload exceeds {cap} bytes");
     }
     let mut body = Vec::new();
@@ -577,7 +584,11 @@ fn resolve_session_capabilities(s: &JellyfinSessionRaw) -> (bool, bool, bool, Ve
 // 1. GET /streaming/artwork/:itemId
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub async fn get_streaming_artwork(Extension(user): Extension<AuthUser>, Path(item_id): Path<String>, Query(mut q): Query<HashMap<String, String>>) -> Response {
+pub async fn get_streaming_artwork(
+    Extension(user): Extension<AuthUser>,
+    Path(item_id): Path<String>,
+    Query(mut q): Query<HashMap<String, String>>,
+) -> Response {
     let trimmed = item_id.trim();
     if trimmed.is_empty()
         || trimmed.len() > 128
@@ -592,8 +603,13 @@ pub async fn get_streaming_artwork(Extension(user): Extension<AuthUser>, Path(it
         );
     }
 
-    let provider = q.get("provider").map(|value| value.to_ascii_lowercase()).unwrap_or_else(|| "jellyfin".into());
-    if !matches!(provider.as_str(), "jellyfin" | "emby") { return StatusCode::BAD_REQUEST.into_response(); }
+    let provider = q
+        .get("provider")
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "jellyfin".into());
+    if !matches!(provider.as_str(), "jellyfin" | "emby") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let authorized = (|| -> anyhow::Result<bool> {
         let conn = af_db::get_conn()?;
         let server_id: String = conn.query_row("SELECT server_id FROM streaming_servers WHERE provider=?1 AND enabled=1 AND COALESCE(server_id,'')!=''", [&provider], |row| row.get(0))?;
@@ -603,16 +619,38 @@ pub async fn get_streaming_artwork(Extension(user): Extension<AuthUser>, Path(it
         let included = crate::streaming_history::inclusion_predicate();
         Ok(conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM streaming_history h CROSS JOIN streaming_tracking_policies p WHERE p.id=1 AND h.provider=?1 AND h.server_id=?2 AND h.item_id=?3 AND ({included}) AND EXISTS(SELECT 1 FROM streaming_user_links identity WHERE identity.af_user_id=?4 AND identity.provider=h.provider AND identity.server_id=h.server_id AND identity.provider_user_id=h.user_id))"), params![provider, server_id, trimmed, user.user_id], |row| row.get(0))?)
     })().unwrap_or(false);
-    if !authorized { return api_error(StatusCode::FORBIDDEN, "artwork_scope_denied", "Artwork is not available in your linked provider/server/item scope"); }
+    if !authorized {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "artwork_scope_denied",
+            "Artwork is not available in your linked provider/server/item scope",
+        );
+    }
     q.insert("provider".into(), provider);
     let selected_provider = q.get("provider").map(String::as_str).unwrap_or("jellyfin");
-    let (_, selected_url, selected_key, _) = if selected_provider == "jellyfin" { get_stored_jellyfin_config() } else { let config = get_stored_emby_config_fail_closed(); (config.name, config.url, config.api_key, config.enabled) };
-    if verify_monitor_source(selected_provider, &selected_url, &selected_key).await.is_err() {
-        return api_error(StatusCode::CONFLICT, "streaming_identity_changed", "Artwork provider identity is unavailable or changed");
+    let (_, selected_url, selected_key, _) = if selected_provider == "jellyfin" {
+        get_stored_jellyfin_config()
+    } else {
+        let config = get_stored_emby_config_fail_closed();
+        (config.name, config.url, config.api_key, config.enabled)
+    };
+    if verify_monitor_source(selected_provider, &selected_url, &selected_key)
+        .await
+        .is_err()
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "streaming_identity_changed",
+            "Artwork provider identity is unavailable or changed",
+        );
     }
-    if let Some(resp) = maybe_handle_emby_artwork(trimmed, &q).await { return resp; }
+    if let Some(resp) = maybe_handle_emby_artwork(trimmed, &q).await {
+        return resp;
+    }
     let (_, server_url, api_key, enabled) = get_stored_jellyfin_config();
-    if !enabled { return StatusCode::NOT_FOUND.into_response(); }
+    if !enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if api_key.is_empty() {
         return fallback_emby_artwork(trimmed, &q).await;
     }
@@ -659,7 +697,8 @@ pub async fn get_streaming_artwork(Extension(user): Extension<AuthUser>, Path(it
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("image/jpeg")
                     .to_string();
-                if let Ok(bytes) = read_bounded_streaming_body(resp, MAX_ARTWORK_PAYLOAD_SIZE).await {
+                if let Ok(bytes) = read_bounded_streaming_body(resp, MAX_ARTWORK_PAYLOAD_SIZE).await
+                {
                     if !bytes.is_empty() && bytes.len() <= MAX_ARTWORK_PAYLOAD_SIZE {
                         image_bytes = Some(bytes);
                         break;
@@ -785,11 +824,15 @@ pub async fn test_jellyfin_connection(
         }
 
         let sys_info = serde_json::from_slice::<JellyfinSystemInfo>(&body)?;
-        if sys_info.id.trim().is_empty() { anyhow::bail!("Missing Jellyfin server identity"); }
+        if sys_info.id.trim().is_empty() {
+            anyhow::bail!("Missing Jellyfin server identity");
+        }
         if let Ok(conn) = af_db::get_conn() {
             let pinned: String = conn.query_row("SELECT COALESCE(server_id,'') FROM streaming_servers WHERE provider='jellyfin' AND RTRIM(url,'/')=?1", [&clean_url], |row| row.get(0)).unwrap_or_default();
             if !pinned.is_empty() && !pinned.eq_ignore_ascii_case(&sys_info.id) {
-                anyhow::bail!("Jellyfin server identity changed; explicitly reconfigure the connection");
+                anyhow::bail!(
+                    "Jellyfin server identity changed; explicitly reconfigure the connection"
+                );
             }
         }
         {
@@ -865,7 +908,11 @@ pub async fn test_jellyfin_connection(
 pub async fn test_streaming_server(Json(req): Json<TestStreamingServerReq>) -> Response {
     if req.provider.eq_ignore_ascii_case("emby") {
         let stored = get_stored_emby_config_fail_closed();
-        let target_url = if req.url.trim().is_empty() { stored.url.as_str() } else { req.url.trim() };
+        let target_url = if req.url.trim().is_empty() {
+            stored.url.as_str()
+        } else {
+            req.url.trim()
+        };
         let target_url = match crate::streaming_emby::validate_emby_server_url(target_url) {
             Ok(url) => url,
             Err(error) => {
@@ -877,13 +924,24 @@ pub async fn test_streaming_server(Json(req): Json<TestStreamingServerReq>) -> R
         if req.api_key.trim().starts_with("****") && (!same_server || stored.api_key.is_empty()) {
             return api_error(StatusCode::BAD_REQUEST, "STREAMING_KEY_REQUIRED", "Provide a new API key when testing a different server URL; stored credentials cannot be transferred to another server");
         }
-        let target_key = if req.api_key.trim().is_empty() || req.api_key.trim().starts_with("****") {
-            if same_server { stored.api_key.as_str() } else { "" }
-        } else { req.api_key.trim() };
+        let target_key = if req.api_key.trim().is_empty() || req.api_key.trim().starts_with("****")
+        {
+            if same_server {
+                stored.api_key.as_str()
+            } else {
+                ""
+            }
+        } else {
+            req.api_key.trim()
+        };
         return finalize_emby_server_test(&stored, &target_url, target_key, same_server).await;
     }
     if !req.provider.is_empty() && !req.provider.eq_ignore_ascii_case("jellyfin") {
-        return api_error(StatusCode::BAD_REQUEST, "unsupported_streaming_provider", "Unsupported streaming provider");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_streaming_provider",
+            "Unsupported streaming provider",
+        );
     }
     let (_, stored_url, stored_key, _) = get_stored_jellyfin_config();
     let raw_target_url = if req.url.trim().is_empty() {
@@ -911,10 +969,23 @@ pub async fn test_streaming_server(Json(req): Json<TestStreamingServerReq>) -> R
     match test_jellyfin_connection(&clean_target_url, &target_key).await {
         Ok(status) => {
             let (_, current_url, current_key, enabled) = get_stored_jellyfin_config();
-            if enabled && current_url.trim_end_matches('/') == clean_target_url && current_key == target_key {
+            if enabled
+                && current_url.trim_end_matches('/') == clean_target_url
+                && current_key == target_key
+            {
                 if let Ok(conn) = af_db::get_conn() {
-                    if let Err(error) = persist_verified_source_with_key(&conn, "jellyfin", &clean_target_url, &target_key, &status.server_id) {
-                        return api_error(StatusCode::CONFLICT, "streaming_identity_changed", error.to_string());
+                    if let Err(error) = persist_verified_source_with_key(
+                        &conn,
+                        "jellyfin",
+                        &clean_target_url,
+                        &target_key,
+                        &status.server_id,
+                    ) {
+                        return api_error(
+                            StatusCode::CONFLICT,
+                            "streaming_identity_changed",
+                            error.to_string(),
+                        );
                     }
                 }
             }
@@ -964,7 +1035,9 @@ pub async fn test_streaming_server(Json(req): Json<TestStreamingServerReq>) -> R
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
-    let _flight = SUMMARY_SWEEP_LOCK.try_lock().map_err(|_| anyhow::anyhow!("Jellyfin summary sync is already running"))?;
+    let _flight = SUMMARY_SWEEP_LOCK
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("Jellyfin summary sync is already running"))?;
     tokio::time::timeout(Duration::from_secs(45), sync_jellyfin_summary_batch()).await?
 }
 
@@ -979,7 +1052,10 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
     let server_id = verify_monitor_source("jellyfin", &server_url, &api_key).await?;
     let instance_identity = if server_id.is_empty() {
         use sha2::Digest;
-        format!("url-{}", hex::encode(sha2::Sha256::digest(clean_url.as_bytes())))
+        format!(
+            "url-{}",
+            hex::encode(sha2::Sha256::digest(clean_url.as_bytes()))
+        )
     } else {
         server_id.clone()
     };
@@ -1013,13 +1089,19 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
         for filter in filters {
             let checkpoint_source = format!("summary:{}:{filter}", u.id);
             let completed = af_db::get_conn()?.query_row("SELECT checkpoint='-1' FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source], |row| row.get::<_, bool>(0)).unwrap_or(false);
-            if completed { continue; }
+            if completed {
+                continue;
+            }
             let mut start_index = af_db::get_conn()?.query_row("SELECT checkpoint FROM streaming_import_checkpoints WHERE provider='jellyfin' AND server_id=?1 AND source=?2", params![server_id, checkpoint_source], |row| row.get::<_, String>(0)).ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
             loop {
-                if remaining_pages == 0 { return Ok(imported); }
+                if remaining_pages == 0 {
+                    return Ok(imported);
+                }
                 remaining_pages -= 1;
                 let (_, current_url, current_key, current_enabled) = get_stored_jellyfin_config();
-                if !current_enabled || current_url != server_url || current_key != api_key { anyhow::bail!("Summary source changed or disabled"); }
+                if !current_enabled || current_url != server_url || current_key != api_key {
+                    anyhow::bail!("Summary source changed or disabled");
+                }
                 let items_url = format!(
                     "{}/Users/{}/Items?Recursive=true&Filters={}&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit={}&StartIndex={}",
                     clean_url, encoded_uid, filter, page_size, start_index
@@ -1047,7 +1129,8 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
                 let batch_len = payload.items.len();
                 {
                     let mut conn = af_db::get_conn()?;
-                    let tx = conn.transaction()?;
+                    let tx =
+                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     for item in payload.items {
                         let dur_secs = (item.run_time_ticks / JELLYFIN_TICKS_PER_SECOND).max(0);
                         let mut v_codec = String::new();
@@ -1144,7 +1227,12 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
                         // Jellyfin's /Users/{id}/Items endpoint; keep them empty/zero rather
                         // than fabricating measurements.
                         let data_used = 0i64;
-                        let session_key = format!("jellyfin:summary:{}:{}:{}", urlencoding::encode(&instance_identity), urlencoding::encode(&u.id), urlencoding::encode(&item.id));
+                        let session_key = format!(
+                            "jellyfin:summary:{}:{}:{}",
+                            urlencoding::encode(&instance_identity),
+                            urlencoding::encode(&u.id),
+                            urlencoding::encode(&item.id)
+                        );
                         let rows = tx.execute(
                                 r#"
                                 INSERT INTO streaming_history (
@@ -1233,8 +1321,14 @@ async fn sync_jellyfin_summary_batch() -> anyhow::Result<usize> {
                         }
                     }
                     let stored_key: String = tx.query_row("SELECT api_key FROM streaming_servers WHERE provider='jellyfin' AND enabled=1 AND url=?1 AND server_id=?2", params![server_url, server_id], |row| row.get(0))?;
-                    let current_key = if stored_key.starts_with("enc:v1:") { af_db::decrypt_key(&stored_key)? } else { stored_key };
-                    if current_key != api_key { anyhow::bail!("Summary source changed before persistence"); }
+                    let current_key = if stored_key.starts_with("enc:v1:") {
+                        af_db::decrypt_key(&stored_key)?
+                    } else {
+                        stored_key
+                    };
+                    if current_key != api_key {
+                        anyhow::bail!("Summary source changed before persistence");
+                    }
                     tx.execute("INSERT INTO streaming_import_checkpoints(provider,server_id,source,checkpoint,updated_at) VALUES('jellyfin',?1,?2,?3,CURRENT_TIMESTAMP) ON CONFLICT(provider,server_id,source) DO UPDATE SET checkpoint=excluded.checkpoint,updated_at=excluded.updated_at", params![server_id, checkpoint_source, (start_index + batch_len).to_string()])?;
                     tx.commit()?;
                 }
@@ -1525,7 +1619,13 @@ pub fn save_emby_server_configuration(
 ) -> Result<String, Response> {
     let clean_url = match crate::streaming_emby::validate_emby_server_url(url_raw) {
         Ok(u) => u,
-        Err(e) => return Err(api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", e.to_string())),
+        Err(e) => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                e.to_string(),
+            ))
+        }
     };
 
     let trimmed_key = api_key_raw.trim();
@@ -1649,11 +1749,7 @@ pub fn save_emby_server_configuration(
     Ok(clean_url)
 }
 
-fn persist_emby_verified_identity(
-    status: &StreamingServerStatus,
-    clean_url: &str,
-    api_key: &str,
-) {
+fn persist_emby_verified_identity(status: &StreamingServerStatus, clean_url: &str, api_key: &str) {
     if status.status != "connected"
         || status.server_id.trim().is_empty()
         || api_key.trim().is_empty()
@@ -1734,7 +1830,10 @@ fn build_emby_artwork_http_response(art: crate::streaming_emby::EmbyArtworkPaylo
     let mut resp = Response::new(Body::from(art.bytes));
     *resp.status_mut() = StatusCode::OK;
     let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(art.content_type));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(art.content_type),
+    );
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
@@ -1750,10 +1849,7 @@ fn build_emby_artwork_http_response(art: crate::streaming_emby::EmbyArtworkPaylo
     resp
 }
 
-async fn maybe_handle_emby_artwork(
-    item_id: &str,
-    q: &HashMap<String, String>,
-) -> Option<Response> {
+async fn maybe_handle_emby_artwork(item_id: &str, q: &HashMap<String, String>) -> Option<Response> {
     let explicit_prov = q
         .get("provider")
         .map(|s| s.trim().to_ascii_lowercase())
@@ -1801,12 +1897,9 @@ async fn maybe_handle_emby_artwork(
     if prefers_emby {
         let emby_cfg = get_stored_emby_config_fail_closed();
         if emby_cfg.enabled && !emby_cfg.api_key.is_empty() {
-            if let Ok(art) = crate::streaming_emby::fetch_emby_artwork(
-                &emby_cfg.url,
-                &emby_cfg.api_key,
-                item_id,
-            )
-            .await
+            if let Ok(art) =
+                crate::streaming_emby::fetch_emby_artwork(&emby_cfg.url, &emby_cfg.api_key, item_id)
+                    .await
             {
                 return Some(build_emby_artwork_http_response(art));
             }
@@ -1824,12 +1917,9 @@ async fn fallback_emby_artwork(item_id: &str, q: &HashMap<String, String>) -> Re
     }
     let emby_cfg = get_stored_emby_config_fail_closed();
     if emby_cfg.enabled && !emby_cfg.api_key.is_empty() {
-        if let Ok(art) = crate::streaming_emby::fetch_emby_artwork(
-            &emby_cfg.url,
-            &emby_cfg.api_key,
-            item_id,
-        )
-        .await
+        if let Ok(art) =
+            crate::streaming_emby::fetch_emby_artwork(&emby_cfg.url, &emby_cfg.api_key, item_id)
+                .await
         {
             return build_emby_artwork_http_response(art);
         }
@@ -1883,9 +1973,9 @@ fn resolve_target_session_provider(
              WHERE is_active = 1 AND provenance = 'observed_session' \
              ORDER BY id DESC LIMIT 64",
         ) {
-            if let Ok(rows) = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }) {
+            if let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            {
                 for (key, prov) in rows.flatten() {
                     let is_match = parse_observed_session_key(&key)
                         .map(|parsed| parsed.session_id == norm_sess)
@@ -2127,8 +2217,10 @@ async fn fetch_jellyfin_live_sessions_for_server(
 
     let raw_sessions: Vec<JellyfinSessionRaw> = serde_json::from_slice(&body)?;
     if let Some(expected) = expected_server_id {
-        if raw_sessions.iter().any(|session| session.now_playing_item.is_some()
-            && !session.server_id.trim().eq_ignore_ascii_case(expected)) {
+        if raw_sessions.iter().any(|session| {
+            session.now_playing_item.is_some()
+                && !session.server_id.trim().eq_ignore_ascii_case(expected)
+        }) {
             anyhow::bail!("Jellyfin session server identity is missing or changed");
         }
     }
@@ -2229,11 +2321,11 @@ async fn fetch_jellyfin_live_sessions_for_server(
                     if s.play_state
                         .as_ref()
                         .and_then(|ps| ps.subtitle_stream_index)
-                        == Some(ms.index)
-                    => {
-                        subtitle_codec = ms.codec.to_uppercase();
-                        subtitle_language = ms.language.to_uppercase();
-                    }
+                        == Some(ms.index) =>
+                {
+                    subtitle_codec = ms.codec.to_uppercase();
+                    subtitle_language = ms.language.to_uppercase();
+                }
                 _ => {}
             }
         }
@@ -2494,9 +2586,10 @@ fn lookup_active_observed_session_metrics(
         )
         .ok()?;
     let rows: Vec<(String, i64, String)> = stmt
-        .query_map(params![provider.trim(), stored_server_id, item_id.trim()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
+        .query_map(
+            params![provider.trim(), stored_server_id, item_id.trim()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .ok()?
         .flatten()
         .collect();
@@ -2716,11 +2809,17 @@ fn record_live_sessions_snapshot_for_source(
     let Ok(conn) = af_db::get_conn() else {
         return;
     };
-    let Ok(transaction) = conn.unchecked_transaction() else { return; };
+    let Ok(transaction) =
+        rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+    else {
+        return;
+    };
     let conn = &transaction;
     if let Some((server_url, server_id)) = source {
         let matches = conn.query_row("SELECT EXISTS(SELECT 1 FROM streaming_servers WHERE provider=?1 AND RTRIM(url,'/')=RTRIM(?2,'/') AND server_id=?3 AND enabled=1)", params![provider, server_url, server_id], |row| row.get::<_, bool>(0)).unwrap_or(false);
-        if !matches { return; }
+        if !matches {
+            return;
+        }
     }
     let interval = if (1..=60).contains(&interval_secs) {
         interval_secs
@@ -2759,10 +2858,16 @@ fn record_live_sessions_snapshot_for_source(
         }
 
         let previous = conn.query_row("SELECT sampled_at, playing FROM streaming_session_samples WHERE history_id=(SELECT id FROM streaming_history WHERE session_key=?1) ORDER BY sampled_at DESC LIMIT 1", [&session_key], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))).ok();
-        let effective_interval = previous.map(|(sampled_at, playing)| {
-            let elapsed = Utc::now().timestamp().saturating_sub(sampled_at);
-            if has_observation_gap || !playing || elapsed > interval.saturating_mul(2) { 0 } else { elapsed.clamp(0, interval) }
-        }).unwrap_or(0);
+        let effective_interval = previous
+            .map(|(sampled_at, playing)| {
+                let elapsed = Utc::now().timestamp().saturating_sub(sampled_at);
+                if has_observation_gap || !playing || elapsed > interval.saturating_mul(2) {
+                    0
+                } else {
+                    elapsed.clamp(0, interval)
+                }
+            })
+            .unwrap_or(0);
         let mut delta_secs = 0i64;
         let mut delta_bytes = 0i64;
         if s.state == "playing" {
@@ -2926,44 +3031,98 @@ pub fn close_disabled_provider(provider: &str) {
     }
 }
 
-fn schedule_live_item_metadata(provider: &str, server_url: &str, api_key: &str, sessions: &[ActiveStreamSession]) {
+fn schedule_live_item_metadata(
+    provider: &str,
+    server_url: &str,
+    api_key: &str,
+    sessions: &[ActiveStreamSession],
+) {
     if sessions.is_empty() {
         return;
     }
-    let item_ids = sessions.iter().map(|session| session.item_id.clone()).collect::<Vec<_>>();
-    crate::streaming_metadata::schedule_provider_item_metadata(provider, server_url, api_key, "", &item_ids);
+    let item_ids = sessions
+        .iter()
+        .map(|session| session.item_id.clone())
+        .collect::<Vec<_>>();
+    crate::streaming_metadata::schedule_provider_item_metadata(
+        provider, server_url, api_key, "", &item_ids,
+    );
 }
 
-fn persist_verified_monitor_source(conn: &rusqlite::Connection, provider: &str, server_url: &str, server_id: &str) -> anyhow::Result<String> {
-    if server_id.trim().is_empty() { anyhow::bail!("Missing provider server identity"); }
+fn persist_verified_monitor_source(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    server_url: &str,
+    server_id: &str,
+) -> anyhow::Result<String> {
+    if server_id.trim().is_empty() {
+        anyhow::bail!("Missing provider server identity");
+    }
     let changed = conn.execute("UPDATE streaming_servers SET server_id=CASE WHEN COALESCE(server_id,'')='' THEN ?3 ELSE server_id END WHERE provider=?1 AND RTRIM(url,'/')=RTRIM(?2,'/') AND enabled=1 AND (COALESCE(server_id,'')='' OR LOWER(server_id)=LOWER(?3))", params![provider, server_url, server_id])?;
-    if changed != 1 { anyhow::bail!("Provider source changed; verify server configuration"); }
+    if changed != 1 {
+        anyhow::bail!("Provider source changed; verify server configuration");
+    }
     Ok(query_stored_provider_server_id(conn, provider))
 }
 
-fn persist_verified_source_with_key(conn: &rusqlite::Connection, provider: &str, url: &str, key: &str, server_id: &str) -> anyhow::Result<String> {
-    let transaction = conn.unchecked_transaction()?;
+fn persist_verified_source_with_key(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    url: &str,
+    key: &str,
+    server_id: &str,
+) -> anyhow::Result<String> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let stored_key: String = transaction.query_row("SELECT api_key FROM streaming_servers WHERE provider=?1 AND RTRIM(url,'/')=RTRIM(?2,'/') AND enabled=1", params![provider, url], |row| row.get(0))?;
-    let plaintext = if stored_key.starts_with("enc:v1:") { af_db::decrypt_key(&stored_key)? } else { stored_key };
-    anyhow::ensure!(!key.is_empty() && plaintext == key, "Provider credentials changed during verification");
+    let plaintext = if stored_key.starts_with("enc:v1:") {
+        af_db::decrypt_key(&stored_key)?
+    } else {
+        stored_key
+    };
+    anyhow::ensure!(
+        !key.is_empty() && plaintext == key,
+        "Provider credentials changed during verification"
+    );
     let identity = persist_verified_monitor_source(&transaction, provider, url, server_id)?;
     transaction.commit()?;
     Ok(identity)
 }
 
-async fn verify_monitor_source(provider: &str, server_url: &str, api_key: &str) -> anyhow::Result<String> {
+async fn verify_monitor_source(
+    provider: &str,
+    server_url: &str,
+    api_key: &str,
+) -> anyhow::Result<String> {
     let clean_url = af_services::validate_server_url(server_url)?;
-    let (body, status) = crate::streaming_metadata::execute_provider_request(&JELLYFIN_CLIENT, reqwest::Method::GET, &format!("{clean_url}/System/Info/Public"), provider, api_key).await?;
-    if !status.is_success() { anyhow::bail!("Provider identity unavailable"); }
+    let (body, status) = crate::streaming_metadata::execute_provider_request(
+        &JELLYFIN_CLIENT,
+        reqwest::Method::GET,
+        &format!("{clean_url}/System/Info/Public"),
+        provider,
+        api_key,
+    )
+    .await?;
+    if !status.is_success() {
+        anyhow::bail!("Provider identity unavailable");
+    }
     let identity: JellyfinSystemInfo = serde_json::from_slice(&body)?;
-    let (_, current_url, current_key, enabled) = if provider == "jellyfin" { get_stored_jellyfin_config() } else { let config = get_stored_emby_config_fail_closed(); (config.name, config.url, config.api_key, config.enabled) };
-    if !enabled || current_url.trim_end_matches('/') != clean_url || current_key != api_key { anyhow::bail!("Provider configuration changed during verification"); }
+    let (_, current_url, current_key, enabled) = if provider == "jellyfin" {
+        get_stored_jellyfin_config()
+    } else {
+        let config = get_stored_emby_config_fail_closed();
+        (config.name, config.url, config.api_key, config.enabled)
+    };
+    if !enabled || current_url.trim_end_matches('/') != clean_url || current_key != api_key {
+        anyhow::bail!("Provider configuration changed during verification");
+    }
     let provider = provider.to_string();
     let api_key = api_key.to_string();
     tokio::task::spawn_blocking(move || {
         let connection = af_db::get_conn()?;
         persist_verified_source_with_key(&connection, &provider, &clean_url, &api_key, &identity.id)
-    }).await?
+    })
+    .await?
 }
 
 pub fn start_streaming_monitor() {
@@ -2997,12 +3156,25 @@ pub fn start_streaming_monitor() {
                 }
                 if let Ok(server_id) = verify_monitor_source(provider, &url, &key).await {
                     let observations = if provider == "jellyfin" {
-                        fetch_jellyfin_live_sessions_for_server(&name, &url, &key, Some(&server_id)).await
+                        fetch_jellyfin_live_sessions_for_server(&name, &url, &key, Some(&server_id))
+                            .await
                     } else {
-                        crate::streaming_emby::fetch_emby_live_sessions(&name, &url, &key, Some(&server_id)).await.map_err(anyhow::Error::from)
+                        crate::streaming_emby::fetch_emby_live_sessions(
+                            &name,
+                            &url,
+                            &key,
+                            Some(&server_id),
+                        )
+                        .await
+                        .map_err(anyhow::Error::from)
                     };
                     if let Ok(sessions) = observations {
-                        record_live_sessions_snapshot_for_source(provider, &sessions, 15, Some((&url, &server_id)));
+                        record_live_sessions_snapshot_for_source(
+                            provider,
+                            &sessions,
+                            15,
+                            Some((&url, &server_id)),
+                        );
                         schedule_live_item_metadata(provider, &url, &key, &sessions);
                     }
                 }
@@ -3739,10 +3911,13 @@ fn query_streaming_history_estimates(
             records: row.get(1)?,
             reported_watch_time_secs: row.get(2)?,
             undated_records: row.get(3)?,
-            time_series: day_keys.iter().map(|date| StreamingTimeSeriesPoint {
-                date: date.clone(),
-                ..Default::default()
-            }).collect(),
+            time_series: day_keys
+                .iter()
+                .map(|date| StreamingTimeSeriesPoint {
+                    date: date.clone(),
+                    ..Default::default()
+                })
+                .collect(),
         })
     })? {
         estimates.push(estimate?);
@@ -3754,19 +3929,27 @@ fn query_streaming_history_estimates(
          GROUP BY provenance, 2 ORDER BY 2"
     );
     let mut series = conn.prepare(&series_sql)?;
-    let date_indexes: HashMap<&str, usize> = day_keys.iter().enumerate()
-        .map(|(index, date)| (date.as_str(), index)).collect();
+    let date_indexes: HashMap<&str, usize> = day_keys
+        .iter()
+        .enumerate()
+        .map(|(index, date)| (date.as_str(), index))
+        .collect();
     for point in series.query_map(params_from_iter(args.iter()), |row| {
-        Ok((row.get::<_, String>(0)?, StreamingTimeSeriesPoint {
-            date: row.get(1)?,
-            plays: row.get(2)?,
-            watch_time_secs: row.get(3)?,
-            ..Default::default()
-        }))
+        Ok((
+            row.get::<_, String>(0)?,
+            StreamingTimeSeriesPoint {
+                date: row.get(1)?,
+                plays: row.get(2)?,
+                watch_time_secs: row.get(3)?,
+                ..Default::default()
+            },
+        ))
     })? {
         let (provenance, point) = point?;
         if let (Some(estimate), Some(index)) = (
-            estimates.iter_mut().find(|estimate| estimate.provenance == provenance),
+            estimates
+                .iter_mut()
+                .find(|estimate| estimate.provenance == provenance),
             date_indexes.get(point.date.as_str()),
         ) {
             estimate.time_series[*index] = point;
@@ -3836,7 +4019,8 @@ pub fn query_streaming_analytics(
     }
     if resolved_window > 0 {
         let cutoff = (now - chrono::Duration::days(resolved_window as i64))
-            .timestamp().to_string();
+            .timestamp()
+            .to_string();
         where_clauses.push("event_unix >= CAST(? AS INTEGER)".to_string());
         args.push(cutoff);
     }
@@ -3894,8 +4078,13 @@ pub fn query_streaming_analytics(
     };
     if !use_demo {
         result.historical_estimates = query_streaming_history_estimates(
-            &conn, &evidence_where_sql, &args, date_format, &day_keys,
-        ).unwrap_or_else(|error| {
+            &conn,
+            &evidence_where_sql,
+            &args,
+            date_format,
+            &day_keys,
+        )
+        .unwrap_or_else(|error| {
             tracing::warn!(%error, "Imported streaming estimate query failed");
             Vec::new()
         });
@@ -4324,37 +4513,89 @@ struct CachedTelemetry {
     result: Result<(StreamingServerStatus, Vec<ActiveStreamSession>), String>,
 }
 
-static TELEMETRY_CACHE: Lazy<tokio::sync::Mutex<HashMap<String, CachedTelemetry>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+static TELEMETRY_CACHE: Lazy<tokio::sync::Mutex<HashMap<String, CachedTelemetry>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
-async fn cached_provider_telemetry(provider: &str) -> anyhow::Result<(StreamingServerStatus, Vec<ActiveStreamSession>)> {
+async fn cached_provider_telemetry(
+    provider: &str,
+) -> anyhow::Result<(StreamingServerStatus, Vec<ActiveStreamSession>)> {
     use sha2::Digest;
-    let (name, url, key, enabled) = if provider == "jellyfin" { get_stored_jellyfin_config() } else { let config = get_stored_emby_config_fail_closed(); (config.name, config.url, config.api_key, config.enabled) };
-    anyhow::ensure!(enabled && !key.is_empty(), "Provider disabled or unconfigured");
+    let (name, url, key, enabled) = if provider == "jellyfin" {
+        get_stored_jellyfin_config()
+    } else {
+        let config = get_stored_emby_config_fail_closed();
+        (config.name, config.url, config.api_key, config.enabled)
+    };
+    anyhow::ensure!(
+        enabled && !key.is_empty(),
+        "Provider disabled or unconfigured"
+    );
     let server_id = {
         let connection = af_db::get_conn()?;
         query_stored_provider_server_id(&connection, provider)
     };
-    anyhow::ensure!(!server_id.is_empty(), "Server identity is unverified; test the saved connection first");
-    let fingerprint = hex::encode(sha2::Sha256::digest(format!("{name}\0{url}\0{key}\0{server_id}")));
+    anyhow::ensure!(
+        !server_id.is_empty(),
+        "Server identity is unverified; test the saved connection first"
+    );
+    let fingerprint = hex::encode(sha2::Sha256::digest(format!(
+        "{name}\0{url}\0{key}\0{server_id}"
+    )));
     let mut cache = TELEMETRY_CACHE.lock().await;
-    if let Some(entry) = cache.get(provider).filter(|entry| entry.fingerprint == fingerprint && entry.sampled_at.elapsed() < Duration::from_secs(15)) {
+    if let Some(entry) = cache.get(provider).filter(|entry| {
+        entry.fingerprint == fingerprint && entry.sampled_at.elapsed() < Duration::from_secs(15)
+    }) {
         return entry.result.clone().map_err(anyhow::Error::msg);
     }
     let result = async {
-        let mut status = if provider == "jellyfin" { test_jellyfin_connection(&url, &key).await? } else { crate::streaming_emby::test_emby_connection(&url, &key, Some(&server_id)).await? };
-        anyhow::ensure!(status.server_id.eq_ignore_ascii_case(&server_id), "Provider server identity changed");
-        let mut sessions = if provider == "jellyfin" { fetch_jellyfin_live_sessions_for_server(&name, &url, &key, Some(&server_id)).await? } else { crate::streaming_emby::fetch_emby_live_sessions(&name, &url, &key, Some(&server_id)).await? };
-        let (_, current_url, current_key, current_enabled) = if provider == "jellyfin" { get_stored_jellyfin_config() } else { let config = get_stored_emby_config_fail_closed(); (config.name, config.url, config.api_key, config.enabled) };
+        let mut status = if provider == "jellyfin" {
+            test_jellyfin_connection(&url, &key).await?
+        } else {
+            crate::streaming_emby::test_emby_connection(&url, &key, Some(&server_id)).await?
+        };
+        anyhow::ensure!(
+            status.server_id.eq_ignore_ascii_case(&server_id),
+            "Provider server identity changed"
+        );
+        let mut sessions = if provider == "jellyfin" {
+            fetch_jellyfin_live_sessions_for_server(&name, &url, &key, Some(&server_id)).await?
+        } else {
+            crate::streaming_emby::fetch_emby_live_sessions(&name, &url, &key, Some(&server_id))
+                .await?
+        };
+        let (_, current_url, current_key, current_enabled) = if provider == "jellyfin" {
+            get_stored_jellyfin_config()
+        } else {
+            let config = get_stored_emby_config_fail_closed();
+            (config.name, config.url, config.api_key, config.enabled)
+        };
         let current_server_id = {
             let connection = af_db::get_conn()?;
             query_stored_provider_server_id(&connection, provider)
         };
-        anyhow::ensure!(current_enabled && current_url == url && current_key == key && current_server_id == server_id, "Provider source changed during telemetry read");
-        if provider == "emby" { enrich_emby_sessions_with_observed_metrics(&mut sessions); }
+        anyhow::ensure!(
+            current_enabled
+                && current_url == url
+                && current_key == key
+                && current_server_id == server_id,
+            "Provider source changed during telemetry read"
+        );
+        if provider == "emby" {
+            enrich_emby_sessions_with_observed_metrics(&mut sessions);
+        }
         status.name = name;
         Ok((status, sessions))
-    }.await.map_err(|error: anyhow::Error| error.to_string());
-    cache.insert(provider.into(), CachedTelemetry { fingerprint, sampled_at: std::time::Instant::now(), result: result.clone() });
+    }
+    .await
+    .map_err(|error: anyhow::Error| error.to_string());
+    cache.insert(
+        provider.into(),
+        CachedTelemetry {
+            fingerprint,
+            sampled_at: std::time::Instant::now(),
+            result: result.clone(),
+        },
+    );
     result.map_err(anyhow::Error::msg)
 }
 
@@ -4439,8 +4680,14 @@ pub async fn build_streaming_dashboard(
     if jf_enabled && !jf_key.is_empty() {
         use_demo = false;
         match cached_provider_telemetry("jellyfin").await {
-            Ok((status, sessions)) => { jf_status = status; active_sessions = sessions; }
-            Err(error) => { jf_status.status = "unavailable".into(); jf_status.error_message = error.to_string(); }
+            Ok((status, sessions)) => {
+                jf_status = status;
+                active_sessions = sessions;
+            }
+            Err(error) => {
+                jf_status.status = "unavailable".into();
+                jf_status.error_message = error.to_string();
+            }
         }
     } else if use_demo {
         if let Ok(conn) = af_db::get_conn() {
@@ -4469,13 +4716,24 @@ pub async fn build_streaming_dashboard(
             audio: 26400,
         };
     } else {
-        jf_status.status = if jf_enabled { "unconfigured" } else { "disabled" }.into();
+        jf_status.status = if jf_enabled {
+            "unconfigured"
+        } else {
+            "disabled"
+        }
+        .into();
     }
 
     if emby_cfg.enabled && emby_configured {
         match cached_provider_telemetry("emby").await {
-            Ok((status, sessions)) => { emby_status = status; active_sessions.extend(sessions); }
-            Err(error) => { emby_status.status = "unavailable".into(); emby_status.error_message = error.to_string(); }
+            Ok((status, sessions)) => {
+                emby_status = status;
+                active_sessions.extend(sessions);
+            }
+            Err(error) => {
+                emby_status.status = "unavailable".into();
+                emby_status.error_message = error.to_string();
+            }
         }
     }
 
@@ -4579,18 +4837,20 @@ pub async fn get_streaming_dashboard_handler(
         .unwrap_or("30");
     let play_method = q.get("playMethod").map(|s| s.as_str()).unwrap_or("all");
     let media_type = q.get("mediaType").map(|s| s.as_str()).unwrap_or("all");
-    let user = req
-        .extensions()
-        .get::<AuthUser>()
-        .cloned();
+    let user = req.extensions().get::<AuthUser>().cloned();
     let Some(user) = user else {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Authentication required"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Authentication required"})),
+        )
+            .into_response();
     };
     if user.role != "admin" {
         return Json(StreamingDashboardResponse {
             updated_at: Utc::now().to_rfc3339(),
             ..Default::default()
-        }).into_response();
+        })
+        .into_response();
     }
     let payload = build_streaming_dashboard(window, play_method, media_type, true).await;
     Json(payload).into_response()
@@ -4610,22 +4870,82 @@ mod tests {
 
     #[test]
     fn test_dashboard_preserves_imported_estimates_without_double_counting_confirmed_time() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = init_isolated_streaming_db("imported_estimates");
         let now = Utc::now();
-        let old = (now - chrono::Duration::days(45)).format("%Y-%m-%d %H:%M:%S").to_string();
+        let old = (now - chrono::Duration::days(45))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         let current = now.format("%Y-%m-%d %H:%M:%S").to_string();
         let conn = af_db::get_conn().unwrap();
         for (key, provenance, timestamp, seconds, policy, user) in [
-            ("legacy", "legacy_unverified", old.as_str(), 3600, "included", "viewer"),
-            ("summary", "item_summary", old.as_str(), 3600, "included", "viewer"),
+            (
+                "legacy",
+                "legacy_unverified",
+                old.as_str(),
+                3600,
+                "included",
+                "viewer",
+            ),
+            (
+                "summary",
+                "item_summary",
+                old.as_str(),
+                3600,
+                "included",
+                "viewer",
+            ),
             ("undated", "item_summary", "", 600, "included", "viewer"),
-            ("negative", "legacy_unverified", old.as_str(), -5, "included", "viewer"),
-            ("observed", "observed_session", current.as_str(), 120, "included", "viewer"),
-            ("event", "imported_event", current.as_str(), 240, "included", "viewer"),
-            ("excluded", "legacy_unverified", old.as_str(), 9999, "excluded", "viewer"),
-            ("duplicate", "item_summary", old.as_str(), 9999, "duplicate", "viewer"),
-            ("hidden-user", "item_summary", old.as_str(), 9999, "included", "hidden"),
+            (
+                "negative",
+                "legacy_unverified",
+                old.as_str(),
+                -5,
+                "included",
+                "viewer",
+            ),
+            (
+                "observed",
+                "observed_session",
+                current.as_str(),
+                120,
+                "included",
+                "viewer",
+            ),
+            (
+                "event",
+                "imported_event",
+                current.as_str(),
+                240,
+                "included",
+                "viewer",
+            ),
+            (
+                "excluded",
+                "legacy_unverified",
+                old.as_str(),
+                9999,
+                "excluded",
+                "viewer",
+            ),
+            (
+                "duplicate",
+                "item_summary",
+                old.as_str(),
+                9999,
+                "duplicate",
+                "viewer",
+            ),
+            (
+                "hidden-user",
+                "item_summary",
+                old.as_str(),
+                9999,
+                "included",
+                "hidden",
+            ),
         ] {
             conn.execute(
                 "INSERT INTO streaming_history (session_key,provider,server_id,user_id,item_id,item_type,started_at,watched_secs,provenance,policy_status) VALUES (?1,'jellyfin','server',?2,'same-item','Movie',?3,?4,?5,?6)",
@@ -4633,32 +4953,88 @@ mod tests {
             ).unwrap();
         }
         conn.execute("UPDATE streaming_tracking_policies SET excluded_users='[{\"provider\":\"jellyfin\",\"serverId\":\"server\",\"id\":\"hidden\"}]'", []).unwrap();
-        let before: (i64, i64) = conn.query_row("SELECT COUNT(*),SUM(watched_secs) FROM streaming_history", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let before: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(watched_secs) FROM streaming_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         drop(conn);
         let all = query_streaming_analytics(0, "all", "all", false, true, 0.0);
         assert_eq!(all.total_plays, 2);
         assert_eq!(all.total_watch_time_secs, 360);
         assert_eq!(all.total_data_used_bytes, 0);
         assert_eq!(all.historical_estimates.len(), 2);
-        let item = all.historical_estimates.iter().find(|estimate| estimate.provenance == "item_summary").unwrap();
-        assert_eq!((item.records, item.reported_watch_time_secs, item.undated_records), (2, 4200, 1));
-        let legacy = all.historical_estimates.iter().find(|estimate| estimate.provenance == "legacy_unverified").unwrap();
+        let item = all
+            .historical_estimates
+            .iter()
+            .find(|estimate| estimate.provenance == "item_summary")
+            .unwrap();
+        assert_eq!(
+            (
+                item.records,
+                item.reported_watch_time_secs,
+                item.undated_records
+            ),
+            (2, 4200, 1)
+        );
+        let legacy = all
+            .historical_estimates
+            .iter()
+            .find(|estimate| estimate.provenance == "legacy_unverified")
+            .unwrap();
         assert_eq!((legacy.records, legacy.reported_watch_time_secs), (2, 3600));
         for estimate in &all.historical_estimates {
             assert_eq!(estimate.time_series.len(), all.time_series.len());
-            assert_eq!(estimate.time_series.iter().map(|point| point.watch_time_secs).sum::<i64>(), 3600);
-            assert!(estimate.time_series.iter().any(|point| point.date == old[..10] && point.watch_time_secs == 3600));
-            assert!(estimate.time_series.iter().all(|point| point.data_used_bytes == 0 && point.direct_play_count == 0));
+            assert_eq!(
+                estimate
+                    .time_series
+                    .iter()
+                    .map(|point| point.watch_time_secs)
+                    .sum::<i64>(),
+                3600
+            );
+            assert!(estimate
+                .time_series
+                .iter()
+                .any(|point| point.date == old[..10] && point.watch_time_secs == 3600));
+            assert!(estimate
+                .time_series
+                .iter()
+                .all(|point| point.data_used_bytes == 0 && point.direct_play_count == 0));
         }
         assert!(all.time_series.first().unwrap().date.as_str() <= &old[..10]);
-        assert!(query_streaming_analytics(7, "all", "all", false, true, 0.0).historical_estimates.is_empty());
-        assert!(query_streaming_analytics(0, "transcode", "all", false, true, 0.0).historical_estimates.is_empty());
-        assert!(query_streaming_analytics(0, "all", "episode", false, true, 0.0).historical_estimates.is_empty());
-        assert!(query_streaming_analytics(0, "all", "all", true, true, 0.0).historical_estimates.is_empty());
+        assert!(query_streaming_analytics(7, "all", "all", false, true, 0.0)
+            .historical_estimates
+            .is_empty());
+        assert!(
+            query_streaming_analytics(0, "transcode", "all", false, true, 0.0)
+                .historical_estimates
+                .is_empty()
+        );
+        assert!(
+            query_streaming_analytics(0, "all", "episode", false, true, 0.0)
+                .historical_estimates
+                .is_empty()
+        );
+        assert!(query_streaming_analytics(0, "all", "all", true, true, 0.0)
+            .historical_estimates
+            .is_empty());
         let conn = af_db::get_conn().unwrap();
-        let after: (i64, i64) = conn.query_row("SELECT COUNT(*),SUM(watched_secs) FROM streaming_history", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let after: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(watched_secs) FROM streaming_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(before, after);
-        conn.execute("UPDATE streaming_tracking_policies SET minimum_watch_secs=180", []).unwrap();
+        conn.execute(
+            "UPDATE streaming_tracking_policies SET minimum_watch_secs=180",
+            [],
+        )
+        .unwrap();
         drop(conn);
         let threshold = query_streaming_analytics(0, "all", "all", false, true, 0.0);
         assert_eq!(threshold.total_plays, 1);
@@ -4669,57 +5045,158 @@ mod tests {
 
     #[test]
     fn test_streaming_distinct_elapsed_accounting_and_disable() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = init_isolated_streaming_db("elapsed_accounting");
-        let session = ActiveStreamSession { session_id: "elapsed".into(), item_id: "movie".into(), state: "playing".into(), bitrate_bps: 8_000_000, ..Default::default() };
+        let session = ActiveStreamSession {
+            session_id: "elapsed".into(),
+            item_id: "movie".into(),
+            state: "playing".into(),
+            bitrate_bps: 8_000_000,
+            ..Default::default()
+        };
         record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
         record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT watched_secs FROM streaming_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM streaming_bandwidth_samples", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            conn.query_row("SELECT watched_secs FROM streaming_history", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM streaming_bandwidth_samples",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         conn.execute("UPDATE streaming_session_samples SET sampled_at=CAST(strftime('%s','now') AS INTEGER)-15", []).unwrap();
         drop(conn);
         record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT watched_secs,data_used_bytes FROM streaming_history", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).unwrap(), (15,15_000_000));
-        conn.execute("DELETE FROM streaming_session_samples", []).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT watched_secs,data_used_bytes FROM streaming_history",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (15, 15_000_000)
+        );
+        conn.execute("DELETE FROM streaming_session_samples", [])
+            .unwrap();
         conn.execute("INSERT INTO streaming_session_samples SELECT id,CAST(strftime('%s','now') AS INTEGER)-600,15,1,8000000 FROM streaming_history", []).unwrap();
         drop(conn);
         record_live_sessions_snapshot("jellyfin", &[session], 15);
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT watched_secs FROM streaming_history", [], |row| row.get::<_, i64>(0)).unwrap(), 15);
-        conn.execute("UPDATE streaming_servers SET enabled=0 WHERE provider='jellyfin'", []).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT watched_secs FROM streaming_history", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            15
+        );
+        conn.execute(
+            "UPDATE streaming_servers SET enabled=0 WHERE provider='jellyfin'",
+            [],
+        )
+        .unwrap();
         drop(conn);
         close_disabled_provider("jellyfin");
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT is_active,ended_at IS NULL FROM streaming_history", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))).unwrap(), (0,true));
+        assert_eq!(
+            conn.query_row(
+                "SELECT is_active,ended_at IS NULL FROM streaming_history",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+            )
+            .unwrap(),
+            (0, true)
+        );
         drop(conn);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]
     async fn test_streaming_pinned_cached_degraded_telemetry_and_artwork_denial() {
-        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = init_isolated_streaming_db("pinned_degraded");
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();
         let router = axum::Router::new()
-            .route("/System/Info", axum::routing::get(move || { let observed = observed.clone(); async move { observed.fetch_add(1, Ordering::SeqCst); Json(serde_json::json!({"Id":"saved","ServerName":"Synthetic"})) } }))
-            .route("/Items/Counts", axum::routing::get(|| async { Json(serde_json::json!({})) }))
-            .route("/Sessions", axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+            .route(
+                "/System/Info",
+                axum::routing::get(move || {
+                    let observed = observed.clone();
+                    async move {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({"Id":"saved","ServerName":"Synthetic"}))
+                    }
+                }),
+            )
+            .route(
+                "/Items/Counts",
+                axum::routing::get(|| async { Json(serde_json::json!({})) }),
+            )
+            .route(
+                "/Sessions",
+                axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
         af_db::get_conn().unwrap().execute("INSERT OR REPLACE INTO streaming_servers(provider,name,url,api_key,server_id,enabled) VALUES('jellyfin','Synthetic',?1,'fixture-key','saved',1)", [&url]).unwrap();
         assert!(cached_provider_telemetry("jellyfin").await.is_err());
         assert!(cached_provider_telemetry("jellyfin").await.is_err());
         assert_eq!(count.load(Ordering::SeqCst), 1);
-        af_db::get_conn().unwrap().execute("UPDATE streaming_servers SET server_id='original' WHERE provider='jellyfin'", []).unwrap();
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE streaming_servers SET server_id='original' WHERE provider='jellyfin'",
+                [],
+            )
+            .unwrap();
         assert!(test_jellyfin_connection(&url, "fixture-key").await.is_err());
-        assert_eq!(af_db::get_conn().unwrap().query_row("SELECT server_id FROM streaming_servers WHERE provider='jellyfin'", [], |row| row.get::<_, String>(0)).unwrap(), "original");
-        let viewer = AuthUser { user_id:1, username:"viewer".into(),role:"user".into(),jti:"fixture".into(),plugin_id:None,plugin_scopes:vec![] };
-        let response = get_streaming_artwork(Extension(viewer), Path("unknown-item".into()), Query(HashMap::from([("provider".into(),"jellyfin".into())]))).await;
+        assert_eq!(
+            af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT server_id FROM streaming_servers WHERE provider='jellyfin'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "original"
+        );
+        let viewer = AuthUser {
+            user_id: 1,
+            username: "viewer".into(),
+            role: "user".into(),
+            jti: "fixture".into(),
+            plugin_id: None,
+            plugin_scopes: vec![],
+        };
+        let response = get_streaming_artwork(
+            Extension(viewer),
+            Path("unknown-item".into()),
+            Query(HashMap::from([("provider".into(), "jellyfin".into())])),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(count.load(Ordering::SeqCst), 2);
         server.abort();
@@ -4729,13 +5206,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_streaming_json_body_exact_cap_and_overflow() {
-        let router = axum::Router::new().route("/exact", axum::routing::get(|| async { "12345678" })).route("/large", axum::routing::get(|| async { "123456789" }));
+        let router = axum::Router::new()
+            .route("/exact", axum::routing::get(|| async { "12345678" }))
+            .route("/large", axum::routing::get(|| async { "123456789" }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
-        let exact = do_jellyfin_request(reqwest::Method::GET, &format!("{base}/exact"), "", None, Duration::from_secs(2), 8).await.unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let exact = do_jellyfin_request(
+            reqwest::Method::GET,
+            &format!("{base}/exact"),
+            "",
+            None,
+            Duration::from_secs(2),
+            8,
+        )
+        .await
+        .unwrap();
         assert_eq!(exact.0, b"12345678");
-        assert!(do_jellyfin_request(reqwest::Method::GET, &format!("{base}/large"), "", None, Duration::from_secs(2), 8).await.is_err());
+        assert!(do_jellyfin_request(
+            reqwest::Method::GET,
+            &format!("{base}/large"),
+            "",
+            None,
+            Duration::from_secs(2),
+            8
+        )
+        .await
+        .is_err());
         server.abort();
         let _ = server.await;
     }
@@ -4758,31 +5257,122 @@ mod tests {
 
     #[test]
     fn test_monitor_identity_cold_start_and_stale_source_refuse_writes() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _path = init_isolated_streaming_db("monitor_identity");
         let conn = af_db::get_conn().unwrap();
         conn.execute("INSERT OR REPLACE INTO streaming_servers(provider,name,url,server_id,enabled) VALUES ('jellyfin','Test','http://127.0.0.1:8096','',1)", []).unwrap();
-        assert!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096", "").is_err());
-        assert_eq!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096/", "Server-Verified").unwrap(), "Server-Verified");
-        assert_eq!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096", "server-verified").unwrap(), "Server-Verified");
-        assert!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096", "different-server").is_err());
-        assert!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:9999", "Server-Verified").is_err());
-        let session = ActiveStreamSession { session_id: "source-session".to_string(), item_id: "source-item".to_string(), item_name: "Source item".to_string(), ..Default::default() };
+        assert!(
+            persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096", "")
+                .is_err()
+        );
+        assert_eq!(
+            persist_verified_monitor_source(
+                &conn,
+                "jellyfin",
+                "http://127.0.0.1:8096/",
+                "Server-Verified"
+            )
+            .unwrap(),
+            "Server-Verified"
+        );
+        assert_eq!(
+            persist_verified_monitor_source(
+                &conn,
+                "jellyfin",
+                "http://127.0.0.1:8096",
+                "server-verified"
+            )
+            .unwrap(),
+            "Server-Verified"
+        );
+        assert!(persist_verified_monitor_source(
+            &conn,
+            "jellyfin",
+            "http://127.0.0.1:8096",
+            "different-server"
+        )
+        .is_err());
+        assert!(persist_verified_monitor_source(
+            &conn,
+            "jellyfin",
+            "http://127.0.0.1:9999",
+            "Server-Verified"
+        )
+        .is_err());
+        let session = ActiveStreamSession {
+            session_id: "source-session".to_string(),
+            item_id: "source-item".to_string(),
+            item_name: "Source item".to_string(),
+            ..Default::default()
+        };
         drop(conn);
-        record_live_sessions_snapshot_for_source("jellyfin", std::slice::from_ref(&session), 15, Some(("http://127.0.0.1:8096", "different-server")));
+        record_live_sessions_snapshot_for_source(
+            "jellyfin",
+            std::slice::from_ref(&session),
+            15,
+            Some(("http://127.0.0.1:8096", "different-server")),
+        );
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM streaming_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM streaming_history", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         drop(conn);
-        record_live_sessions_snapshot_for_source("jellyfin", std::slice::from_ref(&session), 15, Some(("http://127.0.0.1:8096", "Server-Verified")));
+        record_live_sessions_snapshot_for_source(
+            "jellyfin",
+            std::slice::from_ref(&session),
+            15,
+            Some(("http://127.0.0.1:8096", "Server-Verified")),
+        );
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT server_id FROM streaming_history", [], |row| row.get::<_, String>(0)).unwrap(), "Server-Verified");
-        conn.execute("UPDATE streaming_servers SET enabled=0 WHERE provider='jellyfin'", []).unwrap();
-        assert!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:8096", "Server-Verified").is_err());
-        let revision: i64 = conn.query_row("SELECT revision FROM streaming_history_revision WHERE id=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT server_id FROM streaming_history", [], |row| row
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "Server-Verified"
+        );
+        conn.execute(
+            "UPDATE streaming_servers SET enabled=0 WHERE provider='jellyfin'",
+            [],
+        )
+        .unwrap();
+        assert!(persist_verified_monitor_source(
+            &conn,
+            "jellyfin",
+            "http://127.0.0.1:8096",
+            "Server-Verified"
+        )
+        .is_err());
+        let revision: i64 = conn
+            .query_row(
+                "SELECT revision FROM streaming_history_revision WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(conn);
-        record_live_sessions_snapshot_for_source("jellyfin", &[], 15, Some(("http://127.0.0.1:8096", "Server-Verified")));
+        record_live_sessions_snapshot_for_source(
+            "jellyfin",
+            &[],
+            15,
+            Some(("http://127.0.0.1:8096", "Server-Verified")),
+        );
         let conn = af_db::get_conn().unwrap();
-        assert_eq!(conn.query_row("SELECT revision FROM streaming_history_revision WHERE id=1", [], |row| row.get::<_, i64>(0)).unwrap(), revision);
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision FROM streaming_history_revision WHERE id=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            revision
+        );
     }
 
     #[test]
@@ -4793,26 +5383,39 @@ mod tests {
         assert!(!remote);
         assert!(!message);
         assert!(commands.is_empty());
-        let controlled = JellyfinSessionRaw { supports_media_control: Some(true), ..Default::default() };
+        let controlled = JellyfinSessionRaw {
+            supports_media_control: Some(true),
+            ..Default::default()
+        };
         assert!(!resolve_session_capabilities(&controlled).2);
     }
 
     #[tokio::test]
     async fn test_nonadmin_dashboard_withholds_unscoped_legacy_cohorts() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("dashboard_private_scope");
         {
             let conn = af_db::get_conn().unwrap();
-            conn.execute("UPDATE streaming_servers SET enabled = 0", []).unwrap();
+            conn.execute("UPDATE streaming_servers SET enabled = 0", [])
+                .unwrap();
             conn.execute("INSERT INTO streaming_history(session_key,user_id,user_name,item_id,item_name,watched_secs,data_used_bytes) VALUES('private-session','another-user','Private Person','private-item','Private Title',900,123456)", []).unwrap();
         }
         let mut request = Request::new(Body::empty());
         request.extensions_mut().insert(AuthUser {
-            user_id: 1, username: "unlinked".into(), role: "user".into(), jti: "test".into(), plugin_id: None, plugin_scopes: vec![],
+            user_id: 1,
+            username: "unlinked".into(),
+            role: "user".into(),
+            jti: "test".into(),
+            plugin_id: None,
+            plugin_scopes: vec![],
         });
         let response = get_streaming_dashboard_handler(Query(HashMap::new()), request).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(!text.contains("Private Person"));
         assert!(!text.contains("Private Title"));
@@ -4827,7 +5430,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_streaming_dashboard_contract_filters_and_redaction() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("contract_filters");
 
         // 1. Verify empty state contract (empty arrays [], coming_soon statuses, zero metrics)
@@ -5099,7 +5704,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_history_sync_does_not_fabricate_metadata_bytes_or_now_timestamps() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("sync_truth");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -5383,14 +5990,24 @@ mod tests {
         assert_eq!(sync_jellyfin_watch_history().await.unwrap(), 0);
         {
             let conn = af_db::get_conn().unwrap();
-            let title: String = conn.query_row("SELECT item_name FROM streaming_history WHERE item_id = 'item-known'", [], |row| row.get(0)).unwrap();
+            let title: String = conn
+                .query_row(
+                    "SELECT item_name FROM streaming_history WHERE item_id = 'item-known'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(title, "Preserved legacy");
             conn.execute("UPDATE streaming_servers SET server_id = 'replacement-server' WHERE provider = 'jellyfin'", []).unwrap();
         }
         assert!(sync_jellyfin_watch_history().await.is_err());
         {
             let conn = af_db::get_conn().unwrap();
-            let records: i64 = conn.query_row("SELECT COUNT(*) FROM streaming_history", [], |row| row.get(0)).unwrap();
+            let records: i64 = conn
+                .query_row("SELECT COUNT(*) FROM streaming_history", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
             assert_eq!(records, 2);
             let records: i64 = conn.query_row("SELECT COUNT(*) FROM streaming_history WHERE server_id = 'replacement-server' AND provenance = 'item_summary'", [], |row| row.get(0)).unwrap();
             assert_eq!(records, 0);
@@ -5402,7 +6019,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_session_interleaved_snapshots_seek_resume_and_paused_accounting() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("live_interleaved");
 
         // Session A: user resumes a movie at 1h30m (position_secs = 5400), initially PAUSED
@@ -5528,10 +6147,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_history_sync_reports_upstream_item_failures() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("history_sync_failure");
         let app = axum::Router::new()
-            .route("/System/Info/Public", axum::routing::get(|| async { Json(serde_json::json!({"Id":"mock-summary-server"})) }))
+            .route(
+                "/System/Info/Public",
+                axum::routing::get(|| async {
+                    Json(serde_json::json!({"Id":"mock-summary-server"}))
+                }),
+            )
             .route(
                 "/Users",
                 axum::routing::get(|| async {
@@ -5563,7 +6189,9 @@ mod tests {
 
     #[test]
     fn test_all_time_preserves_older_history_and_reports_bucket_granularity() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("all_time_older_history");
         let now = Utc::now();
         let older_date = (now - chrono::Duration::days(400))
@@ -5641,7 +6269,9 @@ mod tests {
 
     #[test]
     fn test_window_parsing_timeseries_span_and_latest_user_device() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("window_and_leaderboard");
 
         assert_eq!(parse_window_days("0"), (0, "all"));
@@ -5752,7 +6382,9 @@ mod tests {
 
     #[test]
     fn test_unknown_filter_percentages_and_latest_device_respect_the_cohort() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("unknown_and_cohort");
         let now = Utc::now();
         let recent = (now - chrono::Duration::days(2))
@@ -5840,7 +6472,9 @@ mod tests {
 
     #[test]
     fn test_rolling_window_keeps_the_partial_boundary_day() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("rolling_boundary");
         let now = Utc::now();
         let boundary = now - chrono::Duration::days(7) + chrono::Duration::minutes(1);
@@ -5902,7 +6536,9 @@ mod tests {
 
     #[test]
     fn test_dashboard_observation_does_not_prune_bandwidth_history() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("pruning");
         {
             let conn = af_db::get_conn().unwrap();
@@ -5930,7 +6566,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_live_sessions_and_session_command_capabilities() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("live_fetch_and_cmd");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -6105,7 +6743,9 @@ mod tests {
 
     #[test]
     fn test_observed_session_identity_generations_reconnect_server_and_legacy_isolation() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("observed_identity_generations");
 
         let colliding_key_g1 = format_observed_session_key(
@@ -6426,7 +7066,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_emby_server_config_save_guards_and_identity_reset() {
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("emby_config_guards");
 
         // 1. Invalid URL rejected
@@ -6560,7 +7202,9 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let db_path = init_isolated_streaming_db("emby_dispatch_integration");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6655,13 +7299,9 @@ mod tests {
         };
 
         // Save Emby config via save_emby_server_configuration
-        let saved_url = save_emby_server_configuration(
-            "Mock Emby",
-            &server_url,
-            "emby-live-key-9876",
-            true,
-        )
-        .expect("save mock emby config");
+        let saved_url =
+            save_emby_server_configuration("Mock Emby", &server_url, "emby-live-key-9876", true)
+                .expect("save mock emby config");
         assert_eq!(saved_url, server_url);
 
         // Test connection endpoint with masked key on same URL persists server_id and keeps support_stage = coming_soon
@@ -6724,9 +7364,13 @@ mod tests {
         // Artwork proxy dispatches to Emby via explicit provider query or fallback
         let mut art_q = HashMap::new();
         art_q.insert("provider".to_string(), "emby".to_string());
-        let art_resp = get_streaming_artwork(Extension(admin.clone()), Path("emby-item-1".to_string()), Query(art_q))
-            .await
-            .into_response();
+        let art_resp = get_streaming_artwork(
+            Extension(admin.clone()),
+            Path("emby-item-1".to_string()),
+            Query(art_q),
+        )
+        .await
+        .into_response();
         assert_eq!(art_resp.status(), StatusCode::OK);
         let art_bytes = axum::body::to_bytes(art_resp.into_body(), 64 * 1024)
             .await

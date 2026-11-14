@@ -53,9 +53,14 @@ jobs:
         with:
           node-version: 22.12.0
 
+      - name: Install Python & Shell Test Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq sqlite3 bc
+
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |
-          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 tests/check_shell_hygiene.py
 
   palate-installer:
@@ -216,8 +221,7 @@ jobs:
       - name: Enforce Workspace Clippy Lints
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Evaluate Formatting Gate (Advisory Check)
-        continue-on-error: true
+      - name: Enforce Rust Formatting Gate
         run: cargo fmt --all -- --check
 
       - name: Build Embedded Single-Binary & Native CLI (Rust)
@@ -303,7 +307,10 @@ jobs:
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           TMPDIR: /tmp
-        run: go test ./... -count=1
+        run: |
+          go vet ./...
+          go test ./... -count=1
+          AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
 
       - name: Build Embedded Single-Binary (CGO_ENABLED=0)
         env:

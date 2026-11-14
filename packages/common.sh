@@ -119,6 +119,36 @@ finally:
 PYEOF
 }
 
+af_validate_tar_archive() {
+    local archive_path="$1"
+    [[ -f "$archive_path" && ! -L "$archive_path" ]] || {
+        log_error "Refusing missing or symlinked archive path: ${archive_path}"
+        return 1
+    }
+    python3 - "$archive_path" <<'PYEOF'
+import pathlib, sys, tarfile
+
+archive = sys.argv[1]
+try:
+    with tarfile.open(archive, "r:*") as tf:
+        members = tf.getmembers()
+        if not members:
+            raise ValueError("empty tar archive")
+        for member in members:
+            name = member.name or ""
+            if not (member.isfile() or member.isdir()):
+                raise ValueError(f"disallowed non-regular tar entry: {name} (type={member.type!r})")
+            if name.startswith("/") or name.startswith("\\"):
+                raise ValueError(f"disallowed absolute tar entry: {name}")
+            parts = pathlib.PurePosixPath(name).parts
+            if ".." in parts:
+                raise ValueError(f"disallowed path-traversal tar entry: {name}")
+except Exception as exc:
+    sys.stderr.write(f"Tar archive validation failed for {archive}: {exc}\n")
+    raise SystemExit(1)
+PYEOF
+}
+
 log_info() {
     log "[INFO] $*"
 }
@@ -4402,18 +4432,13 @@ def load_aes_key():
                         if s.startswith("export "):
                             s = s[7:].strip()
                         if s.startswith("AES_MASTER_KEY="):
-                            raw = s.split("=", 1)[1].strip().strip("\"'")
-                            break
+                            candidate = s.split("=", 1)[1].strip().strip("\"'")
+                            if candidate:
+                                raw = candidate
             except OSError:
                 pass
     if not raw:
         return "", None
-    try:
-        dec = base64.b64decode(raw, validate=True)
-        if len(dec) == 32:
-            return raw, dec
-    except Exception:
-        pass
     if len(raw) == 64:
         try:
             dec_hex = bytes.fromhex(raw)
@@ -4421,6 +4446,12 @@ def load_aes_key():
                 return raw, dec_hex
         except ValueError:
             pass
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return raw, dec
+    except Exception:
+        pass
     raw_bytes = raw.encode("utf-8")
     return raw, (raw_bytes if len(raw_bytes) == 32 else None)
 
@@ -4613,18 +4644,13 @@ def resolve_aes_key():
                         if s.startswith('export '):
                             s = s[7:].strip()
                         if s.startswith('AES_MASTER_KEY='):
-                            raw = s.split('=', 1)[1].strip().strip("\"'")
-                            break
+                            candidate = s.split('=', 1)[1].strip().strip("\"'")
+                            if candidate:
+                                raw = candidate
             except OSError:
                 pass
     if not raw:
         return '', None
-    try:
-        dec = base64.b64decode(raw, validate=True)
-        if len(dec) == 32:
-            return raw, dec
-    except Exception:
-        pass
     if len(raw) == 64:
         try:
             dec_hex = bytes.fromhex(raw)
@@ -4632,6 +4658,12 @@ def resolve_aes_key():
                 return raw, dec_hex
         except ValueError:
             pass
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return raw, dec
+    except Exception:
+        pass
     raw_bytes = raw.encode('utf-8')
     return raw, (raw_bytes if len(raw_bytes) == 32 else None)
 

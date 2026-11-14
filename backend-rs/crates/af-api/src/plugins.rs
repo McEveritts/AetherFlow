@@ -422,7 +422,10 @@ pub fn normalize_scope_entry(
         }
     };
 
-    if methods.iter().any(|method| scope_delegates_admin_user_write(method, &raw_route)) {
+    if methods
+        .iter()
+        .any(|method| scope_delegates_admin_user_write(method, &raw_route))
+    {
         return Err(format!(
             "Plugin API scope '{}' delegates an admin-user-only destructive HTTP capability",
             raw_route
@@ -1886,25 +1889,32 @@ async fn proxy_plugin_request_inner(
         .request(reqwest_method, &target_url)
         .body(body_bytes.to_vec());
 
-    // Forward safe headers ONLY — strip Cookie, Authorization, X-CSRF-Token, and hop-by-hop headers
+    // Forward safe headers ONLY — strip Cookie, Authorization, X-CSRF-Token, identity headers, and hop-by-hop headers
     for (name, val) in req_headers.iter() {
         let lower = name.as_str().to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "cookie"
-                | "authorization"
-                | "x-csrf-token"
-                | "host"
-                | "connection"
-                | "keep-alive"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "content-length"
-        ) {
+        if lower.starts_with("x-aetherflow-")
+            || matches!(
+                lower.as_str(),
+                "cookie"
+                    | "authorization"
+                    | "x-csrf-token"
+                    | "remote-user"
+                    | "x-remote-user"
+                    | "x-forwarded-user"
+                    | "x-forwarded-email"
+                    | "x-forwarded-groups"
+                    | "host"
+                    | "connection"
+                    | "keep-alive"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "te"
+                    | "trailer"
+                    | "transfer-encoding"
+                    | "upgrade"
+                    | "content-length"
+            )
+        {
             continue;
         }
         if let (Ok(r_name), Ok(r_val)) = (
@@ -2329,7 +2339,8 @@ pub(crate) mod tests {
 
         // Write permissions allow explicit POST scope on non-denied route
         let write_perms = vec!["services:control:write".to_string()];
-        let valid_post = RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
+        let valid_post =
+            RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
         let rules = normalize_scope_entry(&valid_post, &write_perms).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].method, "POST");

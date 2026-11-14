@@ -97,7 +97,11 @@ pub fn atomic_replace_symlink(
     create_symlink_or_pointer(&tmp_link, target_dir).map_err(|e| ReleaseError::SymlinkSwap {
         link: current_link.to_path_buf(),
         target: target_dir.to_path_buf(),
-        reason: format!("failed to create temporary symlink {}: {}", tmp_link.display(), e),
+        reason: format!(
+            "failed to create temporary symlink {}: {}",
+            tmp_link.display(),
+            e
+        ),
     })?;
 
     #[cfg(not(unix))]
@@ -137,20 +141,14 @@ fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Re
         Ok(()) => Ok(()),
         Err(_) => {
             // Fallback for unprivileged Windows test environments without Developer Mode symlink privilege
-            fs::write(
-                link_path,
-                format!("AF_SYMLINK:{}\n", target_dir.display()),
-            )
+            fs::write(link_path, format!("AF_SYMLINK:{}\n", target_dir.display()))
         }
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Result<()> {
-    fs::write(
-        link_path,
-        format!("AF_SYMLINK:{}\n", target_dir.display()),
-    )
+    fs::write(link_path, format!("AF_SYMLINK:{}\n", target_dir.display()))
 }
 
 /// Executes Stage 2 Atomic Symlink Swap:
@@ -327,9 +325,8 @@ pub fn cleanup_old_releases(
         {
             continue;
         }
-        fs::remove_dir_all(&dir).map_err(|e| {
-            ReleaseError::io(format!("pruning old release {}", dir.display()), e)
-        })?;
+        fs::remove_dir_all(&dir)
+            .map_err(|e| ReleaseError::io(format!("pruning old release {}", dir.display()), e))?;
         pruned.push(dir);
     }
 

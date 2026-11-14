@@ -156,14 +156,10 @@ fn delete_account_with_conn(
             .map_err(database_error)?;
         if has_revoked_tokens {
             for jti in &revoked_jtis {
-                af_db::revoke_token_in_tx(
-                    &transaction,
-                    jti,
-                    std::time::Duration::from_secs(8160),
-                )
-                .map_err(|_| {
-                    McBrowserError::Internal("Failed to revoke active user sessions".to_owned())
-                })?;
+                af_db::revoke_token_in_tx(&transaction, jti, std::time::Duration::from_secs(8160))
+                    .map_err(|_| {
+                        McBrowserError::Internal("Failed to revoke active user sessions".to_owned())
+                    })?;
             }
         }
     }
@@ -230,10 +226,13 @@ fn update_account_role_with_conn(
         .map_err(database_error)?;
     let mut revoked_jtis = Vec::new();
     if demoting_admin {
-        let (_, jtis) = crate::auth::revoke_all_user_credentials_in_tx(&transaction, target_user_id)
-            .map_err(|_| {
-                McBrowserError::Internal("Failed to revoke demoted admin credentials".to_owned())
-            })?;
+        let (_, jtis) = crate::auth::revoke_all_user_credentials_in_tx(
+            &transaction,
+            target_user_id,
+        )
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to revoke demoted admin credentials".to_owned())
+        })?;
         revoked_jtis = jtis;
     }
     transaction.commit().map_err(database_error)?;

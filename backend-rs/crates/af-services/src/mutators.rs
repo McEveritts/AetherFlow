@@ -434,8 +434,14 @@ pub fn backup_config_file(file_path: &Path) -> Result<Option<PathBuf>, String> {
     let bak_path = PathBuf::from(bak_os);
     let content = fs::read(file_path)
         .map_err(|e| format!("failed to read {} for backup: {}", file_path.display(), e))?;
-    write_file_atomic(&bak_path, &content)
-        .map_err(|e| format!("failed to backup {} to {}: {}", file_path.display(), bak_path.display(), e))?;
+    write_file_atomic(&bak_path, &content).map_err(|e| {
+        format!(
+            "failed to backup {} to {}: {}",
+            file_path.display(),
+            bak_path.display(),
+            e
+        )
+    })?;
     if let Ok(meta) = fs::symlink_metadata(file_path) {
         let _ = fs::set_permissions(&bak_path, meta.permissions());
         #[cfg(unix)]
@@ -552,7 +558,9 @@ pub fn mutate_xml_element(
             new_value
         );
         if re_known.is_match(&content) {
-            content = re_known.replace_all(&content, replacement.as_str()).into_owned();
+            content = re_known
+                .replace_all(&content, replacement.as_str())
+                .into_owned();
         } else if let Some(idx) = content.rfind(&closing_tag) {
             content.insert_str(idx, &format!("  {}\n", replacement));
         } else {
@@ -648,10 +656,14 @@ pub fn mutate_ini_key(
             continue;
         }
 
-        let in_matching_section =
-            want_sec_lower.is_empty() || current_section == want_sec_lower || current_section.is_empty();
+        let in_matching_section = want_sec_lower.is_empty()
+            || current_section == want_sec_lower
+            || current_section.is_empty();
 
-        if !key_updated && in_matching_section && !trimmed.starts_with('#') && !trimmed.starts_with(';')
+        if !key_updated
+            && in_matching_section
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with(';')
         {
             if let Some((lhs, rhs)) = line.split_once('=') {
                 if lhs.trim().eq_ignore_ascii_case(key_trimmed) {
@@ -703,11 +715,7 @@ pub fn mutate_ini_key(
 /// Mutates or inserts `key: new_value` in a JSON object file (supports top-level keys
 /// and dotted paths like `"main.port"`), writing pretty-printed JSON atomically via `.tmp` rename.
 /// Returns `Ok(true)` if the file was created or modified, or `Ok(false)` if unchanged.
-pub fn mutate_json_key(
-    file_path: &Path,
-    key: &str,
-    new_value: Value,
-) -> Result<bool, String> {
+pub fn mutate_json_key(file_path: &Path, key: &str, new_value: Value) -> Result<bool, String> {
     let key_trimmed = key.trim();
     if key_trimmed.is_empty() {
         return Err("JSON key cannot be empty".to_string());
@@ -728,13 +736,8 @@ pub fn mutate_json_key(
     let mut root: Value = if existing.trim().is_empty() {
         Value::Object(serde_json::Map::new())
     } else {
-        serde_json::from_str(&existing).map_err(|e| {
-            format!(
-                "failed to parse JSON file {}: {}",
-                file_path.display(),
-                e
-            )
-        })?
+        serde_json::from_str(&existing)
+            .map_err(|e| format!("failed to parse JSON file {}: {}", file_path.display(), e))?
     };
 
     if !root.is_object() {
@@ -885,28 +888,29 @@ pub fn inject_arr_download_client_routes(
         .map_err(|e| format!("failed to open *arr DB {}: {}", db_path.display(), e))?;
     let _ = conn.busy_timeout(Duration::from_millis(2500));
 
-    let collected_rows: Vec<(i64, String, String)> =
-        if let Ok(mut stmt) = conn.prepare("SELECT Id, Implementation, Settings FROM DownloadClients") {
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| format!("failed to query DownloadClients: {}", e))?
-            .flatten()
-            .collect()
-        } else if let Ok(mut stmt) = conn.prepare("SELECT Id, Settings FROM DownloadClients") {
-            stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, String::new(), r.get::<_, String>(1)?))
-            })
-            .map_err(|e| format!("failed to query DownloadClients: {}", e))?
-            .flatten()
-            .collect()
-        } else {
-            return Ok(0); // Table does not exist yet on fresh install
-        };
+    let collected_rows: Vec<(i64, String, String)> = if let Ok(mut stmt) =
+        conn.prepare("SELECT Id, Implementation, Settings FROM DownloadClients")
+    {
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("failed to query DownloadClients: {}", e))?
+        .flatten()
+        .collect()
+    } else if let Ok(mut stmt) = conn.prepare("SELECT Id, Settings FROM DownloadClients") {
+        stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, String::new(), r.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("failed to query DownloadClients: {}", e))?
+        .flatten()
+        .collect()
+    } else {
+        return Ok(0); // Table does not exist yet on fresh install
+    };
 
     let mut updates: Vec<(i64, String)> = Vec::new();
     for (id, implementation, settings_str) in collected_rows {
@@ -931,38 +935,50 @@ pub fn inject_arr_download_client_routes(
             if let Some(default_host) = routes.get(&host_val) {
                 let impl_lower = implementation.trim().to_ascii_lowercase();
                 let (new_host, desired_port) = match impl_lower.as_str() {
-                    "transmission" => (
-                        "transmission.aether.local".to_string(),
-                        {
-                            let p = get_app_runtime_meta("transmission").configured_port;
-                            if p > 0 { p } else { existing_port }
-                        },
-                    ),
-                    "deluge" => (
-                        "deluge.aether.local".to_string(),
-                        {
-                            let p = get_app_runtime_meta("deluge").configured_port;
-                            if p > 0 { p } else { existing_port }
-                        },
-                    ),
-                    "sabnzbd" => (
-                        "sabnzbd.aether.local".to_string(),
-                        {
-                            let p = get_app_runtime_meta("sabnzbd").configured_port;
-                            if p > 0 { p } else { existing_port }
-                        },
-                    ),
-                    "nzbget" => (
-                        "nzbget.aether.local".to_string(),
-                        {
-                            let p = get_app_runtime_meta("nzbget").configured_port;
-                            if p > 0 { p } else { existing_port }
-                        },
-                    ),
-                    "" if existing_port == 9091 => ("transmission.aether.local".to_string(), existing_port),
-                    "" if existing_port == 8112 || existing_port == 58846 => ("deluge.aether.local".to_string(), existing_port),
-                    "" if existing_port == 8085 => ("sabnzbd.aether.local".to_string(), existing_port),
-                    "" if existing_port == 6789 => ("nzbget.aether.local".to_string(), existing_port),
+                    "transmission" => ("transmission.aether.local".to_string(), {
+                        let p = get_app_runtime_meta("transmission").configured_port;
+                        if p > 0 {
+                            p
+                        } else {
+                            existing_port
+                        }
+                    }),
+                    "deluge" => ("deluge.aether.local".to_string(), {
+                        let p = get_app_runtime_meta("deluge").configured_port;
+                        if p > 0 {
+                            p
+                        } else {
+                            existing_port
+                        }
+                    }),
+                    "sabnzbd" => ("sabnzbd.aether.local".to_string(), {
+                        let p = get_app_runtime_meta("sabnzbd").configured_port;
+                        if p > 0 {
+                            p
+                        } else {
+                            existing_port
+                        }
+                    }),
+                    "nzbget" => ("nzbget.aether.local".to_string(), {
+                        let p = get_app_runtime_meta("nzbget").configured_port;
+                        if p > 0 {
+                            p
+                        } else {
+                            existing_port
+                        }
+                    }),
+                    "" if existing_port == 9091 => {
+                        ("transmission.aether.local".to_string(), existing_port)
+                    }
+                    "" if existing_port == 8112 || existing_port == 58846 => {
+                        ("deluge.aether.local".to_string(), existing_port)
+                    }
+                    "" if existing_port == 8085 => {
+                        ("sabnzbd.aether.local".to_string(), existing_port)
+                    }
+                    "" if existing_port == 6789 => {
+                        ("nzbget.aether.local".to_string(), existing_port)
+                    }
                     "qbittorrent" | "" => (default_host.clone(), target_port),
                     _ => continue,
                 };
@@ -989,7 +1005,7 @@ pub fn inject_arr_download_client_routes(
     if count > 0 {
         let mut conn = conn;
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("failed to start transaction on *arr DB: {}", e))?;
         {
             let mut update_stmt = tx
@@ -1066,7 +1082,8 @@ pub fn update_pihole_custom_list(
         }
     };
 
-    let content = af_runner::reconcile_pihole_custom_list_content(&existing, lan_ip, domains, false);
+    let content =
+        af_runner::reconcile_pihole_custom_list_content(&existing, lan_ip, domains, false);
     if content == existing && custom_list_path.exists() {
         return Ok(());
     }
@@ -1138,8 +1155,7 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
     }
 
     let lan_ip = detect_lan_ip_strict()?;
-    af_runner::validate_hosts_ip(&lan_ip)
-        .map_err(|e| format!("Invalid LAN IP: {e}"))?;
+    af_runner::validate_hosts_ip(&lan_ip).map_err(|e| format!("Invalid LAN IP: {e}"))?;
 
     let mut validated: Vec<String> = Vec::with_capacity(domains.len());
     let mut aether_local_domains: Vec<String> = Vec::new();
@@ -1223,8 +1239,7 @@ pub async fn reconcile_local_dns_domains(authoritative_domains: &[String]) -> Re
     }
 
     let lan_ip = detect_lan_ip_strict()?;
-    af_runner::validate_hosts_ip(&lan_ip)
-        .map_err(|e| format!("Invalid LAN IP: {e}"))?;
+    af_runner::validate_hosts_ip(&lan_ip).map_err(|e| format!("Invalid LAN IP: {e}"))?;
 
     let mut aether_local_domains: Vec<String> = Vec::new();
     let mut validated_authoritative: Vec<String> = Vec::with_capacity(authoritative_domains.len());
@@ -1300,13 +1315,9 @@ pub async fn run_privileged_hosts_command_with_provider(
         "remove" => af_runner::dispatch_hosts_remove(domains)
             .await
             .map_err(|e| format!("privileged runner hosts remove failed: {e}")),
-        _ => af_runner::dispatch_hosts_update_with_provider(
-            domains,
-            provider_ip,
-            provider_domains,
-        )
-        .await
-        .map_err(|e| format!("privileged runner hosts update failed: {e}")),
+        _ => af_runner::dispatch_hosts_update_with_provider(domains, provider_ip, provider_domains)
+            .await
+            .map_err(|e| format!("privileged runner hosts update failed: {e}")),
     }
 }
 
@@ -1517,12 +1528,11 @@ pub fn sync_apache_app_vhost(
                     listen_port,
                     &preserved_blocks,
                 );
-                if prev_raw != updated
-                    && write_file_atomic(&path, updated.as_bytes()).is_ok() {
-                        backups.push((path.clone(), Some(prev_raw)));
-                        modified_any = true;
-                        wrote_any = true;
-                    }
+                if prev_raw != updated && write_file_atomic(&path, updated.as_bytes()).is_ok() {
+                    backups.push((path.clone(), Some(prev_raw)));
+                    modified_any = true;
+                    wrote_any = true;
+                }
             }
         }
     }
@@ -1705,7 +1715,12 @@ fn render_or_update_apache_vhost(
 }
 
 fn verify_apache_configtest() -> Result<(), String> {
-    for bin in ["/usr/sbin/apache2ctl", "/usr/sbin/apachectl", "apache2ctl", "apachectl"] {
+    for bin in [
+        "/usr/sbin/apache2ctl",
+        "/usr/sbin/apachectl",
+        "apache2ctl",
+        "apachectl",
+    ] {
         match std::process::Command::new(bin).arg("-t").output() {
             Ok(out) => {
                 if out.status.success() {
@@ -1713,7 +1728,9 @@ fn verify_apache_configtest() -> Result<(), String> {
                 }
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!("{} {}", stderr.trim(), stdout.trim()).trim().to_string());
+                return Err(format!("{} {}", stderr.trim(), stdout.trim())
+                    .trim()
+                    .to_string());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Ok(()),
@@ -1828,7 +1845,10 @@ async fn provision_installed_app_subdomains_admitted(base_domain: &str) -> Resul
 }
 
 /// Alias matching Go's `SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain)`.
-pub async fn sync_installed_apps_base_domain(_old_base_domain: &str, new_base_domain: &str) -> usize {
+pub async fn sync_installed_apps_base_domain(
+    _old_base_domain: &str,
+    new_base_domain: &str,
+) -> usize {
     provision_installed_app_subdomains(new_base_domain).await
 }
 
@@ -1973,10 +1993,8 @@ fn extract_port_from_systemd_or_apache_text(text: &str) -> i32 {
         .unwrap()
     });
     static CLI_PORT_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#)
+            .unwrap()
     });
     static CLI_ADDR_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
@@ -2187,9 +2205,14 @@ fn request_runner_unix(route: &str, payload: Value, timeout: Duration) -> Option
 fn request_runner_unix_until(route: &str, payload: Value, deadline: Instant) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    if ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"].iter().any(|key| {
-        env::var(key).ok().is_some_and(|value| !value.trim().is_empty())
-    }) {
+    if ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"]
+        .iter()
+        .any(|key| {
+            env::var(key)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    {
         return None;
     }
     let sock_path = af_runner::runner_socket_path();
@@ -2473,7 +2496,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "ombi" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/ombi.service")) {
+            if let Ok(text) =
+                fs::read_to_string(resolve_config_path("/etc/systemd/system/ombi.service"))
+            {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
@@ -2659,10 +2684,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "thelounge" => {
-            for raw in [
-                "/var/lib/thelounge/config.js",
-                "/etc/thelounge/config.js",
-            ] {
+            for raw in ["/var/lib/thelounge/config.js", "/etc/thelounge/config.js"] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     if let Some(v) = extract_ini_value(&text, &["port"]) {
@@ -2677,7 +2699,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "filebrowser" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/filebrowser.service")) {
+            if let Ok(text) = fs::read_to_string(resolve_config_path(
+                "/etc/systemd/system/filebrowser.service",
+            )) {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
@@ -2746,7 +2770,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "audiobookshelf" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/audiobookshelf.service")) {
+            if let Ok(text) = fs::read_to_string(resolve_config_path(
+                "/etc/systemd/system/audiobookshelf.service",
+            )) {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
@@ -2801,8 +2827,10 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    if let Some(v) = extract_yaml_section_value(&text, "server", "port")
-                        .or_else(|| extract_ini_value(&text, &["KOMGA_SERVER_PORT", "SERVER_PORT", "port"]))
+                    if let Some(v) =
+                        extract_yaml_section_value(&text, "server", "port").or_else(|| {
+                            extract_ini_value(&text, &["KOMGA_SERVER_PORT", "SERVER_PORT", "port"])
+                        })
                     {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -2814,10 +2842,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "calibre-web" => {
-            for raw_db in [
-                "/var/lib/calibre-web/app.db",
-                "/opt/calibre-web/app.db",
-            ] {
+            for raw_db in ["/var/lib/calibre-web/app.db", "/opt/calibre-web/app.db"] {
                 let db_path = resolve_config_path(raw_db);
                 if let Some(port_str) = query_sqlite_first_text(
                     &db_path,
@@ -2872,7 +2897,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "uptime-kuma" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/uptime-kuma.service")) {
+            if let Ok(text) = fs::read_to_string(resolve_config_path(
+                "/etc/systemd/system/uptime-kuma.service",
+            )) {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
@@ -2924,7 +2951,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    if let Some(v) = extract_ini_value(&text, &["IMMICH_PORT", "PORT", "SERVER_PORT"]) {
+                    if let Some(v) =
+                        extract_ini_value(&text, &["IMMICH_PORT", "PORT", "SERVER_PORT"])
+                    {
                         let port = parse_valid_port(&v);
                         if port > 0 {
                             meta.configured_port = port;
@@ -2935,7 +2964,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "dispatcharr" => {
-            if let Ok(content) = fs::read_to_string(resolve_config_path("/etc/dispatcharr/dispatcharr.env")) {
+            if let Ok(content) =
+                fs::read_to_string(resolve_config_path("/etc/dispatcharr/dispatcharr.env"))
+            {
                 if let Some(port) = extract_ini_value(&content, &["DISPATCHARR_PORT"]) {
                     meta.configured_port = parse_valid_port(&port);
                 }
@@ -2998,7 +3029,10 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "jellyfin" => {
-            for raw in ["/etc/jellyfin/network.xml", "/var/lib/jellyfin/config/network.xml"] {
+            for raw in [
+                "/etc/jellyfin/network.xml",
+                "/var/lib/jellyfin/config/network.xml",
+            ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     let port = extract_xml_tag_text(&text, "InternalHttpPort")
@@ -3158,7 +3192,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 if let Ok(text) = fs::read_to_string(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if meta.api_key.is_empty() {
-                            if let Some(k) = val.get("apiKey").or_else(|| val.get("api_key")).and_then(|v| v.as_str()) {
+                            if let Some(k) = val
+                                .get("apiKey")
+                                .or_else(|| val.get("api_key"))
+                                .and_then(|v| v.as_str())
+                            {
                                 meta.api_key = k.trim().to_string();
                             }
                         }
@@ -3169,7 +3207,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                         }
                     } else {
                         if meta.api_key.is_empty() {
-                            if let Some(k) = extract_ini_value(&text, &["API_KEY", "SEEDCROSS_API_KEY"]) {
+                            if let Some(k) =
+                                extract_ini_value(&text, &["API_KEY", "SEEDCROSS_API_KEY"])
+                            {
                                 meta.api_key = k;
                             }
                         }
@@ -3204,8 +3244,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    let port = extract_port_from_systemd_or_apache_text(&text)
-                        .max(extract_ini_value(&text, &["UI_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    let port = extract_port_from_systemd_or_apache_text(&text).max(
+                        extract_ini_value(&text, &["UI_PORT", "PORT"])
+                            .map(|v| parse_valid_port(&v))
+                            .unwrap_or(0),
+                    );
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -3221,8 +3264,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    let port = extract_port_from_systemd_or_apache_text(&text)
-                        .max(extract_ini_value(&text, &["PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    let port = extract_port_from_systemd_or_apache_text(&text).max(
+                        extract_ini_value(&text, &["PORT"])
+                            .map(|v| parse_valid_port(&v))
+                            .unwrap_or(0),
+                    );
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -3231,16 +3277,24 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "threadfin" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/threadfin.service")) {
+            if let Ok(text) =
+                fs::read_to_string(resolve_config_path("/etc/systemd/system/threadfin.service"))
+            {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
                 }
             }
             if meta.configured_port <= 0 {
-                if let Ok(text) = fs::read_to_string(resolve_config_path("/var/lib/threadfin/conf/settings.json")) {
+                if let Ok(text) =
+                    fs::read_to_string(resolve_config_path("/var/lib/threadfin/conf/settings.json"))
+                {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                        if let Some(port) = val.get("port").or_else(|| val.get("Port")).and_then(|v| v.as_i64()) {
+                        if let Some(port) = val
+                            .get("port")
+                            .or_else(|| val.get("Port"))
+                            .and_then(|v| v.as_i64())
+                        {
                             if port > 0 {
                                 meta.configured_port = port as i32;
                             }
@@ -3250,10 +3304,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "flood" => {
-            for raw in [
-                "/etc/systemd/system/flood.service",
-                "/etc/default/flood",
-            ] {
+            for raw in ["/etc/systemd/system/flood.service", "/etc/default/flood"] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
@@ -3281,7 +3332,10 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "netdata" => {
-            for raw in ["/etc/netdata/netdata.conf", "/etc/systemd/system/netdata.service"] {
+            for raw in [
+                "/etc/netdata/netdata.conf",
+                "/etc/systemd/system/netdata.service",
+            ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     let port = extract_ini_value(&text, &["default port", "port"])
@@ -3345,8 +3399,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    let port = extract_port_from_systemd_or_apache_text(&text)
-                        .max(extract_ini_value(&text, &["RCLONE_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    let port = extract_port_from_systemd_or_apache_text(&text).max(
+                        extract_ini_value(&text, &["RCLONE_PORT", "PORT"])
+                            .map(|v| parse_valid_port(&v))
+                            .unwrap_or(0),
+                    );
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -3369,7 +3426,10 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "librespeed" => {
-            for raw in ["/opt/librespeed/settings.toml", "/etc/librespeed/settings.toml"] {
+            for raw in [
+                "/opt/librespeed/settings.toml",
+                "/etc/librespeed/settings.toml",
+            ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     if let Some(v) = extract_ini_value(&text, &["listen_port", "port"]) {
@@ -3409,8 +3469,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ] {
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
-                    let port = extract_port_from_systemd_or_apache_text(&text)
-                        .max(extract_ini_value(&text, &["N8N_PORT", "PORT"]).map(|v| parse_valid_port(&v)).unwrap_or(0));
+                    let port = extract_port_from_systemd_or_apache_text(&text).max(
+                        extract_ini_value(&text, &["N8N_PORT", "PORT"])
+                            .map(|v| parse_valid_port(&v))
+                            .unwrap_or(0),
+                    );
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -3475,7 +3538,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "novnc" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path("/etc/systemd/system/novnc.service")) {
+            if let Ok(text) =
+                fs::read_to_string(resolve_config_path("/etc/systemd/system/novnc.service"))
+            {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
                     meta.configured_port = port;
@@ -3547,7 +3612,11 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 let p = resolve_config_path(raw);
                 if let Ok(text) = fs::read_to_string(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                        if let Some(port) = val.get("ui_port").or_else(|| val.get("port")).and_then(|v| v.as_i64()) {
+                        if let Some(port) = val
+                            .get("ui_port")
+                            .or_else(|| val.get("port"))
+                            .and_then(|v| v.as_i64())
+                        {
                             if port > 0 {
                                 meta.configured_port = port as i32;
                                 break;
@@ -3646,28 +3715,21 @@ pub struct MasterCreds {
 /// Pure-Rust RFC 1321 MD5 implementation (used for HTTP Digest HA1 = MD5(user:realm:pass)).
 fn md5_hex(input: &[u8]) -> String {
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
     ];
 
     let mut msg = input.to_vec();
@@ -4038,7 +4100,10 @@ fn load_install_master_conf() -> Option<(String, String, String)> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let val = value.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+        let val = value
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
         match key.trim() {
             "username" => username = val,
             "passwd" => password = val,
@@ -4159,7 +4224,10 @@ fn native_app_spec(canonical_app: &str, bp_config_path: &str) -> NativeAppSpec {
             }
         }
         "jellyfin" => {
-            for p in ["/etc/jellyfin/network.xml", "/var/lib/jellyfin/config/network.xml"] {
+            for p in [
+                "/etc/jellyfin/network.xml",
+                "/var/lib/jellyfin/config/network.xml",
+            ] {
                 let s = p.to_string();
                 if !paths.contains(&s) {
                     paths.push(s);
@@ -4348,7 +4416,9 @@ fn mutate_dispatcharr_port(file_path: &Path, port: i32) -> Result<bool, String> 
     let setting = format!("DISPATCHARR_PORT={}", port);
     let pattern = Regex::new(r"(?m)^\s*DISPATCHARR_PORT\s*=.*$").unwrap();
     let updated = if pattern.is_match(&existing) {
-        pattern.replace_all(&existing, setting.as_str()).into_owned()
+        pattern
+            .replace_all(&existing, setting.as_str())
+            .into_owned()
     } else {
         format!(
             "{}{}{}\n",
@@ -4385,7 +4455,10 @@ pub async fn apply_blueprint_app_config(app_name: &str, listen_port: i32) -> Res
     .map_err(|error| format!("{error:#}"))
 }
 
-async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -> Result<Value, String> {
+async fn apply_blueprint_app_config_admitted(
+    app_name: &str,
+    listen_port: i32,
+) -> Result<Value, String> {
     let canonical = normalize_app_key_name(app_name);
     let bp = crate::get_blueprint(&canonical)
         .or_else(|| crate::get_blueprint(app_name))
@@ -4454,7 +4527,12 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "gitea" => {
                 if effective_port > 0
-                    && handle_host_mutation(mutate_ini_key(&resolved, "server", "HTTP_PORT", &port_str))?
+                    && handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "server",
+                        "HTTP_PORT",
+                        &port_str,
+                    ))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -4462,15 +4540,28 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
                 let mut file_changed = false;
                 if effective_port > 0 {
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "Port", &port_str))?;
+                    file_changed |=
+                        handle_host_mutation(mutate_xml_element(&resolved, "Port", &port_str))?;
                 }
                 let has_bind = read_xml_element(&resolved, "BindAddress")
                     .is_some_and(|v| !v.trim().is_empty());
                 if !has_bind {
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "BindAddress", "127.0.0.1"))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "BindAddress",
+                        "127.0.0.1",
+                    ))?;
                 }
-                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "AuthenticationMethod", "Forms"))?;
-                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "AnalyticsEnabled", "False"))?;
+                file_changed |= handle_host_mutation(mutate_xml_element(
+                    &resolved,
+                    "AuthenticationMethod",
+                    "Forms",
+                ))?;
+                file_changed |= handle_host_mutation(mutate_xml_element(
+                    &resolved,
+                    "AnalyticsEnabled",
+                    "False",
+                ))?;
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -4485,15 +4576,32 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                     .and_then(|c| c.get(1))
                     .is_some_and(|m| !m.as_str().trim().is_empty());
                 if effective_port > 0 {
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "InternalHttpPort", &port_str))?;
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "PublicHttpPort", &port_str))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "InternalHttpPort",
+                        &port_str,
+                    ))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "PublicHttpPort",
+                        &port_str,
+                    ))?;
                 }
-                file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "EnableIPV4", "true"))?;
+                file_changed |=
+                    handle_host_mutation(mutate_xml_element(&resolved, "EnableIPV4", "true"))?;
                 if !has_remote_access {
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "EnableRemoteAccess", "true"))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "EnableRemoteAccess",
+                        "true",
+                    ))?;
                 }
                 if !has_known_proxies {
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "KnownProxies", "127.0.0.1"))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "KnownProxies",
+                        "127.0.0.1",
+                    ))?;
                 }
                 if file_changed {
                     mutated_files.push(resolved.to_string_lossy().to_string());
@@ -4502,9 +4610,16 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             "emby" => {
                 if effective_port > 0 {
                     let mut file_changed = false;
-                    file_changed |=
-                        handle_host_mutation(mutate_xml_element(&resolved, "HttpServerPortNumber", &port_str))?;
-                    file_changed |= handle_host_mutation(mutate_xml_element(&resolved, "PublicPort", &port_str))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "HttpServerPortNumber",
+                        &port_str,
+                    ))?;
+                    file_changed |= handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        "PublicPort",
+                        &port_str,
+                    ))?;
                     if file_changed {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
@@ -4560,12 +4675,18 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 let mut file_changed = false;
                 let existing_ini = fs::read_to_string(&resolved).unwrap_or_default();
                 if effective_port > 0 {
-                    file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "port", &port_str))?;
+                    file_changed |=
+                        handle_host_mutation(mutate_ini_key(&resolved, "misc", "port", &port_str))?;
                 }
                 let has_host = extract_ini_value(&existing_ini, &["host"])
                     .is_some_and(|v| !v.trim().is_empty());
                 if !has_host {
-                    file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "host", "127.0.0.1"))?;
+                    file_changed |= handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "misc",
+                        "host",
+                        "127.0.0.1",
+                    ))?;
                 }
                 let mut whitelist = "sabnzbd.aether.local, localhost, 127.0.0.1".to_string();
                 let base_domain = crate::resolve_base_domain();
@@ -4596,12 +4717,20 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                         .is_some_and(|v| !v.trim().is_empty());
                     if !has_user || !has_pass {
                         let sab_pass = derive_app_webui_password("sabnzbd", &master_pass);
-                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "username", &master_user))?;
-                        file_changed |= handle_host_mutation(mutate_ini_key(&resolved, "misc", "password", &sab_pass))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(
+                            &resolved,
+                            "misc",
+                            "username",
+                            &master_user,
+                        ))?;
+                        file_changed |= handle_host_mutation(mutate_ini_key(
+                            &resolved, "misc", "password", &sab_pass,
+                        ))?;
                         #[cfg(unix)]
                         if resolved.is_file() {
                             use std::os::unix::fs::PermissionsExt;
-                            let _ = fs::set_permissions(&resolved, fs::Permissions::from_mode(0o600));
+                            let _ =
+                                fs::set_permissions(&resolved, fs::Permissions::from_mode(0o600));
                         }
                     }
                 }
@@ -4611,7 +4740,12 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "tautulli" => {
                 if effective_port > 0
-                    && handle_host_mutation(mutate_ini_key(&resolved, "General", "http_port", &port_str))?
+                    && handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "General",
+                        "http_port",
+                        &port_str,
+                    ))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -4619,20 +4753,29 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             "transmission" => {
                 let mut file_changed = false;
                 if effective_port > 0 {
-                    file_changed |=
-                        handle_host_mutation(mutate_json_key(&resolved, "rpc-port", json!(effective_port)))?;
+                    file_changed |= handle_host_mutation(mutate_json_key(
+                        &resolved,
+                        "rpc-port",
+                        json!(effective_port),
+                    ))?;
                 }
                 let existing_json: Value = fs::read_to_string(&resolved)
                     .ok()
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_else(|| json!({}));
                 if existing_json.get("rpc-whitelist-enabled").is_none() {
-                    file_changed |=
-                        handle_host_mutation(mutate_json_key(&resolved, "rpc-whitelist-enabled", json!(false)))?;
+                    file_changed |= handle_host_mutation(mutate_json_key(
+                        &resolved,
+                        "rpc-whitelist-enabled",
+                        json!(false),
+                    ))?;
                 }
                 if existing_json.get("rpc-host-whitelist-enabled").is_none() {
-                    file_changed |=
-                        handle_host_mutation(mutate_json_key(&resolved, "rpc-host-whitelist-enabled", json!(false)))?;
+                    file_changed |= handle_host_mutation(mutate_json_key(
+                        &resolved,
+                        "rpc-host-whitelist-enabled",
+                        json!(false),
+                    ))?;
                 }
                 if !master_user.is_empty() && !master_pass.is_empty() {
                     let has_user = existing_json
@@ -4644,10 +4787,16 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                         .and_then(|v| v.as_str())
                         .is_some_and(|s| !s.trim().is_empty());
                     if !has_user || !has_pass {
-                        file_changed |=
-                            handle_host_mutation(mutate_json_key(&resolved, "rpc-username", json!(master_user)))?;
-                        file_changed |=
-                            handle_host_mutation(mutate_json_key(&resolved, "rpc-password", json!(master_pass)))?;
+                        file_changed |= handle_host_mutation(mutate_json_key(
+                            &resolved,
+                            "rpc-username",
+                            json!(master_user),
+                        ))?;
+                        file_changed |= handle_host_mutation(mutate_json_key(
+                            &resolved,
+                            "rpc-password",
+                            json!(master_pass),
+                        ))?;
                     }
                 }
                 if file_changed {
@@ -4656,38 +4805,61 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
             }
             "overseerr" | "jellyseerr" => {
                 if effective_port > 0
-                    && handle_host_mutation(mutate_json_key(&resolved, "main.port", json!(effective_port)))?
+                    && handle_host_mutation(mutate_json_key(
+                        &resolved,
+                        "main.port",
+                        json!(effective_port),
+                    ))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "jackett" => {
                 if effective_port > 0
-                    && handle_host_mutation(mutate_json_key(&resolved, "Port", json!(effective_port)))?
+                    && handle_host_mutation(mutate_json_key(
+                        &resolved,
+                        "Port",
+                        json!(effective_port),
+                    ))?
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             "pihole" => {
-                if effective_port > 0 && handle_host_mutation(mutate_pihole_toml(&resolved, effective_port))? {
+                if effective_port > 0
+                    && handle_host_mutation(mutate_pihole_toml(&resolved, effective_port))?
+                {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
             }
             _ => match spec.mutator_type {
                 "xml" if effective_port > 0 && !bp.port_config_key.is_empty() => {
-                    if handle_host_mutation(mutate_xml_element(&resolved, &bp.port_config_key, &port_str))? {
+                    if handle_host_mutation(mutate_xml_element(
+                        &resolved,
+                        &bp.port_config_key,
+                        &port_str,
+                    ))? {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
                 }
                 "ini" if effective_port > 0 && !bp.port_config_key.is_empty() => {
-                    if handle_host_mutation(mutate_ini_key(&resolved, "Preferences", &bp.port_config_key, &port_str))? {
+                    if handle_host_mutation(mutate_ini_key(
+                        &resolved,
+                        "Preferences",
+                        &bp.port_config_key,
+                        &port_str,
+                    ))? {
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
                 }
                 "json"
                     if effective_port > 0
                         && !bp.port_config_key.is_empty()
-                        && handle_host_mutation(mutate_json_key(&resolved, &bp.port_config_key, json!(effective_port)))? =>
+                        && handle_host_mutation(mutate_json_key(
+                            &resolved,
+                            &bp.port_config_key,
+                            json!(effective_port),
+                        ))? =>
                 {
                     mutated_files.push(resolved.to_string_lossy().to_string());
                 }
@@ -4880,10 +5052,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            read_xml_element(&xml_path, "Port").as_deref(),
-            Some("8989")
-        );
+        assert_eq!(read_xml_element(&xml_path, "Port").as_deref(), Some("8989"));
         assert_eq!(
             read_xml_element(&xml_path, "ApiKey").as_deref(),
             Some("abc123xyz")
@@ -4912,7 +5081,11 @@ mod tests {
         let path = dir.join("dispatcharr.env");
         let spec = native_app_spec("dispatcharr", "/stale/config");
         assert_eq!(spec.config_paths, vec!["/etc/dispatcharr/dispatcharr.env"]);
-        for original in ["POSTGRES_PASSWORD=keep\nDISPATCHARR_PORT=9191\n", "POSTGRES_PASSWORD=keep", ""] {
+        for original in [
+            "POSTGRES_PASSWORD=keep\nDISPATCHARR_PORT=9191\n",
+            "POSTGRES_PASSWORD=keep",
+            "",
+        ] {
             fs::write(&path, original).unwrap();
             #[cfg(unix)]
             {
@@ -4921,7 +5094,10 @@ mod tests {
             }
             assert!(mutate_dispatcharr_port(&path, 19200).unwrap());
             let text = fs::read_to_string(&path).unwrap();
-            assert_eq!(extract_ini_value(&text, &["DISPATCHARR_PORT"]).as_deref(), Some("19200"));
+            assert_eq!(
+                extract_ini_value(&text, &["DISPATCHARR_PORT"]).as_deref(),
+                Some("19200")
+            );
             assert!(!text.contains("[Preferences]"));
             if original.contains("POSTGRES_PASSWORD") {
                 assert!(text.contains("POSTGRES_PASSWORD=keep"));
@@ -4930,7 +5106,10 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o640
+                );
             }
         }
         fs::remove_dir_all(dir).unwrap();
@@ -4978,8 +5157,7 @@ mod tests {
         assert!(mutate_json_key(&json_path, "rpc-port", json!(19091)).unwrap());
         assert!(mutate_json_key(&json_path, "rpc-whitelist-enabled", json!(false)).unwrap());
 
-        let parsed: Value =
-            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
         assert_eq!(parsed["rpc-port"], json!(19091));
         assert_eq!(parsed["rpc-whitelist-enabled"], json!(false));
 
@@ -5036,7 +5214,11 @@ mod tests {
     ) {
         let _env_guard = TEST_ENV_LOCK.lock().await;
         let dir = temp_test_dir("afmp004-jellyfin-service");
-        for subdir in ["etc/jellyfin", "etc/apache2/sites-available", "var/lib/aetherflow"] {
+        for subdir in [
+            "etc/jellyfin",
+            "etc/apache2/sites-available",
+            "var/lib/aetherflow",
+        ] {
             fs::create_dir_all(dir.join(subdir)).unwrap();
         }
         let net_xml = dir.join("etc/jellyfin/network.xml");
@@ -5166,7 +5348,8 @@ mod tests {
         std::env::set_var("AETHERFLOW_FS_ROOT", &dir);
         std::env::set_var("AETHERFLOW_CONFIG_ROOT", &dir);
 
-        let sync_res = sync_apache_app_vhost("qui", 18376, "qui.aether.local", "qui.example.com", true);
+        let sync_res =
+            sync_apache_app_vhost("qui", 18376, "qui.aether.local", "qui.example.com", true);
 
         for (key, prev) in [
             ("AETHERFLOW_FS_ROOT", prev_fs_root),
@@ -5219,7 +5402,8 @@ mod tests {
     #[tokio::test]
     async fn test_sync_local_dns_domains_preserves_multiple_apps() {
         let _env_guard = TEST_ENV_LOCK.lock().await;
-        let scratch_dir = env::temp_dir().join(format!("af-dns-sync-test-{}", uuid::Uuid::new_v4()));
+        let scratch_dir =
+            env::temp_dir().join(format!("af-dns-sync-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir).unwrap();
         let hosts_file = scratch_dir.join("hosts");
         fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
@@ -5227,15 +5411,25 @@ mod tests {
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
 
         // Install App A -> syncs appa.aether.local
-        sync_local_dns_domains(&["appa.aether.local".to_string()]).await.unwrap();
+        sync_local_dns_domains(&["appa.aether.local".to_string()])
+            .await
+            .unwrap();
         let content_after_a = fs::read_to_string(&hosts_file).unwrap();
         assert!(content_after_a.contains("appa.aether.local"));
 
         // Install App B -> syncs appb.aether.local without wiping appa
-        sync_local_dns_domains(&["appb.aether.local".to_string()]).await.unwrap();
+        sync_local_dns_domains(&["appb.aether.local".to_string()])
+            .await
+            .unwrap();
         let content_after_b = fs::read_to_string(&hosts_file).unwrap();
-        assert!(content_after_b.contains("appa.aether.local"), "App A must be preserved when installing App B: {content_after_b}");
-        assert!(content_after_b.contains("appb.aether.local"), "App B must be present: {content_after_b}");
+        assert!(
+            content_after_b.contains("appa.aether.local"),
+            "App A must be preserved when installing App B: {content_after_b}"
+        );
+        assert!(
+            content_after_b.contains("appb.aether.local"),
+            "App B must be present: {content_after_b}"
+        );
 
         env::remove_var("AF_HOSTS_FILE");
         let _ = fs::remove_dir_all(&scratch_dir);
@@ -5247,8 +5441,12 @@ mod tests {
         env::remove_var("AF_HOSTS_FILE");
         env::remove_var("AETHERFLOW_HOSTS_FILE");
 
-        let dummy_sock = env::temp_dir().join(format!("nonexistent-runner-{}.sock", uuid::Uuid::new_v4()));
-        env::set_var("AETHERFLOW_RUNNER_SOCK", dummy_sock.to_string_lossy().as_ref());
+        let dummy_sock =
+            env::temp_dir().join(format!("nonexistent-runner-{}.sock", uuid::Uuid::new_v4()));
+        env::set_var(
+            "AETHERFLOW_RUNNER_SOCK",
+            dummy_sock.to_string_lossy().as_ref(),
+        );
 
         #[cfg(unix)]
         {
@@ -5260,7 +5458,8 @@ mod tests {
                     .await
                     .unwrap_err();
                 assert!(
-                    err.contains("runner hosts reconcile error") || err.contains("privileged runner hosts reconcile failed"),
+                    err.contains("runner hosts reconcile error")
+                        || err.contains("privileged runner hosts reconcile failed"),
                     "Expected runner error, got: {err}"
                 );
             }
@@ -5272,7 +5471,8 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_and_sync_dns_separates_hosts_loopback_and_provider_lan_ip() {
         let _env_guard = TEST_ENV_LOCK.lock().await;
-        let scratch_dir = env::temp_dir().join(format!("af-mutators-dns-test-{}", uuid::Uuid::new_v4()));
+        let scratch_dir =
+            env::temp_dir().join(format!("af-mutators-dns-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir).unwrap();
 
         let hosts_file = scratch_dir.join("hosts");
@@ -5283,8 +5483,14 @@ mod tests {
         fs::create_dir_all(&pihole_dir).unwrap();
 
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_DNSMASQ_DIR",
+            dnsmasq_dir.to_string_lossy().as_ref(),
+        );
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
         env::set_var("AETHERFLOW_LAN_IP", "192.168.1.150");
 
         let domains = vec![
@@ -5329,7 +5535,10 @@ mod tests {
     #[tokio::test]
     async fn test_untrimmed_or_invalid_lan_ip_fails_closed_without_modifications() {
         let _env_guard = TEST_ENV_LOCK.lock().await;
-        let scratch_dir = env::temp_dir().join(format!("af-mutators-invalid-lan-ip-{}", uuid::Uuid::new_v4()));
+        let scratch_dir = env::temp_dir().join(format!(
+            "af-mutators-invalid-lan-ip-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&scratch_dir).unwrap();
 
         let hosts_file = scratch_dir.join("hosts");
@@ -5342,8 +5551,14 @@ mod tests {
         fs::write(pihole_dir.join("custom.list"), initial_custom_list).unwrap();
 
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_DNSMASQ_DIR",
+            dnsmasq_dir.to_string_lossy().as_ref(),
+        );
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
 
         let invalid_ips = [
             " 192.168.1.50 ",
@@ -5360,23 +5575,44 @@ mod tests {
         for bad_ip in invalid_ips {
             env::set_var("AETHERFLOW_LAN_IP", bad_ip);
 
-            assert!(detect_lan_ip_strict().is_err(), "detect_lan_ip_strict must fail for {bad_ip:?}");
+            assert!(
+                detect_lan_ip_strict().is_err(),
+                "detect_lan_ip_strict must fail for {bad_ip:?}"
+            );
 
             let sync_res = sync_local_dns_domains(&test_domains).await;
-            assert!(sync_res.is_err(), "sync_local_dns_domains must fail closed for {bad_ip:?}");
+            assert!(
+                sync_res.is_err(),
+                "sync_local_dns_domains must fail closed for {bad_ip:?}"
+            );
 
             let rec_res = reconcile_local_dns_domains(&test_domains).await;
-            assert!(rec_res.is_err(), "reconcile_local_dns_domains must fail closed for {bad_ip:?}");
+            assert!(
+                rec_res.is_err(),
+                "reconcile_local_dns_domains must fail closed for {bad_ip:?}"
+            );
 
             // Verify files were not modified
             let hosts_cur = fs::read_to_string(&hosts_file).unwrap();
-            assert_eq!(hosts_cur, "127.0.0.1 localhost\n", "hosts file must remain untouched for {bad_ip:?}");
+            assert_eq!(
+                hosts_cur, "127.0.0.1 localhost\n",
+                "hosts file must remain untouched for {bad_ip:?}"
+            );
 
-            assert!(!dnsmasq_dir.join("aetherflow.conf").exists(), "dnsmasq must not be created");
-            assert!(!dnsmasq_dir.join("aetherflow-local.conf").exists(), "dnsmasq must not be created");
+            assert!(
+                !dnsmasq_dir.join("aetherflow.conf").exists(),
+                "dnsmasq must not be created"
+            );
+            assert!(
+                !dnsmasq_dir.join("aetherflow-local.conf").exists(),
+                "dnsmasq must not be created"
+            );
 
             let pihole_cur = fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
-            assert_eq!(pihole_cur, initial_custom_list, "custom.list must remain untouched for {bad_ip:?}");
+            assert_eq!(
+                pihole_cur, initial_custom_list,
+                "custom.list must remain untouched for {bad_ip:?}"
+            );
         }
 
         env::remove_var("AF_HOSTS_FILE");

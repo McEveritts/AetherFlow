@@ -250,7 +250,11 @@ pub(crate) fn is_loopback_authority(authority: &str) -> bool {
         let Some((v6, after)) = rest.split_once(']') else {
             return false;
         };
-        if !after.is_empty() && !after.strip_prefix(':').is_some_and(|p| p.parse::<u16>().is_ok()) {
+        if !after.is_empty()
+            && !after
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+        {
             return false;
         }
         v6
@@ -1176,7 +1180,13 @@ fn issue_oidc_tokens_in_tx(
         conn.execute(
             "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![refresh_token, client_id, user_id, validated_scope, refresh_exp],
+            params![
+                refresh_token,
+                client_id,
+                user_id,
+                validated_scope,
+                refresh_exp
+            ],
         )
     };
     if insert_res.is_err() {
@@ -1332,8 +1342,7 @@ fn oidc_token_blocking(
                     .into_response();
             }
 
-            let Ok(tx) =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1389,8 +1398,7 @@ fn oidc_token_blocking(
                 )
                     .into_response();
             };
-            let Ok(tx) =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1440,20 +1448,26 @@ fn oidc_token_blocking(
             };
 
             if revoked {
-                if has_family {
-                    let _ = tx.execute(
+                let revoke_res = if has_family {
+                    tx.execute(
                         "UPDATE oidc_refresh_tokens SET revoked = 1 \
                          WHERE user_id = ?1 AND client_id = ?2 AND (family_id = ?3 OR token = ?3)",
                         params![user_id, client_id, effective_family],
-                    );
+                    )
                 } else {
-                    let _ = tx.execute(
+                    tx.execute(
                         "UPDATE oidc_refresh_tokens SET revoked = 1 \
                          WHERE user_id = ?1 AND client_id = ?2",
                         params![user_id, client_id],
+                    )
+                };
+                if revoke_res.is_err() || tx.commit().is_err() {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        "Failed to revoke compromised refresh token family",
                     );
                 }
-                let _ = tx.commit();
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -1828,10 +1842,7 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
         if let Ok(data) = decode::<AccessTokenClaims>(token.trim(), &keys.decoding_key, &validation)
         {
             if data.claims.aud == client_id && !data.claims.jti.is_empty() {
-                let _ = af_db::revoke_token(
-                    &data.claims.jti,
-                    std::time::Duration::from_secs(8160),
-                );
+                let _ = af_db::revoke_token(&data.claims.jti, std::time::Duration::from_secs(8160));
             }
         }
     }
@@ -1843,15 +1854,14 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
         )
             .into_response();
     };
-    let revoke_sql = if crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id")
-        .unwrap_or(false)
-    {
-        "UPDATE oidc_refresh_tokens SET revoked = 1 \
+    let revoke_sql =
+        if crate::auth::column_exists(&conn, "oidc_refresh_tokens", "family_id").unwrap_or(false) {
+            "UPDATE oidc_refresh_tokens SET revoked = 1 \
          WHERE client_id = ?2 AND (token = ?1 OR (COALESCE(family_id, '') != '' AND family_id IN \
          (SELECT family_id FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2)))"
-    } else {
-        "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND client_id = ?2"
-    };
+        } else {
+            "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND client_id = ?2"
+        };
     if conn.execute(revoke_sql, params![token, client_id]).is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2056,9 +2066,7 @@ fn generate_user_code() -> String {
     const CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ23456789";
     let dist = Uniform::new(0, CHARSET.len());
     let mut rng = rand::rngs::OsRng;
-    let chars: Vec<char> = (0..8)
-        .map(|_| CHARSET[rng.sample(dist)] as char)
-        .collect();
+    let chars: Vec<char> = (0..8).map(|_| CHARSET[rng.sample(dist)] as char).collect();
     format!(
         "{}-{}",
         chars[..4].iter().collect::<String>(),
@@ -2778,7 +2786,7 @@ fn resolve_google_user(
         return Ok(None);
     }
     let avatar = info.get("picture").and_then(|v| v.as_str()).unwrap_or("");
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let existing: Option<(i64, bool)> = tx
         .query_row(
             "SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?1",
@@ -2803,7 +2811,8 @@ fn resolve_google_user(
             return Ok(None);
         }
         if matches == 1 {
-            let has_pw_col = crate::auth::column_exists(&tx, "users", "password_hash").unwrap_or(false);
+            let has_pw_col =
+                crate::auth::column_exists(&tx, "users", "password_hash").unwrap_or(false);
             let (id, linked, mfa, pw_hash): (i64, String, bool, String) = if has_pw_col {
                 tx.query_row(
                     "SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE email = ?1 COLLATE NOCASE",
@@ -2987,18 +2996,23 @@ mod hardening_tests {
         assert!(resolve_google_user(&conn, &identity(true), "", "", None)
             .unwrap()
             .is_none());
-        assert!(
-            resolve_google_user(&conn, &identity(false), "person@example.com", "example.com", None)
-                .unwrap()
-                .is_none()
-        );
+        assert!(resolve_google_user(
+            &conn,
+            &identity(false),
+            "person@example.com",
+            "example.com",
+            None
+        )
+        .unwrap()
+        .is_none());
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
-        let (id, mfa) = resolve_google_user(&conn, &identity(true), " PERSON@example.com ", "", None)
-            .unwrap()
-            .unwrap();
+        let (id, mfa) =
+            resolve_google_user(&conn, &identity(true), " PERSON@example.com ", "", None)
+                .unwrap()
+                .unwrap();
         assert!(!mfa);
         let role: String = conn
             .query_row("SELECT role FROM users WHERE id = ?1", params![id], |r| {
@@ -3045,9 +3059,11 @@ mod hardening_tests {
         );
         let mut other = identity(true);
         other["id"] = "different-id".into();
-        assert!(resolve_google_user(&conn, &other, "person@example.com", "", None)
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_google_user(&conn, &other, "person@example.com", "", None)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             resolve_google_user(&conn, &identity(true), "", "", None).unwrap(),
             Some((1, true))
@@ -3067,20 +3083,38 @@ mod hardening_tests {
         )
         .unwrap();
         assert!(
-            resolve_google_user(&conn, &identity(true), "person@example.com", "example.com", None)
-                .unwrap()
-                .is_none(),
+            resolve_google_user(
+                &conn,
+                &identity(true),
+                "person@example.com",
+                "example.com",
+                None
+            )
+            .unwrap()
+            .is_none(),
             "Unauthenticated Google login must never auto-link to a password-bearing local account"
         );
         assert!(
-            resolve_google_user(&conn, &identity(true), "person@example.com", "example.com", Some(999))
-                .unwrap()
-                .is_none(),
+            resolve_google_user(
+                &conn,
+                &identity(true),
+                "person@example.com",
+                "example.com",
+                Some(999)
+            )
+            .unwrap()
+            .is_none(),
             "Mismatched authenticated session must never link another local user"
         );
         assert_eq!(
-            resolve_google_user(&conn, &identity(true), "person@example.com", "example.com", Some(7))
-                .unwrap(),
+            resolve_google_user(
+                &conn,
+                &identity(true),
+                "person@example.com",
+                "example.com",
+                Some(7)
+            )
+            .unwrap(),
             Some((7, false)),
             "Explicitly authenticated local user may link their own Google identity"
         );
@@ -3368,7 +3402,12 @@ mod hardening_tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        let response = oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(form.clone())).await;
+        let response = oidc_token(
+            crate::ws::PeerIp(None),
+            HeaderMap::new(),
+            Form(form.clone()),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), 32768)
             .await
@@ -3493,7 +3532,8 @@ mod hardening_tests {
     }
 
     #[tokio::test]
-    async fn oidc_refresh_reuse_wipes_family_and_revoke_or_client_delete_invalidates_access_tokens() {
+    async fn oidc_refresh_reuse_wipes_family_and_revoke_or_client_delete_invalidates_access_tokens()
+    {
         use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
         if run_plugin_test_in_subprocess() {
             return;
@@ -3537,15 +3577,23 @@ mod hardening_tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        let rot_resp = oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(rotate_form.clone())).await;
+        let rot_resp = oidc_token(
+            crate::ws::PeerIp(None),
+            HeaderMap::new(),
+            Form(rotate_form.clone()),
+        )
+        .await;
         assert_eq!(rot_resp.status(), StatusCode::OK);
-        let b2 = axum::body::to_bytes(rot_resp.into_body(), 32768).await.unwrap();
+        let b2 = axum::body::to_bytes(rot_resp.into_body(), 32768)
+            .await
+            .unwrap();
         let v2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
         let r2 = v2["refresh_token"].as_str().unwrap().to_string();
         let a2 = v2["access_token"].as_str().unwrap().to_string();
 
         // Replaying R1 must fail AND wipe the entire refresh token family (invalidating R2!).
-        let replay_resp = oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(rotate_form)).await;
+        let replay_resp =
+            oidc_token(crate::ws::PeerIp(None), HeaderMap::new(), Form(rotate_form)).await;
         assert_eq!(replay_resp.status(), StatusCode::BAD_REQUEST);
 
         let r2_form: HashMap<String, String> = [
@@ -3571,7 +3619,9 @@ mod hardening_tests {
             HeaderValue::from_str(&format!("Bearer {a1}")).unwrap(),
         );
         assert_eq!(
-            oidc_userinfo(crate::ws::PeerIp(None), ui_headers.clone()).await.status(),
+            oidc_userinfo(crate::ws::PeerIp(None), ui_headers.clone())
+                .await
+                .status(),
             StatusCode::OK
         );
 
@@ -3584,11 +3634,15 @@ mod hardening_tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
         assert_eq!(
-            oidc_revoke(HeaderMap::new(), Form(revoke_a1)).await.status(),
+            oidc_revoke(HeaderMap::new(), Form(revoke_a1))
+                .await
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
-            oidc_userinfo(crate::ws::PeerIp(None), ui_headers).await.status(),
+            oidc_userinfo(crate::ws::PeerIp(None), ui_headers)
+                .await
+                .status(),
             StatusCode::UNAUTHORIZED
         );
 
@@ -3600,8 +3654,15 @@ mod hardening_tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        let intr_resp = oidc_introspect(crate::ws::PeerIp(None), HeaderMap::new(), Form(introspect_a1)).await;
-        let intr_bytes = axum::body::to_bytes(intr_resp.into_body(), 8192).await.unwrap();
+        let intr_resp = oidc_introspect(
+            crate::ws::PeerIp(None),
+            HeaderMap::new(),
+            Form(introspect_a1),
+        )
+        .await;
+        let intr_bytes = axum::body::to_bytes(intr_resp.into_body(), 8192)
+            .await
+            .unwrap();
         let intr_val: serde_json::Value = serde_json::from_slice(&intr_bytes).unwrap();
         assert_eq!(intr_val["active"], false);
 
@@ -3612,7 +3673,9 @@ mod hardening_tests {
             HeaderValue::from_str(&format!("Bearer {a2}")).unwrap(),
         );
         assert_eq!(
-            oidc_userinfo(crate::ws::PeerIp(None), ui2_headers.clone()).await.status(),
+            oidc_userinfo(crate::ws::PeerIp(None), ui2_headers.clone())
+                .await
+                .status(),
             StatusCode::OK
         );
         let del_resp = delete_oidc_client(
@@ -3622,7 +3685,9 @@ mod hardening_tests {
         .await;
         assert_eq!(del_resp.status(), StatusCode::OK);
         assert_eq!(
-            oidc_userinfo(crate::ws::PeerIp(None), ui2_headers).await.status(),
+            oidc_userinfo(crate::ws::PeerIp(None), ui2_headers)
+                .await
+                .status(),
             StatusCode::UNAUTHORIZED
         );
     }

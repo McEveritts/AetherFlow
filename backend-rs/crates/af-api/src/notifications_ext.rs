@@ -92,7 +92,8 @@ fn replace_verified_recovery_codes(
     if !password_ok || code.trim().is_empty() {
         return Ok(None);
     }
-    let transaction = conn.unchecked_transaction()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let current: (String, bool, String) = transaction.query_row(
         "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
         params![user_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),

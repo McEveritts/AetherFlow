@@ -38,10 +38,13 @@ pub fn is_healthy_status(status: &str) -> bool {
 }
 
 pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResult<PathBuf> {
-    let parent = config.current_link.parent().ok_or_else(|| ReleaseError::PathValidation {
-        path: config.current_link.clone(),
-        reason: "current release link has no parent".to_string(),
-    })?;
+    let parent = config
+        .current_link
+        .parent()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: config.current_link.clone(),
+            reason: "current release link has no parent".to_string(),
+        })?;
     crate::fs_security::ensure_no_symlink_ancestors(parent)?;
     let target = match fs::read_link(&config.current_link) {
         Ok(target) => target,
@@ -50,7 +53,11 @@ pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResul
         }
         Err(error) => return Err(ReleaseError::io("reading current release link", error)),
     };
-    let release_dir = if target.is_absolute() { target } else { parent.join(target) };
+    let release_dir = if target.is_absolute() {
+        target
+    } else {
+        parent.join(target)
+    };
     if release_dir.parent() != Some(config.releases_dir.as_path()) {
         return Err(ReleaseError::PathValidation {
             path: release_dir,
@@ -89,30 +96,45 @@ pub fn install_packaged_unit_if_missing(
     Ok(true)
 }
 
+const DAEMON_DEFAULTS_DROPIN: &[u8] =
+    b"[Service]\nRestart=on-failure\nRestartSec=3s\nTimeoutStopSec=30s\n";
+const ONESHOT_DEFAULTS_DROPIN: &[u8] = b"[Service]\nTimeoutStartSec=120s\nTimeoutStopSec=30s\n";
 const RUNNER_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n";
 const API_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n";
 const LOG_RETENTION_HARDENING_DROPIN: &[u8] = b"[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n";
 
-/// Atomically installs vendor-managed systemd hardening drop-ins without modifying
-/// existing base `.service` files (preserving custom operator `ReadWritePaths`/`BindPaths`).
+/// Atomically installs vendor-managed systemd hardening and lifecycle default drop-ins
+/// without modifying existing base `.service` files (preserving custom operator `ReadWritePaths`/`BindPaths`
+/// and allowing higher-numbered operator drop-ins such as `override.conf` to win).
 pub fn install_systemd_hardening_dropins(
     systemd_units_dst: &Path,
     include_log_retention: bool,
 ) -> ReleaseResult<()> {
     crate::fs_security::create_dir_all_no_symlinks(systemd_units_dst, 0o755)?;
     let mut entries = vec![
-        ("aetherflow-runner.service.d", RUNNER_HARDENING_DROPIN),
-        ("aetherflow-api.service.d", API_HARDENING_DROPIN),
+        (
+            "aetherflow-runner.service.d",
+            DAEMON_DEFAULTS_DROPIN,
+            RUNNER_HARDENING_DROPIN,
+        ),
+        (
+            "aetherflow-api.service.d",
+            DAEMON_DEFAULTS_DROPIN,
+            API_HARDENING_DROPIN,
+        ),
     ];
     if include_log_retention {
         entries.push((
             "aetherflow-log-retention.service.d",
+            ONESHOT_DEFAULTS_DROPIN,
             LOG_RETENTION_HARDENING_DROPIN,
         ));
     }
-    for (dropin_dir_name, content) in entries {
+    for (dropin_dir_name, defaults_content, content) in entries {
         let dropin_dir = systemd_units_dst.join(dropin_dir_name);
         crate::fs_security::create_dir_all_no_symlinks(&dropin_dir, 0o755)?;
+        let defaults_path = dropin_dir.join("05-aetherflow-unit-defaults.conf");
+        crate::fs_security::atomic_write_bytes_with_mode(&defaults_path, defaults_content, 0o644)?;
         let conf_path = dropin_dir.join("10-aetherflow-hardening.conf");
         crate::fs_security::atomic_write_bytes_with_mode(&conf_path, content, 0o644)?;
     }
@@ -125,12 +147,10 @@ pub fn verify_isolated_systemd_lifecycle_authorized(config: &ReleaseConfig) -> R
     let Some(ref isolated_root) = config.isolated_root else {
         return Ok(());
     };
-    let normalized_root =
-        af_models::normalize_lexical_path(isolated_root, "isolated_root").map_err(|reason| {
-            ReleaseError::PathValidation {
-                path: isolated_root.clone(),
-                reason,
-            }
+    let normalized_root = af_models::normalize_lexical_path(isolated_root, "isolated_root")
+        .map_err(|reason| ReleaseError::PathValidation {
+            path: isolated_root.clone(),
+            reason,
         })?;
     if normalized_root == Path::new("/") {
         return Ok(());
@@ -316,7 +336,10 @@ pub fn poll_readiness_probe(
 /// Bounded check that waits until no local listener accepts TCP connections on `addr`
 /// (used during PM2 -> systemd migration so the old listener releases the port before
 /// `aetherflow-api.service` binds it).
-pub fn wait_for_listener_stopped(addr: std::net::SocketAddr, timeout: Duration) -> ReleaseResult<()> {
+pub fn wait_for_listener_stopped(
+    addr: std::net::SocketAddr,
+    timeout: Duration,
+) -> ReleaseResult<()> {
     let start = std::time::Instant::now();
     loop {
         match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
@@ -359,7 +382,10 @@ impl LifecycleController for SystemdLifecycleController {
                 .args(["show", "--property=MainPID", "--value", unit])
                 .output()
                 .map_err(|error| ReleaseError::io("querying service runtime identity", error))?;
-            let pid = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().ok();
+            let pid = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok();
             let actual = if output.status.success() {
                 pid.filter(|pid| *pid > 0)
                     .and_then(|pid| fs::read_link(format!("/proc/{pid}/exe")).ok())
@@ -460,7 +486,11 @@ impl LifecycleController for SystemdLifecycleController {
         // match `release-manager.sh` (`if ! command -v systemctl ... return 0`).
         // When `systemctl` IS present, propagate any non-zero exit status so `restore_state_if_corrupted`
         // refuses to overwrite a database while live services are still running.
-        run_systemctl_if_present(&["stop", "aetherflow-api.service", "aetherflow-runner.service"])
+        run_systemctl_if_present(&[
+            "stop",
+            "aetherflow-api.service",
+            "aetherflow-runner.service",
+        ])
     }
 
     fn terminate_legacy_pm2(&self) -> ReleaseResult<()> {
@@ -543,7 +573,11 @@ fn run_systemctl(args: &[&str], required: bool) -> ReleaseResult<()> {
     }
 }
 
-fn verify_executable_identity(unit: &str, expected: &Path, actual: Option<&Path>) -> ReleaseResult<()> {
+fn verify_executable_identity(
+    unit: &str,
+    expected: &Path,
+    actual: Option<&Path>,
+) -> ReleaseResult<()> {
     if actual == Some(expected) {
         return Ok(());
     }
@@ -564,6 +598,32 @@ mod runtime_identity_tests {
         assert!(verify_executable_identity("api", expected, Some(old)).is_err());
         assert!(verify_executable_identity("runner", expected, None).is_err());
         assert!(verify_executable_identity("api", expected, Some(expected)).is_ok());
+    }
+
+    #[test]
+    fn hardening_and_unit_defaults_dropins_install_cleanly() {
+        let tmp = std::env::temp_dir().join(format!(
+            "af-dropin-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        install_systemd_hardening_dropins(&tmp, true).expect("install dropins");
+        let api_defaults = std::fs::read_to_string(
+            tmp.join("aetherflow-api.service.d/05-aetherflow-unit-defaults.conf"),
+        )
+        .expect("api defaults");
+        assert!(api_defaults.contains("Restart=on-failure"));
+        assert!(api_defaults.contains("TimeoutStopSec=30s"));
+        let retention_defaults = std::fs::read_to_string(
+            tmp.join("aetherflow-log-retention.service.d/05-aetherflow-unit-defaults.conf"),
+        )
+        .expect("retention defaults");
+        assert!(retention_defaults.contains("TimeoutStartSec=120s"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

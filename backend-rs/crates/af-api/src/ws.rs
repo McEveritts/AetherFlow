@@ -38,6 +38,7 @@ where
 struct WsTicketEntry {
     user_id: i64,
     session_jti: String,
+    session_ver: Option<i64>,
     client_ip: String,
     expires_at: Instant,
     diagnostics_allowed: bool,
@@ -301,7 +302,14 @@ pub(crate) fn sanitize_services_for_viewer(services: &mut serde_json::Value) {
             outcome.retain(|field, _| {
                 matches!(
                     field.as_str(),
-                    "job_id" | "package_id" | "action" | "status" | "started_at" | "finished_at" | "expected_target_version" | "achieved_version"
+                    "job_id"
+                        | "package_id"
+                        | "action"
+                        | "status"
+                        | "started_at"
+                        | "finished_at"
+                        | "expected_target_version"
+                        | "achieved_version"
                 )
             });
         }
@@ -412,9 +420,9 @@ pub fn start_metrics_broadcast_loop() {
     }));
 
     let telemetry = Arc::clone(&TELEMETRY);
-    tokio::spawn(telemetry.services_loop(|| {
-        Ok(serde_json::to_value(af_services::get_active_services()?)?)
-    }));
+    tokio::spawn(
+        telemetry.services_loop(|| Ok(serde_json::to_value(af_services::get_active_services()?)?)),
+    );
 }
 
 #[cfg(test)]
@@ -436,7 +444,10 @@ mod telemetry_tests {
         let serialized = super::websocket_message_for_session(frame.to_string(), false).unwrap();
         assert!(!serialized.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
         let safe: Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(safe["data"]["services"]["Fixture"]["update_error"], "Update status could not be confirmed");
+        assert_eq!(
+            safe["data"]["services"]["Fixture"]["update_error"],
+            "Update status could not be confirmed"
+        );
         assert_eq!(safe["data"]["services"]["Fixture"]["status"], "running");
     }
 
@@ -510,7 +521,10 @@ mod telemetry_tests {
 
     #[tokio::test]
     async fn admin_ws_final_gate_fragments_and_marked_headers_are_masked() {
-        let long_key = format!(r#""{}Pass\u0077ordEncoded":"FRAGMENT_CANARY""#, "x".repeat(125));
+        let long_key = format!(
+            r#""{}Pass\u0077ordEncoded":"FRAGMENT_CANARY""#,
+            "x".repeat(125)
+        );
         for line in [
             long_key.as_str(),
             r#""databaseCookieEncoded":"FRAGMENT_CANARY""#,
@@ -526,11 +540,14 @@ mod telemetry_tests {
                     "type": "package:progress", "package_id": "sonarr",
                     "action": "update", "status": "updating", "line": input,
                     "progress": 50,
-                }).to_string();
+                })
+                .to_string();
                 for privileged in [true, false] {
-                    let projected = super::websocket_message_for_session(frame.clone(), privileged).unwrap();
+                    let projected =
+                        super::websocket_message_for_session(frame.clone(), privileged).unwrap();
                     assert!(!projected.contains("FRAGMENT_CANARY"), "{projected}");
-                    let repeated = super::websocket_message_for_session(projected, privileged).unwrap();
+                    let repeated =
+                        super::websocket_message_for_session(projected, privileged).unwrap();
                     assert!(!repeated.contains("FRAGMENT_CANARY"), "{repeated}");
                 }
                 input = format!("AF_DIAG_FAILURE={}", json!({"summary": input}));
@@ -781,13 +798,27 @@ pub fn issue_ws_ticket_for_session(user_id: i64, session_jti: &str, client_ip: &
     rand::rngs::OsRng.fill_bytes(&mut b);
     let ticket = hex::encode(b);
 
+    let effective_jti = if session_jti.trim().is_empty() {
+        let mut anon = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut anon);
+        format!("ws-anon-{}", hex::encode(anon))
+    } else {
+        session_jti.trim().to_string()
+    };
+
+    let initial_ver = af_db::get_read_conn()
+        .ok()
+        .and_then(|c| crate::auth::load_active_human_subject(&c, user_id).ok())
+        .map(|s| s.sessions_revoked_after);
+
     if let Ok(mut map) = WS_TICKETS.lock() {
         map.retain(|_, v| v.expires_at > Instant::now());
         map.insert(
             ticket.clone(),
             WsTicketEntry {
                 user_id,
-                session_jti: session_jti.to_string(),
+                session_jti: effective_jti,
+                session_ver: initial_ver,
                 client_ip: client_ip.to_string(),
                 expires_at: Instant::now() + Duration::from_secs(90),
                 diagnostics_allowed: false,
@@ -811,6 +842,25 @@ pub struct WsTicketQuery {
     pub ticket: String,
 }
 
+fn check_ws_jti_revocation(connection: &rusqlite::Connection, entry: &mut WsTicketEntry) -> bool {
+    if entry.session_jti.is_empty() {
+        return false;
+    }
+    if entry.session_jti.starts_with("ws-anon-")
+        && !crate::auth::table_exists(connection, "revoked_tokens").unwrap_or(false)
+    {
+        return true;
+    }
+    let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
+    match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
+        Ok(false) => {
+            entry.session_jti = resolved_jti;
+            true
+        }
+        Ok(true) | Err(_) => false,
+    }
+}
+
 fn consume_live_ws_ticket(
     connection: &rusqlite::Connection,
     ticket: &str,
@@ -819,14 +869,17 @@ fn consume_live_ws_ticket(
         map.retain(|_, value| value.expires_at > Instant::now());
         map.remove(ticket)
     })?;
-    if !entry.session_jti.is_empty() {
-        let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
-        match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
-            Ok(false) => entry.session_jti = resolved_jti,
-            Ok(true) | Err(_) => return None,
-        }
+    if !check_ws_jti_revocation(connection, &mut entry) {
+        return None;
     }
     let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
+    if let Some(issued_ver) = entry.session_ver {
+        if subj.sessions_revoked_after > issued_ver {
+            return None;
+        }
+    } else {
+        entry.session_ver = Some(subj.sessions_revoked_after);
+    }
     entry.diagnostics_allowed = subj.role == "admin";
     Some(entry)
 }
@@ -845,8 +898,14 @@ mod lifecycle_tests {
         })
         .to_string();
         let admin = websocket_message_for_session(message.clone(), true).unwrap();
-        assert!(!admin.contains("private-installer-output"), "raw secrets must be redacted for admin");
-        assert!(admin.contains("[REDACTED]"), "sanitized secrets must be marked REDACTED");
+        assert!(
+            !admin.contains("private-installer-output"),
+            "raw secrets must be redacted for admin"
+        );
+        assert!(
+            admin.contains("[REDACTED]"),
+            "sanitized secrets must be marked REDACTED"
+        );
         let admin_val: serde_json::Value = serde_json::from_str(&admin).unwrap();
         assert_eq!(admin_val["job_id"], "job-42");
         assert_eq!(admin_val["package_id"], "sonarr");
@@ -1033,7 +1092,10 @@ pub async fn handle_websocket(
     let entry_opt = tokio::task::spawn_blocking(move || {
         let connection = af_db::get_read_conn().ok()?;
         consume_live_ws_ticket(&connection, &q.ticket)
-    }).await.ok().flatten();
+    })
+    .await
+    .ok()
+    .flatten();
 
     let Some(entry) = entry_opt else {
         return (
@@ -1071,29 +1133,33 @@ fn refresh_ws_authorization(
     connection: &rusqlite::Connection,
     entry: &mut WsTicketEntry,
 ) -> Option<bool> {
-    if !entry.session_jti.is_empty() {
-        let resolved_jti = crate::auth::resolve_current_session_jti(&entry.session_jti);
-        match af_db::token_revocation_status_with_conn(connection, &resolved_jti) {
-            Ok(false) => entry.session_jti = resolved_jti,
-            Ok(true) | Err(_) => return None,
-        }
+    if !check_ws_jti_revocation(connection, entry) {
+        return None;
     }
     let subj = crate::auth::load_active_human_subject(connection, entry.user_id).ok()?;
+    if let Some(issued_ver) = entry.session_ver {
+        if subj.sessions_revoked_after > issued_ver {
+            return None;
+        }
+    } else {
+        entry.session_ver = Some(subj.sessions_revoked_after);
+    }
     entry.diagnostics_allowed &= subj.role == "admin";
     Some(entry.diagnostics_allowed)
 }
 
 async fn current_ws_authorization(entry: &mut WsTicketEntry) -> Option<bool> {
     let mut checked = entry.clone();
-    let (allowed, updated_jti) = tokio::task::spawn_blocking(move || {
+    let (allowed, updated_jti, updated_ver) = tokio::task::spawn_blocking(move || {
         let connection = af_db::get_read_conn().ok()?;
         let allowed = refresh_ws_authorization(&connection, &mut checked)?;
-        Some((allowed, checked.session_jti))
+        Some((allowed, checked.session_jti, checked.session_ver))
     })
     .await
     .ok()??;
     entry.diagnostics_allowed = allowed;
     entry.session_jti = updated_jti;
+    entry.session_ver = updated_ver;
     Some(allowed)
 }
 
@@ -1187,7 +1253,11 @@ fn parse_live_log_line(line: &str, default_source: &str) -> serde_json::Value {
         let rest = parts.next().unwrap_or(trimmed);
         (first.to_string(), host.to_string(), rest)
     } else {
-        (chrono::Utc::now().to_rfc3339(), "localhost".to_string(), trimmed)
+        (
+            chrono::Utc::now().to_rfc3339(),
+            "localhost".to_string(),
+            trimmed,
+        )
     };
 
     let (unit, message) = if let Some((prefix, msg)) = remainder.split_once(": ") {
@@ -1198,7 +1268,8 @@ fn parse_live_log_line(line: &str, default_source: &str) -> serde_json::Value {
     };
 
     let lower = message.to_lowercase();
-    let priority = if lower.contains("error") || lower.contains("fatal") || lower.contains("failed") {
+    let priority = if lower.contains("error") || lower.contains("fatal") || lower.contains("failed")
+    {
         "err"
     } else if lower.contains("warn") {
         "warning"
@@ -1419,9 +1490,7 @@ fn websocket_origin_matches_host(
         return false;
     };
 
-    origin_scheme == expected_scheme
-        && origin_host == expected_host
-        && origin_port == expected_port
+    origin_scheme == expected_scheme && origin_host == expected_host && origin_port == expected_port
 }
 
 pub async fn handle_log_websocket(
@@ -1442,9 +1511,17 @@ pub async fn handle_log_websocket(
             "Cross-origin WebSocket upgrade rejected",
         );
     }
+    let effective_jti = if user.jti.trim().is_empty() {
+        let mut nonce = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        format!("ws-anon-{}", hex::encode(nonce))
+    } else {
+        user.jti.clone()
+    };
     let mut authorization = WsTicketEntry {
         user_id: user.user_id,
-        session_jti: user.jti.clone(),
+        session_jti: effective_jti,
+        session_ver: None,
         client_ip: extract_client_ip_for_peer(&headers, peer_ip),
         expires_at: Instant::now(),
         diagnostics_allowed: true,
@@ -1605,7 +1682,11 @@ fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
         let Ok(prefix_len) = mask_part.trim().parse::<u32>() else {
             return false;
         };
-        let Ok(net_ip) = net_part.trim().trim_matches(['[', ']']).parse::<std::net::IpAddr>() else {
+        let Ok(net_ip) = net_part
+            .trim()
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+        else {
             return false;
         };
         match (ip, net_ip) {

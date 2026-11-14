@@ -4032,7 +4032,9 @@ mod tests {
         }
         let response = get_worker_metrics(Path(node)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["status"], "online");
         assert!(payload["services"].is_null());

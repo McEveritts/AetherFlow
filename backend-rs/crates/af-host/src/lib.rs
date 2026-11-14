@@ -52,9 +52,8 @@ pub use manifest::{
     MIN_SUPPORTED_MANIFEST_SCHEMA_VERSION, SUPPORTED_APP_MAJOR_VERSION,
 };
 pub use restore::{
-    execute_coordinated_restore, RestoreReceipt,
-    execute_destructive_restore, execute_staged_restore, plan_restore_from_manifest,
-    plan_restore_from_manifest_with_sqlite_override,
+    execute_coordinated_restore, execute_destructive_restore, execute_staged_restore,
+    plan_restore_from_manifest, plan_restore_from_manifest_with_sqlite_override,
     plan_restore_from_manifest_with_sqlite_overrides, preflight_restore_directory,
     preflight_restore_directory_with_sqlite_override,
     preflight_restore_directory_with_sqlite_overrides,
@@ -67,7 +66,7 @@ pub use restore::{
     validate_quiesce_service_entries, validate_trusted_sqlite_db_path, CommandQuiescenceController,
     NoopQuiescenceController, OverwritePolicy, PlannedRestoreAction, RecoveryContext,
     RestoreExecutionOptions, RestoreExecutionReport, RestorePlan, RestorePlanItem,
-    RestorePreflightOptions, RollbackFailureJournal, RollbackFailureJournalEntry,
+    RestorePreflightOptions, RestoreReceipt, RollbackFailureJournal, RollbackFailureJournalEntry,
     ServiceQuiescenceController, DEFAULT_MANDATORY_QUIESCE_SERVICES,
     IN_PROGRESS_RECOVERY_JOURNAL_FILENAME,
 };
@@ -4055,13 +4054,9 @@ Nov  1 04:01:25 host sshd[107]: Accepted publickey for admin from 10.0.0.1 port 
 
         // System root overwrite must fail closed
         let bad_opts = RestorePreflightOptions::default();
-        let err_root = execute_coordinated_restore(
-            &receipt.primary_artifact_path,
-            Path::new("/"),
-            bad_opts,
-        )
-        .unwrap_err();
+        let err_root =
+            execute_coordinated_restore(&receipt.primary_artifact_path, Path::new("/"), bad_opts)
+                .unwrap_err();
         assert!(err_root.is_security_rejection());
     }
-
 }

@@ -19,20 +19,24 @@
 //!    `OverwritePolicy::AllowRegularFilesInStaging` on a non-production staging root.
 
 use crate::error::{HostBackupError, HostBackupResult};
-use crate::manifest::{BackupManifest, BackupTargetKind, CompatibilityReport, SqliteSnapshotMetadata};
+use crate::manifest::{
+    BackupManifest, BackupTargetKind, CompatibilityReport, SqliteSnapshotMetadata,
+};
 use crate::snapshot::{
     verify_sqlite_snapshot_integrity, verify_sqlite_snapshot_integrity_with_trusted_uid,
 };
 use crate::verify::{
     atomic_install_file_at_destination, atomic_install_file_at_destination_with_verification,
-    checksum_sidecar_path, compute_file_sha256, ensure_private_dir_all, verify_file_with_sidecar, open_existing_regular_file_nofollow, open_or_create_dir_nofollow,
+    checksum_sidecar_path, compute_file_sha256, ensure_private_dir_all,
+    open_existing_regular_file_nofollow, open_or_create_dir_nofollow,
     open_or_create_provenance_dir_nofollow, parse_sha256_sidecar_str,
     read_verified_text_file_nofollow, reject_if_symlink, reject_symlink_chain,
     safe_backup_file_path, sync_parent_directory, unlink_file_at_destination,
     unlink_file_at_destination_with_trusted_ancestor_uid, validate_backup_filename,
     validate_no_parent_traversal, validate_relative_backup_path, verify_file_sha256,
-    verify_file_sha256_with_trusted_uid, verify_file_with_sidecar_and_trusted_uid,
-    write_private_file_atomic, write_private_file_atomic_tracking_rename, write_sha256_sidecar,
+    verify_file_sha256_with_trusted_uid, verify_file_with_sidecar,
+    verify_file_with_sidecar_and_trusted_uid, write_private_file_atomic,
+    write_private_file_atomic_tracking_rename, write_sha256_sidecar,
 };
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -201,7 +205,8 @@ pub fn validate_destination_not_provenance(
             if seg_lower == ".restore-provenance"
                 || seg_lower.starts_with(".rollback-restore.")
                 || seg_lower.starts_with(".staging-restore.")
-                || (seg_lower.starts_with(".rollback-restore.") && seg_lower.contains(".journal.json"))
+                || (seg_lower.starts_with(".rollback-restore.")
+                    && seg_lower.contains(".journal.json"))
             {
                 return Err(HostBackupError::UnsafeOverwriteRejected {
                     target: dest.to_path_buf(),
@@ -395,9 +400,7 @@ fn validate_safe_target_root(target_root: &Path) -> HostBackupResult<PathBuf> {
 
 /// Default mandatory writer services that must be quiesced before any live SQLite or host
 /// configuration restore replacement if the caller passes an empty `quiesce_services` list.
-pub const DEFAULT_MANDATORY_QUIESCE_SERVICES: &[&str] = &[
-    "aetherflow-api.service",
-];
+pub const DEFAULT_MANDATORY_QUIESCE_SERVICES: &[&str] = &["aetherflow-api.service"];
 
 fn is_control_worker_service_unit(unit: &str) -> bool {
     let lower = unit.trim().to_ascii_lowercase();
@@ -587,14 +590,15 @@ pub fn resolve_trusted_canonical_host_destination_with_sqlite_override(
     if key == "var/lib/aetherflow/aetherflow.sqlite" {
         if let Some(custom_db) = trusted_sqlite_db_path {
             let validated_db = validate_trusted_sqlite_db_path(custom_db)?;
-            let mapped_dest = if canonical_base == Path::new("/") || validated_db.starts_with(canonical_base) {
-                validated_db
-            } else {
-                let stripped = validated_db
-                    .strip_prefix(Path::new("/"))
-                    .unwrap_or(&validated_db);
-                canonical_base.join(stripped)
-            };
+            let mapped_dest =
+                if canonical_base == Path::new("/") || validated_db.starts_with(canonical_base) {
+                    validated_db
+                } else {
+                    let stripped = validated_db
+                        .strip_prefix(Path::new("/"))
+                        .unwrap_or(&validated_db);
+                    canonical_base.join(stripped)
+                };
             validate_destination_not_provenance(&mapped_dest, canonical_base, None)?;
             let anchor = mapped_dest
                 .parent()
@@ -627,8 +631,14 @@ pub fn resolve_trusted_canonical_host_destination_with_sqlite_override(
     let dest = canonical_base.join(&mapped_rel);
     validate_destination_not_provenance(&dest, canonical_base, None)?;
     let mut comps = mapped_rel.components();
-    let first = comps.next().map(|comp| comp.as_os_str()).unwrap_or_default();
-    let second = comps.next().map(|comp| comp.as_os_str()).unwrap_or_default();
+    let first = comps
+        .next()
+        .map(|comp| comp.as_os_str())
+        .unwrap_or_default();
+    let second = comps
+        .next()
+        .map(|comp| comp.as_os_str())
+        .unwrap_or_default();
     let anchor = canonical_base.join(first).join(second);
     reject_symlink_chain(&anchor, &dest)?;
     Ok((anchor, dest))
@@ -686,10 +696,12 @@ fn split_sqlite_override_path(
         None => Ok((None, None)),
         Some(path_val) if path_val.is_absolute() => Ok((None, Some(path_val))),
         Some(path_val) => {
-            let rel_str = path_val.to_str().ok_or_else(|| HostBackupError::PathValidation {
-                path: path_val.to_path_buf(),
-                reason: "relative sqlite override path must be valid UTF-8".to_string(),
-            })?;
+            let rel_str = path_val
+                .to_str()
+                .ok_or_else(|| HostBackupError::PathValidation {
+                    path: path_val.to_path_buf(),
+                    reason: "relative sqlite override path must be valid UTF-8".to_string(),
+                })?;
             let _ = validate_relative_backup_path(rel_str)?;
             Ok((Some(rel_str.to_string()), None))
         }
@@ -1415,10 +1427,12 @@ pub(crate) fn verify_tar_gz_against_manifest_with_options_and_uid(
         let mut buf = [0u8; 64 * 1024];
         let mut read_bytes = 0u64;
         loop {
-            let bytes_read = entry.read(&mut buf).map_err(|err| HostBackupError::Archive {
-                archive: archive_path.to_path_buf(),
-                reason: format!("failed reading tar payload for '{}': {}", key, err),
-            })?;
+            let bytes_read = entry
+                .read(&mut buf)
+                .map_err(|err| HostBackupError::Archive {
+                    archive: archive_path.to_path_buf(),
+                    reason: format!("failed reading tar payload for '{}': {}", key, err),
+                })?;
             if bytes_read == 0 {
                 break;
             }
@@ -1446,24 +1460,27 @@ pub(crate) fn verify_tar_gz_against_manifest_with_options_and_uid(
         if expected.required && !seen_entries.contains(key) {
             return Err(HostBackupError::Archive {
                 archive: archive_path.to_path_buf(),
-                reason: format!("required manifest entry '{}' is missing from tar archive", key),
+                reason: format!(
+                    "required manifest entry '{}' is missing from tar archive",
+                    key
+                ),
             });
         }
     }
 
     if !resolved_for_uniqueness.is_empty() {
-        validate_unique_resolved_destinations(resolved_for_uniqueness.iter().map(
-            |(rel_key, dest_path, kind)| (rel_key.as_str(), dest_path.as_path(), *kind),
-        ))?;
+        validate_unique_resolved_destinations(
+            resolved_for_uniqueness
+                .iter()
+                .map(|(rel_key, dest_path, kind)| (rel_key.as_str(), dest_path.as_path(), *kind)),
+        )?;
     }
 
     Ok(())
 }
 
 /// Explicitly unsupported unconfirmed/in-place destructive live-host restore entry point.
-pub fn execute_destructive_restore(
-    _plan: &RestorePlan,
-) -> HostBackupResult<()> {
+pub fn execute_destructive_restore(_plan: &RestorePlan) -> HostBackupResult<()> {
     Err(HostBackupError::DestructiveRestoreUnsupported {
         reason: "in-place destructive host/database overwrite is disabled by design; run preflight verification and perform state replacement only under an offline maintenance window".to_string(),
     })
@@ -1563,7 +1580,9 @@ impl ServiceQuiescenceController for CommandQuiescenceController {
             if let Some(reason) = stop_err {
                 let mut comp_errors = Vec::new();
                 for prev in stopped_so_far.iter().rev() {
-                    if let Err(comp_err) = self.start_and_verify_services(std::slice::from_ref(prev)) {
+                    if let Err(comp_err) =
+                        self.start_and_verify_services(std::slice::from_ref(prev))
+                    {
                         comp_errors.push(format!("{}: {}", prev, comp_err));
                     }
                 }
@@ -1603,7 +1622,9 @@ impl ServiceQuiescenceController for CommandQuiescenceController {
                     reason: err.to_string(),
                 })?;
             if !start_out.status.success() {
-                let stderr_msg = String::from_utf8_lossy(&start_out.stderr).trim().to_string();
+                let stderr_msg = String::from_utf8_lossy(&start_out.stderr)
+                    .trim()
+                    .to_string();
                 return Err(HostBackupError::ServiceQuiescenceFailed {
                     unit: trimmed.to_string(),
                     phase: "start".to_string(),
@@ -2036,28 +2057,31 @@ fn write_exclusive_staged_file(
         open_opts.mode(mode & 0o777);
         open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    let mut out = open_opts
-        .open(path)
-        .map_err(|err| HostBackupError::io(format!("creating staged file {}", path.display()), err))?;
+    let mut out = open_opts.open(path).map_err(|err| {
+        HostBackupError::io(format!("creating staged file {}", path.display()), err)
+    })?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut total = 0u64;
     loop {
-        let count = reader
-            .read(&mut buf)
-            .map_err(|err| HostBackupError::io(format!("reading stream for {}", path.display()), err))?;
+        let count = reader.read(&mut buf).map_err(|err| {
+            HostBackupError::io(format!("reading stream for {}", path.display()), err)
+        })?;
         if count == 0 {
             break;
         }
-        std::io::Write::write_all(&mut out, &buf[..count])
-            .map_err(|err| HostBackupError::io(format!("writing staged file {}", path.display()), err))?;
+        std::io::Write::write_all(&mut out, &buf[..count]).map_err(|err| {
+            HostBackupError::io(format!("writing staged file {}", path.display()), err)
+        })?;
         hasher.update(&buf[..count]);
         total += count as u64;
     }
-    out.sync_all()
-        .map_err(|err| HostBackupError::io(format!("fsyncing staged file {}", path.display()), err))?;
-    std::io::Seek::seek(&mut out, std::io::SeekFrom::Start(0))
-        .map_err(|err| HostBackupError::io(format!("rewinding staged file {}", path.display()), err))?;
+    out.sync_all().map_err(|err| {
+        HostBackupError::io(format!("fsyncing staged file {}", path.display()), err)
+    })?;
+    std::io::Seek::seek(&mut out, std::io::SeekFrom::Start(0)).map_err(|err| {
+        HostBackupError::io(format!("rewinding staged file {}", path.display()), err)
+    })?;
 
     #[cfg(unix)]
     let staged_dev_ino = {
@@ -2090,7 +2114,10 @@ fn compute_journal_canonical_digest(journal: &RollbackFailureJournal) -> HostBac
     let mut normalized_journal = journal.clone();
     normalized_journal.journal_digest_sha256 = None;
     let canonical_bytes = serde_json::to_vec(&normalized_journal).map_err(|err| {
-        HostBackupError::InvalidManifest(format!("serializing recovery journal digest payload: {}", err))
+        HostBackupError::InvalidManifest(format!(
+            "serializing recovery journal digest payload: {}",
+            err
+        ))
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&canonical_bytes);
@@ -2207,7 +2234,8 @@ fn write_journal_with_sidecar_and_provenance_with_fault(
 
     if fail_local_write {
         return Err(HostBackupError::InvalidManifest(
-            "simulated initial local recovery journal write failure after provenance write".to_string(),
+            "simulated initial local recovery journal write failure after provenance write"
+                .to_string(),
         ));
     }
 
@@ -2465,7 +2493,10 @@ fn remove_recovery_dir_and_provenance_with_fault(
     let prev_sidecar = checksum_sidecar_path(&prev_journal);
 
     unlink_file_at_destination(&prov_sidecar, "removing provenance journal sidecar")?;
-    unlink_file_at_destination(&prev_sidecar, "removing previous provenance journal sidecar")?;
+    unlink_file_at_destination(
+        &prev_sidecar,
+        "removing previous provenance journal sidecar",
+    )?;
     unlink_file_at_destination(&prev_journal, "removing previous provenance journal")?;
     unlink_file_at_destination(&prov_journal, "removing provenance journal")?;
 
@@ -2557,10 +2588,8 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
     }
 
     let artifact_path = safe_backup_file_path(backup_dir, filename)?;
-    let provenance_dir = resolve_recovery_provenance_dir(
-        &normalized_root,
-        options.provenance_dir.as_deref(),
-    );
+    let provenance_dir =
+        resolve_recovery_provenance_dir(&normalized_root, options.provenance_dir.as_deref());
 
     let run_id = format!("{}.{}", std::process::id(), uuid::Uuid::new_v4());
     let staging_dir = backup_dir.join(format!(".staging-restore.{}", run_id));
@@ -2606,14 +2635,25 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                 })?;
                 let entry_type = entry.header().entry_type();
                 let header_mode = entry.header().mode().ok().map(|mode_val| mode_val & 0o7777);
-                let header_uid = entry.header().uid().ok().and_then(|uid_val| u32::try_from(uid_val).ok());
-                let header_gid = entry.header().gid().ok().and_then(|gid_val| u32::try_from(gid_val).ok());
+                let header_uid = entry
+                    .header()
+                    .uid()
+                    .ok()
+                    .and_then(|uid_val| u32::try_from(uid_val).ok());
+                let header_gid = entry
+                    .header()
+                    .gid()
+                    .ok()
+                    .and_then(|gid_val| u32::try_from(gid_val).ok());
 
                 let raw_path = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
                 if entry_type == EntryType::Symlink || entry_type == EntryType::Link {
                     return Err(HostBackupError::SymlinkRejected {
                         path: PathBuf::from(&raw_path),
-                        reason: format!("tar archive contains forbidden {:?} entry '{}'", entry_type, raw_path),
+                        reason: format!(
+                            "tar archive contains forbidden {:?} entry '{}'",
+                            entry_type, raw_path
+                        ),
                     });
                 }
                 let norm_rel = validate_relative_backup_path(&raw_path)?;
@@ -2665,12 +2705,18 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                     options,
                 );
                 let uid = if expected.kind == BackupTargetKind::SqliteSnapshot {
-                    options.trusted_sqlite_uid.or(expected.unix_uid).or(header_uid)
+                    options
+                        .trusted_sqlite_uid
+                        .or(expected.unix_uid)
+                        .or(header_uid)
                 } else {
                     expected.unix_uid.or(header_uid)
                 };
                 let gid = if expected.kind == BackupTargetKind::SqliteSnapshot {
-                    options.trusted_sqlite_gid.or(expected.unix_gid).or(header_gid)
+                    options
+                        .trusted_sqlite_gid
+                        .or(expected.unix_gid)
+                        .or(header_gid)
                 } else {
                     expected.unix_gid.or(header_gid)
                 };
@@ -2872,7 +2918,9 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
         return Err(err);
     }
 
-    if let Err((stop_err, comp_failed)) = stop_services_with_compensation(quiescence, &effective_services) {
+    if let Err((stop_err, comp_failed)) =
+        stop_services_with_compensation(quiescence, &effective_services)
+    {
         drop(staged_entries);
         let _ = fs::remove_dir_all(&staging_dir);
         if !comp_failed
@@ -2990,7 +3038,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                         "existing SQLite WAL sidecar",
                     )?
                 {
-                    wal_attrs = (Some(wal_fd_mode & 0o7777), Some(wal_fd_uid), Some(wal_fd_gid));
+                    wal_attrs = (
+                        Some(wal_fd_mode & 0o7777),
+                        Some(wal_fd_uid),
+                        Some(wal_fd_gid),
+                    );
                     let rb_wal = rollback_dir.join(format!("entry_{}.wal.bak", idx));
                     let (wal_pinned, wal_dev_ino, wal_sha, wal_sz) =
                         write_exclusive_staged_file(&rb_wal, &mut wal_file, 0o600)?;
@@ -3007,7 +3059,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                         "existing SQLite SHM sidecar",
                     )?
                 {
-                    shm_attrs = (Some(shm_fd_mode & 0o7777), Some(shm_fd_uid), Some(shm_fd_gid));
+                    shm_attrs = (
+                        Some(shm_fd_mode & 0o7777),
+                        Some(shm_fd_uid),
+                        Some(shm_fd_gid),
+                    );
                     let rb_shm = rollback_dir.join(format!("entry_{}.shm.bak", idx));
                     let (shm_pinned, shm_dev_ino, shm_sha, shm_sz) =
                         write_exclusive_staged_file(&rb_shm, &mut shm_file, 0o600)?;
@@ -3167,8 +3223,7 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
 
     if let Err(apply_err) = apply_result {
         if committed_durably {
-            if options.fail_local_journal_on_commit
-                || options.fail_provenance_parent_sync_on_commit
+            if options.fail_local_journal_on_commit || options.fail_provenance_parent_sync_on_commit
             {
                 drop(rollback_records);
                 return Err(apply_err);
@@ -3262,8 +3317,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                         "rollback WAL cleanup",
                     ) {
                         rec_ok = false;
-                        rollback_errors
-                            .push(format!("unlink WAL {}: {}", wal_path.display(), wal_err));
+                        rollback_errors.push(format!(
+                            "unlink WAL {}: {}",
+                            wal_path.display(),
+                            wal_err
+                        ));
                     }
                     if let Err(shm_err) = unlink_file_at_destination_with_trusted_ancestor_uid(
                         &shm_path,
@@ -3271,8 +3329,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                         "rollback SHM cleanup",
                     ) {
                         rec_ok = false;
-                        rollback_errors
-                            .push(format!("unlink SHM {}: {}", shm_path.display(), shm_err));
+                        rollback_errors.push(format!(
+                            "unlink SHM {}: {}",
+                            shm_path.display(),
+                            shm_err
+                        ));
                     }
                 }
 
@@ -3338,8 +3399,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                             "rolling back SQLite WAL sidecar",
                         ) {
                             rec_ok = false;
-                            rollback_errors
-                                .push(format!("restore WAL {}: {}", wal_path.display(), err));
+                            rollback_errors.push(format!(
+                                "restore WAL {}: {}",
+                                wal_path.display(),
+                                err
+                            ));
                         }
                     }
                     if let Some(ref rb_shm) = rec.had_shm_copy {
@@ -3356,8 +3420,11 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
                             "rolling back SQLite SHM sidecar",
                         ) {
                             rec_ok = false;
-                            rollback_errors
-                                .push(format!("restore SHM {}: {}", shm_path.display(), err));
+                            rollback_errors.push(format!(
+                                "restore SHM {}: {}",
+                                shm_path.display(),
+                                err
+                            ));
                         }
                     }
                 }
@@ -3504,8 +3571,9 @@ pub fn execute_staged_restore<Q: ServiceQuiescenceController>(
 
 fn verify_private_journal_or_backup_file(path: &Path, context: &str) -> HostBackupResult<()> {
     reject_if_symlink(path, context)?;
-    let meta = fs::symlink_metadata(path)
-        .map_err(|err| HostBackupError::io(format!("stat {} ({})", path.display(), context), err))?;
+    let meta = fs::symlink_metadata(path).map_err(|err| {
+        HostBackupError::io(format!("stat {} ({})", path.display(), context), err)
+    })?;
     if !meta.file_type().is_file() {
         return Err(HostBackupError::PathValidation {
             path: path.to_path_buf(),
@@ -3557,10 +3625,7 @@ fn verify_private_journal_or_backup_file(path: &Path, context: &str) -> HostBack
         if mode != 0o600 {
             return Err(HostBackupError::PathValidation {
                 path: path.to_path_buf(),
-                reason: format!(
-                    "{} must have mode 0600, found {:04o}",
-                    context, mode
-                ),
+                reason: format!("{} must have mode 0600, found {:04o}", context, mode),
             });
         }
     }
@@ -3569,8 +3634,9 @@ fn verify_private_journal_or_backup_file(path: &Path, context: &str) -> HostBack
 
 fn verify_recovery_dir_owned_by_euid(rb_dir: &Path, context: &str) -> HostBackupResult<()> {
     reject_if_symlink(rb_dir, context)?;
-    let meta = fs::symlink_metadata(rb_dir)
-        .map_err(|err| HostBackupError::io(format!("stat {} ({})", rb_dir.display(), context), err))?;
+    let meta = fs::symlink_metadata(rb_dir).map_err(|err| {
+        HostBackupError::io(format!("stat {} ({})", rb_dir.display(), context), err)
+    })?;
     if !meta.file_type().is_dir() {
         return Err(HostBackupError::PathValidation {
             path: rb_dir.to_path_buf(),
@@ -3918,26 +3984,23 @@ fn load_validated_journal_checkpoint(
     allow_missing_sidecar_if_digest_in: &[String],
 ) -> HostBackupResult<(RollbackFailureJournal, String)> {
     verify_private_journal_or_backup_file(journal_path, "recovery journal")?;
-    let raw_text = read_verified_text_file_nofollow(
-        journal_path,
-        None,
-        16 * 1024 * 1024,
-        "recovery journal",
-    )?
-    .ok_or_else(|| {
-        HostBackupError::InvalidManifest(format!(
-            "recovery journal '{}' does not exist",
-            journal_path.display()
-        ))
-    })?;
+    let raw_text =
+        read_verified_text_file_nofollow(journal_path, None, 16 * 1024 * 1024, "recovery journal")?
+            .ok_or_else(|| {
+                HostBackupError::InvalidManifest(format!(
+                    "recovery journal '{}' does not exist",
+                    journal_path.display()
+                ))
+            })?;
     let actual_file_sha256 = hex::encode(Sha256::digest(raw_text.as_bytes()));
-    let parsed_journal: RollbackFailureJournal = serde_json::from_str(&raw_text).map_err(|err| {
-        HostBackupError::InvalidManifest(format!(
-            "corrupt recovery journal {}: {}",
-            journal_path.display(),
-            err
-        ))
-    })?;
+    let parsed_journal: RollbackFailureJournal =
+        serde_json::from_str(&raw_text).map_err(|err| {
+            HostBackupError::InvalidManifest(format!(
+                "corrupt recovery journal {}: {}",
+                journal_path.display(),
+                err
+            ))
+        })?;
     validate_recovery_journal(&parsed_journal, rb_dir, context)?;
     let internal_digest = parsed_journal
         .journal_digest_sha256
@@ -3962,11 +4025,13 @@ fn load_validated_journal_checkpoint(
             let matches_allowed_stale = allowed_stale_sidecar_digests
                 .iter()
                 .any(|allowed_hex| allowed_hex.eq_ignore_ascii_case(&sidecar_hex))
-                || allow_missing_sidecar_if_digest_in.iter().any(|allowed_hex| {
-                    allowed_hex.eq_ignore_ascii_case(&actual_file_sha256)
-                        || (!internal_digest.is_empty()
-                            && allowed_hex.eq_ignore_ascii_case(&internal_digest))
-                });
+                || allow_missing_sidecar_if_digest_in
+                    .iter()
+                    .any(|allowed_hex| {
+                        allowed_hex.eq_ignore_ascii_case(&actual_file_sha256)
+                            || (!internal_digest.is_empty()
+                                && allowed_hex.eq_ignore_ascii_case(&internal_digest))
+                    });
             if !matches_allowed_stale {
                 return Err(HostBackupError::ChecksumMismatch {
                     artifact: journal_path.display().to_string(),
@@ -4012,7 +4077,10 @@ fn check_journal_metadata_matches_provenance(
         )));
     }
     if rb_journal.generation > prov_journal.generation
-        || prov_journal.generation.saturating_sub(rb_journal.generation) > 1
+        || prov_journal
+            .generation
+            .saturating_sub(rb_journal.generation)
+            > 1
     {
         return Err(HostBackupError::InvalidManifest(format!(
             "recovery journal generation {} is inconsistent with protected provenance generation {}",
@@ -4080,10 +4148,8 @@ pub fn recover_interrupted_restore_with_context<Q: ServiceQuiescenceController>(
     reject_if_symlink(backup_dir, "backup_dir")?;
     open_or_create_dir_nofollow(backup_dir, 0o700, "backup_dir")?;
 
-    let provenance_dir = resolve_recovery_provenance_dir(
-        &validated_caller_root,
-        context.provenance_dir.as_deref(),
-    );
+    let provenance_dir =
+        resolve_recovery_provenance_dir(&validated_caller_root, context.provenance_dir.as_deref());
 
     let mut recovered_dirs = Vec::new();
     for entry in fs::read_dir(backup_dir)
@@ -4594,7 +4660,9 @@ pub fn execute_coordinated_restore(
                     continue;
                 }
 
-                let entry_kind = manifest.entries.iter()
+                let entry_kind = manifest
+                    .entries
+                    .iter()
                     .find(|manifest_entry| Path::new(&manifest_entry.relative_path) == norm_rel)
                     .map(|manifest_entry| manifest_entry.kind);
                 let (dest_path, _) = plan_single_destination_with_options(
@@ -4722,7 +4790,8 @@ pub fn execute_coordinated_restore(
                             return Err(HostBackupError::IncompatibleVersion {
                                 backup_version: format!("sqlite_user_version={}", uv),
                                 host_version: format!("max_sqlite_user_version={}", max_uv),
-                                reason: "SQLite snapshot user_version exceeds host maximum".to_string(),
+                                reason: "SQLite snapshot user_version exceeds host maximum"
+                                    .to_string(),
                             });
                         }
                     }
@@ -4844,7 +4913,9 @@ pub fn execute_coordinated_restore(
                 let expected_sha = manifest
                     .entries
                     .iter()
-                    .find(|e| e.relative_path == filename || e.kind == BackupTargetKind::SqliteSnapshot)
+                    .find(|e| {
+                        e.relative_path == filename || e.kind == BackupTargetKind::SqliteSnapshot
+                    })
                     .map(|e| e.sha256.as_str())
                     .or_else(|| manifest.sqlite_snapshot.as_ref().map(|s| s.sha256.as_str()));
                 if let Some(exp_sha) = expected_sha {

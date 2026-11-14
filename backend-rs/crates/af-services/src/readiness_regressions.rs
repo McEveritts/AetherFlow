@@ -196,10 +196,7 @@ async fn invalidated_in_flight_probes_cannot_repopulate_the_cache() {
         return;
     }
     let fixture = Fixture::new();
-    let sock_name = format!(
-        "ic-{}.sock",
-        &uuid::Uuid::new_v4().to_string()[..8]
-    );
+    let sock_name = format!("ic-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]);
     let candidate = env::var_os("TMPDIR")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)

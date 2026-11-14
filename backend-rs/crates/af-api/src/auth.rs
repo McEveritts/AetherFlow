@@ -127,31 +127,35 @@ pub(crate) fn load_active_human_subject(
             "SELECT id, COALESCE(username, ''), 'user', 0 FROM users WHERE id = ?1"
         }
     };
-    let row = if column_exists(conn, "users", "username")
-        .map_err(|_| SubjectStatusError::DbError)?
-    {
-        conn.query_row(sql, params![user_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })
-        .optional()
-        .map_err(|_| SubjectStatusError::DbError)?
-    } else {
-        let role_sql = if has_role {
-            "SELECT id, COALESCE(role, 'user') FROM users WHERE id = ?1"
+    let row =
+        if column_exists(conn, "users", "username").map_err(|_| SubjectStatusError::DbError)? {
+            conn.query_row(sql, params![user_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()
+            .map_err(|_| SubjectStatusError::DbError)?
         } else {
-            "SELECT id, 'user' FROM users WHERE id = ?1"
+            let role_sql = if has_role {
+                "SELECT id, COALESCE(role, 'user') FROM users WHERE id = ?1"
+            } else {
+                "SELECT id, 'user' FROM users WHERE id = ?1"
+            };
+            conn.query_row(role_sql, params![user_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    String::new(),
+                    r.get::<_, String>(1)?,
+                    0i64,
+                ))
+            })
+            .optional()
+            .map_err(|_| SubjectStatusError::DbError)?
         };
-        conn.query_row(role_sql, params![user_id], |r| {
-            Ok((r.get::<_, i64>(0)?, String::new(), r.get::<_, String>(1)?, 0i64))
-        })
-        .optional()
-        .map_err(|_| SubjectStatusError::DbError)?
-    };
 
     let Some((id, username, role, sessions_revoked_after)) = row else {
         return Err(SubjectStatusError::MissingOrPlugin);
@@ -501,15 +505,21 @@ pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> 
             let Some(grace) = check_rotation_grace(jti).filter(|g| g.user_id == user_id) else {
                 return true;
             };
-            if grace.successor_jti.is_empty() {
+            let leaf_jti = resolve_current_session_jti(&grace.successor_jti);
+            if grace.successor_jti.is_empty() || leaf_jti.is_empty() {
                 return true;
             }
-            match af_db::token_revocation_status(&grace.successor_jti) {
-                Ok(false) => false,
-                Ok(true) | Err(_) => {
-                    evict_rotation_grace_for_family(&grace.family_id, jti);
-                    true
-                }
+            let direct_ok = matches!(
+                af_db::token_revocation_status(&grace.successor_jti),
+                Ok(false)
+            );
+            let leaf_ok = leaf_jti == grace.successor_jti
+                || matches!(af_db::token_revocation_status(&leaf_jti), Ok(false));
+            if direct_ok && leaf_ok {
+                false
+            } else {
+                evict_rotation_grace_for_family(&grace.family_id, jti);
+                true
             }
         }
     }
@@ -518,8 +528,10 @@ pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> 
 pub(crate) fn evict_rotation_grace_for_family(family_id: &str, target_jti: &str) {
     if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
         map.retain(|old_jti, entry| {
+            let leaf = resolve_current_session_jti(&entry.successor_jti);
             old_jti != target_jti
                 && entry.successor_jti != target_jti
+                && (target_jti.is_empty() || leaf != target_jti)
                 && (family_id.is_empty() || entry.family_id != family_id)
         });
     }
@@ -568,7 +580,10 @@ pub(crate) fn revoke_all_user_credentials_in_tx(
                 }
             }
         }
-        tx.execute("DELETE FROM active_sessions WHERE user_id = ?1", params![user_id])?;
+        tx.execute(
+            "DELETE FROM active_sessions WHERE user_id = ?1",
+            params![user_id],
+        )?;
     }
 
     if table_exists(tx, "oidc_refresh_tokens").unwrap_or(false)
@@ -672,23 +687,16 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
     };
 
     let jti = claims.jti.clone();
-    let revocation = blocking_auth_work(move || af_db::token_revocation_status(&jti)).await;
-    let Ok(Ok(revoked)) = revocation else {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "SESSION_EXPIRED",
-            "Unable to validate session",
-        );
-    };
-    if revoked
-        && !check_rotation_grace(&claims.jti).is_some_and(|g| g.user_id == claims.user_id)
-    {
+    let check_uid = claims.user_id;
+    let still_revoked =
+        blocking_auth_work(move || is_session_token_revoked_beyond_grace(&jti, check_uid)).await;
+    let Ok(false) = still_revoked else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "SESSION_EXPIRED",
             "Session revoked",
         );
-    }
+    };
 
     // Enforce scoped RBAC if this JWT is a plugin-scoped token (`plugin_id` or `plugin_scopes` set)
     if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
@@ -975,10 +983,10 @@ fn revoke_session_family_in_tx(
             let mut stmt = tx.prepare(
                 "SELECT jti FROM active_sessions WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
             )?;
-            let rows = stmt.query_map(
-                params![user_id, family_id, target_jti, resolved_jti],
-                |r| r.get::<_, String>(0),
-            )?;
+            let rows = stmt
+                .query_map(params![user_id, family_id, target_jti, resolved_jti], |r| {
+                    r.get::<_, String>(0)
+                })?;
             for row in rows {
                 let found = row?;
                 if !found.is_empty() && !jtis_to_revoke.contains(&found) {
@@ -993,7 +1001,8 @@ fn revoke_session_family_in_tx(
     }
 
     if table_exists(tx, "active_sessions").unwrap_or(false) {
-        if !family_id.is_empty() && column_exists(tx, "active_sessions", "family_id").unwrap_or(false)
+        if !family_id.is_empty()
+            && column_exists(tx, "active_sessions", "family_id").unwrap_or(false)
         {
             tx.execute(
                 "DELETE FROM active_sessions WHERE user_id = ?1 AND family_id = ?2",
@@ -1283,15 +1292,8 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
             ))
         },
     );
-    let Ok((
-        username,
-        email,
-        avatar_url,
-        role,
-        current_password_hash,
-        google_id,
-        totp_enabled,
-    )) = current_row
+    let Ok((username, email, avatar_url, role, current_password_hash, google_id, totp_enabled)) =
+        current_row
     else {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -1467,6 +1469,7 @@ fn logout_blocking(req: Request) -> Response {
             af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
             evict_rotation_grace_for_family(&family_id, jti);
         }
+        evict_rotation_grace_for_family(&family_id, &auth_user.jti);
         drop(conn);
     }
     let cookie = build_set_cookie(
@@ -1611,7 +1614,8 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
     }
 
     let has_family = column_exists(&tx, "active_sessions", "family_id").unwrap_or(false);
-    let existing_family_opt: Option<String> = if table_exists(&tx, "active_sessions").unwrap_or(false)
+    let existing_family_opt: Option<String> = if table_exists(&tx, "active_sessions")
+        .unwrap_or(false)
     {
         if has_family {
             tx.query_row(
@@ -1649,14 +1653,17 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         if let Some(grace_entry) =
             check_rotation_grace(&claims.jti).filter(|g| g.user_id == subj.user_id)
         {
-            let successor_revoked =
-                af_db::token_revocation_status_with_conn(&tx, &grace_entry.successor_jti)
-                    .unwrap_or(true);
+            let leaf_succ = resolve_current_session_jti(&grace_entry.successor_jti);
+            let successor_revoked = leaf_succ.is_empty()
+                || af_db::token_revocation_status_with_conn(&tx, &grace_entry.successor_jti)
+                    .unwrap_or(true)
+                || (leaf_succ != grace_entry.successor_jti
+                    && af_db::token_revocation_status_with_conn(&tx, &leaf_succ).unwrap_or(true));
             let successor_active = table_exists(&tx, "active_sessions").unwrap_or(false)
                 && tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2)",
-                        params![grace_entry.successor_jti, subj.user_id],
+                        params![leaf_succ, subj.user_id],
                         |r| r.get::<_, bool>(0),
                     )
                     .unwrap_or(false);
@@ -1697,63 +1704,78 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
                     .ok()
                     .flatten();
         }
-        if table_exists(&tx, "active_sessions").unwrap_or(false) {
-            if resolved_family.is_none() && has_family {
-                resolved_family = tx
-                    .query_row(
-                        "SELECT COALESCE(family_id, '') FROM active_sessions \
-                         WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3 OR family_id = ?2) LIMIT 1",
-                        params![subj.user_id, claims.jti, resolved_successor],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-            }
-            let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
-            if has_family {
-                if let Ok(mut stmt) = tx.prepare(
-                    "SELECT jti FROM active_sessions \
-                     WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
-                ) {
-                    if let Ok(rows) = stmt.query_map(
+        let wipe_outcome = (|| -> anyhow::Result<()> {
+            if table_exists(&tx, "active_sessions")? {
+                if resolved_family.is_none() && has_family {
+                    resolved_family = tx
+                        .query_row(
+                            "SELECT COALESCE(family_id, '') FROM active_sessions \
+                             WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3 OR family_id = ?2) LIMIT 1",
+                            params![subj.user_id, claims.jti, resolved_successor],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                }
+                let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
+                if has_family {
+                    let mut stmt = tx.prepare(
+                        "SELECT jti FROM active_sessions \
+                         WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
+                    )?;
+                    let rows = stmt.query_map(
                         params![subj.user_id, target_family, claims.jti, resolved_successor],
                         |r| r.get::<_, String>(0),
-                    ) {
-                        for jti in rows.flatten() {
+                    )?;
+                    for row in rows {
+                        let jti = row?;
+                        if !jti.is_empty() {
                             wiped_jtis.push(jti);
                         }
                     }
+                    drop(stmt);
+                    tx.execute(
+                        "DELETE FROM active_sessions \
+                         WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
+                        params![subj.user_id, target_family, claims.jti, resolved_successor],
+                    )?;
+                } else {
+                    if resolved_successor != claims.jti {
+                        wiped_jtis.push(resolved_successor.clone());
+                    }
+                    tx.execute(
+                        "DELETE FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3)",
+                        params![subj.user_id, claims.jti, resolved_successor],
+                    )?;
                 }
-                let _ = tx.execute(
-                    "DELETE FROM active_sessions \
-                     WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
-                    params![subj.user_id, target_family, claims.jti, resolved_successor],
-                );
-            } else {
-                if resolved_successor != claims.jti {
-                    wiped_jtis.push(resolved_successor.clone());
+                for jti in &wiped_jtis {
+                    af_db::revoke_token_in_tx(&tx, jti, MIN_REVOCATION_TTL)?;
+                    af_db::record_revoked_token_lineage_in_tx(
+                        &tx,
+                        jti,
+                        target_family,
+                        subj.user_id,
+                    )?;
                 }
-                let _ = tx.execute(
-                    "DELETE FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3)",
-                    params![subj.user_id, claims.jti, resolved_successor],
-                );
             }
-            for jti in &wiped_jtis {
-                let _ = af_db::revoke_token_in_tx(&tx, jti, MIN_REVOCATION_TTL);
-            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if wipe_outcome.is_err() {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke compromised session family",
+            );
         }
-        if tx.commit().is_ok() {
-            for jti in &wiped_jtis {
-                af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
-            }
-            let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
-            evict_rotation_grace_for_family(target_family, &claims.jti);
-            for jti in &wiped_jtis {
-                evict_rotation_grace_for_family(target_family, jti);
-            }
+        for jti in &wiped_jtis {
+            af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
+        }
+        let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
+        evict_rotation_grace_for_family(target_family, &claims.jti);
+        for jti in &wiped_jtis {
+            evict_rotation_grace_for_family(target_family, jti);
         }
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -1784,11 +1806,29 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     };
 
-    let _ = af_db::record_revoked_token_lineage_in_tx(&tx, &claims.jti, &family_id, subj.user_id);
-    let _ = tx.execute(
-        "DELETE FROM active_sessions WHERE jti = ?1",
-        params![claims.jti],
-    );
+    if af_db::record_revoked_token_lineage_in_tx(&tx, &claims.jti, &family_id, subj.user_id)
+        .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to record token rotation lineage",
+        );
+    }
+    if table_exists(&tx, "active_sessions").unwrap_or(false)
+        && tx
+            .execute(
+                "DELETE FROM active_sessions WHERE jti = ?1",
+                params![claims.jti],
+            )
+            .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to retire rotated session",
+        );
+    }
 
     if tx.commit().is_err() {
         return api_error(
@@ -2167,7 +2207,11 @@ pub(crate) fn store_recovery_codes(
     Ok(())
 }
 
-pub(crate) fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &str) -> bool {
+pub(crate) fn validate_recovery_code(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    raw_code: &str,
+) -> bool {
     let normalized = raw_code.trim().to_uppercase();
     if normalized.is_empty() {
         return false;
@@ -2321,7 +2365,10 @@ pub async fn verify_2fa(req: Request) -> Response {
     let recovery_codes = generate_recovery_codes();
     let result = (|| -> anyhow::Result<()> {
         let conn = af_db::get_conn()?;
-        let transaction = conn.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let affected = transaction.execute(
             "UPDATE users SET totp_secret = ?1, totp_enabled = 1, last_totp_step = ?3 WHERE id = ?2 AND COALESCE(totp_enabled, 0) = 0",
             params![enc_secret, auth_user.user_id, verified_step],
@@ -2566,7 +2613,8 @@ fn verify_mfa_factor_outcome(
     token: &str,
     code: &str,
 ) -> anyhow::Result<MfaVerifyOutcome> {
-    let transaction = conn.unchecked_transaction()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     redeem_mfa_challenge_in_tx(transaction, token, code, None)
 }
 
@@ -3474,7 +3522,10 @@ mod tests {
             plugin_id: None,
             plugin_scopes: Vec::new(),
         });
-        assert_eq!(disable_2fa(pw_only_req).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            disable_2fa(pw_only_req).await.status(),
+            StatusCode::BAD_REQUEST
+        );
 
         let mut req = Request::builder()
             .method("POST")
@@ -3654,7 +3705,14 @@ mod tests {
         // 2. Pending MFA challenge issued at epoch 50 MUST fail after sessions_revoked_after advances to 60
         {
             let conn = af_db::get_conn().unwrap();
-            af_db::store_mfa_challenge_in_tx(&conn, "r3-epoch-mfa", 994, 50, Duration::from_secs(300)).unwrap();
+            af_db::store_mfa_challenge_in_tx(
+                &conn,
+                "r3-epoch-mfa",
+                994,
+                50,
+                Duration::from_secs(300),
+            )
+            .unwrap();
             conn.execute(
                 "UPDATE users SET sessions_revoked_after = 60 WHERE id = 994",
                 [],

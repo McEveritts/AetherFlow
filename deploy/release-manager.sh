@@ -563,7 +563,14 @@ if [[ "${DRY_RUN}" == true ]]; then
 fi
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-mkdir -p "$(dirname "${LOG_FILE}")"
+if [[ "${LOG_FILE}" != "/dev/null" ]]; then
+    _log_parent="$(dirname "${LOG_FILE}")"
+    if [[ -L "${_log_parent}" || -L "${LOG_FILE}" || ( -e "${LOG_FILE}" && ! -f "${LOG_FILE}" ) ]]; then
+        echo "[FATAL] Refusing unsafe or symlinked LOG_FILE path: ${LOG_FILE}" >&2
+        exit 4
+    fi
+    mkdir -p "${_log_parent}"
+fi
 
 json_escape() {
     local s="$1"
@@ -575,6 +582,46 @@ json_escape() {
     printf '%s' "${s}"
 }
 
+append_log_line_locked() {
+    local line="$1"
+    [[ "${LOG_FILE}" != "/dev/null" ]] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${LOG_FILE}" "${line}" <<'PY' || return 1
+import fcntl, os, stat, sys
+
+target, line = sys.argv[1], sys.argv[2]
+parent = os.path.dirname(target) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(target, flags, 0o640)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise SystemExit(1)
+        data = (line + "\n").encode("utf-8", errors="replace")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PY
+        return 0
+    fi
+    if [[ -L "${LOG_FILE}" ]]; then
+        return 1
+    fi
+    printf '%s\n' "${line}" >> "${LOG_FILE}"
+}
+
 log() {
     local level="$1"
     shift
@@ -584,7 +631,8 @@ log() {
     esc_level="$(json_escape "${level}")"
     esc_msg="$(json_escape "${msg}")"
     local line="{\"ts\":\"${ts}\",\"level\":\"${esc_level}\",\"msg\":\"${esc_msg}\"}"
-    echo "${line}" | tee -a "${LOG_FILE}"
+    printf '%s\n' "${line}"
+    append_log_line_locked "${line}" || true
 }
 
 log_info()  { log "INFO"  "$@"; }
@@ -949,11 +997,39 @@ is_v4_or_newer_release_tag() {
     [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
+resolve_github_token_for_url() {
+    local url="$1"
+    [[ "${url}" == https://api.github.com/* || "${url}" == https://github.com/* ]] || return 1
+    local tok="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
+    [[ -n "${tok}" ]] || return 1
+    printf '%s' "${tok}"
+}
+
+github_https_curl() {
+    local max_bytes="$1"
+    local url="${!#}"
+    shift
+    local -a extra_args=("$@")
+    local hdr_file=""
+    local gh_tok=""
+    if gh_tok="$(resolve_github_token_for_url "${url}" 2>/dev/null)"; then
+        hdr_file="$(umask 0077; mktemp "${TMPDIR:-/tmp}/af-curl-hdr.XXXXXX")" || hdr_file=""
+        if [[ -n "${hdr_file}" ]]; then
+            printf 'Authorization: Bearer %s\n' "${gh_tok}" > "${hdr_file}"
+            extra_args=(-H "@${hdr_file}" "${extra_args[@]}")
+        fi
+    fi
+    local rc=0
+    curl --proto '=https' --max-filesize "${max_bytes}" "${extra_args[@]}" || rc=$?
+    [[ -n "${hdr_file}" ]] && rm -f "${hdr_file}"
+    return "${rc}"
+}
+
 resolve_release_tag() {
     local channel="$1"
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
     local releases_json
-    releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
+    releases_json="$(github_https_curl 16777216 -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
 
     if [[ "${channel}" == "nightly" ]]; then
         if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
@@ -987,7 +1063,7 @@ except Exception:
 
     if [[ -z "${releases_json}" ]]; then
         local latest_url latest_tag
-        latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
+        latest_url="$(github_https_curl 1048576 -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
         latest_tag="${latest_url##*/}"
         [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]] || return 1
         printf '%s\n' "${latest_tag}"
@@ -1113,13 +1189,13 @@ pull_prebuilt_artifact() {
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/af-release-XXXXXX")" || return 1
 
     log_info "Downloading pre-built release ${tag} (${ARTIFACT_NAME})..."
-    if ! curl -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
+    if ! github_https_curl 268435456 -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
         rm -rf "${tmp_dir}"
         return 1
     fi
 
     log_info "Downloading SHA-256 manifest (${CHECKSUM_NAME})..."
-    if ! curl -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
+    if ! github_https_curl 1048576 -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
         log_error "Missing SHA256SUMS manifest for release ${tag}. Refusing unverified binary."
         rm -rf "${tmp_dir}"
         return 1
@@ -1145,14 +1221,25 @@ pull_prebuilt_artifact() {
             --tag "${tag}"
             --channel "${CHANNEL}"
         )
-        if [[ -n "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" ]]; then
-            prov_args+=(--bundle-file "${AETHERFLOW_PROVENANCE_BUNDLE_FILE}")
+        local effective_bundle_file="${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}"
+        if [[ -z "${effective_bundle_file}" ]]; then
+            local candidate_bundle="${tmp_dir}/${ARTIFACT_NAME}.sigstore.json"
+            if github_https_curl 8388608 -fsSL --max-time 30 -o "${candidate_bundle}" "${base_url}/${ARTIFACT_NAME}.sigstore.json" 2>/dev/null && [[ -s "${candidate_bundle}" ]]; then
+                effective_bundle_file="${candidate_bundle}"
+                log_info "Using release-attached Sigstore bundle (${ARTIFACT_NAME}.sigstore.json)."
+            fi
         fi
-        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" >> "${LOG_FILE}" 2>&1; then
+        if [[ -n "${effective_bundle_file}" ]]; then
+            prov_args+=(--bundle-file "${effective_bundle_file}")
+        fi
+        local prov_out=""
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
+            [[ -n "${prov_out}" ]] && log_warn "Provenance verifier output: ${prov_out}"
             log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
             rm -rf "${tmp_dir}"
             return 1
         fi
+        [[ -n "${prov_out}" ]] && log_info "Provenance verifier: ${prov_out}"
         log_info "Sigstore build provenance OK for ${tag}"
     fi
 
@@ -1619,22 +1706,33 @@ restart_systemd_units() {
             return 1
         fi
         mkdir -p "${SYSTEMD_UNITS_DST}"
-        local dropin_unit dropin_dir dropin_dest tmp_dropin dropin_payload
+        local dropin_unit dropin_dir dropin_dest defaults_dest tmp_dropin tmp_defaults dropin_payload defaults_payload
         for dropin_unit in "${dropin_units[@]}"; do
             dropin_dir="${SYSTEMD_UNITS_DST}/${dropin_unit}.d"
+            defaults_dest="${dropin_dir}/05-aetherflow-unit-defaults.conf"
             dropin_dest="${dropin_dir}/10-aetherflow-hardening.conf"
-            if [[ -L "${dropin_dir}" || -L "${dropin_dest}" ]]; then
+            if [[ -L "${dropin_dir}" || -L "${defaults_dest}" || -L "${dropin_dest}" ]]; then
                 printf 'Refusing symlinked systemd drop-in path: %s\n' "${dropin_dest}" >&2
                 return 1
             fi
             mkdir -p "${dropin_dir}"
             chmod 0755 "${dropin_dir}"
+            if [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
+                defaults_payload=$'[Service]\nTimeoutStartSec=120s\nTimeoutStopSec=30s\n'
+            else
+                defaults_payload=$'[Service]\nRestart=on-failure\nRestartSec=3s\nTimeoutStopSec=30s\n'
+            fi
             if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
                 dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
             elif [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
                 dropin_payload=$'[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n'
             else
                 dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'
+            fi
+            tmp_defaults="$(mktemp "${dropin_dir}/.05-aetherflow-unit-defaults.conf.tmp.XXXXXX")" || return 1
+            if ! printf '%s' "${defaults_payload}" > "${tmp_defaults}" || ! chmod 0644 "${tmp_defaults}" || ! mv -f "${tmp_defaults}" "${defaults_dest}"; then
+                rm -f "${tmp_defaults}"
+                return 1
             fi
             tmp_dropin="$(mktemp "${dropin_dir}/.10-aetherflow-hardening.conf.tmp.XXXXXX")" || return 1
             if ! printf '%s' "${dropin_payload}" > "${tmp_dropin}" || ! chmod 0644 "${tmp_dropin}" || ! mv -f "${tmp_dropin}" "${dropin_dest}"; then
@@ -1670,7 +1768,7 @@ restart_systemd_units() {
         pm2 delete aetherflow-frontend aetherflow-api 2>/dev/null || true
     fi
 
-    systemctl enable aetherflow-runner.service aetherflow-api.service >> "${LOG_FILE}" 2>&1 || true
+    systemctl enable aetherflow-runner.service aetherflow-api.service >/dev/null 2>&1 || true
     systemctl restart aetherflow-runner.service
     systemctl restart aetherflow-api.service
 }
@@ -1728,6 +1826,21 @@ health_probe() {
         if [[ "${http_code}" == "200" ]]; then
             status="$(parse_health_status "${body}" || true)"
             if [[ "${status}" == "ready" || "${status}" == "ok" ]]; then
+                if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" && -L "${CURRENT_LINK}" ]]; then
+                    local expected_release_dir main_pid proc_exe
+                    expected_release_dir="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                    main_pid="$(systemctl show -p MainPID --value aetherflow-api.service 2>/dev/null | tr -d '[:space:]' || true)"
+                    if [[ -n "${expected_release_dir}" && "${main_pid}" =~ ^[1-9][0-9]*$ && -e "/proc/${main_pid}/exe" ]]; then
+                        proc_exe="$(readlink -f "/proc/${main_pid}/exe" 2>/dev/null || true)"
+                        proc_exe="${proc_exe% (deleted)}"
+                        if [[ -n "${proc_exe}" && "${proc_exe}" != "${expected_release_dir}/"* ]]; then
+                            log_warn "Health probe HTTP 200 but MainPID ${main_pid} exe=${proc_exe} does not match ${expected_release_dir}; retrying."
+                            sleep "${HEALTH_INTERVAL}"
+                            attempt=$((attempt + 1))
+                            continue
+                        fi
+                    fi
+                fi
                 log_info "Health probe PASSED on attempt ${attempt}/${HEALTH_RETRIES} (status=${status})"
                 return 0
             fi
@@ -1893,6 +2006,9 @@ rollback() {
             fi
         else
             restart_systemd_units
+            if ! systemctl is-active --quiet aetherflow-runner.service || ! systemctl is-active --quiet aetherflow-api.service; then
+                log_error "Post-rollback systemd unit activation check failed on ${previous_target}; manual operator inspection required."
+            fi
         fi
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="

@@ -18,7 +18,15 @@ PACKAGE_NAME="sabnzbd"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8085}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+mkdir -p /install /run/lock
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
 exec 9>/run/lock/aetherflow-sabnzbd.lock
 flock -n 9 || { log_error "Another SABnzbd installation is running."; exit 1; }
 
@@ -72,7 +80,9 @@ cleanup() {
             systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start sabnzbd >> "$LOGFILE" 2>&1 || restore_failed=true
+            if ! systemctl start sabnzbd >> "$LOGFILE" 2>&1 || ! systemctl is-active --quiet sabnzbd 2>/dev/null; then
+                restore_failed=true
+            fi
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
@@ -110,6 +120,7 @@ report_progress 55 "Downloading and extracting SABnzbd ${SAB_VERSION} into stagi
 BUILD_DIR="$(mktemp -d /opt/.sabnzbd-build.XXXXXX)"
 TMP_TAR=$(mktemp /tmp/sabnzbd-XXXXXX.tar.gz)
 download_file "$SAB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_validate_tar_archive "$TMP_TAR"
 tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
 test -s "$BUILD_DIR/SABnzbd.py" || { log_error "Failed to verify SABnzbd archive extraction"; exit 1; }
@@ -188,7 +199,7 @@ SAB_BIND_HOST="$(retained_bind_address /var/lib/sabnzbd/sabnzbd.ini '^\s*host\s*
 if [[ "$SAB_BIND_HOST" == *:* && "$SAB_BIND_HOST" != \[*\] ]]; then
     SAB_BIND_HOST="[$SAB_BIND_HOST]"
 fi
-sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_HOST@/${SAB_BIND_HOST}/g" <<'EOF' > /etc/systemd/system/sabnzbd.service
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_HOST@/${SAB_BIND_HOST}/g" <<'EOF' | write_config_file /etc/systemd/system/sabnzbd.service 0644
 [Unit]
 Description=SABnzbd Usenet Client
 After=network-online.target

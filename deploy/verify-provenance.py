@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SAFE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -94,22 +95,60 @@ def _resolve_github_token() -> str | None:
     return None
 
 
+def _is_trusted_github_https_url(candidate_url: str) -> bool:
+    parsed = urllib.parse.urlsplit(candidate_url)
+    if parsed.scheme.lower() != "https":
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        host in ("api.github.com", "github.com")
+        or host.endswith(".githubusercontent.com")
+    )
+
+
+class _StripAuthCrossOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        orig = urllib.parse.urlsplit(req.full_url)
+        dest = urllib.parse.urlsplit(redirected.full_url)
+        same_https_origin = (
+            orig.scheme.lower() == "https"
+            and dest.scheme.lower() == "https"
+            and (orig.hostname or "").lower() == (dest.hostname or "").lower()
+            and (orig.port or 443) == (dest.port or 443)
+        )
+        if not same_https_origin or not _is_trusted_github_https_url(redirected.full_url):
+            for header_dict in (redirected.headers, redirected.unredirected_hdrs):
+                for key in list(header_dict.keys()):
+                    if key.lower() == "authorization":
+                        header_dict.pop(key, None)
+        return redirected
+
+
 def _fetch_attestations(api_base_url: str, repo: str, digest: str) -> list[dict]:
     url = f"{api_base_url.rstrip('/')}/repos/{repo}/attestations/sha256:{digest}?per_page=30"
+    parsed_url = urllib.parse.urlsplit(url)
+    if parsed_url.scheme.lower() != "https":
+        raise ProvenanceVerificationError(
+            f"refusing non-HTTPS provenance API URL: {url!r}"
+        )
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "AetherFlow-ProvenanceVerifier/4.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     token = _resolve_github_token()
-    if token:
+    if token and _is_trusted_github_https_url(url):
         headers["Authorization"] = f"Bearer {token}"
 
+    opener = urllib.request.build_opener(_StripAuthCrossOriginRedirectHandler())
     last_exc: Exception | None = None
     for attempt in range(3):
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with opener.open(req, timeout=30) as resp:
                 raw = resp.read(16 * 1024 * 1024 + 1)
                 if len(raw) > 16 * 1024 * 1024:
                     raise ProvenanceVerificationError("attestation response exceeds 16 MiB limit")
@@ -735,12 +774,19 @@ def verify_single_bundle(
     sigs = dsse.get("signatures")
     if not isinstance(payload_b64, str) or not isinstance(sigs, list) or not sigs:
         raise ProvenanceVerificationError("missing DSSE payload or signatures")
-    sig_b64 = sigs[0].get("sig") if isinstance(sigs[0], dict) else None
-    if not isinstance(sig_b64, str) or not sig_b64:
+    candidate_sigs: list[tuple[str, bytes]] = []
+    for sig_entry in sigs:
+        if isinstance(sig_entry, dict):
+            sb64 = sig_entry.get("sig")
+            if isinstance(sb64, str) and sb64:
+                try:
+                    candidate_sigs.append((sb64, base64.b64decode(sb64)))
+                except Exception:
+                    continue
+    if not candidate_sigs:
         raise ProvenanceVerificationError("missing DSSE signature bytes")
 
     raw_payload = base64.b64decode(payload_b64)
-    raw_sig = base64.b64decode(sig_b64)
     payload_sha256 = hashlib.sha256(raw_payload).hexdigest()
 
     # 2. Extract leaf & extra intermediate certificates
@@ -769,31 +815,35 @@ def verify_single_bundle(
 
         leaf_der = base64.b64decode(leaf_b64)
 
-        # 3a. Verify any RFC 3161 signed timestamps against pinned Sigstore TSA chain
-        verified_tsa_times = _verify_rfc3161_timestamps(
-            td, vm, raw_sig, tsa_roots_b64=tsa_roots_b64, tsa_leaves_b64=tsa_leaves_b64
-        )
-
-        # 3b. Verify Rekor transparency log entry (v1 or v2) + authenticated signing timestamps
+        # 3a & 3b. Evaluate candidate DSSE signatures against RFC 3161 & Rekor transparency log
         authenticated_times: list[int] | None = None
+        verified_raw_sigs: list[bytes] = []
         last_tlog_err: Exception | None = None
-        for entry in tlog_entries:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                authenticated_times = _verify_rekor_tlog_entry(
-                    td,
-                    entry,
-                    payload_sha256,
-                    sig_b64,
-                    leaf_der,
-                    verified_tsa_times,
-                    rekor_keys=rekor_keys,
-                )
-                break
-            except Exception as exc:
-                last_tlog_err = exc
-        if not authenticated_times:
+        for cand_sig_b64, cand_raw_sig in candidate_sigs:
+            verified_tsa_times = _verify_rfc3161_timestamps(
+                td, vm, cand_raw_sig, tsa_roots_b64=tsa_roots_b64, tsa_leaves_b64=tsa_leaves_b64
+            )
+            for entry in tlog_entries:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    times = _verify_rekor_tlog_entry(
+                        td,
+                        entry,
+                        payload_sha256,
+                        cand_sig_b64,
+                        leaf_der,
+                        verified_tsa_times,
+                        rekor_keys=rekor_keys,
+                    )
+                    if times:
+                        if authenticated_times is None:
+                            authenticated_times = times
+                        verified_raw_sigs.append(cand_raw_sig)
+                        break
+                except Exception as exc:
+                    last_tlog_err = exc
+        if not authenticated_times or not verified_raw_sigs:
             raise ProvenanceVerificationError(
                 f"no valid Rekor transparency log entry: {last_tlog_err}"
             )
@@ -932,9 +982,21 @@ def verify_single_bundle(
             + f" {len(raw_payload)} ".encode("ascii")
             + raw_payload
         )
-        _verify_signature_with_openssl(
-            td, pub_res.stdout, "PKIX_ECDSA_P256_SHA_256", pae, raw_sig, "dsse-pae"
-        )
+        pae_verified = False
+        last_pae_err: Exception | None = None
+        for cand_raw_sig in verified_raw_sigs:
+            try:
+                _verify_signature_with_openssl(
+                    td, pub_res.stdout, "PKIX_ECDSA_P256_SHA_256", pae, cand_raw_sig, "dsse-pae"
+                )
+                pae_verified = True
+                break
+            except Exception as exc:
+                last_pae_err = exc
+        if not pae_verified:
+            raise ProvenanceVerificationError(
+                f"DSSE PAE signature verification failed: {last_pae_err}"
+            )
 
     # 7. Verify SLSA v1 in-toto statement, subject binding, & workflow ref/tag policy
     try:

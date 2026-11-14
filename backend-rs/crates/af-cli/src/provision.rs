@@ -61,8 +61,9 @@ fn ensure_dir_no_symlinks(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(unix_mode))
-            .map_err(|error| CliError::io(format!("setting permissions on {}", dir.display()), error))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(unix_mode)).map_err(|error| {
+            CliError::io(format!("setting permissions on {}", dir.display()), error)
+        })?;
     }
     #[cfg(not(unix))]
     {
@@ -93,7 +94,9 @@ fn open_exclusive_private_file(path: &Path, unix_mode: u32, context: &str) -> Cl
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(unix_mode))
-            .map_err(|error| CliError::io(format!("setting permissions on {}", path.display()), error))?;
+            .map_err(|error| {
+                CliError::io(format!("setting permissions on {}", path.display()), error)
+            })?;
     }
     #[cfg(not(unix))]
     {
@@ -145,13 +148,21 @@ fn write_file_atomic_exclusive(
         let mut f = open_exclusive_private_file(&tmp_path, unix_mode, context)?;
         f.write_all(contents).map_err(|e| {
             CliError::io(
-                format!("writing temporary file {} ({})", tmp_path.display(), context),
+                format!(
+                    "writing temporary file {} ({})",
+                    tmp_path.display(),
+                    context
+                ),
                 e,
             )
         })?;
         f.sync_all().map_err(|e| {
             CliError::io(
-                format!("syncing temporary file {} ({})", tmp_path.display(), context),
+                format!(
+                    "syncing temporary file {} ({})",
+                    tmp_path.display(),
+                    context
+                ),
                 e,
             )
         })?;
@@ -233,8 +244,7 @@ pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "bcm",
 ];
 
-static SAFE_STEP_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]{1,31}$").unwrap());
+static SAFE_STEP_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]{1,31}$").unwrap());
 static SAFE_CONF_KEY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$").unwrap());
 
@@ -590,7 +600,10 @@ impl ProvisionStateStore {
         }
         self.write_completed_steps_atomic(&remaining)?;
         for s in &removed {
-            self.append_log(&format!("[REPAIR] Cleared completion state for step '{}'", s))?;
+            self.append_log(&format!(
+                "[REPAIR] Cleared completion state for step '{}'",
+                s
+            ))?;
         }
         Ok(removed)
     }
@@ -829,19 +842,20 @@ impl ProvisionLockGuard {
             lock_path.file_name().unwrap_or_default().to_string_lossy()
         ));
         ensure_no_symlink_ancestors(&guard_path, "provision serialization guard")?;
-        let serialization_guard = af_release::ReleaseLockGuard::acquire(
-            &guard_path, std::time::Duration::ZERO,
-        ).map_err(|error| CliError::PreflightOrIntegrity(format!(
-            "another provisioning operation holds {}: {}", guard_path.display(), error
-        )))?;
+        let serialization_guard =
+            af_release::ReleaseLockGuard::acquire(&guard_path, std::time::Duration::ZERO).map_err(
+                |error| {
+                    CliError::PreflightOrIntegrity(format!(
+                        "another provisioning operation holds {}: {}",
+                        guard_path.display(),
+                        error
+                    ))
+                },
+            )?;
 
         let my_pid = std::process::id();
         let pid_payload = format!("{}\n", my_pid);
-        let tmp_lock = parent.join(format!(
-            ".af-lock-tmp-{}-{}",
-            my_pid,
-            Uuid::new_v4()
-        ));
+        let tmp_lock = parent.join(format!(".af-lock-tmp-{}-{}", my_pid, Uuid::new_v4()));
 
         let mut tmp_file = open_exclusive_private_file(&tmp_lock, 0o600, "temporary lockfile")?;
         if let Err(e) = tmp_file
@@ -886,7 +900,9 @@ impl ProvisionLockGuard {
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if let Err(sym_err) = ensure_no_symlink_ancestors(&lock_path, "provision lockfile") {
+                    if let Err(sym_err) =
+                        ensure_no_symlink_ancestors(&lock_path, "provision lockfile")
+                    {
                         let _ = fs::remove_file(&tmp_lock);
                         return Err(sym_err);
                     }
@@ -1097,12 +1113,7 @@ pub fn safe_overlay_config_file(
                     e,
                 )
             })?;
-            write_file_atomic_exclusive(
-                bak,
-                &existing_bytes,
-                0o600,
-                "overlay user backup file",
-            )?;
+            write_file_atomic_exclusive(bak, &existing_bytes, 0o600, "overlay user backup file")?;
         }
 
         write_file_atomic_exclusive(target_path, &source_bytes, 0o640, "overlay target file")?;
@@ -1441,9 +1452,9 @@ pub fn execute_provision_steps(
     let mut records = Vec::with_capacity(target_steps.len());
 
     for step_id in &target_steps {
-        let desc = catalog_map.get(step_id.as_str()).ok_or_else(|| {
-            CliError::Validation(format!("unknown canonical step {:?}", step_id))
-        })?;
+        let desc = catalog_map
+            .get(step_id.as_str())
+            .ok_or_else(|| CliError::Validation(format!("unknown canonical step {:?}", step_id)))?;
 
         if !dry_run && !is_repair && store.is_step_done(step_id)? {
             records.push(StepExecutionRecord {
@@ -1473,7 +1484,10 @@ pub fn execute_provision_steps(
                         step_id: step_id.clone(),
                         tier: desc.tier,
                         status: StepExecutionStatus::DryRunPlanned,
-                        detail: format!("would execute Rust-native foundation step: {}", desc.summary),
+                        detail: format!(
+                            "would execute Rust-native foundation step: {}",
+                            desc.summary
+                        ),
                     });
                     continue;
                 }
@@ -1491,7 +1505,9 @@ pub fn execute_provision_steps(
     }
 
     let (_, completed_steps_after) = if dry_run {
-        store.read_state().unwrap_or((Some(PROVISION_STATE_VERSION), Vec::new()))
+        store
+            .read_state()
+            .unwrap_or((Some(PROVISION_STATE_VERSION), Vec::new()))
     } else {
         store.read_state()?
     };
@@ -1568,9 +1584,8 @@ fn execute_single_rust_step(
                 )?;
             } else {
                 reject_if_symlink(&bashrc_path, "root .bashrc")?;
-                let content = fs::read_to_string(&bashrc_path).map_err(|e| {
-                    CliError::io(format!("reading {}", bashrc_path.display()), e)
-                })?;
+                let content = fs::read_to_string(&bashrc_path)
+                    .map_err(|e| CliError::io(format!("reading {}", bashrc_path.display()), e))?;
                 if !content.contains("/usr/local/bin") {
                     let mut updated = content;
                     if !updated.ends_with('\n') {
@@ -1597,7 +1612,10 @@ fn execute_single_rust_step(
                     }
                 }
             }
-            Ok("ensured root/.bashrc exists with mode 0640 and /usr/local/bin PATH export".to_string())
+            Ok(
+                "ensured root/.bashrc exists with mode 0640 and /usr/local/bin PATH export"
+                    .to_string(),
+            )
         }
         "checkroot" => {
             if require_root && paths.fs_root == Path::new("/") && !is_effective_root_user() {
@@ -1619,10 +1637,7 @@ fn execute_single_rust_step(
             ensure_no_symlink_ancestors(&paths.os_release_file, "os-release file")?;
             if paths.os_release_file.is_file() {
                 let raw = fs::read_to_string(&paths.os_release_file).map_err(|e| {
-                    CliError::io(
-                        format!("reading {}", paths.os_release_file.display()),
-                        e,
-                    )
+                    CliError::io(format!("reading {}", paths.os_release_file.display()), e)
                 })?;
                 let info = parse_and_validate_os_release(&raw);
                 if !info.supported {
@@ -1632,7 +1647,10 @@ fn execute_single_rust_step(
                 store.save_config_value("DISTRO_VERSION_ID", &info.version_id)?;
                 Ok(info.support_reason)
             } else {
-                Ok("no /etc/os-release in isolated root; skipped kernel/distro rejection".to_string())
+                Ok(
+                    "no /etc/os-release in isolated root; skipped kernel/distro rejection"
+                        .to_string(),
+                )
             }
         }
         "hostname" => {
@@ -1668,13 +1686,11 @@ fn execute_single_rust_step(
             let locale_file = etc_default.join("locale");
             ensure_no_symlink_ancestors(&locale_file, "etc/default/locale")?;
             let body = b"LANG=en_US.UTF-8\nLC_ALL=en_US.UTF-8\n";
-            write_file_atomic_exclusive(
-                &locale_file,
-                body,
-                0o644,
-                "etc/default/locale",
-            )?;
-            Ok("wrote etc/default/locale with LANG=en_US.UTF-8 and LC_ALL=en_US.UTF-8 (0644)".to_string())
+            write_file_atomic_exclusive(&locale_file, body, 0o644, "etc/default/locale")?;
+            Ok(
+                "wrote etc/default/locale with LANG=en_US.UTF-8 and LC_ALL=en_US.UTF-8 (0644)"
+                    .to_string(),
+            )
         }
         "skel" => {
             let skel_subdirs = [
@@ -1706,14 +1722,20 @@ fn execute_single_rust_step(
                         ensure_no_symlink_ancestors(&target, "legacy sudoers file")?;
                         if target.is_file() || target.is_symlink() {
                             fs::remove_file(&target).map_err(|e| {
-                                CliError::io(format!("removing legacy sudoers file {}", target.display()), e)
+                                CliError::io(
+                                    format!("removing legacy sudoers file {}", target.display()),
+                                    e,
+                                )
                             })?;
                         }
                     }
                 }
             }
             store.save_config_value("SUDOERS_HARDENED", "true")?;
-            Ok("purged legacy /etc/sudoers.d/aether* files and recorded SUDOERS_HARDENED=true".to_string())
+            Ok(
+                "purged legacy /etc/sudoers.d/aether* files and recorded SUDOERS_HARDENED=true"
+                    .to_string(),
+            )
         }
         "build_modern" => {
             let env_path = paths.fs_root.join("etc/aetherflow/aetherflow.env");
@@ -1722,9 +1744,14 @@ fn execute_single_rust_step(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-                        CliError::io(format!("setting permissions on {}", env_path.display()), e)
-                    })?;
+                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(
+                        |e| {
+                            CliError::io(
+                                format!("setting permissions on {}", env_path.display()),
+                                e,
+                            )
+                        },
+                    )?;
                 }
                 Ok("preserved existing /etc/aetherflow/aetherflow.env with 0600 mode".to_string())
             } else {
@@ -1771,8 +1798,17 @@ fn execute_single_rust_step(
             for dir in dirs {
                 ensure_dir_no_symlinks(&paths.fs_root, dir, 0o750, "FHS directory")?;
             }
-            for dir in [&paths.opt_aetherflow, &paths.opt_releases, &paths.etc_systemd_system] {
-                ensure_dir_no_symlinks(&paths.fs_root, dir, 0o755, "executable or shared FHS directory")?;
+            for dir in [
+                &paths.opt_aetherflow,
+                &paths.opt_releases,
+                &paths.etc_systemd_system,
+            ] {
+                ensure_dir_no_symlinks(
+                    &paths.fs_root,
+                    dir,
+                    0o755,
+                    "executable or shared FHS directory",
+                )?;
             }
             Ok("created canonical bare-metal FHS directories".to_string())
         }
@@ -1785,12 +1821,14 @@ fn execute_single_rust_step(
             )?;
             // Render a baseline systemd sandbox drop-in template using af-runner's canonical helper
             // and overlay it safely with a .aetherflow-sha256 sidecar.
-            let dropin_dir = paths
-                .etc_systemd_system
-                .join("aetherflow-api.service.d");
+            let dropin_dir = paths.etc_systemd_system.join("aetherflow-api.service.d");
             ensure_dir_no_symlinks(&paths.fs_root, &dropin_dir, 0o755, "systemd dropin dir")?;
-            let rw_paths = vec!["/var/lib/aetherflow".to_string(), "/var/log/aetherflow".to_string()];
-            let rendered = render_systemd_sandbox_dropin("native", "aetherflow-api.service", &rw_paths);
+            let rw_paths = vec![
+                "/var/lib/aetherflow".to_string(),
+                "/var/log/aetherflow".to_string(),
+            ];
+            let rendered =
+                render_systemd_sandbox_dropin("native", "aetherflow-api.service", &rw_paths);
             let staging_src = paths.install_dir.join(format!(
                 ".staging-aetherflow-api-sandbox-{}-{}.conf",
                 std::process::id(),
@@ -1853,9 +1891,14 @@ fn execute_single_rust_step(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-                        CliError::io(format!("setting permissions on {}", env_path.display()), e)
-                    })?;
+                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(
+                        |e| {
+                            CliError::io(
+                                format!("setting permissions on {}", env_path.display()),
+                                e,
+                            )
+                        },
+                    )?;
                 }
             }
             let var_lib = paths.fs_root.join("var/lib/aetherflow");
@@ -1864,9 +1907,11 @@ fn execute_single_rust_step(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&var_lib, fs::Permissions::from_mode(0o700)).map_err(|e| {
-                        CliError::io(format!("setting permissions on {}", var_lib.display()), e)
-                    })?;
+                    fs::set_permissions(&var_lib, fs::Permissions::from_mode(0o700)).map_err(
+                        |e| {
+                            CliError::io(format!("setting permissions on {}", var_lib.display()), e)
+                        },
+                    )?;
                 }
             } else {
                 ensure_dir_no_symlinks(&paths.fs_root, &var_lib, 0o700, "var_lib_aetherflow")?;

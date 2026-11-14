@@ -18,11 +18,12 @@ const MAX_STATIC_METADATA_BYTES: usize = 512 * 1024;
 const MAX_PACKED_REFS_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DLL_SCAN_BYTES: usize = 64 * 1024 * 1024;
 
-static SAFE_HEX_40: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[0-9a-fA-F]{40}$").unwrap());
+static SAFE_HEX_40: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[0-9a-fA-F]{40}$").unwrap());
 static SAFE_STABLE_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?m)^\s*(?:STABLE_VERSION|__version__|__full_version_str__)\s*=\s*['"]([^'"]+)['"]"#)
-        .unwrap()
+    Regex::new(
+        r#"(?m)^\s*(?:STABLE_VERSION|__version__|__full_version_str__)\s*=\s*['"]([^'"]+)['"]"#,
+    )
+    .unwrap()
 });
 static BAZARR_VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([0-9]+\.[0-9]+\.[0-9]+)").unwrap());
@@ -36,8 +37,9 @@ static ABS_APP_PATH_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(/(?:opt|srv|var/www|etc/systemd/system|usr/local/bin|usr/bin)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
         .unwrap()
 });
-static DLL_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^v?([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.+_-]+)?$").unwrap());
+static DLL_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^v?([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.+_-]+)?$").unwrap()
+});
 
 #[derive(Debug, Clone, Default)]
 pub struct ProbeSandboxSpec {
@@ -179,7 +181,11 @@ pub fn read_regular_nofollow(path: &Path, max_bytes: usize) -> Result<Option<Vec
     let owned_fd = unsafe { OwnedFd::from_raw_fd(file_fd) };
     let mut opened_stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(owned_fd.as_raw_fd(), &mut opened_stat) } != 0 {
-        return Err(format!("fstat {:?}: {}", path, std::io::Error::last_os_error()));
+        return Err(format!(
+            "fstat {:?}: {}",
+            path,
+            std::io::Error::last_os_error()
+        ));
     }
     if (opened_stat.st_mode & libc::S_IFMT) != libc::S_IFREG
         || opened_stat.st_dev != stat_buf.st_dev
@@ -212,7 +218,9 @@ pub fn read_regular_nofollow(path: &Path, max_bytes: usize) -> Result<Option<Vec
     if meta.len() as usize > max_bytes {
         return Err(format!("file {:?} exceeded {} byte limit", path, max_bytes));
     }
-    Ok(Some(fs::read(path).map_err(|e| format!("reading {:?}: {}", path, e))?))
+    Ok(Some(
+        fs::read(path).map_err(|e| format!("reading {:?}: {}", path, e))?,
+    ))
 }
 
 fn read_text_nofollow(path: &Path, max_bytes: usize) -> Result<Option<String>, String> {
@@ -279,10 +287,17 @@ pub fn resolve_git_head_commit_nofollow(git_dir: &Path) -> Result<String, String
         return Ok(direct_sha);
     }
     let Some(ref_rel) = trimmed.strip_prefix("ref:").map(str::trim) else {
-        return Err(format!("unrecognized git HEAD contents in {}", head_path.display()));
+        return Err(format!(
+            "unrecognized git HEAD contents in {}",
+            head_path.display()
+        ));
     };
     if !is_safe_git_ref_rel(ref_rel) {
-        return Err(format!("unsafe git ref target '{}' in {}", ref_rel, head_path.display()));
+        return Err(format!(
+            "unsafe git ref target '{}' in {}",
+            ref_rel,
+            head_path.display()
+        ));
     }
     let loose_ref_path = abs_git_dir.join(ref_rel);
     if let Some(loose_text) = read_text_nofollow(&loose_ref_path, 64 * 1024)? {
@@ -583,9 +598,8 @@ pub fn read_dll_version_nofollow(
     dll_paths: &[PathBuf],
     skip_placeholder_versions: bool,
 ) -> Result<Option<String>, String> {
-    let is_placeholder = |v: &str| {
-        skip_placeholder_versions && matches!(v, "0.0.0.0" | "1.0.0" | "1.0.0.0")
-    };
+    let is_placeholder =
+        |v: &str| skip_placeholder_versions && matches!(v, "0.0.0.0" | "1.0.0" | "1.0.0.0");
     let mut fallback_candidates = Vec::new();
     for path in dll_paths {
         let Some(bytes) = read_regular_nofollow(path, MAX_DLL_SCAN_BYTES)? else {
@@ -696,13 +710,18 @@ pub fn extract_static_package_version(
             );
         }
         "flaresolverr" => {
-            for rel in ["/opt/flaresolverr/package.json", "/opt/flaresolverr/_internal/package.json"] {
+            for rel in [
+                "/opt/flaresolverr/package.json",
+                "/opt/flaresolverr/_internal/package.json",
+            ] {
                 let p = rebase_path(rel);
                 if let Ok(Some(ver)) = read_package_json_version_nofollow(&p) {
                     return Some(Ok(ver));
                 }
             }
-            return Some(Err("missing version in FlareSolverr package.json".to_string()));
+            return Some(Err(
+                "missing version in FlareSolverr package.json".to_string()
+            ));
         }
         "filebot" => {
             let base = rebase_path("/opt/filebot-node");
@@ -714,7 +733,9 @@ pub fn extract_static_package_version(
                     return Some(Ok(ver));
                 }
             }
-            return Some(Err("missing version in filebot-node package.json".to_string()));
+            return Some(Err(
+                "missing version in filebot-node package.json".to_string()
+            ));
         }
         "calibreweb" => {
             let constants = rebase_path("/opt/calibre-web/cps/constants.py");
@@ -729,9 +750,13 @@ pub fn extract_static_package_version(
                 }
             }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/opt/calibre-web"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
-            return Some(Err("unable to resolve calibreweb static version".to_string()));
+            return Some(Err(
+                "unable to resolve calibreweb static version".to_string()
+            ));
         }
         "dispatcharr" => {
             let vp = rebase_path("/opt/dispatcharr/version.py");
@@ -739,9 +764,13 @@ pub fn extract_static_package_version(
                 return Some(Ok(normalize_stripped_v(ver)));
             }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/opt/dispatcharr"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
-            return Some(Err("unable to resolve dispatcharr static version".to_string()));
+            return Some(Err(
+                "unable to resolve dispatcharr static version".to_string()
+            ));
         }
         "bazarr" => {
             let vfile = rebase_path("/opt/bazarr/VERSION");
@@ -757,8 +786,9 @@ pub fn extract_static_package_version(
         "nextcloud" => {
             let vp = rebase_path("/var/www/nextcloud/version.php");
             return Some(
-                read_static_regex_nofollow(&vp, &NEXTCLOUD_VERSION_RE)
-                    .and_then(|o| o.ok_or_else(|| format!("missing OC_VersionString in {}", vp.display()))),
+                read_static_regex_nofollow(&vp, &NEXTCLOUD_VERSION_RE).and_then(|o| {
+                    o.ok_or_else(|| format!("missing OC_VersionString in {}", vp.display()))
+                }),
             );
         }
         "tautulli" => {
@@ -769,8 +799,12 @@ pub fn extract_static_package_version(
                     return Some(Ok(normalized));
                 }
             }
-            if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/opt/Tautulli", "/opt/tautulli"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+            if let Some(git_dir) =
+                find_git_dir_candidate(rebase_path, &["/opt/Tautulli", "/opt/tautulli"])
+            {
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
             return Some(Err("missing /opt/Tautulli/.git repository".to_string()));
         }
@@ -780,7 +814,9 @@ pub fn extract_static_package_version(
                 return Some(Ok(ver));
             }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/opt/uptime-kuma"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
             return Some(Err("missing /opt/uptime-kuma version metadata".to_string()));
         }
@@ -797,7 +833,9 @@ pub fn extract_static_package_version(
                 return Some(Ok(ver));
             }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/var/www/rutorrent"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
             return Some(Err("unable to resolve rutorrent static version".to_string()));
         }
@@ -814,7 +852,9 @@ pub fn extract_static_package_version(
                 return Some(Ok(ver));
             }
             if let Some(git_dir) = find_git_dir_candidate(rebase_path, &["/var/www/organizr"]) {
-                return Some(resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v));
+                return Some(
+                    resolve_git_tag_or_head_nofollow(&git_dir, true).map(normalize_stripped_v),
+                );
             }
             return Some(Err("unable to resolve organizr static version".to_string()));
         }
@@ -875,8 +915,9 @@ pub fn extract_static_package_version(
                 rebase_path("/opt/Readarr/Readarr.Core.dll"),
             ];
             return Some(
-                read_dll_version_nofollow(&paths, false)
-                    .and_then(|o| o.ok_or_else(|| "unable to read Readarr.dll version".to_string())),
+                read_dll_version_nofollow(&paths, false).and_then(|o| {
+                    o.ok_or_else(|| "unable to read Readarr.dll version".to_string())
+                }),
             );
         }
         "prowlarr" => {
@@ -885,8 +926,9 @@ pub fn extract_static_package_version(
                 rebase_path("/opt/Prowlarr/Prowlarr.Core.dll"),
             ];
             return Some(
-                read_dll_version_nofollow(&paths, false)
-                    .and_then(|o| o.ok_or_else(|| "unable to read Prowlarr.dll version".to_string())),
+                read_dll_version_nofollow(&paths, false).and_then(|o| {
+                    o.ok_or_else(|| "unable to read Prowlarr.dll version".to_string())
+                }),
             );
         }
         "kavita" => {
@@ -908,17 +950,15 @@ pub fn extract_static_package_version(
         }
         "listenarr" => {
             let paths = [rebase_path("/opt/Listenarr/Listenarr.Api.dll")];
-            return Some(
-                read_dll_version_nofollow(&paths, false)
-                    .and_then(|o| o.ok_or_else(|| "unable to read Listenarr.Api.dll version".to_string())),
-            );
+            return Some(read_dll_version_nofollow(&paths, false).and_then(|o| {
+                o.ok_or_else(|| "unable to read Listenarr.Api.dll version".to_string())
+            }));
         }
         "requestrr" => {
             let paths = [rebase_path("/opt/requestrr/Requestrr.WebApi.dll")];
-            return Some(
-                read_dll_version_nofollow(&paths, false)
-                    .and_then(|o| o.ok_or_else(|| "unable to read Requestrr.WebApi.dll version".to_string())),
-            );
+            return Some(read_dll_version_nofollow(&paths, false).and_then(|o| {
+                o.ok_or_else(|| "unable to read Requestrr.WebApi.dll version".to_string())
+            }));
         }
         _ => {}
     }
@@ -1049,7 +1089,8 @@ fn inspect_path_trust(
                 || path.starts_with(r.join("var/www"))
         });
 
-    let mut non_root_owners: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    let mut non_root_owners: std::collections::BTreeMap<u32, u32> =
+        std::collections::BTreeMap::new();
     inspect_ancestors_trust(path, fs_root, current_euid, &mut non_root_owners)?;
 
     if let Ok(canon) = fs::canonicalize(path) {
@@ -1095,7 +1136,11 @@ fn inspect_path_trust(
 }
 
 #[cfg(unix)]
-fn collect_probe_path_references(prog: &Path, args: &[String], fs_root: Option<&Path>) -> Vec<PathBuf> {
+fn collect_probe_path_references(
+    prog: &Path,
+    args: &[String],
+    fs_root: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let rebase = |raw: &str| -> PathBuf {
         if let Some(root) = fs_root {
@@ -1114,7 +1159,14 @@ fn collect_probe_path_references(prog: &Path, args: &[String], fs_root: Option<&
     } else if let Some(s) = prog.to_str() {
         let mut matched = false;
         if let Some(root) = fs_root {
-            for dir in ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] {
+            for dir in [
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ] {
                 let cand = root.join(dir.trim_start_matches('/')).join(s);
                 if cand.exists() {
                     paths.push(cand);
@@ -1124,7 +1176,14 @@ fn collect_probe_path_references(prog: &Path, args: &[String], fs_root: Option<&
             }
         }
         if !matched {
-            for dir in ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] {
+            for dir in [
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ] {
                 let cand = Path::new(dir).join(s);
                 if cand.exists() {
                     paths.push(cand);
@@ -1201,11 +1260,9 @@ pub fn validate_and_resolve_probe_sandbox(
     }
 
     if detected_owner.is_none() && fs_root.is_none() {
-        let touches_app_tree = refs.iter().any(|p| {
-            p.starts_with("/opt")
-                || p.starts_with("/srv")
-                || p.starts_with("/var/www")
-        });
+        let touches_app_tree = refs
+            .iter()
+            .any(|p| p.starts_with("/opt") || p.starts_with("/srv") || p.starts_with("/var/www"));
         if touches_app_tree || (euid == 0 && spec.drop_to_path_owner) {
             if let Some(ref svc_user) = spec.package_user {
                 if let Some(owner) = lookup_user_uid_gid(svc_user) {
@@ -1217,8 +1274,10 @@ pub fn validate_and_resolve_probe_sandbox(
                 && spec.drop_to_path_owner
                 && !probe_requires_root_daemon_access(prog, args)
             {
-                detected_owner = lookup_user_uid_gid("nobody")
-                    .or(Some(NonRootOwner { uid: 65534, gid: 65534 }));
+                detected_owner = lookup_user_uid_gid("nobody").or(Some(NonRootOwner {
+                    uid: 65534,
+                    gid: 65534,
+                }));
             }
         }
     }
@@ -1263,12 +1322,19 @@ fn sandbox_path_for_root(fs_root: Option<&Path>) -> String {
     let Some(root) = fs_root else {
         return base.to_string();
     };
-    let mut parts: Vec<String> = ["usr/local/sbin", "usr/local/bin", "usr/sbin", "usr/bin", "sbin", "bin"]
-        .into_iter()
-        .map(|rel| root.join(rel))
-        .filter(|dir| dir.exists())
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
+    let mut parts: Vec<String> = [
+        "usr/local/sbin",
+        "usr/local/bin",
+        "usr/sbin",
+        "usr/bin",
+        "sbin",
+        "bin",
+    ]
+    .into_iter()
+    .map(|rel| root.join(rel))
+    .filter(|dir| dir.exists())
+    .map(|dir| dir.to_string_lossy().into_owned())
+    .collect();
     parts.push(base.to_string());
     parts.join(":")
 }
@@ -1314,7 +1380,9 @@ unsafe fn install_unix_isolation(drop_ugid: Option<(u32, u32)>) -> std::io::Resu
             return Err(std::io::Error::last_os_error());
         }
         if libc::geteuid() == 0 || libc::getegid() == 0 {
-            return Err(std::io::Error::other("privilege drop left root uid/gid active"));
+            return Err(std::io::Error::other(
+                "privilege drop left root uid/gid active",
+            ));
         }
     }
     Ok(())

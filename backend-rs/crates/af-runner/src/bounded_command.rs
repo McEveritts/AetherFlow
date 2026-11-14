@@ -193,7 +193,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_commands_release_inherited_locks_before_returning() {
-        let test = "bounded_command::tests::completed_commands_release_inherited_locks_before_returning";
+        let test =
+            "bounded_command::tests::completed_commands_release_inherited_locks_before_returning";
         if std::env::var("AF_COMPLETED_COMMAND_TEST_CHILD").as_deref() != Ok(test) {
             assert!(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", test, "--nocapture"])
@@ -203,12 +204,17 @@ mod tests {
                 .success());
             return;
         }
-        let root = std::env::temp_dir().join(format!("af-command-release-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("af-command-release-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let lock = root.join("maintenance.lock");
         for iteration in 0..256 {
             let guard = af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO).unwrap();
-            let mut command = shell(if iteration % 2 == 0 { "exit 0" } else { "exit 7" });
+            let mut command = shell(if iteration % 2 == 0 {
+                "exit 0"
+            } else {
+                "exit 7"
+            });
             guard.preserve_in_child(command.as_std_mut()).unwrap();
             drop(guard);
             let result = output(command, Duration::from_secs(2), 1024).await.unwrap();
@@ -305,11 +311,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_command_with_closed_stdio_background_descendant_kills_group_before_return() {
+    async fn successful_command_with_closed_stdio_background_descendant_kills_group_before_return()
+    {
         let root = std::env::temp_dir().join(format!("af-command-succ-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let pid_file = root.join("descendant.pid");
-        let mut command = shell("nohup sleep 60 >/dev/null 2>&1 </dev/null & echo $! > \"$AF_BG_PID\"; exit 0");
+        let mut command =
+            shell("nohup sleep 60 >/dev/null 2>&1 </dev/null & echo $! > \"$AF_BG_PID\"; exit 0");
         command.env("AF_BG_PID", &pid_file);
         let out = output(command, Duration::from_secs(2), 1024).await.unwrap();
         assert!(out.status.success());
@@ -319,9 +327,9 @@ mod tests {
             .parse()
             .unwrap();
         let stat = std::fs::read_to_string(format!("/proc/{child_pid}/stat")).unwrap_or_default();
-        let alive = stat
-            .rsplit_once(") ")
-            .is_some_and(|(_, fields)| !matches!(fields.split_whitespace().next(), Some("Z" | "X")));
+        let alive = stat.rsplit_once(") ").is_some_and(|(_, fields)| {
+            !matches!(fields.split_whitespace().next(), Some("Z" | "X"))
+        });
         assert!(
             !alive,
             "background descendant pid={child_pid} stayed alive after successful bounded_command::output return"

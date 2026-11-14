@@ -99,7 +99,8 @@ impl PackageStreamAccumulator {
                     let line = String::from_utf8_lossy(before);
                     self.process_complete_line(&line, &mut on_event);
                 } else {
-                    let space = MAX_PACKAGE_STREAM_LINE_CARRY_BYTES.saturating_sub(self.carry.len());
+                    let space =
+                        MAX_PACKAGE_STREAM_LINE_CARRY_BYTES.saturating_sub(self.carry.len());
                     let take = before.len().min(space);
                     self.carry.extend_from_slice(&before[..take]);
                     let line = String::from_utf8_lossy(&self.carry).into_owned();
@@ -130,18 +131,27 @@ impl PackageStreamAccumulator {
             return;
         }
         if let Some(raw) = line.strip_prefix(af_runner::package_lifecycle::JOB_MARKER) {
-            let parsed = serde_json::from_str::<serde_json::Value>(raw).ok().and_then(|value| {
-                Some((value.get("job_id")?.as_str()?.to_owned(),
-                    value.get("package_id")?.as_str()?.to_owned(), value.get("action")?.as_str()?.to_owned()))
-            });
+            let parsed = serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| {
+                    Some((
+                        value.get("job_id")?.as_str()?.to_owned(),
+                        value.get("package_id")?.as_str()?.to_owned(),
+                        value.get("action")?.as_str()?.to_owned(),
+                    ))
+                });
             if self.lifecycle_identity.is_some() || parsed.is_none() {
                 self.exit_error = Some("Invalid lifecycle admission identity".into());
-            } else { self.lifecycle_identity = parsed; }
+            } else {
+                self.lifecycle_identity = parsed;
+            }
             return;
         }
         if let Some(raw) = line.strip_prefix(af_runner::package_lifecycle::RECEIPT_MARKER) {
             match serde_json::from_str(raw) {
-                Ok(receipt) if self.lifecycle_receipt.is_none() => self.lifecycle_receipt = Some(receipt),
+                Ok(receipt) if self.lifecycle_receipt.is_none() => {
+                    self.lifecycle_receipt = Some(receipt)
+                }
                 _ => self.exit_error = Some("Invalid durable lifecycle receipt".into()),
             }
             return;
@@ -172,7 +182,11 @@ impl PackageStreamAccumulator {
     /// Flushes any trailing un-terminated line in the carry buffer and finalizes the
     /// [`PackageExecutionReceipt`], returning [`CliError::RunnerIpc`] if `__RUNNER_EXIT_ERROR__:`
     /// was reported.
-    pub fn finish<F>(mut self, req: &PackageRunnerRequest, mut on_event: F) -> CliResult<PackageExecutionReceipt>
+    pub fn finish<F>(
+        mut self,
+        req: &PackageRunnerRequest,
+        mut on_event: F,
+    ) -> CliResult<PackageExecutionReceipt>
     where
         F: FnMut(&PackageStreamEvent),
     {
@@ -205,8 +219,13 @@ impl PackageStreamAccumulator {
         })
     }
 
-    pub fn finish_verified<F>(self, req: &PackageRunnerRequest, on_event: F) -> CliResult<PackageExecutionReceipt>
-    where F: FnMut(&PackageStreamEvent),
+    pub fn finish_verified<F>(
+        self,
+        req: &PackageRunnerRequest,
+        on_event: F,
+    ) -> CliResult<PackageExecutionReceipt>
+    where
+        F: FnMut(&PackageStreamEvent),
     {
         let identity = self.lifecycle_identity.clone();
         let receipt = self.finish(req, on_event)?;
@@ -214,13 +233,22 @@ impl PackageStreamAccumulator {
             endpoint: "/v1/package".into(),
             message: "Transport ended without a durable lifecycle receipt; completion is unconfirmed. Inspect package status before retrying.".into(),
         })?;
-        if identity.as_ref() != Some(&(terminal.job_id.clone(), req.package_id.clone(), req.action.clone()))
-            || terminal.package_id != req.package_id || terminal.action != req.action
+        if identity.as_ref()
+            != Some(&(
+                terminal.job_id.clone(),
+                req.package_id.clone(),
+                req.action.clone(),
+            ))
+            || terminal.package_id != req.package_id
+            || terminal.action != req.action
             || uuid::Uuid::parse_str(&terminal.job_id).is_err()
-            || terminal.started_at.is_empty() || terminal.finished_at.is_empty()
+            || terminal.started_at.is_empty()
+            || terminal.finished_at.is_empty()
         {
-            return Err(CliError::RunnerIpc { endpoint: "/v1/package".into(),
-                message: "Durable lifecycle receipt does not match the admitted operation".into() });
+            return Err(CliError::RunnerIpc {
+                endpoint: "/v1/package".into(),
+                message: "Durable lifecycle receipt does not match the admitted operation".into(),
+            });
         }
         if terminal.status != "completed" {
             return Err(CliError::Execution(format!(
@@ -342,7 +370,9 @@ impl UnixSocketRunnerClient {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| CliError::Execution(format!("failed to build tokio runtime: {}", e)))?;
+                .map_err(|e| {
+                    CliError::Execution(format!("failed to build tokio runtime: {}", e))
+                })?;
             rt.block_on(fut)
         }
     }
@@ -359,7 +389,10 @@ impl UnixSocketRunnerClient {
         use hyper_util::rt::TokioIo;
 
         let body_bytes = serde_json::to_vec(payload).map_err(|e| {
-            CliError::Execution(format!("failed to serialize runner request for {}: {}", endpoint, e))
+            CliError::Execution(format!(
+                "failed to serialize runner request for {}: {}",
+                endpoint, e
+            ))
         })?;
         let sock_path = self.socket_path.clone();
 
@@ -397,10 +430,13 @@ impl UnixSocketRunnerClient {
                     message: format!("failed to build HTTP request: {}", e),
                 })?;
 
-            let resp = sender.send_request(req).await.map_err(|e| CliError::RunnerIpc {
-                endpoint: endpoint.to_string(),
-                message: format!("runner socket request failed: {}", e),
-            })?;
+            let resp = sender
+                .send_request(req)
+                .await
+                .map_err(|e| CliError::RunnerIpc {
+                    endpoint: endpoint.to_string(),
+                    message: format!("runner socket request failed: {}", e),
+                })?;
             let status = resp.status();
             let collected = resp
                 .into_body()
@@ -513,10 +549,13 @@ impl UnixSocketRunnerClient {
                     message: format!("failed to build HTTP request: {}", e),
                 })?;
 
-            let resp = sender.send_request(req).await.map_err(|e| CliError::RunnerIpc {
-                endpoint: "/v1/package".to_string(),
-                message: format!("runner socket package request failed: {}", e),
-            })?;
+            let resp = sender
+                .send_request(req)
+                .await
+                .map_err(|e| CliError::RunnerIpc {
+                    endpoint: "/v1/package".to_string(),
+                    message: format!("runner socket package request failed: {}", e),
+                })?;
             let status = resp.status();
             let mut body = resp.into_body();
 
@@ -528,7 +567,8 @@ impl UnixSocketRunnerClient {
                         message: format!("failed reading package error stream frame: {}", e),
                     })?;
                     if let Ok(data) = frame.into_data() {
-                        let space = MAX_PACKAGE_STREAM_LINE_CARRY_BYTES.saturating_sub(err_buf.len());
+                        let space =
+                            MAX_PACKAGE_STREAM_LINE_CARRY_BYTES.saturating_sub(err_buf.len());
                         if space == 0 {
                             break;
                         }

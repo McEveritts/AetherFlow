@@ -100,8 +100,10 @@ jobs:
       - name: Check Shell Hygiene & Full Python Verification Suite
         working-directory: .
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq sqlite3 bc
           python3 tests/check_shell_hygiene.py
-          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Secret Scan (Gitleaks Gate)
         working-directory: .
@@ -170,6 +172,7 @@ jobs:
 
       - name: Rust Static Analysis (workspace + strict restore/release core)
         run: |
+          cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
 
@@ -182,6 +185,25 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --workspace --locked -- --test-threads=1
+
+      - name: Setup Go for Legacy Compatibility Gate
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Legacy Go Backend Build & Security Regression Gate
+        working-directory: backend
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          TMPDIR: /tmp
+        run: |
+          go vet ./...
+          go test ./... -count=1
+          AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
+          CGO_ENABLED=0 go build ./...
 
   release-build:
     name: Build & Verify Release Tarball (Rust Control Plane)
@@ -339,6 +361,7 @@ jobs:
           (cd release-dist && sha256sum -c SHA256SUMS)
 
       - name: Attest Build Provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
@@ -348,6 +371,7 @@ jobs:
       - name: Publish to GitHub Releases
         env:
           RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+          ATTEST_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_FLAGS=(--generate-notes)
@@ -376,9 +400,18 @@ jobs:
               --notes-file "${RELEASE_NOTES_FILE}"
             )
           fi
+          RELEASE_ASSETS=(
+            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/SHA256SUMS
+          )
+          if [[ -n "${ATTEST_BUNDLE_PATH:-}" && -s "${ATTEST_BUNDLE_PATH}" ]]; then
+            cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json
+          fi
+          if [[ -s release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json ]]; then
+            RELEASE_ASSETS+=(release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json)
+          fi
           gh release create "${RELEASE_TAG}" \
-            release-dist/aetherflow-linux-amd64.tar.gz \
-            release-dist/SHA256SUMS \
+            "${RELEASE_ASSETS[@]}" \
             --target "${GITHUB_SHA}" \
             --title "AetherFlow ${RELEASE_TAG} (${GITHUB_SHA::8})" \
             "${RELEASE_FLAGS[@]}"

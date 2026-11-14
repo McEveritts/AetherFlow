@@ -2,7 +2,10 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -77,6 +80,52 @@ func generateRecoveryCodes(count int) ([]string, error) {
 	return codes, nil
 }
 
+func verifyRecoveryCodeHash(storedHash, rawCode string) bool {
+	trimmedHash := strings.TrimSpace(storedHash)
+	normalized := strings.ToUpper(strings.TrimSpace(rawCode))
+	compact := strings.ReplaceAll(normalized, "-", "")
+	if trimmedHash == "" || compact == "" {
+		return false
+	}
+
+	if rest, ok := strings.CutPrefix(trimmedHash, "sha256:v1:"); ok {
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		saltBytes, sErr := hex.DecodeString(parts[0])
+		expectedDigest, dErr := hex.DecodeString(parts[1])
+		if sErr != nil || dErr != nil || len(saltBytes) != 16 || len(expectedDigest) != sha256.Size {
+			return false
+		}
+		h := sha256.New()
+		_, _ = h.Write([]byte("aetherflow-recovery-v1\x00"))
+		_, _ = h.Write(saltBytes)
+		_, _ = h.Write([]byte(compact))
+		actual := h.Sum(nil)
+		return subtle.ConstantTimeCompare(actual, expectedDigest) == 1
+	}
+
+	if len(trimmedHash) == 64 {
+		if expectedDigest, err := hex.DecodeString(trimmedHash); err == nil && len(expectedDigest) == sha256.Size {
+			sumNorm := sha256.Sum256([]byte(normalized))
+			if subtle.ConstantTimeCompare(sumNorm[:], expectedDigest) == 1 {
+				return true
+			}
+			sumComp := sha256.Sum256([]byte(compact))
+			return subtle.ConstantTimeCompare(sumComp[:], expectedDigest) == 1
+		}
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(trimmedHash), []byte(normalized)) == nil {
+		return true
+	}
+	if compact != normalized && bcrypt.CompareHashAndPassword([]byte(trimmedHash), []byte(compact)) == nil {
+		return true
+	}
+	return false
+}
+
 // validateRecoveryCodeInTx checks a recovery code inside tx and atomically marks it used
 // via `WHERE id = ? AND user_id = ? AND COALESCE(used, 0) = 0` (`RowsAffected() == 1`).
 func validateRecoveryCodeInTx(tx *sql.Tx, userID int, code string) bool {
@@ -103,10 +152,9 @@ func validateRecoveryCodeInTx(tx *sql.Tx, userID int, code string) bool {
 	}
 	_ = rows.Close()
 
-	normalized := strings.ToUpper(strings.TrimSpace(code))
 	matchedID := -1
 	for _, cand := range candidates {
-		if bcrypt.CompareHashAndPassword([]byte(cand.hash), []byte(normalized)) == nil {
+		if verifyRecoveryCodeHash(cand.hash, code) {
 			matchedID = cand.id
 			break
 		}
@@ -292,16 +340,16 @@ func Verify2FA(c *gin.Context) {
 	}
 
 	recoveryCodes, rcErr := generateRecoveryCodes(recoveryCodeCount)
-	var recoveryHashes []string
 	if rcErr != nil {
 		slog.Error("failed to generate recovery codes", "user_id", userID, "error", rcErr)
-		recoveryCodes = []string{}
-	} else {
-		recoveryHashes, rcErr = hashRecoveryCodes(recoveryCodes)
-		if rcErr != nil {
-			slog.Error("failed to hash recovery codes", "user_id", userID, "error", rcErr)
-			recoveryCodes = []string{}
-		}
+		InternalError(c, "Failed to generate recovery codes")
+		return
+	}
+	recoveryHashes, rcErr := hashRecoveryCodes(recoveryCodes)
+	if rcErr != nil {
+		slog.Error("failed to hash recovery codes", "user_id", userID, "error", rcErr)
+		InternalError(c, "Failed to secure recovery codes")
+		return
 	}
 
 	tx, txErr := db.DB.Begin()
@@ -329,11 +377,10 @@ func Verify2FA(c *gin.Context) {
 		return
 	}
 
-	if len(recoveryHashes) > 0 {
-		if err := storeHashedRecoveryCodesInTx(tx, userID, recoveryHashes); err != nil {
-			slog.Error("failed to store recovery codes", "user_id", userID, "error", err)
-			recoveryCodes = []string{}
-		}
+	if err := storeHashedRecoveryCodesInTx(tx, userID, recoveryHashes); err != nil {
+		slog.Error("failed to store recovery codes", "user_id", userID, "error", err)
+		InternalError(c, "Failed to persist recovery codes")
+		return
 	}
 
 	if err := tx.Commit(); err != nil {

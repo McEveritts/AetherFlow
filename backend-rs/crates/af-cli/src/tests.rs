@@ -29,40 +29,86 @@ use std::sync::{Arc, Mutex};
 fn direct_cli_requires_matching_durable_terminal_not_progress_or_eof() {
     let request = build_package_runner_request("remove", "syncthing", None).unwrap();
     let identity = uuid::Uuid::new_v4().to_string();
-    let admitted = format!("{}{}\n", af_runner::package_lifecycle::JOB_MARKER,
-        serde_json::json!({"job_id":identity,"package_id":"syncthing","action":"remove"}));
+    let admitted = format!(
+        "{}{}\n",
+        af_runner::package_lifecycle::JOB_MARKER,
+        serde_json::json!({"job_id":identity,"package_id":"syncthing","action":"remove"})
+    );
     let terminal = af_runner::package_lifecycle::LifecycleReceipt {
-        job_id: identity.clone(), package_id: "syncthing".into(), action: "remove".into(),
-        status: "completed".into(), started_at: "2026-11-06T00:00:00Z".into(),
-        finished_at: "2026-11-06T00:01:00Z".into(), app_port: 0,
+        job_id: identity.clone(),
+        package_id: "syncthing".into(),
+        action: "remove".into(),
+        status: "completed".into(),
+        started_at: "2026-11-06T00:00:00Z".into(),
+        finished_at: "2026-11-06T00:01:00Z".into(),
+        app_port: 0,
     };
     let receipt_line = |receipt: &af_runner::package_lifecycle::LifecycleReceipt| {
-        format!("{}{}\n", af_runner::package_lifecycle::RECEIPT_MARKER, serde_json::to_string(receipt).unwrap())
+        format!(
+            "{}{}\n",
+            af_runner::package_lifecycle::RECEIPT_MARKER,
+            serde_json::to_string(receipt).unwrap()
+        )
     };
     let mut progress_only = PackageStreamAccumulator::new();
-    progress_only.push_chunk(format!("{admitted}[PROGRESS:100] Installer finished\n").as_bytes(), |_| {});
-    assert!(matches!(progress_only.finish_verified(&request, |_| {}), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed")));
+    progress_only.push_chunk(
+        format!("{admitted}[PROGRESS:100] Installer finished\n").as_bytes(),
+        |_| {},
+    );
+    assert!(
+        matches!(progress_only.finish_verified(&request, |_| {}), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed"))
+    );
     let mut success = PackageStreamAccumulator::new();
-    success.push_chunk(format!("{admitted}[PROGRESS:100] Script finished\n{}", receipt_line(&terminal)).as_bytes(), |_| {});
-    assert_eq!(success.finish_verified(&request, |_| {}).unwrap().lifecycle.unwrap(), terminal);
+    success.push_chunk(
+        format!(
+            "{admitted}[PROGRESS:100] Script finished\n{}",
+            receipt_line(&terminal)
+        )
+        .as_bytes(),
+        |_| {},
+    );
+    assert_eq!(
+        success
+            .finish_verified(&request, |_| {})
+            .unwrap()
+            .lifecycle
+            .unwrap(),
+        terminal
+    );
     let mut failed_terminal = terminal.clone();
     failed_terminal.status = "failed".into();
     let mut failed = PackageStreamAccumulator::new();
-    failed.push_chunk(format!("{admitted}{}", receipt_line(&failed_terminal)).as_bytes(), |_| {});
-    assert!(matches!(failed.finish_verified(&request, |_| {}), Err(CliError::Execution(message)) if message.contains(&identity)));
+    failed.push_chunk(
+        format!("{admitted}{}", receipt_line(&failed_terminal)).as_bytes(),
+        |_| {},
+    );
+    assert!(
+        matches!(failed.finish_verified(&request, |_| {}), Err(CliError::Execution(message)) if message.contains(&identity))
+    );
     let mut wrong_identity = terminal.clone();
     wrong_identity.job_id = uuid::Uuid::new_v4().to_string();
     let mut wrong = PackageStreamAccumulator::new();
-    wrong.push_chunk(format!("{admitted}{}", receipt_line(&wrong_identity)).as_bytes(), |_| {});
-    assert!(matches!(wrong.finish_verified(&request, |_| {}), Err(CliError::RunnerIpc { .. })));
+    wrong.push_chunk(
+        format!("{admitted}{}", receipt_line(&wrong_identity)).as_bytes(),
+        |_| {},
+    );
+    assert!(matches!(
+        wrong.finish_verified(&request, |_| {}),
+        Err(CliError::RunnerIpc { .. })
+    ));
 }
 
 #[test]
 fn direct_cli_purge_is_explicit_and_ordinary_removal_retains_data() {
-    for (args, purge) in [(vec!["remove", "syncthing"], false),
-        (vec!["package", "remove", "syncthing", "--purge"], true)] {
-        let invocation = parse_cli_args(args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
-        assert!(matches!(invocation.command, AfCommand::Package(PackageCommand::Remove { purge: actual, .. }) if actual == purge));
+    for (args, purge) in [
+        (vec!["remove", "syncthing"], false),
+        (vec!["package", "remove", "syncthing", "--purge"], true),
+    ] {
+        let invocation =
+            parse_cli_args(args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+        assert!(
+            matches!(invocation.command, AfCommand::Package(PackageCommand::Remove { purge: actual, .. }) if actual == purge)
+        );
     }
 }
 
@@ -88,7 +134,9 @@ fn actual_unix_transport_rejects_eof_after_script_success_without_durable_receip
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         let mut request = Vec::new();
         loop {
             let mut chunk = [0u8; 1024];
@@ -97,19 +145,33 @@ fn actual_unix_transport_rejects_eof_after_script_success_without_durable_receip
             request.extend_from_slice(&chunk[..count]);
             if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                }).unwrap();
-                if request.len() >= end + 4 + length { break; }
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if request.len() >= end + 4 + length {
+                    break;
+                }
             }
         }
         let body = "[PROGRESS:100] Installer script succeeded\n";
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
     });
     let client = UnixSocketRunnerClient::new(socket);
     let request = build_package_runner_request("remove", "syncthing", None).unwrap();
-    assert!(matches!(client.execute_package(&request), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed")));
+    assert!(
+        matches!(client.execute_package(&request), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed"))
+    );
     server.join().unwrap();
 }
 
@@ -391,10 +453,14 @@ Installing dependencies...
     let mut live_events = Vec::new();
     acc.push_chunk(b"[PROGR", |ev| live_events.push(ev.clone()));
     assert!(live_events.is_empty());
-    acc.push_chunk(b"ESS:25] Step one\nPlain log ", |ev| live_events.push(ev.clone()));
+    acc.push_chunk(b"ESS:25] Step one\nPlain log ", |ev| {
+        live_events.push(ev.clone())
+    });
     assert_eq!(live_events.len(), 1);
     assert_eq!(live_events[0].progress_percent, Some(25));
-    acc.push_chunk(b"line\n[PROGRESS:100] Done", |ev| live_events.push(ev.clone()));
+    acc.push_chunk(b"line\n[PROGRESS:100] Done", |ev| {
+        live_events.push(ev.clone())
+    });
     assert_eq!(live_events.len(), 2);
     let chunked_receipt = acc.finish(&req, |ev| live_events.push(ev.clone())).unwrap();
     assert_eq!(live_events.len(), 3);
@@ -422,7 +488,8 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     let root_str = tmp.path().to_string_lossy().to_string();
 
     // 1. Install `sonarr` and `radarr`: `radarr` should be skipped as already installed, `sonarr` dispatched
-    let inv = parse_cli_args(["--json", "--root", &root_str, "install", "sonarr", "radarr"]).unwrap();
+    let inv =
+        parse_cli_args(["--json", "--root", &root_str, "install", "sonarr", "radarr"]).unwrap();
     let env = execute_invocation(&inv, &transport);
     assert_eq!(env.status, "ok");
     assert_eq!(env.exit_code, 0);
@@ -444,7 +511,15 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     assert_eq!(transport.package_calls.lock().unwrap().len(), 1);
 
     // Verify `af reinstall radarr sonarr` executes both in-place with action="reinstall" and delete_data=false
-    let reinv = parse_cli_args(["--json", "--root", &root_str, "reinstall", "radarr", "sonarr"]).unwrap();
+    let reinv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "reinstall",
+        "radarr",
+        "sonarr",
+    ])
+    .unwrap();
     let reenv = execute_invocation(&reinv, &transport);
     assert_eq!(reenv.status, "ok");
     assert_eq!(reenv.exit_code, 0);
@@ -488,7 +563,8 @@ fn runner_mediated_commands_dispatch_typed_requests_and_respect_lockfiles_and_dr
     assert_eq!(sbx_env.status, "ok");
     assert_eq!(transport.sandbox_calls.lock().unwrap().len(), 1);
 
-    let render_inv = parse_cli_args(["sandbox", "render", "sonarr", "--user", "mediauser"]).unwrap();
+    let render_inv =
+        parse_cli_args(["sandbox", "render", "sonarr", "--user", "mediauser"]).unwrap();
     let render_env = execute_invocation(&render_inv, &transport);
     assert_eq!(render_env.status, "ok");
     assert!(render_env.message.contains("[Service]"));
@@ -535,10 +611,7 @@ fn release_status_and_local_dry_run_integrate_with_af_release() {
         .as_array()
         .expect("available_releases array");
     assert_eq!(avail.len(), 1);
-    assert!(avail[0]
-        .as_str()
-        .unwrap_or_default()
-        .ends_with("v4.0.0"));
+    assert!(avail[0].as_str().unwrap_or_default().ends_with("v4.0.0"));
 
     // Cleanup in --dry-run mode
     let clean_inv = parse_cli_args([
@@ -641,7 +714,10 @@ fn backup_commands_create_verify_list_and_run_non_destructive_restore_preflight_
     );
     let plan_data = preflight_env.data.unwrap();
     assert_eq!(plan_data["non_destructive_only"], true);
-    assert!(!stage_target.exists(), "restore-preflight must never write to target_root");
+    assert!(
+        !stage_target.exists(),
+        "restore-preflight must never write to target_root"
+    );
 
     // 5. Verify destructive `af backup restore` without confirmation fails closed with UnsupportedOperation (exit code 6)
     let restore_inv = parse_cli_args([
@@ -702,9 +778,14 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
     let transport = MockRunnerTransport::default();
 
     // 1. Preflight check passes against Ubuntu 24.04 in isolated root
-    let pre_inv = parse_cli_args(["--json", "--root", &root_str, "provision", "preflight"]).unwrap();
+    let pre_inv =
+        parse_cli_args(["--json", "--root", &root_str, "provision", "preflight"]).unwrap();
     let pre_env = execute_invocation(&pre_inv, &transport);
-    assert_eq!(pre_env.status, "ok", "preflight failed: {}", pre_env.message);
+    assert_eq!(
+        pre_env.status, "ok",
+        "preflight failed: {}",
+        pre_env.message
+    );
 
     // 2. Dry-run provisioning does not create `/install/.aetherflow.state`
     let dry_inv = parse_cli_args([
@@ -731,7 +812,11 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
     ])
     .unwrap();
     let run_env = execute_invocation(&run_inv, &transport);
-    assert_eq!(run_env.status, "ok", "provision run failed: {}", run_env.message);
+    assert_eq!(
+        run_env.status, "ok",
+        "provision run failed: {}",
+        run_env.message
+    );
 
     let state_raw = fs::read_to_string(root.join("install/.aetherflow.state")).unwrap();
     assert!(state_raw.starts_with("# STATE_VERSION=2\n"));
@@ -755,18 +840,21 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(state_mode, 0o600, "state file must have 0600 private permissions");
-        assert_eq!(conf_mode, 0o600, "config file must have 0600 private permissions");
+        assert_eq!(
+            state_mode, 0o600,
+            "state file must have 0600 private permissions"
+        );
+        assert_eq!(
+            conf_mode, 0o600,
+            "config file must have 0600 private permissions"
+        );
     }
 
     // 4. Re-running `af provision run` skips already-completed steps (`SkippedAlreadyDone`)
     let resume_env = execute_invocation(&run_inv, &transport);
     assert_eq!(resume_env.status, "ok");
     let resume_data = resume_env.data.unwrap();
-    assert_eq!(
-        resume_data["records"][0]["status"],
-        "skipped_already_done"
-    );
+    assert_eq!(resume_data["records"][0]["status"], "skipped_already_done");
 
     // 5. Explicit `af provision repair makedirs` clears and re-executes `makedirs`
     let repair_inv = parse_cli_args([
@@ -789,14 +877,8 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
     assert_eq!(repair_data["records"][0]["status"], "completed");
 
     // 6. Reject arbitrary raw shell step names or command injections
-    let bad_step = parse_cli_args([
-        "--root",
-        &root_str,
-        "provision",
-        "run",
-        "bash -c 'id'",
-    ])
-    .unwrap();
+    let bad_step =
+        parse_cli_args(["--root", &root_str, "provision", "run", "bash -c 'id'"]).unwrap();
     let bad_env = execute_invocation(&bad_step, &transport);
     assert_eq!(bad_env.status, "error");
     assert_eq!(bad_env.exit_code, CliExitCode::UsageOrValidation.as_i32());
@@ -804,14 +886,18 @@ fn resumable_provisioning_persists_state_v2_supports_repair_and_overlays_configs
     // 7. Test `ProvisionLockGuard` crash recovery and active contention
     let lock_path = root.join("run/aetherflow-setup.lock");
     fs::write(&lock_path, b"99999999\n").unwrap(); // Stale crashed PID
-    let lock_guard = ProvisionLockGuard::acquire(&lock_path).expect("should recover stale lockfile");
+    let lock_guard =
+        ProvisionLockGuard::acquire(&lock_path).expect("should recover stale lockfile");
     let contention_err = ProvisionLockGuard::acquire(&lock_path).unwrap_err();
     assert_eq!(
         contention_err.exit_code(),
         CliExitCode::PreflightOrIntegrityFailure
     );
     drop(lock_guard);
-    assert!(!lock_path.exists(), "dropping lock guard should remove lockfile");
+    assert!(
+        !lock_path.exists(),
+        "dropping lock guard should remove lockfile"
+    );
 
     // 8. Test `safe_overlay_config_file` user-modification backup semantics
     let src_v1 = tmp.path().join("stock_v1.conf");
@@ -870,7 +956,9 @@ fn package_stream_accumulator_bounds_retained_logs_and_partial_lines() {
     let mut accumulator = PackageStreamAccumulator::new();
     let chunk = vec![b'x'; MAX_PACKAGE_STREAM_LINE_CARRY_BYTES * 3];
     let mut largest_line = 0;
-    accumulator.push_chunk(&chunk, |event| largest_line = largest_line.max(event.raw_line.len()));
+    accumulator.push_chunk(&chunk, |event| {
+        largest_line = largest_line.max(event.raw_line.len())
+    });
     accumulator.push_chunk(b"\n", |_| {});
     for _ in 0..MAX_RETAINED_PACKAGE_LOG_LINES + 10 {
         accumulator.push_chunk(b"log line\n", |_| {});
@@ -885,7 +973,7 @@ fn package_stream_accumulator_bounds_retained_logs_and_partial_lines() {
 #[cfg(unix)]
 #[test]
 fn concurrent_provisioning_stale_lock_recovery_has_one_owner() {
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{mpsc, Arc, Barrier};
     let sandbox = TempTestDir::new("concurrent-provision-lock");
     let lock_path = sandbox.path().join("aetherflow-setup.lock");
     fs::write(&lock_path, "99999999\n").unwrap();
@@ -909,10 +997,15 @@ fn concurrent_provisioning_stale_lock_recovery_has_one_owner() {
     start.wait();
     let owner_count = usize::from(receiver.recv().unwrap()) + usize::from(receiver.recv().unwrap());
     finish.wait();
-    for worker in workers { worker.join().unwrap(); }
+    for worker in workers {
+        worker.join().unwrap();
+    }
     assert_eq!(owner_count, 1);
     assert!(!lock_path.exists());
-    assert!(sandbox.path().join(".aetherflow-setup.lock.rust-guard").is_file());
+    assert!(sandbox
+        .path()
+        .join(".aetherflow-setup.lock.rust-guard")
+        .is_file());
     let guard = ProvisionLockGuard::acquire(&lock_path).unwrap();
     drop(guard);
 }
@@ -927,7 +1020,15 @@ fn provisioning_rejects_ancestor_symlinks_without_writing_outside_root() {
     let root = sandbox.path().join("root");
     fs::create_dir_all(&root).unwrap();
     symlink(&outside, root.join("install")).unwrap();
-    let invocation = parse_cli_args(["--json", "--root", root.to_str().unwrap(), "provision", "run", "--no-root-check"]).unwrap();
+    let invocation = parse_cli_args([
+        "--json",
+        "--root",
+        root.to_str().unwrap(),
+        "provision",
+        "run",
+        "--no-root-check",
+    ])
+    .unwrap();
     let response = execute_invocation(&invocation, &MockRunnerTransport::default());
     assert_eq!(response.status, "error");
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
@@ -939,10 +1040,21 @@ fn backup_assembly_dry_run_does_not_create_directories() {
     let backup_dir = sandbox.path().join("not-created/backups");
     let digest = "a".repeat(64);
     let invocation = parse_cli_args([
-        "--json", "--dry-run", "--root", sandbox.path().to_str().unwrap(),
-        "backup", "assemble", "--output", "backup.sqlite", "--sha256", &digest,
-        "--backup-dir", backup_dir.to_str().unwrap(), "part.00000",
-    ]).unwrap();
+        "--json",
+        "--dry-run",
+        "--root",
+        sandbox.path().to_str().unwrap(),
+        "backup",
+        "assemble",
+        "--output",
+        "backup.sqlite",
+        "--sha256",
+        &digest,
+        "--backup-dir",
+        backup_dir.to_str().unwrap(),
+        "part.00000",
+    ])
+    .unwrap();
     let response = execute_invocation(&invocation, &MockRunnerTransport::default());
     assert_eq!(response.status, "ok", "{}", response.message);
     assert_eq!(fs::read_dir(sandbox.path()).unwrap().count(), 0);
@@ -958,7 +1070,15 @@ fn maintenance_cli_commands_and_aliases_work_correctly() {
 
     // 1. Test `af maintenance tune` (and shorthand `af tune`)
     // Dry-run
-    let tune_dry_inv = parse_cli_args(["--json", "--root", &root_str, "maintenance", "tune", "--dry-run"]).unwrap();
+    let tune_dry_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "maintenance",
+        "tune",
+        "--dry-run",
+    ])
+    .unwrap();
     let resp = execute_invocation(&tune_dry_inv, &transport);
     assert_eq!(resp.status, "ok");
     assert!(resp.message.contains("[DRY-RUN]"));
@@ -1004,14 +1124,8 @@ fn maintenance_cli_commands_and_aliases_work_correctly() {
     assert_eq!(data["offending_ips"][0], "192.168.1.100");
 
     // Shorthand `af sentinel <path> --threshold 2`
-    let sent_short_inv = parse_cli_args([
-        "--json",
-        "sentinel",
-        &auth_str,
-        "--threshold",
-        "2",
-    ])
-    .unwrap();
+    let sent_short_inv =
+        parse_cli_args(["--json", "sentinel", &auth_str, "--threshold", "2"]).unwrap();
     let resp = execute_invocation(&sent_short_inv, &transport);
     assert_eq!(resp.status, "ok");
 
@@ -1060,14 +1174,8 @@ fn maintenance_cli_commands_and_aliases_work_correctly() {
     fs::write(alice_home.join("data.bin"), vec![0u8; 1024]).unwrap();
     fs::write(bob_home.join("data.bin"), vec![0u8; 2048]).unwrap();
 
-    let show_inv = parse_cli_args([
-        "--json",
-        "--root",
-        &root_str,
-        "maintenance",
-        "showspace",
-    ])
-    .unwrap();
+    let show_inv =
+        parse_cli_args(["--json", "--root", &root_str, "maintenance", "showspace"]).unwrap();
     let resp = execute_invocation(&show_inv, &transport);
     assert_eq!(resp.status, "ok");
     let entries = resp.data.expect("showspace entries");
@@ -1095,10 +1203,18 @@ fn maintenance_cli_commands_and_aliases_work_correctly() {
     assert_eq!(resp.status, "ok");
     let items = resp.data.expect("ownership items");
     let arr = items.as_array().unwrap();
-    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/af-tune"));
-    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/af-sentinel.py"));
-    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/clean_log"));
-    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/showspace"));
+    assert!(arr
+        .iter()
+        .any(|e| e["script_path"] == "packages/system/af-tune"));
+    assert!(arr
+        .iter()
+        .any(|e| e["script_path"] == "packages/system/af-sentinel.py"));
+    assert!(arr
+        .iter()
+        .any(|e| e["script_path"] == "packages/system/clean_log"));
+    assert!(arr
+        .iter()
+        .any(|e| e["script_path"] == "packages/system/showspace"));
 }
 
 #[test]
@@ -1115,7 +1231,11 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     // Create a legacy sudoers file to verify apachesudo purges it
     let sudoers_d = root.join("etc/sudoers.d");
     fs::create_dir_all(&sudoers_d).unwrap();
-    fs::write(sudoers_d.join("aether-legacy"), b"www-data ALL=(ALL) NOPASSWD: ALL\n").unwrap();
+    fs::write(
+        sudoers_d.join("aether-legacy"),
+        b"www-data ALL=(ALL) NOPASSWD: ALL\n",
+    )
+    .unwrap();
     assert!(sudoers_d.join("aether-legacy").exists());
 
     let root_str = root.to_string_lossy().to_string();
@@ -1183,7 +1303,10 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     // 5. Verify hostname
     let etc_hostname = root.join("etc/hostname");
     assert!(etc_hostname.is_file(), "etc/hostname must exist");
-    assert_eq!(fs::read_to_string(&etc_hostname).unwrap().trim(), "localhost");
+    assert_eq!(
+        fs::read_to_string(&etc_hostname).unwrap().trim(),
+        "localhost"
+    );
 
     // 6. Verify locale
     let locale_path = root.join("etc/default/locale");
@@ -1199,7 +1322,10 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     assert!(root.join("etc/skel/torrents/qbittorrent").is_dir());
 
     // 8. Verify apachesudo purged legacy sudoers file
-    assert!(!sudoers_d.join("aether-legacy").exists(), "legacy sudoers file must be purged");
+    assert!(
+        !sudoers_d.join("aether-legacy").exists(),
+        "legacy sudoers file must be purged"
+    );
 
     // 9. Verify build_modern created /etc/aetherflow/aetherflow.env with 0600 mode
     let env_path = root.join("etc/aetherflow/aetherflow.env");
@@ -1222,19 +1348,39 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     {
         use std::os::unix::fs::PermissionsExt;
         let bashrc_mode = fs::metadata(&bashrc_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(bashrc_mode, 0o640, "root/.bashrc must have 0640 permissions");
+        assert_eq!(
+            bashrc_mode, 0o640,
+            "root/.bashrc must have 0640 permissions"
+        );
 
         let locale_mode = fs::metadata(&locale_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(locale_mode, 0o644, "etc/default/locale must have 0644 permissions");
+        assert_eq!(
+            locale_mode, 0o644,
+            "etc/default/locale must have 0644 permissions"
+        );
 
         let env_mode = fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(env_mode, 0o600, "aetherflow.env must have 0600 permissions");
 
-        let var_lib_mode = fs::metadata(root.join("var/lib/aetherflow")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(var_lib_mode, 0o700, "var/lib/aetherflow must have 0700 permissions");
+        let var_lib_mode = fs::metadata(root.join("var/lib/aetherflow"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            var_lib_mode, 0o700,
+            "var/lib/aetherflow must have 0700 permissions"
+        );
 
-        let skel_media_mode = fs::metadata(root.join("etc/skel/Media")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(skel_media_mode, 0o750, "etc/skel/Media must have 0750 permissions");
+        let skel_media_mode = fs::metadata(root.join("etc/skel/Media"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            skel_media_mode, 0o750,
+            "etc/skel/Media must have 0750 permissions"
+        );
     }
 
     // 12. Verify re-running build_modern preserves existing .env content
@@ -1252,7 +1398,10 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     let rerun_env = execute_invocation(&rerun_inv, &transport);
     assert_eq!(rerun_env.status, "ok");
     let preserved_env = fs::read_to_string(&env_path).unwrap();
-    assert_eq!(original_env, preserved_env, "existing aetherflow.env must be preserved across runs");
+    assert_eq!(
+        original_env, preserved_env,
+        "existing aetherflow.env must be preserved across runs"
+    );
 }
 
 #[test]
@@ -1310,7 +1459,9 @@ fn release_local_deploy_and_rollback_write_status_receipts_and_honor_root_conf()
     assert_eq!(data["configured_channel"], "nightly");
 
     // 2. Local rollback fails when no `previous` slot exists and writes a `failed` receipt
-    let fail_receipt_path = tmp.path().join("var/lib/aetherflow/.self-update-jobs/job-fail.json");
+    let fail_receipt_path = tmp
+        .path()
+        .join("var/lib/aetherflow/.self-update-jobs/job-fail.json");
     let fail_inv = parse_cli_args([
         "--json",
         "--root",
@@ -1349,7 +1500,9 @@ fn release_local_deploy_and_rollback_write_status_receipts_and_honor_root_conf()
             format!("{}\n", rel_v1.display()),
         )
         .unwrap();
-        let ok_receipt_path = tmp.path().join("var/lib/aetherflow/.self-update-jobs/job-ok.json");
+        let ok_receipt_path = tmp
+            .path()
+            .join("var/lib/aetherflow/.self-update-jobs/job-ok.json");
         let ok_inv = parse_cli_args([
             "--json",
             "--dry-run",
@@ -1433,7 +1586,13 @@ fn runner_dispatched_release_and_update_commands_reject_local_root_and_config_ov
         vec!["--json", "--root", &root_str, "release", "rollback"],
         vec!["--json", "release", "deploy", "--config", &conf_str],
         vec!["--json", "release", "deploy", "--keep-releases", "3"],
-        vec!["--json", "release", "deploy", "--job-status-file", &status_str],
+        vec![
+            "--json",
+            "release",
+            "deploy",
+            "--job-status-file",
+            &status_str,
+        ],
         vec![
             "--json",
             "release",
@@ -1509,7 +1668,8 @@ fn isolated_root_backup_cli_rejects_out_of_root_backup_dir_and_contains_staging_
     let mut backup_cfg = af_host::HostBackupConfig::for_isolated_root(&root_dir, "v4.0.0");
     backup_cfg.backup_dir = backup_dir.clone();
     backup_cfg.sqlite_db_path = Some(db_path.clone());
-    let receipt = af_host::create_sqlite_snapshot_backup(&backup_cfg, Some("20261103_110000")).unwrap();
+    let receipt =
+        af_host::create_sqlite_snapshot_backup(&backup_cfg, Some("20261103_110000")).unwrap();
     let backup_filename = receipt
         .primary_artifact_path
         .file_name()

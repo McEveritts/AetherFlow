@@ -371,10 +371,7 @@ SYSTEMD_UNITS_SRC="${SYSTEMD_UNITS_SRC:-${SCRIPT_DIR}/systemd}"
         let cfg = ReleaseConfig::load_with_env(Some(&conf_file), &env_map).unwrap();
         assert_eq!(cfg.release_channel, ReleaseChannel::Nightly);
         assert_eq!(cfg.max_releases, 5);
-        assert_eq!(
-            cfg.releases_dir,
-            PathBuf::from("/opt/AetherFlow/releases")
-        );
+        assert_eq!(cfg.releases_dir, PathBuf::from("/opt/AetherFlow/releases"));
         assert_eq!(cfg.systemd_units_src, sb.path().join("systemd"));
 
         // Verify read_env_str_value last-wins and quote-stripping rules
@@ -467,7 +464,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "v4.0.1-nightly.20261031"
         );
         assert_eq!(
-            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), sample_json).unwrap(),
+            select_release_tag_from_json(
+                "experimental".parse::<ReleaseChannel>().unwrap(),
+                sample_json
+            )
+            .unwrap(),
             "v4.0.1-nightly.20261031"
         );
 
@@ -492,7 +493,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &good_tar,
             &cfg.artifact_name,
             &[
-                ("aetherflow-api", b"#!/bin/sh\necho v4\n", EntryType::Regular),
+                (
+                    "aetherflow-api",
+                    b"#!/bin/sh\necho v4\n",
+                    EntryType::Regular,
+                ),
                 (".version", b"v4.0.0\n", EntryType::Regular),
                 ("config/packages.json", b"[]", EntryType::Regular),
             ],
@@ -501,9 +506,12 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert_eq!(digest.len(), 64);
 
         // 2. Tampered checksum must fail with ChecksumMismatch
-        let bad_manifest =
-            format!("0000000000000000000000000000000000000000000000000000000000000000  {}\n", cfg.artifact_name);
-        let err = verify_artifact_checksum(&good_tar, &bad_manifest, &cfg.artifact_name).unwrap_err();
+        let bad_manifest = format!(
+            "0000000000000000000000000000000000000000000000000000000000000000  {}\n",
+            cfg.artifact_name
+        );
+        let err =
+            verify_artifact_checksum(&good_tar, &bad_manifest, &cfg.artifact_name).unwrap_err();
         assert!(matches!(err, ReleaseError::ChecksumMismatch { .. }));
 
         // 3. Archive containing a symlink entry must be rejected
@@ -542,21 +550,33 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let sandbox = TempSandbox::new("stale-runtime");
         let mut config = ReleaseConfig::for_root(sandbox.path());
         config.health_interval = Duration::ZERO;
-        seed_valid_sqlite_db(&config.data_dir.join("aetherflow.sqlite"), "preserve-live-data");
+        seed_valid_sqlite_db(
+            &config.data_dir.join("aetherflow.sqlite"),
+            "preserve-live-data",
+        );
         let previous = config.releases_dir.join("previous");
         fs::create_dir_all(&previous).unwrap();
         fs::write(previous.join("aetherflow-api"), b"old").unwrap();
         fs::write(previous.join(".version"), "v4.0.0-old").unwrap();
         std::os::unix::fs::symlink(&previous, &config.current_link).unwrap();
         let archive = sandbox.path().join("release.tar.gz");
-        let (_, manifest) = build_synthetic_release_tarball(&archive, &config.artifact_name, &[
-            ("aetherflow-api", b"new", EntryType::Regular),
-            (".version", b"v4.0.0-new", EntryType::Regular),
-        ]);
+        let (_, manifest) = build_synthetic_release_tarball(
+            &archive,
+            &config.artifact_name,
+            &[
+                ("aetherflow-api", b"new", EntryType::Regular),
+                (".version", b"v4.0.0-new", EntryType::Regular),
+            ],
+        );
         let provider = MockArtifactProvider {
-            resolved_tag: Ok("v4.0.0-new".to_string()), archive_source: archive, manifest_content: manifest,
+            resolved_tag: Ok("v4.0.0-new".to_string()),
+            archive_source: archive,
+            manifest_content: manifest,
         };
-        let lifecycle = MockLifecycle { stale_identity: true, ..Default::default() };
+        let lifecycle = MockLifecycle {
+            stale_identity: true,
+            ..Default::default()
+        };
         let prober = MockHealthProber::new(vec![
             Ok(HealthCheckAttempt {
                 http_status: 200,
@@ -573,10 +593,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         ]);
         let engine = ReleaseEngine::new(config.clone(), provider, lifecycle, prober);
         let result = engine.execute(&ReleaseOptions {
-            command: ReleaseCommand::Deploy, channel: ReleaseChannel::Nightly,
-            dry_run: false, offline: false, from_source: false,
+            command: ReleaseCommand::Deploy,
+            channel: ReleaseChannel::Nightly,
+            dry_run: false,
+            offline: false,
+            from_source: false,
         });
-        assert!(matches!(result, Err(ReleaseError::RolledBackAfterProbeFailure { .. })));
+        assert!(matches!(
+            result,
+            Err(ReleaseError::RolledBackAfterProbeFailure { .. })
+        ));
         assert_eq!(fs::read_link(&config.current_link).unwrap(), previous);
         let recovery = RecoveryState::load(&config.releases_dir).unwrap().unwrap();
         assert_eq!(recovery.phase, ReleasePhase::Complete);
@@ -591,7 +617,9 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         cfg.health_interval = Duration::from_millis(1);
 
         // Seed live database at a non-FHS legacy path referenced via ENV_FILE
-        let custom_db = sb.path().join("opt/AetherFlow/backend/data/aetherflow.sqlite");
+        let custom_db = sb
+            .path()
+            .join("opt/AetherFlow/backend/data/aetherflow.sqlite");
         seed_valid_sqlite_db(&custom_db, "live-v3-data");
         fs::create_dir_all(&cfg.env_dir).unwrap();
         fs::write(
@@ -708,7 +736,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         };
 
         assert_eq!(out3.pruned_releases.len(), 1);
-        assert!(!out1.release_dir.exists(), "oldest release should be pruned");
+        assert!(
+            !out1.release_dir.exists(),
+            "oldest release should be pruned"
+        );
         assert!(
             out2.release_dir.exists(),
             "previous release must be protected from pruning"
@@ -720,10 +751,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
 
         let status = engine.inspect_status().unwrap();
         assert_eq!(status.current_version.as_deref(), Some("v4.0.0"));
-        assert_eq!(
-            status.recovery_state.unwrap().phase,
-            ReleasePhase::Complete
-        );
+        assert_eq!(status.recovery_state.unwrap().phase, ReleasePhase::Complete);
         let canonical_state: serde_json::Value =
             serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
         assert_eq!(canonical_state["phase"], "complete");
@@ -902,7 +930,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
                     canonicalize_preserve_normal(&reverted_to),
                     canonicalize_preserve_normal(&first_deploy.release_dir)
                 );
-                assert!(db_restored, "corrupted live DB must be restored from pre-swap snapshot");
+                assert!(
+                    db_restored,
+                    "corrupted live DB must be restored from pre-swap snapshot"
+                );
             }
             other => panic!("unexpected error variant: {:?}", other),
         }
@@ -941,9 +972,17 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let prober = MockHealthProber::new(vec![]);
 
         let engine = ReleaseEngine::new(cfg.clone(), provider, lifecycle.clone(), prober);
-        let opts =
-            ReleaseOptions::parse_args(["deploy", "--dry-run", "--offline", "--channel", "experimental"], ReleaseChannel::Stable)
-                .unwrap();
+        let opts = ReleaseOptions::parse_args(
+            [
+                "deploy",
+                "--dry-run",
+                "--offline",
+                "--channel",
+                "experimental",
+            ],
+            ReleaseChannel::Stable,
+        )
+        .unwrap();
 
         let report = match engine.execute(&opts).unwrap() {
             ReleaseOutcome::Deploy(r) => r,
@@ -955,7 +994,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert_eq!(report.channel, ReleaseChannel::Nightly);
         assert!(report.release_dir.starts_with(&cfg.dry_run_root));
         assert!(report.current_link.starts_with(&cfg.dry_run_root));
-        assert!(!cfg.current_link.exists(), "production current_link must remain untouched");
+        assert!(
+            !cfg.current_link.exists(),
+            "production current_link must remain untouched"
+        );
         assert!(
             !lifecycle
                 .recorded_calls()
@@ -1053,7 +1095,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let err_non_empty =
             extract_and_validate_release_archive(&tar_path, &preplanted_dir, "v4.0.0", &cfg)
                 .unwrap_err();
-        assert!(matches!(err_non_empty, ReleaseError::ArchiveExtraction { .. }));
+        assert!(matches!(
+            err_non_empty,
+            ReleaseError::ArchiveExtraction { .. }
+        ));
 
         // 2. Duplicate file entry inside tarball must be rejected by open_exclusive_private_file / collision check
         let dup_tar = sb.path().join("dup.tar.gz");
@@ -1155,7 +1200,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
                 manifest_content: String::new(),
             };
             let engine = ReleaseEngine::new(
-                config.clone(), provider, lifecycle.clone(), MockHealthProber::new(vec![]),
+                config.clone(),
+                provider,
+                lifecycle.clone(),
+                MockHealthProber::new(vec![]),
             );
             let options = ReleaseOptions {
                 command: ReleaseCommand::Rollback,
@@ -1165,15 +1213,25 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             assert_eq!(error.exit_code(), ExitCode::RollbackFailed);
             assert!(error.to_string().contains("database recovery failed"));
             let calls = lifecycle.recorded_calls();
-            assert!(calls.iter().any(|call| call.starts_with("stop_db_services:")));
+            assert!(calls
+                .iter()
+                .any(|call| call.starts_with("stop_db_services:")));
             assert!(!calls.iter().any(|call| call == "restart_units"));
             let recovery = RecoveryState::load(&config.releases_dir).unwrap().unwrap();
             assert_eq!(recovery.phase, ReleasePhase::Failed);
-            assert!(recovery.last_error.unwrap().contains("database recovery failed"));
-            assert_eq!(fs::read(&live_db).unwrap(), b"CORRUPT DATABASE MUST REMAIN UNMODIFIED");
+            assert!(recovery
+                .last_error
+                .unwrap()
+                .contains("database recovery failed"));
+            assert_eq!(
+                fs::read(&live_db).unwrap(),
+                b"CORRUPT DATABASE MUST REMAIN UNMODIFIED"
+            );
             assert_eq!(fs::read(&wal_path).unwrap(), b"PRESERVED WAL SENTINEL");
             assert_eq!(fs::read(&shm_path).unwrap(), b"PRESERVED SHM SENTINEL");
-            assert!(!fs::read_to_string(&config.log_file).unwrap().contains("ROLLBACK COMPLETE"));
+            assert!(!fs::read_to_string(&config.log_file)
+                .unwrap()
+                .contains("ROLLBACK COMPLETE"));
             if fail_stop_services {
                 assert!(error.to_string().contains("writer quiescence also failed"));
             }
@@ -1202,22 +1260,14 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         fs::write(format!("{}-wal", live_db.display()), b"active-wal").unwrap();
 
         // Case A: stop_services returns Err -> restore MUST fail closed and MUST NOT remove WAL or overwrite DB
-        let stop_err = restore_state_if_corrupted(
-            &cfg,
-            &resolved,
-            &release_dir,
-            false,
-            |_db| {
-                Err(ReleaseError::Systemd {
-                    action: "systemctl stop".to_string(),
-                    reason: "permission denied stopping service".to_string(),
-                })
-            },
-        )
+        let stop_err = restore_state_if_corrupted(&cfg, &resolved, &release_dir, false, |_db| {
+            Err(ReleaseError::Systemd {
+                action: "systemctl stop".to_string(),
+                reason: "permission denied stopping service".to_string(),
+            })
+        })
         .unwrap_err();
-        assert!(stop_err
-            .to_string()
-            .contains("stopping services failed"));
+        assert!(stop_err.to_string().contains("stopping services failed"));
         assert!(
             PathBuf::from(format!("{}-wal", live_db.display())).exists(),
             "WAL sidecar must not be removed when stopping services failed"
@@ -1236,16 +1286,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         .unwrap();
 
         let mut stop_called = false;
-        let tamper_err = restore_state_if_corrupted(
-            &cfg,
-            &resolved,
-            &release_dir,
-            false,
-            |_db| {
-                stop_called = true;
-                Ok(())
-            },
-        )
+        let tamper_err = restore_state_if_corrupted(&cfg, &resolved, &release_dir, false, |_db| {
+            stop_called = true;
+            Ok(())
+        })
         .unwrap_err();
         assert!(
             tamper_err.to_string().contains("SHA-256 mismatch"),
@@ -1362,7 +1406,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             canonicalize_preserve_normal(&r1.release_dir)
         );
         assert_eq!(
-            RecoveryState::load(&cfg.releases_dir).unwrap().unwrap().phase,
+            RecoveryState::load(&cfg.releases_dir)
+                .unwrap()
+                .unwrap()
+                .phase,
             ReleasePhase::Complete
         );
 
@@ -1466,7 +1513,9 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             ..ReleaseOptions::default()
         };
         engine.execute(&migrate_opts).unwrap();
-        let rec_mig = RecoveryState::load(&cfg.with_dry_run(true).releases_dir).unwrap().unwrap();
+        let rec_mig = RecoveryState::load(&cfg.with_dry_run(true).releases_dir)
+            .unwrap()
+            .unwrap();
         assert_eq!(rec_mig.command, ReleaseCommand::MigrateSystemd);
         assert_eq!(rec_mig.phase, ReleasePhase::Complete);
     }
@@ -1479,7 +1528,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let release = config.releases_dir.join("1700000003");
         fs::create_dir_all(release.join("deploy/systemd")).unwrap();
         symlink(&release, &config.current_link).unwrap();
-        assert_eq!(crate::health::packaged_systemd_directory(&config).unwrap(), release.join("deploy/systemd"));
+        assert_eq!(
+            crate::health::packaged_systemd_directory(&config).unwrap(),
+            release.join("deploy/systemd")
+        );
         fs::remove_file(&config.current_link).unwrap();
         let outside = sandbox.path().join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -1515,7 +1567,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "v4.0.0-nightly.110.1"
         );
         assert_eq!(
-            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), payload).unwrap(),
+            select_release_tag_from_json(
+                "experimental".parse::<ReleaseChannel>().unwrap(),
+                payload
+            )
+            .unwrap(),
             "v4.0.0-nightly.110.1"
         );
 
@@ -1540,32 +1596,26 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "v4.0.0"
         );
         // Pre-v4 stable tags must be rejected (no v3 downgrade)
-        assert!(
-            parse_stable_tag_from_redirect_url(
-                "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7",
-                "https://github.com",
-                "McEveritts/AetherFlow"
-            )
-            .is_err()
-        );
+        assert!(parse_stable_tag_from_redirect_url(
+            "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7",
+            "https://github.com",
+            "McEveritts/AetherFlow"
+        )
+        .is_err());
         // Prerelease / hyphenated tags must be rejected by stable redirect parser
-        assert!(
-            parse_stable_tag_from_redirect_url(
-                "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental",
-                "https://github.com",
-                "McEveritts/AetherFlow"
-            )
-            .is_err()
-        );
+        assert!(parse_stable_tag_from_redirect_url(
+            "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental",
+            "https://github.com",
+            "McEveritts/AetherFlow"
+        )
+        .is_err());
         // Unredirected /releases/latest URL must return Err
-        assert!(
-            parse_stable_tag_from_redirect_url(
-                "https://github.com/McEveritts/AetherFlow/releases/latest",
-                "https://github.com",
-                "McEveritts/AetherFlow"
-            )
-            .is_err()
-        );
+        assert!(parse_stable_tag_from_redirect_url(
+            "https://github.com/McEveritts/AetherFlow/releases/latest",
+            "https://github.com",
+            "McEveritts/AetherFlow"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1605,7 +1655,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         );
         assert_eq!(resolved_default.source, DbPathSource::DataDirDefault);
 
-        fs::write(&cfg.host_env_file, "DB_PATH=/var/lib/aetherflow/outside.sqlite\n").unwrap();
+        fs::write(
+            &cfg.host_env_file,
+            "DB_PATH=/var/lib/aetherflow/outside.sqlite\n",
+        )
+        .unwrap();
         assert!(try_resolve_db_path(&cfg, None).is_err());
 
         let inside_a = sandbox.path().join("var/lib/aetherflow/a.sqlite");
@@ -1621,7 +1675,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         .unwrap();
         assert!(try_resolve_db_path(&cfg, None).is_err());
 
-        fs::write(&cfg.host_env_file, format!("DB_PATH={}\n", inside_a.display())).unwrap();
+        fs::write(
+            &cfg.host_env_file,
+            format!("DB_PATH={}\n", inside_a.display()),
+        )
+        .unwrap();
         let resolved_inside = try_resolve_db_path(&cfg, None).unwrap();
         assert_eq!(resolved_inside.path, inside_a);
 
@@ -1658,7 +1716,11 @@ AETHERFLOW_DB_PATH=fallback.sqlite
 
         // Start with restrictive/group-writable permissions to ensure prepare_release_permissions fixes them
         fs::set_permissions(&release_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::set_permissions(release_dir.join("config"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            release_dir.join("config"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::set_permissions(
             release_dir.join("aetherflow-api"),
             fs::Permissions::from_mode(0o600),

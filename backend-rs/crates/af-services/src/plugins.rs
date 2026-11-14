@@ -12,8 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Duration;
 
-static PLUGIN_ID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{1,62}$").unwrap());
+static PLUGIN_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{1,62}$").unwrap());
 static PERMISSION_TOKEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,63}$").unwrap());
 
@@ -294,11 +293,7 @@ fn validate_safe_relative_path(
         if joined.exists() {
             let resolved = fs::canonicalize(&joined)?;
             if !resolved.starts_with(&canon_root) {
-                anyhow::bail!(
-                    "{} '{}' escapes plugin directory root",
-                    field_name,
-                    trimmed
-                );
+                anyhow::bail!("{} '{}' escapes plugin directory root", field_name, trimmed);
             }
         }
     }
@@ -356,9 +351,13 @@ pub fn validate_plugin_manifest_in_dir(
             if !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE") {
                 anyhow::bail!("invalid api_scope method '{}'", method);
             }
-            if !matches!(method, "GET" | "HEAD") && !manifest.permissions.iter().any(|permission| {
-                permission.ends_with(":write") || permission.ends_with(":admin") || permission.ends_with(":control")
-            }) {
+            if !matches!(method, "GET" | "HEAD")
+                && !manifest.permissions.iter().any(|permission| {
+                    permission.ends_with(":write")
+                        || permission.ends_with(":admin")
+                        || permission.ends_with(":control")
+                })
+            {
                 anyhow::bail!("mutating api_scope '{}' requires a write permission", scope);
             }
             route

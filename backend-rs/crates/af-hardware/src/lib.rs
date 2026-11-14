@@ -55,15 +55,19 @@ impl NvmlRuntime {
         for path in candidates {
             if let Ok(lib) = unsafe { Library::new(path) } {
                 let init_ok = unsafe {
-                    let init_fn: Result<Symbol<unsafe extern "C" fn() -> NvmlReturn>, _> =
-                        lib.get(b"nvmlInit_v2\0").or_else(|_| lib.get(b"nvmlInit\0"));
+                    let init_fn: Result<Symbol<unsafe extern "C" fn() -> NvmlReturn>, _> = lib
+                        .get(b"nvmlInit_v2\0")
+                        .or_else(|_| lib.get(b"nvmlInit\0"));
                     match init_fn {
                         Ok(f) => f() == NVML_SUCCESS,
                         Err(_) => false,
                     }
                 };
                 if init_ok {
-                    tracing::info!(library = path, "Loaded native NVML runtime (zero-fork GPU telemetry)");
+                    tracing::info!(
+                        library = path,
+                        "Loaded native NVML runtime (zero-fork GPU telemetry)"
+                    );
                     return Some(Self { _lib: lib });
                 }
             }
@@ -855,7 +859,9 @@ fn count_established_tcp_connections() -> usize {
 }
 
 fn refresh_top_processes(state: &mut TelemetryState, now: Instant) {
-    state.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    state
+        .sys
+        .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let total_mem = state.sys.total_memory().max(1) as f64;
     let mut entries: Vec<ProcessInfo> = state
         .sys
@@ -1054,8 +1060,7 @@ fn update_gpu_metrics(state: &mut TelemetryState) {
         if let Some(vram_total) = read_sysfs_f64(&card_dir.join("device/mem_info_vram_total")) {
             if vram_total > 0.0 {
                 state.cached_gpus[i].memory_total = round_1(vram_total / (1024.0 * 1024.0));
-                if let Some(vram_used) =
-                    read_sysfs_f64(&card_dir.join("device/mem_info_vram_used"))
+                if let Some(vram_used) = read_sysfs_f64(&card_dir.join("device/mem_info_vram_used"))
                 {
                     if vram_used >= 0.0 {
                         state.cached_gpus[i].memory_used = round_1(vram_used / (1024.0 * 1024.0));

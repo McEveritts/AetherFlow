@@ -712,18 +712,19 @@ _build_modern_stack() {
     local aes_key
     if [[ -n "${existing_aes_key}" ]]; then
         aes_key="${existing_aes_key}"
+    elif command -v openssl >/dev/null 2>&1; then
+        aes_key="$(openssl rand -hex 32)"
     else
-        aes_key="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)"
-        while [[ ${#aes_key} -lt 32 ]]; do
-            aes_key="${aes_key}$(head -c 4 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 1)"
-        done
+        aes_key="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     fi
 
     local jwt_secret
     if [[ -n "${existing_jwt_secret}" ]]; then
         jwt_secret="${existing_jwt_secret}"
+    elif command -v openssl >/dev/null 2>&1; then
+        jwt_secret="$(openssl rand -hex 32)"
     else
-        jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
+        jwt_secret="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     fi
 
     local saved_domain=""
@@ -835,7 +836,14 @@ _build_modern_stack() {
         extra_lines="$(grep -v -E '^[[:space:]]*(export[[:space:]]+)?(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     fi
 
-    cat > "${env_dir}/aetherflow.env" <<EOF
+    if [[ -L "${env_dir}" || -L "${env_dir}/aetherflow.env" ]]; then
+        echo "[ERROR] Refusing symlinked environment configuration path under ${env_dir}" >&2
+        return 1
+    fi
+    local tmp_env
+    tmp_env="$(umask 0027; mktemp "${env_dir}/.aetherflow.env.tmp.XXXXXX")" || return 1
+    chmod 0640 "${tmp_env}"
+    cat > "${tmp_env}" <<EOF
 AES_MASTER_KEY=${aes_key}
 JWT_SECRET=${jwt_secret}
 PORT=${port}
@@ -852,12 +860,13 @@ GIN_MODE=${gin_mode}
 EOF
 
     if [[ -n "${extra_lines}" ]]; then
-        printf "\n# Preserved Operator Custom Configurations\n%s\n" "${extra_lines}" >> "${env_dir}/aetherflow.env"
+        printf "\n# Preserved Operator Custom Configurations\n%s\n" "${extra_lines}" >> "${tmp_env}"
     fi
-    chmod 0640 "${env_dir}/aetherflow.env"
+    chmod 0640 "${tmp_env}"
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
-        chown root:aetherflow "${env_dir}/aetherflow.env" 2>/dev/null || true
+        chown root:aetherflow "${tmp_env}" 2>/dev/null || true
     fi
+    mv -f "${tmp_env}" "${env_dir}/aetherflow.env"
 
     # ── Install systemd unit files from templates ────────────────────────
     local sysd_dir="${af_root}/setup/templates/sysd"

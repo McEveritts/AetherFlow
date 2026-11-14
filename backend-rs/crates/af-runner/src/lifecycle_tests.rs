@@ -1203,7 +1203,8 @@ async fn local_service_admission_types_reservation_and_updater_contention() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
     use futures::StreamExt;
-    let test = "lifecycle_tests::legacy_cancellation_after_output_eof_reaps_child_and_releases_locks";
+    let test =
+        "lifecycle_tests::legacy_cancellation_after_output_eof_reaps_child_and_releases_locks";
     if subprocess(test) {
         return;
     }
@@ -1254,7 +1255,10 @@ async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(package_executor::cancel_package_execution("fixture"));
     let output = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>()).await;
-    let pid: i32 = fs::read_to_string(root.join("pid")).unwrap().parse().unwrap();
+    let pid: i32 = fs::read_to_string(root.join("pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
     if output.is_err() {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
@@ -1263,9 +1267,19 @@ async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
         .into_iter()
         .map(Result::unwrap)
         .collect::<String>();
-    assert!(output.contains("operation cancelled for package 'fixture'"), "{output}");
-    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "cancelled child must be reaped");
-    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    assert!(
+        output.contains("operation cancelled for package 'fixture'"),
+        "{output}"
+    );
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "cancelled child must be reaped"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
     assert!(!package_executor::is_package_execution_active("fixture"));
     assert!(af_release::ReleaseLockGuard::acquire(
         af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),

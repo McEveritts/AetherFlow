@@ -197,14 +197,30 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
                     retained.extend(extra)
                     if len(retained) > max_bytes:
                         del retained[:-max_bytes]
-            if retained:
+            def _rewrite_retained_from_start(buf: bytearray) -> None:
+                if not buf:
+                    return
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                unwritten = memoryview(retained)
+                unwritten = memoryview(buf)
                 while unwritten:
                     written = os.write(descriptor, unwritten)
                     if written <= 0:
                         raise OSError("zero-length trailing restore write")
                     unwritten = unwritten[written:]
+
+            _rewrite_retained_from_start(retained)
+            for _ in range(8):
+                post_write_size = os.fstat(descriptor).st_size
+                tail_start = max(read_cursor, len(retained))
+                if post_write_size <= tail_start:
+                    break
+                late_extra = _read_bounded_live_tail(descriptor, tail_start, post_write_size, max_bytes)
+                read_cursor = post_write_size
+                if late_extra:
+                    retained.extend(late_extra)
+                    if len(retained) > max_bytes:
+                        del retained[:-max_bytes]
+                    _rewrite_retained_from_start(retained)
             os.ftruncate(descriptor, len(retained))
             os.fsync(descriptor)
             return True

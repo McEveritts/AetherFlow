@@ -586,10 +586,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let dir_name = format!(
-                "c11-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..10]
-            );
+            let dir_name = format!("c11-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
             let base = std::env::var_os("TMPDIR")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)

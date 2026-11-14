@@ -2,17 +2,17 @@ pub mod cluster_daemon;
 pub mod lifecycle_cache;
 pub mod mutators;
 pub mod plugins;
-pub mod workers;
 mod service_observations;
+pub mod workers;
 
-#[cfg(all(test, unix))]
-mod inventory_regressions;
 #[cfg(all(test, unix))]
 mod http_lifecycle_regressions;
 #[cfg(all(test, unix))]
-mod readiness_regressions;
+mod inventory_regressions;
 #[cfg(all(test, unix))]
 mod native_metadata_regressions;
+#[cfg(all(test, unix))]
+mod readiness_regressions;
 
 use af_models::{Package, PackageAutomation};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -326,9 +326,8 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
     let Ok(conn) = af_db::get_conn() else {
         return map;
     };
-    let _ = conn.execute_batch(
-        "ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';",
-    );
+    let _ = conn
+        .execute_batch("ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';");
     let Ok(mut stmt) = conn.prepare(
         "SELECT package_name, installed_version, latest_version, update_available, update_url, COALESCE(CAST(checked_at AS TEXT), ''), last_error, COALESCE(source_key, '') FROM app_updates",
     ) else {
@@ -478,8 +477,8 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     let pkgs = get_package_catalog().ok()?;
     let p = pkgs.into_iter().find(|x| x.name == app_name)?;
     let (mutator_type, config_file_path, port_config_key) = default_blueprint_mutator_meta(&p.name);
-    let supports_dynamic_port = p.default_port > 0
-        && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
+    let supports_dynamic_port =
+        p.default_port > 0 && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
     Some(AppBlueprint {
         app_name: p.name.clone(),
         service_name: if p.service_name.is_empty() {
@@ -1024,10 +1023,9 @@ pub fn aggregate_component_statuses(
                     configured_optional_failed = true;
                 }
             }
-            "oneshot"
-                if comp.status == "failed" => {
-                    oneshot_failed = true;
-                }
+            "oneshot" if comp.status == "failed" => {
+                oneshot_failed = true;
+            }
             _ => {}
         }
     }
@@ -1191,7 +1189,8 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 
     // systemd format: "Mon 2026-03-30 12:34:56 UTC" or "2026-03-30 12:34:56 UTC"
     let tokens: Vec<&str> = raw.split_whitespace().collect();
-    let date_time_pair = if tokens.len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic()) {
+    let date_time_pair = if tokens.len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic())
+    {
         Some(format!("{} {}", tokens[1], tokens[2]))
     } else if tokens.len() >= 2 {
         Some(format!("{} {}", tokens[0], tokens[1]))
@@ -1781,9 +1780,7 @@ pub fn get_active_services_with_jobs(
 
         let internal_domain = format!("{}.aether.local", p.name.trim().to_lowercase());
 
-        let mut public_domain = ing
-            .map(|c| c.public_domain.clone())
-            .unwrap_or_default();
+        let mut public_domain = ing.map(|c| c.public_domain.clone()).unwrap_or_default();
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = format_app_public_domain(&p.name, &base_domain);
         }
@@ -2473,7 +2470,10 @@ pub fn set_streaming_demo_mode(enabled: bool) {
 }
 
 pub fn is_streaming_demo_mode() -> bool {
-    DEMO_STREAMING_MODE.lock().map(|guard| *guard).unwrap_or(false)
+    DEMO_STREAMING_MODE
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(false)
 }
 
 pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDashboardResponse {
@@ -2592,7 +2592,10 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL host is required"))?
         .to_lowercase();
-    if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(forbidden_streaming_ip)
+    if host
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(forbidden_streaming_ip)
         || host == "metadata.google.internal"
         || host.ends_with(".metadata.google.internal")
         || host == "metadata.goog"
@@ -2606,12 +2609,14 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
 pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
     match address {
         std::net::IpAddr::V4(address) => address.is_unspecified() || address.is_link_local(),
-        std::net::IpAddr::V6(address) => {
-            address.to_ipv4_mapped().map(|mapped| forbidden_streaming_ip(mapped.into())).unwrap_or_else(|| {
-                address.is_unspecified() || address.is_unicast_link_local()
+        std::net::IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(|mapped| forbidden_streaming_ip(mapped.into()))
+            .unwrap_or_else(|| {
+                address.is_unspecified()
+                    || address.is_unicast_link_local()
                     || address.segments()[..2] == [0xfd00, 0x0ec2]
-            })
-        }
+            }),
     }
 }
 
@@ -2621,9 +2626,19 @@ impl reqwest::dns::Resolve for StreamingResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let hostname = name.as_str().to_string();
         Box::pin(async move {
-            let addresses: Vec<_> = tokio::net::lookup_host((hostname.as_str(), 0)).await?.collect();
-            if addresses.is_empty() || addresses.iter().any(|address| forbidden_streaming_ip(address.ip())) {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Disallowed resolved media-server address").into());
+            let addresses: Vec<_> = tokio::net::lookup_host((hostname.as_str(), 0))
+                .await?
+                .collect();
+            if addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|address| forbidden_streaming_ip(address.ip()))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Disallowed resolved media-server address",
+                )
+                .into());
             }
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
         })
@@ -2805,7 +2820,10 @@ mod tests {
     #[test]
     fn test_internal_domains_are_derived_from_blueprints() {
         let blueprint = get_blueprint("jellyfin").unwrap();
-        assert_eq!(resolve_app_internal_domain("jellyfin"), blueprint.internal_domain);
+        assert_eq!(
+            resolve_app_internal_domain("jellyfin"),
+            blueprint.internal_domain
+        );
         assert_eq!(
             resolve_app_internal_domain("unknown-audit-app"),
             "unknown-audit-app.aether.local"
@@ -2902,7 +2920,10 @@ mod tests {
                 tracking.version_command,
                 vec!["cat".to_string(), format!("/opt/{app}/.af-version")]
             );
-            assert!(!tracking.version_command.iter().any(|arg| arg.contains(".af-version")));
+            assert!(!tracking
+                .version_command
+                .iter()
+                .any(|arg| arg.contains(".af-version")));
             if app == "piped" {
                 assert_eq!(
                     tracking.version_command,

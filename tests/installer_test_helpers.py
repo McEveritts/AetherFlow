@@ -17,6 +17,8 @@ def common_functions(*names):
                                      'derive_app_password', 'check_disk_space')))
     if 'stop_systemd_unit' in names:
         names = tuple(dict.fromkeys((*names, 'quiesce_services_for_rollback', 'retained_bind_address')))
+    if 'download_file' in names:
+        names = tuple(dict.fromkeys((*names, 'af_prepare_logfile_path', 'af_validate_tar_archive')))
     source = (ROOT / "packages/common.sh").read_text()
     functions = []
     for name in names:

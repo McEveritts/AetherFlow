@@ -704,7 +704,8 @@ fn apply_scoped_provider_item_metadata(
 ) -> Result<usize, StreamingMetadataError> {
     let norm_provider = normalize_metadata_provider(provider)?;
     let clean_server_id = server_id.trim();
-    let transaction = conn.unchecked_transaction()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let conn = &transaction;
 
     let configured_server_id: Option<String> = conn

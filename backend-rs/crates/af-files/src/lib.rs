@@ -275,10 +275,7 @@ impl BrowserFs {
                     self.derive_resolved_components(&initial_components)?;
                 let (leaf_name, parent_slice) =
                     resolved_components.split_last().ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::InvalidInput,
-                            "resolved file path cannot be root",
-                        )
+                        Error::new(ErrorKind::InvalidInput, "resolved file path cannot be root")
                     })?;
                 let parent_refs: Vec<&str> = parent_slice.iter().map(String::as_str).collect();
                 let strict_parent = self.open_dir_components_strict_openat2(&parent_refs)?;
@@ -302,8 +299,7 @@ impl BrowserFs {
                 }
                 let resolved_path = resolved_components.join("/");
                 let entry = entry_from_stat(leaf_name, resolved_path.clone(), &verify_stat);
-                let was_symlink =
-                    !resolution_paths.is_empty() || requested_norm != resolved_path;
+                let was_symlink = !resolution_paths.is_empty() || requested_norm != resolved_path;
                 Ok(ResolvedEntry {
                     was_symlink,
                     entry,
@@ -353,14 +349,10 @@ impl BrowserFs {
                         "resolved directory identity proof failed under concurrent mutation",
                     ));
                 }
-                let leaf_name = resolved_components
-                    .last()
-                    .cloned()
-                    .unwrap_or_default();
+                let leaf_name = resolved_components.last().cloned().unwrap_or_default();
                 let resolved_path = resolved_components.join("/");
                 let entry = entry_from_stat(&leaf_name, resolved_path.clone(), &verify_stat);
-                let was_symlink =
-                    !resolution_paths.is_empty() || requested_norm != resolved_path;
+                let was_symlink = !resolution_paths.is_empty() || requested_norm != resolved_path;
                 Ok(ResolvedEntry {
                     was_symlink,
                     entry,
@@ -973,12 +965,12 @@ impl BrowserFs {
         path: &str,
         allow_symlinks: bool,
     ) -> Result<u64, RemovalError> {
-        let (parent_fd, leaf) = self
-            .resolve_parent_and_leaf(path)
-            .map_err(|error| RemovalError {
-                removed_bytes: 0,
-                error,
-            })?;
+        let (parent_fd, leaf) =
+            self.resolve_parent_and_leaf(path)
+                .map_err(|error| RemovalError {
+                    removed_bytes: 0,
+                    error,
+                })?;
         let mut removed_bytes = 0u64;
         remove_entry_recursive(
             parent_fd.as_raw_fd(),
@@ -1109,8 +1101,7 @@ impl BrowserFs {
                     "operation not allowed on root directory",
                 ));
             }
-            let dir_flags =
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+            let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
             let root_dup = openat2_beneath_internal(self.root_fd.as_raw_fd(), c".", dir_flags)?;
             let root_stat = fstat_fd(root_dup.as_raw_fd())?;
             if (root_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
@@ -1155,10 +1146,7 @@ impl BrowserFs {
                     self.derive_resolved_components(&initial_components)?;
                 let (leaf_name, parent_slice) =
                     resolved_components.split_last().ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::InvalidInput,
-                            "resolved file path cannot be root",
-                        )
+                        Error::new(ErrorKind::InvalidInput, "resolved file path cannot be root")
                     })?;
                 let parent_refs: Vec<&str> = parent_slice.iter().map(String::as_str).collect();
                 let strict_parent = self.open_dir_components_strict_openat2(&parent_refs)?;
@@ -1225,11 +1213,8 @@ impl BrowserFs {
                 if resolved_components.is_empty() {
                     let verify_flags =
                         libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
-                    let verify_root = openat2_strict_no_symlinks(
-                        self.root_fd.as_raw_fd(),
-                        c".",
-                        verify_flags,
-                    )?;
+                    let verify_root =
+                        openat2_strict_no_symlinks(self.root_fd.as_raw_fd(), c".", verify_flags)?;
                     let verify_stat = fstat_fd(verify_root.as_raw_fd())?;
                     if (verify_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR
                         || verify_stat.st_dev != probe_stat.st_dev
@@ -1269,10 +1254,7 @@ impl BrowserFs {
                         "resolved directory identity proof failed under concurrent mutation",
                     ));
                 }
-                let leaf_name = resolved_components
-                    .last()
-                    .cloned()
-                    .unwrap_or_default();
+                let leaf_name = resolved_components.last().cloned().unwrap_or_default();
                 let resolved_path = resolved_components.join("/");
                 let entry = entry_from_stat(&leaf_name, resolved_path.clone(), &verify_stat);
                 let scoped_fs = Self::from_directory(verify_dir)?;
@@ -3168,8 +3150,8 @@ mod tests {
     }
 
     #[test]
-    fn walk_returns_descendants_with_full_relative_paths_and_enforces_bounds_and_no_symlink_traversal()
-    {
+    fn walk_returns_descendants_with_full_relative_paths_and_enforces_bounds_and_no_symlink_traversal(
+    ) {
         let outside = TempDir::new();
         fs::write(outside.path().join("secret.txt"), b"classified").unwrap();
 
@@ -3380,11 +3362,7 @@ mod tests {
         // Partial deletion accounting when a directory contains valid files and a hardlink
         bfs.create_directory_all("partial_hard/sub").unwrap();
         fs::write(tmp.path().join("partial_hard/file1.txt"), b"abcdef").unwrap();
-        fs::write(
-            tmp.path().join("partial_hard/sub/file2.txt"),
-            b"0123456789",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("partial_hard/sub/file2.txt"), b"0123456789").unwrap();
         fs::hard_link(
             &outside_secret,
             tmp.path().join("partial_hard/sub/a_hardlink.txt"),
@@ -3429,7 +3407,9 @@ mod tests {
 
         // Atomic replacement with matching dev/ino succeeds
         let mut replacement = bfs.begin_replace("config.json").unwrap();
-        replacement.write_all(b"{\"v\":2,\"mode\":\"new\"}").unwrap();
+        replacement
+            .write_all(b"{\"v\":2,\"mode\":\"new\"}")
+            .unwrap();
         replacement.commit_replace(&expected_file).unwrap();
 
         // Previously opened file handle retains its own inode and descriptor offset
@@ -3515,7 +3495,9 @@ mod tests {
         // Publication semantics: directory sync failure after renameat must still return Ok(())
         let sync_expected = bfs.open_file("hard_target.txt").unwrap();
         let mut sync_replace = bfs.begin_replace("hard_target.txt").unwrap();
-        sync_replace.write_all(b"published-despite-dir-eio").unwrap();
+        sync_replace
+            .write_all(b"published-despite-dir-eio")
+            .unwrap();
         sync_replace
             .commit_replace_with_directory_sync(&sync_expected, |_| {
                 Err(Error::from_raw_os_error(libc::EIO))
@@ -3626,8 +3608,8 @@ mod tests {
     }
 
     #[test]
-    fn internal_symlink_resolution_supports_nested_directory_and_file_links_with_proven_target_paths()
-    {
+    fn internal_symlink_resolution_supports_nested_directory_and_file_links_with_proven_target_paths(
+    ) {
         let temp_root = TempDir::new();
         let browser = BrowserFs::open(temp_root.path()).unwrap();
 
@@ -3662,9 +3644,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(browser
-            .open_file("aliases/music/top_pick.flac")
-            .is_err());
+        assert!(browser.open_file("aliases/music/top_pick.flac").is_err());
         assert!(browser
             .open_file("aliases/music/year_link/notes.txt")
             .is_err());
@@ -3710,7 +3690,10 @@ mod tests {
             .metadata_resolving_internal_links("real//albums/2026/notes.txt")
             .unwrap();
         assert!(!redundant_separator_meta.was_symlink);
-        assert_eq!(redundant_separator_meta.resolved_path, direct_meta.resolved_path);
+        assert_eq!(
+            redundant_separator_meta.resolved_path,
+            direct_meta.resolved_path
+        );
 
         let resolved_dir = browser
             .scoped_resolving_internal_links("aliases/music/year_link/live")
@@ -3803,11 +3786,7 @@ mod tests {
             temp_root.path().join("nested/magic_root"),
         )
         .unwrap();
-        symlink(
-            "/proc/self/cwd",
-            temp_root.path().join("nested/magic_cwd"),
-        )
-        .unwrap();
+        symlink("/proc/self/cwd", temp_root.path().join("nested/magic_cwd")).unwrap();
 
         symlink(
             "missing_target.txt",
@@ -3869,9 +3848,7 @@ mod tests {
                 "scoped_resolving_internal_links must reject {rejected_dir}"
             );
             assert!(
-                browser
-                    .list_resolving_internal_links(rejected_dir)
-                    .is_err(),
+                browser.list_resolving_internal_links(rejected_dir).is_err(),
                 "list_resolving_internal_links must reject {rejected_dir}"
             );
         }
@@ -3904,9 +3881,7 @@ mod tests {
         root_fs
             .create_directory_all("tenants/alpha/private")
             .unwrap();
-        root_fs
-            .create_directory_all("tenants/beta/shared")
-            .unwrap();
+        root_fs.create_directory_all("tenants/beta/shared").unwrap();
 
         fs::write(
             temp_root.path().join("tenants/alpha/public/readme.txt"),
@@ -4043,10 +4018,18 @@ mod tests {
             b"internal-target-7777777",
         )
         .unwrap();
-        fs::write(temp_root.path().join("dir_b/existing.txt"), b"do-not-clobber").unwrap();
+        fs::write(
+            temp_root.path().join("dir_b/existing.txt"),
+            b"do-not-clobber",
+        )
+        .unwrap();
 
         symlink("target.txt", temp_root.path().join("dir_a/internal_sym")).unwrap();
-        symlink(&external_target, temp_root.path().join("dir_a/external_sym")).unwrap();
+        symlink(
+            &external_target,
+            temp_root.path().join("dir_a/external_sym"),
+        )
+        .unwrap();
         symlink(
             "nonexistent.txt",
             temp_root.path().join("dir_a/dangling_sym"),

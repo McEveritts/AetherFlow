@@ -108,7 +108,8 @@ async fn expired_cleanup_advances_past_a_full_page_of_ambiguous_uploads() {
          INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status)
          VALUES (4, 'dave', 10000, 0, 'active'), (5, 'eve', 10000, 0, 'active');
          UPDATE user_quotas SET status = 'active' WHERE user_id = 3;",
-    ).unwrap();
+    )
+    .unwrap();
     let mut ambiguous = Vec::new();
     for index in 0..128 {
         let user_id = index / 32 + 1;
@@ -118,7 +119,8 @@ async fn expired_cleanup_advances_past_a_full_page_of_ambiguous_uploads() {
             &human_user(user_id),
             &tus_post_headers(&format!("ambiguous-{index}.bin"), None, 4),
             None,
-        ).unwrap();
+        )
+        .unwrap();
         remove_publication_proof_at(temporary.path(), user_id, &session.id).unwrap();
         ambiguous.push(session);
     }
@@ -128,28 +130,55 @@ async fn expired_cleanup_advances_past_a_full_page_of_ambiguous_uploads() {
         &human_user(5),
         &tus_post_headers("safe-expired.bin", None, 4),
         None,
-    ).unwrap();
+    )
+    .unwrap();
     for session in &ambiguous {
         conn.execute(
             "UPDATE mcbrowser_uploads SET status = 'publishing', offset_bytes = 4, expires_at = 1 WHERE id = ?1",
             [&session.id],
         ).unwrap();
     }
-    conn.execute("UPDATE mcbrowser_uploads SET expires_at = 2 WHERE id = ?1", [&safe.id]).unwrap();
-    let retained_quota: Vec<i64> = (1..=4).map(|user_id| queried_used_bytes(&conn, user_id)).collect();
-    assert_eq!(cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(), 0);
+    conn.execute(
+        "UPDATE mcbrowser_uploads SET expires_at = 2 WHERE id = ?1",
+        [&safe.id],
+    )
+    .unwrap();
+    let retained_quota: Vec<i64> = (1..=4)
+        .map(|user_id| queried_used_bytes(&conn, user_id))
+        .collect();
+    assert_eq!(
+        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        0
+    );
     assert!(load_session_conn(&conn, &safe.id).unwrap().is_some());
-    assert_eq!(cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(), 1);
+    assert_eq!(
+        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        1
+    );
     assert!(load_session_conn(&conn, &safe.id).unwrap().is_none());
     assert!(open_existing_staging_file_at(temporary.path(), 5, &safe.id).is_err());
     assert_eq!(queried_used_bytes(&conn, 5), 0);
-    assert_eq!(cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(), 0);
+    assert_eq!(
+        cleanup_expired_uploads_at(&conn, temporary.path(), 100).unwrap(),
+        0
+    );
     for session in &ambiguous {
         assert!(load_session_conn(&conn, &session.id).unwrap().is_some());
-        let audit = super::super::events::load_audit_record_by_id_with_conn(&conn, &session.audit_event_id).unwrap().unwrap();
-        assert_eq!(audit.status, super::super::events::AuditEventStatus::Pending);
+        let audit =
+            super::super::events::load_audit_record_by_id_with_conn(&conn, &session.audit_event_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            audit.status,
+            super::super::events::AuditEventStatus::Pending
+        );
     }
-    assert_eq!(retained_quota, (1..=4).map(|user_id| queried_used_bytes(&conn, user_id)).collect::<Vec<_>>());
+    assert_eq!(
+        retained_quota,
+        (1..=4)
+            .map(|user_id| queried_used_bytes(&conn, user_id))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -163,33 +192,82 @@ async fn public_head_audit_binding_repair_rolls_back_intent_when_binding_fails()
         &user,
         &tus_post_headers("binding-recovery.txt", None, 4),
         None,
-    ).unwrap();
+    )
+    .unwrap();
     let mut staging = open_existing_staging_file_at(temporary.path(), 1, &session.id).unwrap();
     staging.write_all(b"data").unwrap();
     staging.sync_all().unwrap();
     conn.execute("UPDATE mcbrowser_uploads SET offset_bytes = 4, status = 'publishing', audit_event_id = '' WHERE id = ?1", [&session.id]).unwrap();
-    conn.execute("DELETE FROM mcbrowser_audit_events WHERE event_id = ?1", [&session.audit_event_id]).unwrap();
+    conn.execute(
+        "DELETE FROM mcbrowser_audit_events WHERE event_id = ?1",
+        [&session.audit_event_id],
+    )
+    .unwrap();
     conn.execute_batch(
         "CREATE TRIGGER reject_audit_binding BEFORE UPDATE OF audit_event_id ON mcbrowser_uploads
          WHEN NEW.audit_event_id != '' BEGIN SELECT RAISE(ABORT, 'binding unavailable'); END;",
-    ).unwrap();
-    let count_intents = || conn.query_row("SELECT COUNT(*) FROM mcbrowser_audit_events", [], |row| row.get::<_, i64>(0)).unwrap();
-    assert_eq!(head_upload_at(&conn, temporary.path(), &user, &session.id, &tus_basic_headers()).unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    )
+    .unwrap();
+    let count_intents = || {
+        conn.query_row("SELECT COUNT(*) FROM mcbrowser_audit_events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        head_upload_at(
+            &conn,
+            temporary.path(),
+            &user,
+            &session.id,
+            &tus_basic_headers()
+        )
+        .unwrap_err()
+        .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
     assert_eq!(count_intents(), 0);
-    assert_eq!(load_session_conn(&conn, &session.id).unwrap().unwrap().audit_event_id, "");
+    assert_eq!(
+        load_session_conn(&conn, &session.id)
+            .unwrap()
+            .unwrap()
+            .audit_event_id,
+        ""
+    );
     let filesystem = super::super::open_user_browser_fs_at(temporary.path(), 1).unwrap();
     assert!(filesystem.open_file("binding-recovery.txt").is_err());
-    conn.execute_batch("DROP TRIGGER reject_audit_binding").unwrap();
-    let response = head_upload_at(&conn, temporary.path(), &user, &session.id, &tus_basic_headers()).unwrap();
+    conn.execute_batch("DROP TRIGGER reject_audit_binding")
+        .unwrap();
+    let response = head_upload_at(
+        &conn,
+        temporary.path(),
+        &user,
+        &session.id,
+        &tus_basic_headers(),
+    )
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["Upload-Status"], "completed");
     assert_eq!(count_intents(), 1);
     let recovered = load_session_conn(&conn, &session.id).unwrap().unwrap();
     assert!(!recovered.audit_event_id.is_empty());
-    let audit = super::super::events::load_audit_record_by_id_with_conn(&conn, &recovered.audit_event_id).unwrap().unwrap();
-    assert_eq!(audit.status, super::super::events::AuditEventStatus::Completed);
+    let audit =
+        super::super::events::load_audit_record_by_id_with_conn(&conn, &recovered.audit_event_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        audit.status,
+        super::super::events::AuditEventStatus::Completed
+    );
     assert_eq!(queried_used_bytes(&conn, 1), 1004);
-    head_upload_at(&conn, temporary.path(), &user, &session.id, &tus_basic_headers()).unwrap();
+    head_upload_at(
+        &conn,
+        temporary.path(),
+        &user,
+        &session.id,
+        &tus_basic_headers(),
+    )
+    .unwrap();
     assert_eq!(count_intents(), 1);
 }
 
