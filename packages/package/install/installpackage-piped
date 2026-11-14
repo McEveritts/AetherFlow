@@ -767,17 +767,17 @@ cleanup_piped_install() {
                     runtime_path="${RUNTIME_PATHS[$runtime_index]}"
                     safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
                 done
-                systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl daemon-reload || restore_failed=true
                 if [[ "$restored" != true || "$restore_failed" == true ]]; then
                     restore_failed=true
                     export AF_PRESERVE_SCRATCH=1
                     print_error "Piped recovery incomplete; backups retained in $RUNTIME_BACKUP"
                 elif [[ "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-                    systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                    af_logged systemctl restart af-piped-api af-piped-proxy af-piped || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
                 fi
             fi
         elif [[ "${INSTALL_COMMITTED:-false}" != true && "$SERVICE_STOPPED" == true && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            systemctl restart af-piped-api af-piped-proxy af-piped >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+            af_logged systemctl restart af-piped-api af-piped-proxy af-piped || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
         fi
     fi
     [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
@@ -805,7 +805,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 af_set_stage "dependencies" 10
-apt-get install --no-remove -y -qq openjdk-21-jdk-headless apache2-bin build-essential pkg-config libssl-dev cargo rustc >> "$LOGFILE" 2>&1
+af_logged apt-get install --no-remove -y -qq openjdk-21-jdk-headless apache2-bin build-essential pkg-config libssl-dev cargo rustc
 ensure_node 24
 
 af_set_stage "backup" 20
@@ -849,9 +849,9 @@ safe_write_text(path, source.replace(old, new))
 PY
 
 af_set_stage "build_frontend" 50
-node_build run_as_piped_clean_env "$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0 >> "$LOGFILE" 2>&1
-node_build run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
-run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged node_build run_as_piped_clean_env "$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0
+af_logged node_build run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}"
+af_logged run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR"
 
 af_set_stage "build_proxy" 65
 RUST_VERSION=0
@@ -900,7 +900,7 @@ if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
     fi
 fi
 rm -f "${INSTALL_DIR}/proxy/target/release/piped-proxy" 2>/dev/null || run_as_piped_clean_env "$DATA_DIR" rm -f "${INSTALL_DIR}/proxy/target/release/piped-proxy" 2>/dev/null || true
-run_as_piped_clean_env "$DATA_DIR" env CARGO_HOME="${DATA_DIR}/.cargo" RUSTC=rustc PATH="$RUST_BUILD_PATH" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
+af_logged run_as_piped_clean_env "$DATA_DIR" env CARGO_HOME="${DATA_DIR}/.cargo" RUSTC=rustc PATH="$RUST_BUILD_PATH" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml"
 [[ -z "$RUST_TOOLCHAIN_DIR" ]] || safe_rm_rf "$RUST_TOOLCHAIN_DIR"
 stop_systemd_unit af-piped-api af-piped-proxy
 
@@ -1005,7 +1005,7 @@ youtube_unit af-piped "/usr/sbin/apache2 -f ${CONFIG_DIR}/httpd.conf -DFOREGROUN
 
 af_set_stage "activate" 85
 systemctl daemon-reload
-systemctl enable af-piped.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable af-piped.service
 systemctl restart af-piped-api.service af-piped-proxy.service af-piped.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
 youtube_ready "http://127.0.0.1:${APP_PORT}/api/healthcheck"

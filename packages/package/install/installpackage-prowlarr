@@ -20,14 +20,35 @@ PACKAGE_NAME="prowlarr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9696}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Prowlarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl sqlite3 libicu-dev ca-certificates
 
 if ! id -u prowlarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/prowlarr --shell /usr/sbin/nologin prowlarr
@@ -48,7 +69,7 @@ PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
 PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?version=${PROWLARR_VERSION#v}&os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/prowlarr-XXXXXX.tar.gz)
-download_file "$PROWLARR_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "$PROWLARR_URL" "$TMP_TAR"
 
 report_progress 65 "Extracting Prowlarr to /opt/Prowlarr..."
 stage_app_archive "$TMP_TAR" "/opt/Prowlarr" "Prowlarr" "/var/lib/prowlarr" "${PACKAGE_NAME}"
@@ -121,9 +142,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now prowlarr >> "$LOGFILE" 2>&1
-systemctl restart prowlarr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now prowlarr
+af_logged systemctl restart prowlarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "prowlarr" ${APP_PORT} "v1"

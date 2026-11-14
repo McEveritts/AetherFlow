@@ -31,7 +31,28 @@ UNIT_WRITTEN=0
 WAS_ACTIVE=0
 SERVICE_STOPPED=0
 SUCCESS=0
-mkdir -p "$(dirname "$LOGFILE")" /install /run/lock /opt /var/backups
+mkdir -p /install /run/lock /opt /var/backups
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 exec 9>/run/lock/aetherflow-palate.lock
 flock -n 9 || { print_error "Another Palate operation is running."; exit 1; }
 
@@ -62,10 +83,10 @@ cleanup() {
             if [[ -f "$BACKUP_DIR/af-palate.service" ]]; then
                 safe_restore_path_from_backup "$BACKUP_DIR/af-palate.service" "$UNIT_FILE" || restore_failed=true
             else
-                systemctl disable af-palate.service >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl disable af-palate.service || restore_failed=true
                 rm -f "$UNIT_FILE" || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ -n "$BACKUP_DIR" && -f "$BACKUP_DIR/.af-database-ready" ]]; then
             if ! restore_postgresql_database "$BACKUP_DIR" af_palate; then
@@ -81,7 +102,7 @@ cleanup() {
             fi
         fi
         if [[ "$restore_failed" == false && "$SERVICE_STOPPED" -eq 1 && "$WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start af-palate.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start af-palate.service || restore_failed=true
         fi
         if [[ -n "$BACKUP_DIR" ]]; then
             print_error "Database and vault backups are in ${BACKUP_DIR}."
@@ -115,9 +136,9 @@ fi
 
 report_progress 10 "Installing Palate's native build and database prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq curl ca-certificates git build-essential python3 python3-setuptools pkg-config xz-utils openssl postgresql postgresql-client >> "$LOGFILE" 2>&1
-systemctl enable --now postgresql.service >> "$LOGFILE" 2>&1
+af_logged apt-get update -qq
+af_logged apt-get install --no-remove -y -qq curl ca-certificates git build-essential python3 python3-setuptools pkg-config xz-utils openssl postgresql postgresql-client
+af_logged systemctl enable --now postgresql.service
 
 if ! id -u af-palate >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-palate
@@ -170,7 +191,7 @@ PY
 
 report_progress 20 "Preparing Palate's PostgreSQL database..."
 # Passwords travel over stdin, never in process arguments or progress messages.
-runuser -u postgres -- psql -Xq -v ON_ERROR_STOP=1 -d postgres >> "$LOGFILE" 2>&1 <<SQL
+af_logged runuser -u postgres -- psql -Xq -v ON_ERROR_STOP=1 -d postgres <<SQL
 SELECT 'CREATE ROLE af_palate LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'af_palate') \gexec
 ALTER ROLE af_palate PASSWORD '${PALATE_DB_PASSWORD}';
 SELECT 'CREATE DATABASE af_palate OWNER af_palate' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'af_palate') \gexec
@@ -183,7 +204,7 @@ if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 BUILD_DIR="$(mktemp -d /opt/.palate-build.XXXXXX)"
-git clone --quiet --depth 1 --branch "$TAG" https://github.com/McEveritts/Palate.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged git clone --quiet --depth 1 --branch "$TAG" https://github.com/McEveritts/Palate.git "$BUILD_DIR"
 
 # Use an application-private, checksum-verified Node.js 22 runtime.
 case "$(uname -m)" in
@@ -217,9 +238,9 @@ run_app() {
         /bin/bash -c 'set -e; set -a; source "$1"; set +a; cd "$2"; shift 2; exec "$@"' -- "$ENV_FILE" "$BUILD_DIR" "$@"
 }
 report_progress 50 "Building Palate ${TAG} as its dedicated service user..."
-node_build run_app npm ci --include=dev --no-audit --no-fund >> "$LOGFILE" 2>&1
-run_app node node_modules/prisma/build/index.js generate >> "$LOGFILE" 2>&1
-node_build run_app npm run build >> "$LOGFILE" 2>&1
+af_logged node_build run_app npm ci --include=dev --no-audit --no-fund
+af_logged run_app node node_modules/prisma/build/index.js generate
+af_logged node_build run_app npm run build
 test -s "$BUILD_DIR/.next/BUILD_ID"
 VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json').version")"
 [[ "$VERSION" == "${TAG#v}" ]] || { print_error "Palate's package version does not match ${TAG}."; exit 1; }
@@ -232,7 +253,7 @@ cp -a "${ENV_BACKUP:-$ENV_FILE}" "$BACKUP_DIR/palate.env"
 if [[ -f "$UNIT_FILE" ]]; then
     cp -a "$UNIT_FILE" "$BACKUP_DIR/af-palate.service"
     if systemctl is-active --quiet af-palate.service; then WAS_ACTIVE=1; fi
-    systemctl stop af-palate.service >> "$LOGFILE" 2>&1
+    af_logged systemctl stop af-palate.service
     SERVICE_STOPPED=1
 fi
 runuser -u postgres -- pg_dump --format=custom --dbname=af_palate > "$BACKUP_DIR/database.dump"
@@ -240,7 +261,7 @@ backup_postgresql_database "$BACKUP_DIR" af_palate
 cp -a -- "$DATA_DIR" "$BACKUP_DIR/app-state"
 tar -czf "$BACKUP_DIR/vault.tar.gz" -C "$DATA_DIR" vault
 # Refuse destructive schema changes: never pass --accept-data-loss or --force-reset.
-run_app node node_modules/prisma/build/index.js db push >> "$LOGFILE" 2>&1
+af_logged run_app node node_modules/prisma/build/index.js db push
 
 if [[ -d "$APP_DIR" ]]; then
     mv "$APP_DIR" "$BACKUP_DIR/app"
@@ -275,11 +296,11 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable af-palate.service >> "$LOGFILE" 2>&1
-systemctl restart af-palate.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable af-palate.service
+af_logged systemctl restart af-palate.service
 report_progress 90 "Checking Palate's login page..."
-curl --fail --silent --show-error --output /dev/null --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "http://127.0.0.1:${APP_PORT}/login" >> "$LOGFILE" 2>&1
+af_logged curl --fail --silent --show-error --output /dev/null --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "http://127.0.0.1:${APP_PORT}/login"
 systemctl is-active --quiet af-palate.service
 commit_app_versions
 write_lock palate

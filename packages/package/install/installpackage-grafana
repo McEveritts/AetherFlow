@@ -20,7 +20,28 @@ PACKAGE_NAME="grafana"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3000}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/apt/keyrings/grafana.gpg /var/lib/grafana/.af-version
@@ -31,18 +52,18 @@ prepare_apt_package_transaction /var/lib/grafana/.af-version grafana
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Grafana..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-transport-https curl gnupg ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq apt-transport-https curl gnupg ca-certificates
 
 report_progress 35 "Adding official Grafana APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-install_apt_signing_key https://apt.grafana.com/gpg.key /etc/apt/keyrings/grafana.gpg >> "$LOGFILE" 2>&1
+af_logged install_apt_signing_key https://apt.grafana.com/gpg.key /etc/apt/keyrings/grafana.gpg
 chmod a+r /etc/apt/keyrings/grafana.gpg
 echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
 
 report_progress 65 "Installing Grafana server..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq grafana >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq grafana
 verify_deb_installed grafana
 
 report_progress 85 "Configuring Grafana on port ${APP_PORT} and starting service..."
@@ -73,12 +94,12 @@ GRAFANA_VER="$(dpkg-query -W -f='${Version}' grafana 2>/dev/null || echo "11.0.0
 mkdir -p /var/lib/grafana
 queue_app_version /var/lib/grafana/.af-version "${GRAFANA_VER%%-*}"
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now grafana-server >> "$LOGFILE" 2>&1
-systemctl restart grafana-server >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now grafana-server
+af_logged systemctl restart grafana-server
 systemctl is-active --quiet grafana-server
 if [[ "$GRAFANA_ROTATE_CREDS" -eq 1 ]] && command_exists grafana-cli; then
-    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | grafana-cli admin reset-admin-password --password-from-stdin >> "$LOGFILE" 2>&1 || true
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | af_logged grafana-cli admin reset-admin-password --password-from-stdin || true
 fi
 
 commit_app_versions

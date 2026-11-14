@@ -21,15 +21,36 @@ PACKAGE_NAME="adguardhome"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3080}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/aetherflow-adguardhome.conf
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and preparing network environment..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates libcap2-bin apache2-utils >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates libcap2-bin apache2-utils
 
 if ! id -u adguardhome >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/AdGuardHome --shell /usr/sbin/nologin adguardhome
@@ -51,10 +72,10 @@ AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VER
 
 report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."
 TMP_TAR=$(mktemp /tmp/agh-XXXXXX.tar.gz)
-if ! download_file "$AGH_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+if ! af_logged download_file "$AGH_URL" "$TMP_TAR"; then
     # Fallback to static cdn URL
     STATIC_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${AGH_ARCH}.tar.gz"
-    download_file "$STATIC_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+    af_logged download_file "$STATIC_URL" "$TMP_TAR"
 fi
 
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
@@ -62,7 +83,7 @@ stage_app_archive "$TMP_TAR" "/opt/AdGuardHome" "AdGuardHome" "/etc/systemd/reso
 rm -f "$TMP_TAR"
 validate_config_paths /opt/AdGuardHome/AdGuardHome.yaml
 chmod +x /opt/AdGuardHome/AdGuardHome
-setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdGuardHome >> "$LOGFILE" 2>&1 || true
+af_logged setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdGuardHome || true
 queue_app_version /opt/AdGuardHome/.af-version "${AGH_VERSION#v}"
 
 if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
@@ -153,7 +174,7 @@ PYEOF
 )"
 if [[ "$AGH_RESOLVED_CHANGED" == changed ]]; then
     AF_ARCHIVE_ROLLBACK_RESTART_UNITS+=(systemd-resolved)
-    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1
+    af_logged systemctl restart systemd-resolved
 fi
 
 report_progress 85 "Configuring and starting adguardhome.service on port ${APP_PORT}..."
@@ -180,8 +201,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now adguardhome >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now adguardhome
 systemctl is-active --quiet adguardhome
 
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"

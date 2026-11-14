@@ -28,7 +28,41 @@ SERVICE_FILE="/etc/systemd/system/seedcross.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8019}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
+if ! declare -F af_logged_stderr >/dev/null 2>&1; then
+    af_logged_stderr() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" 2>/dev/null; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" 2>&"$lock_fd" || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -39,10 +73,10 @@ ADMIN_PASS="${MASTER_PASS}"
 ADMIN_EMAIL="${ADMIN_USER}@localhost"
 
 report_progress 25 "Installing Python runtime and system dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl wget git jq ca-certificates build-essential \
-    python3 python3-venv python3-dev python3-pip sqlite3 >> "$LOGFILE" 2>&1
+    python3 python3-venv python3-dev python3-pip sqlite3
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
@@ -56,9 +90,9 @@ trap 'exit 143' TERM
 chmod 755 "$BUILD_DIR"
 
 report_progress 45 "Cloning ${APP_NAME} repository..."
-git clone https://github.com/ccf-2012/seedcross.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged git clone https://github.com/ccf-2012/seedcross.git "$BUILD_DIR"
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    git -C "$BUILD_DIR" checkout "$AF_TARGET_VERSION" >> "$LOGFILE" 2>&1 || {
+    af_logged git -C "$BUILD_DIR" checkout "$AF_TARGET_VERSION" || {
         log_error "Failed to checkout commit ${AF_TARGET_VERSION} for ${APP_NAME}"
         exit 1
     }
@@ -74,10 +108,10 @@ COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse HEAD)"
 queue_app_version "/opt/seedcross/.af-version" "${COMMIT_VER}"
 
 report_progress 65 "Creating Python virtualenv and installing dependencies..."
-python3 -m venv "$BUILD_DIR/.venv" >> "$LOGFILE" 2>&1
-"$BUILD_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel gunicorn 'whitenoise>=6,<7' >> "$LOGFILE" 2>&1
+af_logged python3 -m venv "$BUILD_DIR/.venv"
+af_logged "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel gunicorn 'whitenoise>=6,<7'
 if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
-    "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade --no-cache-dir -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+    af_logged "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade --no-cache-dir -r "$BUILD_DIR/requirements.txt"
 fi
 
 cat > "$BUILD_DIR/start-seedcross.sh" <<EOF
@@ -98,7 +132,7 @@ chown -hRP "${APP_USER}:${APP_USER}" "$INSTALL_DIR" "$DATA_DIR"
 validate_config_paths "$DATA_DIR/runtime.json" "$INSTALL_DIR/csui/settings.py"
 LEGACY_SETTINGS_SNAPSHOT="$AF_ARCHIVE_BACKUP/legacy-settings.json"
 if [[ ! -e "$DATA_DIR/runtime.json" ]]; then
-    if ! (umask 077; su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' -" > "$LEGACY_SETTINGS_SNAPSHOT" 2>> "$LOGFILE" <<'LEGACY_SETTINGS_PYEOF'
+    if ! (umask 077; af_logged_stderr su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' -" > "$LEGACY_SETTINGS_SNAPSHOT" <<'LEGACY_SETTINGS_PYEOF'
 import contextlib, importlib, io, json, sys
 with contextlib.redirect_stdout(io.StringIO()):
     operator_settings = importlib.import_module("csui.settings")
@@ -161,11 +195,11 @@ export DJANGO_SETTINGS_MODULE=af_settings
 
 report_progress 80 "Initializing ${APP_NAME} database and master account..."
 if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py collectstatic --noinput" </dev/null >> "$LOGFILE" 2>&1
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" </dev/null >> "$LOGFILE" 2>&1
+    af_logged su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py collectstatic --noinput" </dev/null
+    af_logged su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" </dev/null
     ADMIN_USER="${ADMIN_USER}" ADMIN_PASS="${ADMIN_PASS}" ADMIN_EMAIL="${ADMIN_EMAIL}" \
         AF_KEEP_EXISTING_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-}" \
-        su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
+        af_logged su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell" <<'PYEOF'
 import os
 from django.contrib.auth import get_user_model
 UserModel = get_user_model()
@@ -203,8 +237,8 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now seedcross.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now seedcross.service
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 
 commit_app_versions

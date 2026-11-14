@@ -1592,6 +1592,7 @@ pub async fn handle_log_websocket(
 
             if spawned.is_none() {
                 let fallback_files = [
+                    ("/var/log/aetherflow/deploy.log", "deploy"),
                     ("/var/log/aetherflow-deploy.log", "deploy"),
                     ("/var/log/syslog", "syslog"),
                     ("/var/log/messages", "syslog"),

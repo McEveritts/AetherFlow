@@ -20,7 +20,28 @@ PACKAGE_NAME="autoscan"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3030}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/autoscan/config.yml
@@ -28,8 +49,8 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 print_warn "Cloudbox Autoscan is archived, unmaintained and feature frozen; future integration incompatibilities will not receive upstream fixes. Existing configuration and data are preserved; no fork is substituted."
 report_progress 10 "Installing prerequisites for Autoscan..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates
 
 if ! id -u autoscan >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/autoscan --shell /usr/sbin/nologin autoscan
@@ -53,9 +74,9 @@ report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
 TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/autoscan-extract-XXXXXX)"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
-download_file "$AS_URL" "$TMP_BIN" >> "$LOGFILE" 2>&1
+af_logged download_file "$AS_URL" "$TMP_BIN"
 if [[ "$AS_URL" == *.tar.gz ]]; then
-    tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan >> "$LOGFILE" 2>&1
+    af_logged tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan
     rm -f "$TMP_BIN"
 else
     cp "$TMP_BIN" "$TMP_DIR/autoscan"
@@ -144,9 +165,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now autoscan >> "$LOGFILE" 2>&1
-systemctl restart autoscan >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now autoscan
+af_logged systemctl restart autoscan
 systemctl is-active --quiet autoscan
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 

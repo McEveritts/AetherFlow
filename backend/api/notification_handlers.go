@@ -177,47 +177,34 @@ func UpdateNotificationRule(c *gin.Context) {
 		return
 	}
 
-	// Build dynamic UPDATE
-	updates := []string{}
-	args := []interface{}{}
-
-	if req.Name != "" {
-		updates = append(updates, "name = ?")
-		args = append(args, req.Name)
-	}
-	if req.ConditionType != "" {
-		updates = append(updates, "condition_type = ?")
-		args = append(args, req.ConditionType)
-	}
-	if req.ConditionValue != "" {
-		updates = append(updates, "condition_value = ?")
-		args = append(args, req.ConditionValue)
-	}
-	if req.Level != "" {
-		updates = append(updates, "level = ?")
-		args = append(args, req.Level)
-	}
-	if req.Enabled != nil {
-		updates = append(updates, "enabled = ?")
-		args = append(args, *req.Enabled)
-	}
-
-	if len(updates) == 0 {
+	hasUpdates := req.Name != "" || req.ConditionType != "" || req.ConditionValue != "" || req.Level != "" || req.Enabled != nil
+	if !hasUpdates {
 		BadRequest(c, "No fields to update")
 		return
 	}
 
-	query := "UPDATE notification_rules SET "
-	for i, u := range updates {
-		if i > 0 {
-			query += ", "
-		}
-		query += u
+	updateEnabled := 0
+	enabledVal := false
+	if req.Enabled != nil {
+		updateEnabled = 1
+		enabledVal = *req.Enabled
 	}
-	query += " WHERE id = ?"
-	args = append(args, id)
 
-	_, err := db.DB.Exec(query, args...)
+	_, err := db.DB.Exec(`
+		UPDATE notification_rules
+		SET name = CASE WHEN ? != '' THEN ? ELSE name END,
+		    condition_type = CASE WHEN ? != '' THEN ? ELSE condition_type END,
+		    condition_value = CASE WHEN ? != '' THEN ? ELSE condition_value END,
+		    level = CASE WHEN ? != '' THEN ? ELSE level END,
+		    enabled = CASE WHEN ? = 1 THEN ? ELSE enabled END
+		WHERE id = ?`,
+		req.Name, req.Name,
+		req.ConditionType, req.ConditionType,
+		req.ConditionValue, req.ConditionValue,
+		req.Level, req.Level,
+		updateEnabled, enabledVal,
+		id,
+	)
 	if err != nil {
 		InternalError(c, "Failed to update rule")
 		return

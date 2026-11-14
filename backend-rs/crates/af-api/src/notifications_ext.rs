@@ -101,7 +101,11 @@ fn replace_verified_recovery_codes(
     if !current.1 || current.0 != encrypted_secret || current.2 != password_hash {
         return Ok(None);
     }
-    let secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
+    let secret = if current.0.is_empty() {
+        String::new()
+    } else {
+        af_db::decrypt_key(&current.0)?
+    };
     if !crate::auth::consume_totp_code(&transaction, user_id, &secret, code)
         && !crate::auth::validate_recovery_code(&transaction, user_id, code)
     {

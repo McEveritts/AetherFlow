@@ -18,7 +18,28 @@ fi
 
 PACKAGE_NAME="rtorrent"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /var/lib/rtorrent/.af-directory-check /run/rtorrent/.af-directory-check
@@ -29,8 +50,8 @@ prepare_apt_package_transaction /var/lib/rtorrent/.af-version rtorrent
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing rTorrent, screen, and dependencies via apt..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rtorrent screen curl psmisc ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq rtorrent screen curl psmisc ca-certificates
 
 report_progress 40 "Configuring rtorrent service user and session directories..."
 if ! id -u rtorrent >/dev/null 2>&1; then
@@ -38,8 +59,8 @@ if ! id -u rtorrent >/dev/null 2>&1; then
 fi
 
 # Ensure rtorrent and www-data have shared socket access
-usermod -aG www-data rtorrent >> "$LOGFILE" 2>&1 || true
-usermod -aG rtorrent www-data >> "$LOGFILE" 2>&1 || true
+af_logged usermod -aG www-data rtorrent || true
+af_logged usermod -aG rtorrent www-data || true
 
 mkdir -p /var/lib/rtorrent/session \
          /var/lib/rtorrent/downloads \
@@ -109,10 +130,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now rtorrent >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now rtorrent
 
-systemctl restart rtorrent >> "$LOGFILE" 2>&1
+af_logged systemctl restart rtorrent
 systemctl is-active --quiet rtorrent
 queue_app_version /var/lib/rtorrent/.af-version "$(dpkg-query -W -f='${Version}' rtorrent)"
 

@@ -22,16 +22,36 @@ PACKAGE_NAME="x2go"
 APP_NAME="x2go"
 DATA_DIR="/var/lib/x2go"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping x2goserver service..."
 
 purge_systemd_unit "x2goserver"
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 
 report_progress 60 "Removing x2goserver packages..."
-DEBIAN_FRONTEND=noninteractive apt-get remove -y x2goserver x2goserver-xsession >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get remove -y x2goserver x2goserver-xsession
 rm -f "${DATA_DIR}/.af-version"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then

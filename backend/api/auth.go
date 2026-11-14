@@ -512,6 +512,11 @@ func secureCookie() bool {
 // SetupAdmin godoc
 // @Summary      Create initial admin
 // @Description  Creates the initial admin account. Fails if any user already exists.
+var setupAdminMu sync.Mutex
+
+// SetupAdmin godoc
+// @Summary      Initial admin account setup
+// @Description  Creates the initial admin account on a fresh installation when zero users exist.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -560,7 +565,28 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	res, err := db.DB.Exec(
+	setupAdminMu.Lock()
+	defer setupAdminMu.Unlock()
+
+	tx, err := db.DB.Begin()
+	if err != nil {
+		slog.Error("failed to begin transaction during admin setup", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Database unavailable")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := tx.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
+		slog.Error("failed to verify user count in transaction during admin setup", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Database unavailable")
+		return
+	}
+	if count > 0 {
+		RespondError(c, http.StatusConflict, ErrCodeConflict, "Admin account already exists")
+		return
+	}
+
+	res, err := tx.Exec(
 		"INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
 		req.Username, string(hash),
 	)
@@ -577,14 +603,20 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	services.EnsureProvisioningMasterCredentials(req.Username)
-
-	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
-	tokenString, err := createStandardJWT(int(id), c)
+	// Issue JWT inside the setup transaction so the user row and initial session commit atomically.
+	tokenString, _, err := createSessionJWTInTx(tx, int(id), c, time.Now().UTC().Unix(), "", 0)
 	if err != nil {
 		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to create session")
 		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("failed to commit admin setup transaction", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to create admin account")
+		return
+	}
+
+	services.EnsureProvisioningMasterCredentials(req.Username)
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
 
@@ -1514,28 +1546,54 @@ func Logout(c *gin.Context) {
 			}
 			currentJTI := resolveCurrentSessionJTI(jti)
 			var familyID string
-			_ = tx.QueryRow(
-				"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ? OR family_id = ?) LIMIT 1",
-				userID, jti, currentJTI, jti,
-			).Scan(&familyID)
-			familyID = strings.TrimSpace(familyID)
-			if familyID == "" {
-				familyID = jti
-			}
-
 			var familyJTIs []string
-			if rows, qErr := tx.Query(
-				"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
-				userID, familyID, jti, currentJTI,
-			); qErr == nil {
+			if sqlTableExists(tx, "active_sessions") {
+				famErr := tx.QueryRow(
+					"SELECT COALESCE(family_id, '') FROM active_sessions WHERE user_id = ? AND (jti = ? OR jti = ? OR family_id = ?) LIMIT 1",
+					userID, jti, currentJTI, jti,
+				).Scan(&familyID)
+				if famErr != nil && !errors.Is(famErr, sql.ErrNoRows) {
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
+				familyID = strings.TrimSpace(familyID)
+				if familyID == "" {
+					familyID = jti
+				}
+
+				rows, qErr := tx.Query(
+					"SELECT jti FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+					userID, familyID, jti, currentJTI,
+				)
+				if qErr != nil {
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
 				for rows.Next() {
 					var fJTI string
-					if rows.Scan(&fJTI) == nil && fJTI != "" {
+					if sErr := rows.Scan(&fJTI); sErr != nil {
+						_ = rows.Close()
+						_ = tx.Rollback()
+						InternalError(c, "Failed to revoke session")
+						return
+					}
+					if fJTI != "" {
 						familyJTIs = append(familyJTIs, fJTI)
 					}
 				}
+				if rErr := rows.Err(); rErr != nil {
+					_ = rows.Close()
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
 				_ = rows.Close()
+			} else {
+				familyID = jti
 			}
+
 			familyJTIs = append(familyJTIs, jti)
 			if currentJTI != "" && currentJTI != jti {
 				familyJTIs = append(familyJTIs, currentJTI)
@@ -1547,12 +1605,22 @@ func Logout(c *gin.Context) {
 					return
 				}
 			}
-			_, _ = tx.Exec(
-				"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
-				userID, familyID, jti, currentJTI,
-			)
-			if userID > 0 {
-				_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID)
+			if sqlTableExists(tx, "active_sessions") {
+				if _, dErr := tx.Exec(
+					"DELETE FROM active_sessions WHERE user_id = ? AND (family_id = ? OR jti = ? OR jti = ?)",
+					userID, familyID, jti, currentJTI,
+				); dErr != nil {
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
+			}
+			if userID > 0 && sqlTableExists(tx, "oidc_refresh_tokens") {
+				if _, oErr := tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?", userID); oErr != nil {
+					_ = tx.Rollback()
+					InternalError(c, "Failed to revoke session")
+					return
+				}
 			}
 			if cErr := tx.Commit(); cErr != nil {
 				InternalError(c, "Failed to revoke session")
@@ -2136,7 +2204,7 @@ func CSRFMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if c.Request.Method == "POST" || c.Request.Method == "PUT" || c.Request.Method == "DELETE" {
+		if c.Request.Method == http.MethodPost || c.Request.Method == http.MethodPut || c.Request.Method == http.MethodPatch || c.Request.Method == http.MethodDelete {
 			token := c.GetHeader("X-CSRF-Token")
 			cookie, err := c.Cookie("csrf_token")
 			if err != nil || token == "" || token != cookie {

@@ -352,7 +352,8 @@ func getSystemMetrics(c *gin.Context) {
 }
 
 func getServices(c *gin.Context) {
-	servicesList := services.GetActiveServices()
+	role, _ := c.Get("user_role")
+	servicesList := SanitizeServicesForViewer(services.GetActiveServices(), role == "admin")
 	c.JSON(http.StatusOK, servicesList)
 }
 

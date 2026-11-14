@@ -19,7 +19,28 @@ fi
 PACKAGE_NAME="tailscale"
 DATA_DIR="/var/lib/tailscale"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 touch "$LOGFILE"
 chmod 600 "$LOGFILE"
 
@@ -32,8 +53,8 @@ prepare_apt_package_transaction /var/lib/tailscale/.af-version tailscale
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Tailscale..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install --no-remove -y -qq curl gnupg ca-certificates apt-transport-https lsb-release iproute2 iptables >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install --no-remove -y -qq curl gnupg ca-certificates apt-transport-https lsb-release iproute2 iptables
 
 report_progress 35 "Configuring official Tailscale APT repository..."
 DISTRO_ID="debian"
@@ -50,7 +71,7 @@ if [[ -f /etc/os-release ]]; then
 fi
 
 install -m 0755 -d /etc/apt/keyrings
-download_file "https://pkgs.tailscale.com/stable/${DISTRO_ID}/${CODENAME}.noarmor.gpg" /etc/apt/keyrings/tailscale-archive-keyring.gpg >> "$LOGFILE" 2>&1
+af_logged download_file "https://pkgs.tailscale.com/stable/${DISTRO_ID}/${CODENAME}.noarmor.gpg" /etc/apt/keyrings/tailscale-archive-keyring.gpg
 chmod a+r /etc/apt/keyrings/tailscale-archive-keyring.gpg
 
 cat <<EOF > /etc/apt/sources.list.d/tailscale.list
@@ -58,8 +79,8 @@ deb [signed-by=/etc/apt/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tai
 EOF
 
 report_progress 60 "Installing Tailscale daemon and CLI..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install --no-remove -y -qq tailscale >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install --no-remove -y -qq tailscale
 
 report_progress 75 "Enabling IPv4 and IPv6 packet forwarding for subnet routing..."
 mkdir -p /etc/sysctl.d "${DATA_DIR}"
@@ -67,12 +88,12 @@ cat <<'EOF' > /etc/sysctl.d/99-tailscale.conf
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
-sysctl -p /etc/sysctl.d/99-tailscale.conf >> "$LOGFILE" 2>&1
+af_logged sysctl -p /etc/sysctl.d/99-tailscale.conf
 
 report_progress 90 "Enabling and starting tailscaled.service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable tailscaled.service >> "$LOGFILE" 2>&1
-systemctl start tailscaled.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable tailscaled.service
+af_logged systemctl start tailscaled.service
 systemctl is-active --quiet tailscaled.service
 
 AUTH_KEY="${AF_TAILSCALE_AUTHKEY:-${TAILSCALE_AUTHKEY:-}}"

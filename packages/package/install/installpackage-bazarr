@@ -20,7 +20,28 @@ PACKAGE_NAME="bazarr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6767}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 BUILD_DIR=""
@@ -63,12 +84,12 @@ cleanup() {
         if [[ -f "$BACKUP_DIR/bazarr.service" ]]; then
             safe_restore_path_from_backup "$BACKUP_DIR/bazarr.service" /etc/systemd/system/bazarr.service || restore_failed=true
         else
-            systemctl disable bazarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl disable bazarr.service || restore_failed=true
             rm -f /etc/systemd/system/bazarr.service || restore_failed=true
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true && "$SERVICE_STOPPED" == true ]]; then
-            systemctl start bazarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start bazarr.service || restore_failed=true
         fi
     fi
     [[ -z "$BUILD_DIR" ]] || rm -rf -- "$BUILD_DIR"
@@ -85,8 +106,8 @@ trap 'exit 143' TERM
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python and build dependencies for Bazarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl python3 python3-pip python3-venv python3-dev build-essential libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev unzip unrar-free ffmpeg ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl python3 python3-pip python3-venv python3-dev build-essential libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev unzip unrar-free ffmpeg ca-certificates
 
 if ! id -u bazarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/bazarr --shell /usr/sbin/nologin bazarr
@@ -99,12 +120,12 @@ BAZARR_VERSION="$(github_latest_tag "morpheus65535/bazarr" "1.5.1")"
 BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
 
 TMP_ZIP=$(mktemp /tmp/bazarr-XXXXXX.zip)
-download_file "$BAZARR_URL" "$TMP_ZIP" >> "$LOGFILE" 2>&1
+af_logged download_file "$BAZARR_URL" "$TMP_ZIP"
 
 report_progress 55 "Extracting Bazarr and creating isolated Python virtualenv..."
 BUILD_DIR="$(mktemp -d /opt/.bazarr-build.XXXXXX)"
 chmod 755 "$BUILD_DIR"
-unzip -qo "$TMP_ZIP" -d "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
 rm -f "$TMP_ZIP"
 test -s "$BUILD_DIR/bazarr.py"
 
@@ -126,9 +147,9 @@ if [[ -e /opt/bazarr/.venv || -L /opt/bazarr/.venv ]]; then
     mv /opt/bazarr/.venv "$BACKUP_DIR/venv"
 fi
 VENV_BUILDING=true
-python3 -m venv /opt/bazarr/.venv >> "$LOGFILE" 2>&1
-/opt/bazarr/.venv/bin/pip install --upgrade pip wheel setuptools >> "$LOGFILE" 2>&1
-/opt/bazarr/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+af_logged python3 -m venv /opt/bazarr/.venv
+af_logged /opt/bazarr/.venv/bin/pip install --upgrade pip wheel setuptools
+af_logged /opt/bazarr/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
 
 if [[ -n "$BAZARR_VERSION" ]]; then
     queue_app_version "/opt/bazarr/.af-version" "${BAZARR_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
@@ -187,9 +208,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now bazarr >> "$LOGFILE" 2>&1
-systemctl restart bazarr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now bazarr
+af_logged systemctl restart bazarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 wait_for_service_ready "bazarr.service" "$APP_PORT" "$READY_URL"
 

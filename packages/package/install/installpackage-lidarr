@@ -20,14 +20,35 @@ PACKAGE_NAME="lidarr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8686}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Lidarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev libchromaprint-tools mediainfo ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl sqlite3 libicu-dev libchromaprint-tools mediainfo ca-certificates
 
 if ! id -u lidarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/lidarr --shell /usr/sbin/nologin lidarr
@@ -46,7 +67,7 @@ esac
 report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
 LIDARR_VERSION="$(github_latest_tag "Lidarr/Lidarr" "2.8.2.4493")"
 TMP_TAR=$(mktemp /tmp/lidarr-XXXXXX.tar.gz)
-download_file "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" "$TMP_TAR"
 
 report_progress 65 "Extracting Lidarr to /opt/Lidarr..."
 stage_app_archive "$TMP_TAR" "/opt/Lidarr" "Lidarr" "/var/lib/lidarr" "${PACKAGE_NAME}"
@@ -80,9 +101,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now lidarr >> "$LOGFILE" 2>&1
-systemctl restart lidarr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now lidarr
+af_logged systemctl restart lidarr
 systemctl is-active --quiet lidarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"

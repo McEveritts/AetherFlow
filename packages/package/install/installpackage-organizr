@@ -20,17 +20,38 @@ PACKAGE_NAME="organizr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8086}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /var/www/organizr/.af-directory-check
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Apache and PHP dependencies for Organizr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     apache2 libapache2-mod-php git curl unzip ca-certificates \
-    php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd >> "$LOGFILE" 2>&1
+    php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd
 
 report_progress 45 "Cloning Organizr repository..."
 REPO_URL="https://github.com/causefx/Organizr.git"
@@ -55,13 +76,13 @@ if ! git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TARGET_TAG}" >/de
 fi
 BUILD_DIR="$(mktemp -d /var/www/.organizr-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
-if ! git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1; then
+if ! af_logged git clone --branch "$TARGET_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR"; then
     if [[ "$TARGET_TAG" =~ ^v ]]; then
         ALT_TAG="${TARGET_TAG#v}"
     else
         ALT_TAG="v${TARGET_TAG}"
     fi
-    if ! git clone --branch "$ALT_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR" >> "$LOGFILE" 2>&1; then
+    if ! af_logged git clone --branch "$ALT_TAG" --depth 1 "$REPO_URL" "$BUILD_DIR"; then
         log_error "Failed to clone Organizr repository at tag $TARGET_TAG"
         exit 1
     else
@@ -84,7 +105,7 @@ rollback_web_runtime() {
         done
     fi
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$RUNTIME_STOPPED" == true ]]; then
-        [[ "$restore_failed" == false ]] && apache2ctl configtest >> "$LOGFILE" 2>&1 && systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+        [[ "$restore_failed" == false ]] && af_logged apache2ctl configtest && af_logged systemctl start apache2 || restore_failed=true
     fi
     [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
     if [[ "$restore_failed" == true ]]; then
@@ -152,11 +173,11 @@ Alias /organizr "/var/www/organizr"
 EOF
 fi
 
-a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
-a2ensite organizr.conf >> "$LOGFILE" 2>&1
-systemctl enable --now apache2 >> "$LOGFILE" 2>&1
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1
+af_logged a2enmod rewrite headers env dir mime
+af_logged a2ensite organizr.conf
+af_logged systemctl enable --now apache2
+af_logged apache2ctl configtest
+af_logged systemctl reload apache2
 
 systemctl is-active --quiet apache2
 

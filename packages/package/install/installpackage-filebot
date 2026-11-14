@@ -31,7 +31,28 @@ SERVICE_FILE="/etc/systemd/system/filebot.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5452}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -41,10 +62,10 @@ ADMIN_USER="${MASTER_USER}"
 ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 20 "Installing Java runtime, MediaInfo, Chromaprint, and archive tools..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl wget jq xz-utils ca-certificates default-jre-headless \
-    mediainfo libchromaprint-tools p7zip-full unrar-free >> "$LOGFILE" 2>&1
+    mediainfo libchromaprint-tools p7zip-full unrar-free
 
 report_progress 35 "Provisioning Node.js runtime for FileBot Node..."
 ensure_node 20
@@ -73,10 +94,10 @@ cleanup() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        [[ -f "$SERVICE_FILE" ]] || systemctl disable filebot.service >> "$LOGFILE" 2>&1 || restore_failed=true
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        [[ -f "$SERVICE_FILE" ]] || af_logged systemctl disable filebot.service || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
-            systemctl start filebot.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start filebot.service || restore_failed=true
         fi
     fi
     rm -rf -- "$FB_BUILD" "$NODE_BUILD"
@@ -98,12 +119,12 @@ report_progress 50 "Downloading FileBot portable runtime..."
 FB_VERSION="5.1.6"
 FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
 TMP_FB="$(mktemp --suffix=.tar.xz)"
-if ! download_file "${FB_URL}" "${TMP_FB}" >> "$LOGFILE" 2>&1; then
+if ! af_logged download_file "${FB_URL}" "${TMP_FB}"; then
     FB_VERSION="5.2.0"
     FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
-    download_file "${FB_URL}" "${TMP_FB}" >> "$LOGFILE" 2>&1
+    af_logged download_file "${FB_URL}" "${TMP_FB}"
 fi
-tar -xJf "${TMP_FB}" -C "${FB_BUILD}" >> "$LOGFILE" 2>&1
+af_logged tar -xJf "${TMP_FB}" -C "${FB_BUILD}"
 rm -f "${TMP_FB}"
 test -s "${FB_BUILD}/filebot.sh"
 chmod +x "${FB_BUILD}/filebot.sh"
@@ -122,8 +143,8 @@ fi
 NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/filebot-node_${NODE_TAG}.tar.xz"
 
 TMP_NODE="$(mktemp --suffix=.tar.xz)"
-download_file "${NODE_URL}" "${TMP_NODE}" >> "$LOGFILE" 2>&1
-tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}" >> "$LOGFILE" 2>&1
+af_logged download_file "${NODE_URL}" "${TMP_NODE}"
+af_logged tar -xJf "${TMP_NODE}" -C "${NODE_BUILD}"
 rm -f "${TMP_NODE}"
 
 if [[ ! -f "${NODE_BUILD}/package.json" ]]; then
@@ -140,7 +161,7 @@ fi
 
 if [[ -f "${NODE_BUILD}/server/package.json" ]]; then
     pushd "${NODE_BUILD}/server" >/dev/null
-    node_build npm install --include=dev >> "$LOGFILE" 2>&1
+    af_logged node_build npm install --include=dev
     popd >/dev/null
 fi
 
@@ -213,9 +234,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now filebot.service >> "$LOGFILE" 2>&1
-systemctl restart filebot.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now filebot.service
+af_logged systemctl restart filebot.service
 systemctl is-active --quiet filebot.service
 systemctl is-active --quiet filebot.service
 

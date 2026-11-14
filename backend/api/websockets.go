@@ -20,34 +20,84 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func canonicalOriginAuthority(scheme, hostPort string) string {
+	s := strings.ToLower(strings.TrimSpace(scheme))
+	h := strings.ToLower(strings.TrimSpace(hostPort))
+	if h == "" {
+		return ""
+	}
+	switch s {
+	case "http", "ws":
+		if !strings.Contains(h, ":") || strings.HasSuffix(h, "]") {
+			return h + ":80"
+		}
+	case "https", "wss":
+		if !strings.Contains(h, ":") || strings.HasSuffix(h, "]") {
+			return h + ":443"
+		}
+	}
+	return h
+}
+
+func requestExpectedWSScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+		if strings.EqualFold(proto, "https") {
+			return "https"
+		}
+		if strings.EqualFold(proto, "http") {
+			return "http"
+		}
+		return ""
+	}
+	if strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Port"), ",")[0]) == "443" {
+		return "https"
+	}
+	return "http"
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Fix #12 + Public-IP: Check Origin against a multi-layer allowlist:
-	//   1. Empty origin (non-browser clients)
-	//   2. Direct host match
-	//   3. Loopback origins (backend is on 127.0.0.1 — always safe)
-	//   4. ALLOWED_CORS_ORIGIN env var (comma-separated)
+	// Strict Origin validation matching Rust af-api ws.rs:
+	//   1. Empty Origin allowed ONLY for non-cookie clients (Bearer/ticket CLI)
+	//   2. Exact scheme + normalized host:port match against request Host
+	//   3. Exact scheme + normalized host:port match against ALLOWED_CORS_ORIGIN
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin == "" {
-			return true // Non-browser clients (curl, server-side, etc.)
+			// Browser cookie upgrades MUST carry an Origin header.
+			return strings.TrimSpace(r.Header.Get("Cookie")) == ""
 		}
 		parsed, err := url.Parse(origin)
-		if err != nil {
+		if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return false
 		}
-		// Direct host match (original check)
-		if parsed.Host == r.Host {
-			return true
+		if parsed.Path != "" && parsed.Path != "/" {
+			return false
 		}
-		// Always accept loopback origins — backend only listens on
-		// 127.0.0.1:8080 so the request has already been proxied.
-		host := parsed.Hostname()
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-			return true
+		var originScheme string
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "ws":
+			originScheme = "http"
+		case "https", "wss":
+			originScheme = "https"
+		default:
+			return false
 		}
-		// Check against allowed CORS origins (comma-separated)
+		if parsed.Hostname() == "" {
+			return false
+		}
+		originAuth := canonicalOriginAuthority(originScheme, parsed.Host)
+		expectedScheme := requestExpectedWSScheme(r)
+		reqHost := strings.TrimSpace(r.Host)
+		if expectedScheme != "" && reqHost != "" && originScheme == expectedScheme {
+			if originAuth == canonicalOriginAuthority(expectedScheme, reqHost) {
+				return true
+			}
+		}
 		if allowed := os.Getenv("ALLOWED_CORS_ORIGIN"); allowed != "" {
 			for _, o := range strings.Split(allowed, ",") {
 				o = strings.TrimSpace(o)
@@ -55,10 +105,11 @@ var upgrader = websocket.Upgrader{
 					continue
 				}
 				allowedParsed, err := url.Parse(o)
-				if err != nil {
+				if err != nil || allowedParsed.Hostname() == "" {
 					continue
 				}
-				if parsed.Host == allowedParsed.Host {
+				allowedScheme := strings.ToLower(allowedParsed.Scheme)
+				if allowedScheme == originScheme && originAuth == canonicalOriginAuthority(allowedScheme, allowedParsed.Host) {
 					return true
 				}
 			}
@@ -69,6 +120,34 @@ var upgrader = websocket.Upgrader{
 		)
 		return false
 	},
+}
+
+func SanitizeServicesForViewer(raw interface{}, isAdmin bool) interface{} {
+	if isAdmin || raw == nil {
+		return raw
+	}
+	typed, ok := raw.(map[string]gin.H)
+	if !ok {
+		return raw
+	}
+	sanitized := make(map[string]gin.H, len(typed))
+	for svcKey, entry := range typed {
+		clean := make(gin.H, len(entry))
+		for k, v := range entry {
+			if k == "api_key" {
+				continue
+			}
+			clean[k] = v
+		}
+		if errStr, ok := clean["update_error"].(string); ok && errStr != "" {
+			clean["update_error"] = "Update check failed"
+		}
+		if logLine, ok := clean["log_line"].(string); ok && logLine != "" {
+			clean["log_line"] = "Package operation in progress"
+		}
+		sanitized[svcKey] = clean
+	}
+	return sanitized
 }
 
 type Client struct {
@@ -83,6 +162,7 @@ type Client struct {
 
 type hubEnvelope struct {
 	raw          []byte
+	nonAdminRaw  []byte
 	adminOnly    bool
 	targetUserID *int
 }
@@ -151,8 +231,12 @@ func (h *Hub) fanout(env hubEnvelope) {
 		if !deliver {
 			continue
 		}
+		out := env.raw
+		if client.role != "admin" && len(env.nonAdminRaw) > 0 {
+			out = env.nonAdminRaw
+		}
 		select {
-		case client.send <- env.raw:
+		case client.send <- out:
 		default:
 			close(client.send)
 			delete(h.clients, client)
@@ -464,7 +548,7 @@ func HandleWebSocket(c *gin.Context) {
 			"type": "METRICS_UPDATE",
 			"data": map[string]interface{}{
 				"system":   m,
-				"services": s,
+				"services": SanitizeServicesForViewer(s, cl.role == "admin"),
 			},
 		}
 		if message, err := json.Marshal(payload); err == nil {
@@ -557,22 +641,33 @@ func broadcastMetricsLoop() {
 			continue
 		}
 
-		payload := map[string]interface{}{
+		adminPayload := map[string]interface{}{
 			"type": "METRICS_UPDATE",
 			"data": map[string]interface{}{
 				"system":   m,
 				"services": s,
 			},
 		}
+		userPayload := map[string]interface{}{
+			"type": "METRICS_UPDATE",
+			"data": map[string]interface{}{
+				"system":   m,
+				"services": SanitizeServicesForViewer(s, false),
+			},
+		}
 
-		message, err := json.Marshal(payload)
+		adminMsg, err := json.Marshal(adminPayload)
 		if err != nil {
 			slog.Error("Failed to marshal metrics payload for WebSocket broadcast", "error", err)
 			continue
 		}
-		// Non-blocking broadcast
+		userMsg, uErr := json.Marshal(userPayload)
+		if uErr != nil {
+			userMsg = adminMsg
+		}
+		// Non-blocking viewer-scoped dispatch
 		select {
-		case WSHub.broadcast <- message:
+		case WSHub.dispatch <- hubEnvelope{raw: adminMsg, nonAdminRaw: userMsg}:
 		default:
 			slog.Warn("WebSocket broadcast channel full, dropping metrics payload")
 		}

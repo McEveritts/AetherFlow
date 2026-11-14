@@ -16,6 +16,27 @@ fi
 require_root
 validate_config_paths /var/lib/mcvnc/.af-version /etc/mcvnc/mcvnc.env
 export LOGFILE="/var/log/aetherflow/install-mcvnc.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 APP_PORT="${AF_APP_PORT:-6900}"
 RENDER_DEVICE="${AF_MCVNC_DEVICE:-/dev/dri/renderD128}"
 DATA_DIR="/var/lib/mcvnc"
@@ -36,10 +57,10 @@ cleanup() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl disable af-mcvnc.service >> "$LOGFILE" 2>&1 || restore_failed=true
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        [[ -f /etc/systemd/system/af-mcvnc.service ]] || af_logged systemctl disable af-mcvnc.service || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
-            systemctl start af-mcvnc.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start af-mcvnc.service || restore_failed=true
         fi
     fi
     [[ -z "$TMP_DIR" ]] || rm -rf -- "$TMP_DIR"
@@ -71,19 +92,19 @@ fi
 
 report_progress 15 "Installing McVNC GPU/Wayland build and runtime prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq \
+af_logged apt-get update -qq
+af_logged apt-get install --no-remove -y -qq \
     python3 curl ca-certificates git jq pkg-config clang libclang-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
     libwayland-dev wayland-protocols libxkbcommon-dev libffmpeg-nvenc-dev \
-    libva2 libgbm1 libegl1 libgles2 libwayland-server0 libxkbcommon0 >> "$LOGFILE" 2>&1
+    libva2 libgbm1 libegl1 libgles2 libwayland-server0 libxkbcommon0
 
 if [[ -f "${HOME:-/root}/.cargo/env" ]]; then
     # shellcheck disable=SC1091
     source "${HOME:-/root}/.cargo/env"
 fi
 if ! command -v cargo >/dev/null 2>&1; then
-    apt-get install --no-remove -y -qq cargo rustc >> "$LOGFILE" 2>&1
+    af_logged apt-get install --no-remove -y -qq cargo rustc
 fi
 
 report_progress 35 "Resolving McVNC release tag..."
@@ -109,20 +130,20 @@ fi
 VERSION="${TAG#v}"
 
 report_progress 55 "Cloning and compiling McVNC ${VERSION}..."
-if ! git clone --depth 1 --branch "$TAG" "$REPO_URL" "${TMP_DIR}/src" >> "$LOGFILE" 2>&1; then
+if ! af_logged git clone --depth 1 --branch "$TAG" "$REPO_URL" "${TMP_DIR}/src"; then
     if [[ "$TAG" =~ ^v ]]; then
         ALT_TAG="${TAG#v}"
     else
         ALT_TAG="v${TAG}"
     fi
-    git clone --depth 1 --branch "$ALT_TAG" "$REPO_URL" "${TMP_DIR}/src" >> "$LOGFILE" 2>&1 || {
+    af_logged git clone --depth 1 --branch "$ALT_TAG" "$REPO_URL" "${TMP_DIR}/src" || {
         print_error "Failed to clone McVNC repository at tag ${TAG}."
         exit 1
     }
     TAG="$ALT_TAG"
     VERSION="${TAG#v}"
 fi
-cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml" >> "$LOGFILE" 2>&1
+af_logged cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml"
 RUNTIME_BACKUP="$(mktemp -d /tmp/af-mcvnc-runtime.XXXXXX)"
 if [[ -f /etc/systemd/system/af-mcvnc.service ]] || systemctl is-active --quiet af-mcvnc.service 2>/dev/null; then
     WAS_RUNNABLE=true
@@ -204,8 +225,8 @@ EOF
 
 report_progress 90 "Starting McVNC..."
 systemctl daemon-reload
-systemctl enable af-mcvnc.service >> "$LOGFILE" 2>&1
-systemctl restart af-mcvnc.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable af-mcvnc.service
+af_logged systemctl restart af-mcvnc.service
 systemctl is-active --quiet af-mcvnc.service
 READY=false
 for attempt in {1..30}; do

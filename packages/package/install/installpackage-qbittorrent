@@ -30,6 +30,19 @@ elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE
 else
     mkdir -p -m 0750 "${LOGFILE%/*}"
 fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-qbittorrent}"
@@ -39,15 +52,15 @@ prepare_apt_package_transaction /var/lib/qbittorrent/.af-version qbittorrent-nox
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing qbittorrent-nox via APT..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qbittorrent-nox >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq qbittorrent-nox
 
 if ! id -u qbittorrent >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/qbittorrent --shell /usr/sbin/nologin qbittorrent
 fi
 
 report_progress 55 "Configuring qBittorrent WebUI on port ${APP_PORT}..."
-systemctl stop qbittorrent >> "$LOGFILE" 2>&1 || true
+af_logged systemctl stop qbittorrent || true
 mkdir -p /var/lib/qbittorrent/.config/qBittorrent/config /var/lib/qbittorrent/Downloads
 
 QBT_PBKDF2="$(generate_qbittorrent_pbkdf2 "${MASTER_PASS}")"
@@ -103,9 +116,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now qbittorrent >> "$LOGFILE" 2>&1
-systemctl restart qbittorrent >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now qbittorrent
+af_logged systemctl restart qbittorrent
 
 systemctl is-active --quiet qbittorrent
 queue_app_version /var/lib/qbittorrent/.af-version "$(dpkg-query -W -f='${Version}' qbittorrent-nox)"

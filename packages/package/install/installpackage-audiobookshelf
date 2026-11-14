@@ -20,15 +20,36 @@ PACKAGE_NAME="audiobookshelf"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-13378}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and multimedia libraries for Audiobookshelf..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ffmpeg ca-certificates
 
 validate_config_paths /etc/default/audiobookshelf /etc/systemd/system/audiobookshelf.service /opt/audiobookshelf/.af-version
 ABS_BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-audiobookshelf.XXXXXX)"
@@ -52,16 +73,16 @@ rollback_audiobookshelf() {
                 safe_restore_path_from_backup "$ABS_BACKUP_DIR/$index" "${ABS_STATE_PATHS[$index]}" || restore_failed=true
             done
             if [[ "$ABS_WAS_ENABLED" -eq 1 ]]; then
-                systemctl enable audiobookshelf >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl enable audiobookshelf || restore_failed=true
             else
-                systemctl disable audiobookshelf >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl disable audiobookshelf || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
             if [[ "$restore_failed" == false && "$ABS_WAS_ACTIVE" -eq 1 ]]; then
-                systemctl start audiobookshelf >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl start audiobookshelf || restore_failed=true
             fi
         elif [[ "$ABS_WAS_ACTIVE" -eq 1 && "$ABS_QUIESCE_STARTED" -eq 1 ]]; then
-            systemctl start audiobookshelf >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start audiobookshelf || restore_failed=true
         fi
     fi
     if [[ "$restore_failed" == true ]]; then
@@ -104,18 +125,18 @@ ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSI
 
 report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
 TMP_DEB=$(mktemp /tmp/abs-XXXXXX.deb)
-if download_file "$ABS_URL" "$TMP_DEB" >> "$LOGFILE" 2>&1; then
+if af_logged download_file "$ABS_URL" "$TMP_DEB"; then
     install_deb_verified "$TMP_DEB" audiobookshelf
     rm -f "$TMP_DEB"
 else
     rm -f "$TMP_DEB"
     # Fallback to official Audiobookshelf PPA repository
     install -m 0755 -d /etc/apt/keyrings
-    install_apt_signing_key https://advplyr.github.io/audiobookshelf-ppa/KEY.gpg /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg >> "$LOGFILE" 2>&1
+    af_logged install_apt_signing_key https://advplyr.github.io/audiobookshelf-ppa/KEY.gpg /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
     chmod a+r /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/audiobookshelf-archive-keyring.gpg] https://advplyr.github.io/audiobookshelf-ppa ./" > /etc/apt/sources.list.d/audiobookshelf.list
-    DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq audiobookshelf >> "$LOGFILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq audiobookshelf
 fi
 
 queue_app_version /opt/audiobookshelf/.af-version "$(dpkg-query -W -f='${Version}' audiobookshelf)"
@@ -148,10 +169,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now audiobookshelf >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now audiobookshelf
 verify_systemd_service_active audiobookshelf
-AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF'
+AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="$MASTER_PASS" af_logged python3 - <<'PYEOF'
 import os
 import sys, time, json, urllib.request
 user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]

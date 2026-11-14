@@ -60,14 +60,19 @@ if url.endswith("/SHA256SUMS"):
     shutil.copyfile(root / "SHA256SUMS", target)
     sys.exit(0)
 if url.endswith("/health/ready"):
-    corrupt = os.environ.get("TEST_CORRUPT_DB", "")
-    if corrupt:
-        target = Path(corrupt)
-        target.write_bytes(b"not a database")
-        Path(corrupt + "-wal").write_text("wal")
-        Path(corrupt + "-shm").write_text("shm")
-    body = os.environ.get("TEST_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
-    code = os.environ.get("TEST_HEALTH_CODE", "200")
+    is_rollback = (root / "current").exists() and (root / "current").resolve().name == "100"
+    if is_rollback and "TEST_ROLLBACK_HEALTH_CODE" in os.environ:
+        body = os.environ.get("TEST_ROLLBACK_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
+        code = os.environ["TEST_ROLLBACK_HEALTH_CODE"]
+    else:
+        corrupt = os.environ.get("TEST_CORRUPT_DB", "")
+        if corrupt:
+            target = Path(corrupt)
+            target.write_bytes(b"not a database")
+            Path(corrupt + "-wal").write_text("wal")
+            Path(corrupt + "-shm").write_text("shm")
+        body = os.environ.get("TEST_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
+        code = os.environ.get("TEST_HEALTH_CODE", "200")
     sys.stdout.write(body)
     if not body.endswith("\n"):
         sys.stdout.write("\n")
@@ -555,6 +560,7 @@ os.execvp(inner[0], inner)
             "deploy", "--channel", "stable",
             TEST_HEALTH_CODE="503",
             TEST_HEALTH_BODY='{"uptime":"0.0s","database":"unreachable","redis":"disabled","status":"not_ready"}',
+            TEST_ROLLBACK_HEALTH_CODE="200",
         )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("ROLLBACK COMPLETE", result.stdout)
@@ -575,6 +581,7 @@ os.execvp(inner[0], inner)
             "deploy", "--channel", "stable",
             TEST_HEALTH_CODE="503",
             TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable","redis":"disabled","uptime":"1.0s"}',
+            TEST_ROLLBACK_HEALTH_CODE="200",
             TEST_CORRUPT_DB=str(live_db),
         )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)

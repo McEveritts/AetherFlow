@@ -2522,7 +2522,11 @@ pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDas
             jellyfin_server.server_id = srv_id;
             jellyfin_server.version = srv_ver;
             jellyfin_server.last_connected_at = last_conn;
-            let decrypted = af_db::decrypt_key(&api_key).unwrap_or(api_key);
+            let decrypted = if api_key.is_empty() {
+                String::new()
+            } else {
+                af_db::decrypt_key(&api_key).unwrap_or_default()
+            };
             if !decrypted.is_empty() {
                 jellyfin_server.configured = true;
                 if is_admin {

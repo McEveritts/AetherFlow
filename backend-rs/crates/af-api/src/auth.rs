@@ -302,6 +302,22 @@ pub fn secure_cookie_enabled() -> bool {
         .unwrap_or(true)
 }
 
+pub fn validate_startup_jwt_secret() -> anyhow::Result<()> {
+    let secret = env::var("JWT_SECRET").unwrap_or_default();
+    if secret.trim().is_empty() {
+        anyhow::bail!(
+            "FATAL: JWT_SECRET environment variable is not set. Refusing to start without a persistent signing key."
+        );
+    }
+    if secret.len() < 32 {
+        anyhow::bail!(
+            "FATAL: JWT_SECRET must be at least 32 bytes long (got {} bytes).",
+            secret.len()
+        );
+    }
+    Ok(())
+}
+
 pub fn jwt_secret_bytes() -> Vec<u8> {
     let secret = env::var("JWT_SECRET").unwrap_or_default();
     if !secret.is_empty() {
@@ -2116,10 +2132,11 @@ fn list_active_sessions_blocking(req: Request) -> Response {
         }
     };
 
+    let current_session_jti = resolve_current_session_jti(&auth_user.jti);
     let mut sessions = Vec::new();
     if let Ok(rows) = stmt.query_map(params![auth_user.user_id], |r| {
         let full_jti: String = r.get(0)?;
-        let is_current = full_jti == auth_user.jti;
+        let is_current = full_jti == auth_user.jti || full_jti == current_session_jti;
         let masked = if full_jti.len() > 8 {
             format!("{}...", &full_jti[..8])
         } else {
@@ -2544,7 +2561,20 @@ pub async fn disable_2fa(req: Request) -> Response {
             return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "User not found");
         };
         drop(conn);
-        let secret = af_db::decrypt_key(&encrypted_secret).unwrap_or(encrypted_secret);
+        let secret = if encrypted_secret.is_empty() {
+            String::new()
+        } else {
+            match af_db::decrypt_key(&encrypted_secret) {
+                Ok(s) => s,
+                Err(_) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "CRYPTO_ERROR",
+                        "Failed to decrypt 2FA secret",
+                    );
+                }
+            }
+        };
         let password_ok = payload.password.is_empty()
             || (!password_hash.is_empty() && verify_password(&payload.password, &password_hash));
         let result = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
@@ -2555,7 +2585,11 @@ pub async fn disable_2fa(req: Request) -> Response {
                 "SELECT COALESCE(totp_secret, ''), COALESCE(password_hash, '') FROM users WHERE id = ?1",
                 params![auth_user.user_id], |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let current_secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
+            let current_secret = if current.0.is_empty() {
+                String::new()
+            } else {
+                af_db::decrypt_key(&current.0)?
+            };
             anyhow::ensure!(current_secret == secret && current.1 == password_hash, "Credentials changed");
             if !password_ok {
                 return Ok(None);

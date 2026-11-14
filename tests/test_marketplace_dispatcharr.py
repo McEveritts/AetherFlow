@@ -358,7 +358,7 @@ class DispatcharrProvisioningTests(unittest.TestCase):
                 self.assertEqual(vars(user), before)
 
     def test_admin_credentials_survive_shell_and_python_boundaries(self):
-        block = SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
+        block = common_functions("af_logged") + "\n" + SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "env/bin").mkdir(parents=True)

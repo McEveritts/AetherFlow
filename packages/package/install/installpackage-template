@@ -19,7 +19,27 @@ APP_BINARY="${APP_INSTALL_DIR}/${APP_LABEL}"
 GITHUB_REPOSITORY="owner/repo"
 
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 require_root
 if [[ ! "$APP_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
     print_error "AF_APP_PORT must be between 1024 and 65535."
@@ -30,8 +50,8 @@ if has_lock "$PACKAGE_NAME"; then
 fi
 
 report_progress 10 "Installing ${APP_LABEL} dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq curl python3 ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get -o DPkg::Lock::Timeout=120 update -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get -o DPkg::Lock::Timeout=120 install -y -qq curl python3 ca-certificates
 
 case "$(dpkg --print-architecture)" in
     amd64) APP_ARCH="x64" ;;
@@ -67,7 +87,7 @@ mkdir -p "$APP_DATA_DIR" "$(dirname "$APP_INSTALL_DIR")"
 TMP_TAR="$(mktemp "/tmp/${PACKAGE_NAME}-XXXXXX.tar.gz")"
 trap 'rm -f -- "$TMP_TAR"' EXIT
 report_progress 40 "Downloading and staging ${APP_LABEL}..."
-download_file "$DOWNLOAD_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "$DOWNLOAD_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "$APP_INSTALL_DIR" "$APP_LABEL" "$APP_DATA_DIR" "$PACKAGE_NAME" "$APP_LABEL"
 chmod 755 "$APP_BINARY"
 queue_app_version "$APP_INSTALL_DIR/.af-version" "${APP_VERSION#v}"
@@ -103,9 +123,9 @@ ReadWritePaths=${APP_DATA_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable "$PACKAGE_NAME" >> "$LOGFILE" 2>&1
-systemctl restart "$PACKAGE_NAME" >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable "$PACKAGE_NAME"
+af_logged systemctl restart "$PACKAGE_NAME"
 report_progress 90 "Waiting for ${APP_LABEL} readiness..."
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/ping"
 

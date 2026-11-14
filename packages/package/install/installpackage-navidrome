@@ -20,14 +20,35 @@ PACKAGE_NAME="navidrome"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4533}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Navidrome..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates python3-toml >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ffmpeg ca-certificates python3-toml
 
 ND_DATABASE="$(read_navidrome_database_path /var/lib/navidrome/navidrome.toml)" || exit 1
 validate_config_paths "$ND_DATABASE" "${ND_DATABASE}-wal" "${ND_DATABASE}-shm" || exit 1
@@ -54,7 +75,7 @@ ND_URL="https://github.com/navidrome/navidrome/releases/download/v${ND_VERSION}/
 
 report_progress 60 "Downloading and extracting Navidrome ${ND_VERSION}..."
 TMP_TAR=$(mktemp /tmp/navidrome-XXXXXX.tar.gz)
-download_file "$ND_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "$ND_URL" "$TMP_TAR"
 stage_app_archive "$TMP_TAR" "/opt/navidrome" "navidrome" "/var/lib/navidrome/navidrome.toml" "${PACKAGE_NAME}" "." "$ND_DATABASE" ""
 rm -f "$TMP_TAR"
 chmod +x /opt/navidrome/navidrome
@@ -96,11 +117,11 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now navidrome >> "$LOGFILE" 2>&1
-systemctl restart navidrome >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now navidrome
+af_logged systemctl restart navidrome
 verify_systemd_service_active navidrome
-AF_BOOTSTRAP_RETAINED="$ADMIN_RETAINED" MASTER_USER="${MASTER_USER}" MASTER_PASS="${MASTER_PASS}" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF'
+AF_BOOTSTRAP_RETAINED="$ADMIN_RETAINED" MASTER_USER="${MASTER_USER}" MASTER_PASS="${MASTER_PASS}" af_logged python3 - <<'PYEOF'
 import os, time, json, urllib.request, urllib.error
 user, pw = (os.environ.get('MASTER_USER', ''), os.environ.get('MASTER_PASS', ''))
 for _ in range(30):

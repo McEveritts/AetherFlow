@@ -18,7 +18,28 @@ fi
 
 PACKAGE_NAME="mergerfs"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-mergerfs}"
@@ -28,8 +49,8 @@ prepare_apt_package_transaction /var/lib/mergerfs/.af-version mergerfs
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing mergerfs and FUSE3 packages..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mergerfs fuse3 >> "$LOGFILE" 2>&1; then
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq mergerfs fuse3; then
     # Fallback to upstream deb release
     ARCH=$(dpkg --print-architecture)
     report_progress 30 "Fetching mergerfs deb package from GitHub releases..."
@@ -40,7 +61,7 @@ if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mergerfs fuse3 >> "$L
     fi
     if [[ -n "$MFS_DEB_URL" ]]; then
         TMP_DEB=$(mktemp /tmp/mergerfs-XXXXXX.deb)
-        download_file "$MFS_DEB_URL" "$TMP_DEB" >> "$LOGFILE" 2>&1
+        af_logged download_file "$MFS_DEB_URL" "$TMP_DEB"
         install_deb_verified "$TMP_DEB" mergerfs
         rm -f "$TMP_DEB"
     else
@@ -87,9 +108,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable mergerfs >> "$LOGFILE" 2>&1
-systemctl start mergerfs >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable mergerfs
+af_logged systemctl start mergerfs
 systemctl is-active --quiet mergerfs
 
 commit_app_versions

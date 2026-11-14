@@ -20,14 +20,35 @@ PACKAGE_NAME="pihole"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8089}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Pi-hole..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates
 
 report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
 validate_config_paths /etc/systemd/resolved.conf.d/pihole.conf /etc/pihole/setupVars.conf
@@ -73,10 +94,10 @@ rollback_pihole() {
             rm -f -- /etc/resolv.conf || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$PIHOLE_WAS_ACTIVE" -eq 1 ]]; then
-            systemctl start pihole-FTL >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start pihole-FTL || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$RESOLVED_WAS_ACTIVE" -eq 1 ]]; then
-            systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl restart systemd-resolved || restore_failed=true
         fi
     fi
     if [[ "$restore_failed" == true ]]; then
@@ -101,7 +122,7 @@ EOF
     if [[ -L /etc/resolv.conf ]] && readlink /etc/resolv.conf | grep -q "stub-resolv.conf"; then
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     fi
-    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
+    af_logged systemctl restart systemd-resolved || true
 fi
 
 report_progress 45 "Preparing unattended Pi-hole configuration..."
@@ -134,7 +155,7 @@ fi
 
 report_progress 65 "Running official Pi-hole installer..."
 PIHOLE_BOOTSTRAP_SHA256="${AF_PIHOLE_BOOTSTRAP_SHA256:-0c67c8f8358fede4b4dd8d51b429114461c9bb90ad56ff00ef05637f664bf3ac}"
-if ! fetch_and_run "https://install.pi-hole.net" "$PIHOLE_BOOTSTRAP_SHA256" --unattended >> "$LOGFILE" 2>&1; then
+if ! af_logged fetch_and_run "https://install.pi-hole.net" "$PIHOLE_BOOTSTRAP_SHA256" --unattended; then
     print_error "Pi-hole bootstrap verification or execution failed."
     exit 1
 fi
@@ -166,7 +187,7 @@ fi
 report_progress 85 "Configuring Pi-hole Web Admin interface on port ${APP_PORT}..."
 # Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)
 if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
-    pihole-FTL --config webserver.port "${APP_PORT}o" >> "$LOGFILE" 2>&1
+    af_logged pihole-FTL --config webserver.port "${APP_PORT}o"
 fi
 if [[ -d /etc/lighttpd ]]; then
     safe_config_python "$APP_PORT" /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf <<'PYEOF'
@@ -182,12 +203,12 @@ with contextlib.ExitStack() as stack:
             text += ('\n' if text and not text.endswith('\n') else '') + 'server.port := ' + sys.argv[1] + '\n'
         config.write_text(text, 0o644)
 PYEOF
-    systemctl restart lighttpd >> "$LOGFILE" 2>&1
+    af_logged systemctl restart lighttpd
 fi
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now pihole-FTL >> "$LOGFILE" 2>&1
-systemctl restart pihole-FTL >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now pihole-FTL
+af_logged systemctl restart pihole-FTL
 systemctl is-active --quiet pihole-FTL
 PIHOLE_VERSION="$(pihole-FTL -v | head -n1)"
 queue_app_version /etc/pihole/.af-version "${PIHOLE_VERSION#v}"

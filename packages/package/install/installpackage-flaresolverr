@@ -18,7 +18,28 @@ PACKAGE_NAME="flaresolverr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8191}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+mkdir -p /install /run/lock
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 exec 9>/run/lock/aetherflow-flaresolverr.lock
 flock -n 9 || { log_error "Another FlareSolverr installation is running."; exit 1; }
 
@@ -62,13 +83,13 @@ cleanup() {
             if [[ -f "$BACKUP_DIR/flaresolverr.service" ]]; then
                 safe_restore_path_from_backup "$BACKUP_DIR/flaresolverr.service" /etc/systemd/system/flaresolverr.service || restore_failed=true
             else
-                systemctl disable flaresolverr >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl disable flaresolverr || restore_failed=true
                 rm -f /etc/systemd/system/flaresolverr.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start flaresolverr >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start flaresolverr || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
@@ -87,17 +108,17 @@ trap 'exit 143' TERM
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Chromium and Xvfb dependencies for FlareSolverr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-    libxrandr2 libgbm1 libasound2t64 fonts-liberation python3 python3-venv python3-pip >> "$LOGFILE" 2>&1 || \
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    libxrandr2 libgbm1 libasound2t64 fonts-liberation python3 python3-venv python3-pip || \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl tar ca-certificates xvfb xauth libnss3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-    libxrandr2 libgbm1 libasound2 fonts-liberation python3 python3-venv python3-pip >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >> "$LOGFILE" 2>&1 || \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium-browser >> "$LOGFILE" 2>&1 || true
+    libxrandr2 libgbm1 libasound2 fonts-liberation python3 python3-venv python3-pip
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq chromium || \
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq chromium-browser || true
 
 if ! id -u flaresolverr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/flaresolverr --shell /usr/sbin/nologin flaresolverr
@@ -131,13 +152,13 @@ fi
 BUILD_DIR="$(mktemp -d /opt/.flaresolverr-build.XXXXXX)"
 if [[ -n "$FS_URL" ]]; then
     TMP_TAR=$(mktemp /tmp/flaresolverr-XXXXXX.tar.gz)
-    download_file "$FS_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
-    tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || tar -xzf "$TMP_TAR" -C "$BUILD_DIR" >> "$LOGFILE" 2>&1
+    af_logged download_file "$FS_URL" "$TMP_TAR"
+    tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR"
     rm -f "$TMP_TAR"
 else
     TMP_TAR=$(mktemp /tmp/flaresolverr-src-XXXXXX.tar.gz)
-    download_file "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" "$TMP_TAR" >> "$LOGFILE" 2>&1
-    tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
+    af_logged download_file "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" "$TMP_TAR"
+    af_logged tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1
     rm -f "$TMP_TAR"
     mkdir -p /opt/flaresolverr
     if [[ -e /opt/flaresolverr/.venv || -L /opt/flaresolverr/.venv ]]; then
@@ -148,10 +169,10 @@ else
         mv /opt/flaresolverr/.venv "$BACKUP_DIR/venv"
         VENV_MOVED=1
     fi
-    python3 -m venv /opt/flaresolverr/.venv >> "$LOGFILE" 2>&1
+    af_logged python3 -m venv /opt/flaresolverr/.venv
     VENV_ACTIVATED=1
-    /opt/flaresolverr/.venv/bin/pip install --upgrade pip wheel >> "$LOGFILE" 2>&1
-    /opt/flaresolverr/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+    af_logged /opt/flaresolverr/.venv/bin/pip install --upgrade pip wheel
+    af_logged /opt/flaresolverr/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
     cat <<'WRAP' > "$BUILD_DIR/flaresolverr"
 #!/bin/bash
 exec /opt/flaresolverr/.venv/bin/python3 /opt/flaresolverr/src/flaresolverr.py "$@"
@@ -214,8 +235,8 @@ WantedBy=multi-user.target
 EOF
 UNIT_WRITTEN=1
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now flaresolverr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now flaresolverr
 
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 wait_for_service_ready "flaresolverr.service" "$APP_PORT" "$READY_URL"

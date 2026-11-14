@@ -20,14 +20,35 @@ PACKAGE_NAME="prometheus"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9090}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Prometheus..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates
 
 if ! id -u prometheus >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --shell /usr/sbin/nologin prometheus
@@ -61,9 +82,9 @@ rollback_runtime() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            systemctl restart prometheus node_exporter >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl restart prometheus node_exporter || restore_failed=true
         fi
     fi
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
@@ -84,8 +105,8 @@ PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VER
 
 TMP_DIR="$(mktemp -d /tmp/prometheus-extract-XXXXXX)"
 TMP_TAR="$TMP_DIR/prometheus.tar.gz"
-download_file "$PROM_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
+af_logged download_file "$PROM_URL" "$TMP_TAR"
+af_logged tar -xzf "$TMP_TAR" -C "$TMP_DIR"
 rm -f "$TMP_TAR"
 
 PROM_EXTRACTED="$TMP_DIR/prometheus-${PROM_VERSION}.${PROM_ARCH}"
@@ -94,8 +115,8 @@ report_progress 50 "Downloading and extracting Node Exporter..."
 NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
 NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
 TMP_NE="$TMP_DIR/node_exporter.tar.gz"
-download_file "$NE_URL" "$TMP_NE" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_NE" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
+af_logged download_file "$NE_URL" "$TMP_NE"
+af_logged tar -xzf "$TMP_NE" -C "$TMP_DIR"
 rm -f "$TMP_NE"
 test -s "${PROM_EXTRACTED}/prometheus"
 test -s "${PROM_EXTRACTED}/promtool"
@@ -196,11 +217,11 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now node_exporter >> "$LOGFILE" 2>&1
-systemctl restart node_exporter >> "$LOGFILE" 2>&1
-systemctl enable --now prometheus >> "$LOGFILE" 2>&1
-systemctl restart prometheus >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now node_exporter
+af_logged systemctl restart node_exporter
+af_logged systemctl enable --now prometheus
+af_logged systemctl restart prometheus
 
 systemctl is-active --quiet node_exporter prometheus
 queue_app_version /etc/prometheus/.af-version "${PROM_VERSION#v}"

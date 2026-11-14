@@ -17,31 +17,51 @@ fi
 
 PACKAGE_NAME="tailscale"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Disconnecting and stopping tailscaled service..."
 
 if command -v tailscale >/dev/null 2>&1; then
-    tailscale down >> "$LOGFILE" 2>&1 || true
+    af_logged tailscale down || true
 fi
 
 purge_systemd_unit "tailscaled"
 
 report_progress 55 "Removing Tailscale APT packages and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq tailscale >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get remove -y -qq tailscale
 rm -f /etc/apt/sources.list.d/tailscale.list /etc/apt/keyrings/tailscale-archive-keyring.gpg /etc/sysctl.d/99-tailscale.conf
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     report_progress 80 "Purging Tailscale node state and configuration..."
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq tailscale >> "$LOGFILE" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get purge -y -qq tailscale || true
     safe_rm_rf /var/lib/tailscale /etc/tailscale /etc/default/tailscaled
 fi
 
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
-sysctl --system >> "$LOGFILE" 2>&1 || true
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
+af_logged sysctl --system || true
+af_logged systemctl daemon-reload
 
 rm -f -- /var/lib/tailscale/.af-version
 remove_lock "${PACKAGE_NAME}"

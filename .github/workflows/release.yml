@@ -200,8 +200,16 @@ jobs:
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           TMPDIR: /tmp
         run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          go mod verify
+          govulncheck ./...
           go vet ./...
-          go test ./... -count=1
+          staticcheck ./...
+          gosec -severity high -confidence high ./...
+          gosec -include=G201,G202 ./...
+          go test -race ./... -count=1
           AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
           CGO_ENABLED=0 go build ./...
 
@@ -318,7 +326,7 @@ jobs:
           cp -R deploy "${STAGE_DIR}/deploy"
           rm -rf "${STAGE_DIR}/deploy/__pycache__"
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py"
+          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py" "${STAGE_DIR}/deploy/log-retention.py"
 
           mkdir -p release-dist
           tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
@@ -404,12 +412,12 @@ jobs:
             release-dist/aetherflow-linux-amd64.tar.gz
             release-dist/SHA256SUMS
           )
-          if [[ -n "${ATTEST_BUNDLE_PATH:-}" && -s "${ATTEST_BUNDLE_PATH}" ]]; then
-            cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json
+          if [[ -z "${ATTEST_BUNDLE_PATH:-}" || ! -s "${ATTEST_BUNDLE_PATH}" ]]; then
+            echo "::error::Missing or empty Sigstore attestation bundle from actions/attest-build-provenance" >&2
+            exit 1
           fi
-          if [[ -s release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json ]]; then
-            RELEASE_ASSETS+=(release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json)
-          fi
+          cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json
+          RELEASE_ASSETS+=(release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json)
           gh release create "${RELEASE_TAG}" \
             "${RELEASE_ASSETS[@]}" \
             --target "${GITHUB_SHA}" \

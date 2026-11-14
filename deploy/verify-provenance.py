@@ -816,13 +816,16 @@ def verify_single_bundle(
         leaf_der = base64.b64decode(leaf_b64)
 
         # 3a & 3b. Evaluate candidate DSSE signatures against RFC 3161 & Rekor transparency log
-        authenticated_times: list[int] | None = None
-        verified_raw_sigs: list[bytes] = []
+        verified_candidates: list[tuple[bytes, list[int]]] = []
         last_tlog_err: Exception | None = None
         for cand_sig_b64, cand_raw_sig in candidate_sigs:
-            verified_tsa_times = _verify_rfc3161_timestamps(
-                td, vm, cand_raw_sig, tsa_roots_b64=tsa_roots_b64, tsa_leaves_b64=tsa_leaves_b64
-            )
+            try:
+                verified_tsa_times = _verify_rfc3161_timestamps(
+                    td, vm, cand_raw_sig, tsa_roots_b64=tsa_roots_b64, tsa_leaves_b64=tsa_leaves_b64
+                )
+            except Exception as exc:
+                last_tlog_err = exc
+                continue
             for entry in tlog_entries:
                 if not isinstance(entry, dict):
                     continue
@@ -837,18 +840,16 @@ def verify_single_bundle(
                         rekor_keys=rekor_keys,
                     )
                     if times:
-                        if authenticated_times is None:
-                            authenticated_times = times
-                        verified_raw_sigs.append(cand_raw_sig)
+                        verified_candidates.append((cand_raw_sig, times))
                         break
                 except Exception as exc:
                     last_tlog_err = exc
-        if not authenticated_times or not verified_raw_sigs:
+        if not verified_candidates:
             raise ProvenanceVerificationError(
                 f"no valid Rekor transparency log entry: {last_tlog_err}"
             )
 
-        # 4. Verify Fulcio X.509 certificate chain at every authenticated signing timestamp
+        # 4. Prepare Fulcio X.509 certificate chain & leaf validity bounds
         roots_pem = "".join(_wrap_pem("CERTIFICATE", c) for c in fulcio_roots_b64)
         inters_pem = "".join(
             _wrap_pem("CERTIFICATE", c)
@@ -880,35 +881,6 @@ def verify_single_bundle(
                 not_after = _parse_openssl_asn1_time(line.split("=", 1)[1])
         if not_before is None or not_after is None:
             raise ProvenanceVerificationError("leaf X.509 certificate missing validity bounds")
-
-        for auth_time in authenticated_times:
-            if not (not_before <= auth_time <= not_after):
-                raise ProvenanceVerificationError(
-                    f"authenticated timestamp {auth_time} outside leaf cert window [{not_before}, {not_after}]"
-                )
-
-        primary_time = authenticated_times[0]
-        chain_cmd = [
-            "openssl",
-            "verify",
-            "-attime",
-            str(primary_time),
-            "-CAfile",
-            str(roots_path),
-        ]
-        if inters_pem.strip():
-            chain_cmd.extend(["-untrusted", str(inters_path)])
-        chain_cmd.append(str(leaf_path))
-        chain_res = subprocess.run(
-            chain_cmd,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if chain_res.returncode != 0:
-            raise ProvenanceVerificationError(
-                f"Fulcio X.509 chain verification failed: {chain_res.stderr.strip() or chain_res.stdout.strip()}"
-            )
 
         # 5. Verify X.509 EKU (Code Signing) + Fulcio GitHub Actions OIDC identity, issuer & runner_environment
         text_res = subprocess.run(
@@ -965,7 +937,7 @@ def verify_single_bundle(
                 f"leaf certificate runner_environment {runner_env!r} is not 'github-hosted'"
             )
 
-        # 6. Verify DSSE PAE cryptographic signature using leaf public key
+        # 6. Verify DSSE PAE cryptographic signature + Fulcio chain validity bound to the SAME candidate signature
         pub_res = subprocess.run(
             ["openssl", "x509", "-in", str(leaf_path), "-pubkey", "-noout"],
             capture_output=True,
@@ -982,20 +954,50 @@ def verify_single_bundle(
             + f" {len(raw_payload)} ".encode("ascii")
             + raw_payload
         )
-        pae_verified = False
-        last_pae_err: Exception | None = None
-        for cand_raw_sig in verified_raw_sigs:
+        bound_verified = False
+        primary_time: int | None = None
+        last_bound_err: Exception | None = None
+        for cand_raw_sig, cand_times in verified_candidates:
             try:
                 _verify_signature_with_openssl(
                     td, pub_res.stdout, "PKIX_ECDSA_P256_SHA_256", pae, cand_raw_sig, "dsse-pae"
                 )
-                pae_verified = True
+                for auth_time in cand_times:
+                    if not (not_before <= auth_time <= not_after):
+                        raise ProvenanceVerificationError(
+                            f"authenticated timestamp {auth_time} outside leaf cert window [{not_before}, {not_after}]"
+                        )
+                    chain_cmd = [
+                        "openssl",
+                        "verify",
+                        "-attime",
+                        str(auth_time),
+                        "-CAfile",
+                        str(roots_path),
+                    ]
+                    if inters_pem.strip():
+                        chain_cmd.extend(["-untrusted", str(inters_path)])
+                    chain_cmd.append(str(leaf_path))
+                    chain_res = subprocess.run(
+                        chain_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    if chain_res.returncode != 0:
+                        raise ProvenanceVerificationError(
+                            f"Fulcio X.509 chain verification failed: {chain_res.stderr.strip() or chain_res.stdout.strip()}"
+                        )
+                primary_time = cand_times[0]
+                bound_verified = True
                 break
             except Exception as exc:
-                last_pae_err = exc
-        if not pae_verified:
+                last_bound_err = exc
+        if not bound_verified:
+            if isinstance(last_bound_err, ProvenanceVerificationError):
+                raise last_bound_err
             raise ProvenanceVerificationError(
-                f"DSSE PAE signature verification failed: {last_pae_err}"
+                f"DSSE PAE signature verification failed: {last_bound_err}"
             )
 
     # 7. Verify SLSA v1 in-toto statement, subject binding, & workflow ref/tag policy

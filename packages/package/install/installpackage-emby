@@ -20,7 +20,28 @@ PACKAGE_NAME="emby"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8097}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-emby}"
@@ -30,8 +51,8 @@ prepare_apt_package_transaction /opt/emby-server/.af-version emby-server
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Emby Server..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certificates
 
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
@@ -46,7 +67,7 @@ EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY
 
 report_progress 50 "Downloading Emby Server ${EMBY_VERSION}..."
 TMP_DEB=$(mktemp /tmp/emby-XXXXXX.deb)
-download_file "$EMBY_URL" "$TMP_DEB" >> "$LOGFILE" 2>&1
+af_logged download_file "$EMBY_URL" "$TMP_DEB"
 
 report_progress 75 "Installing Emby Server package..."
 install_deb_verified "$TMP_DEB" emby-server
@@ -70,9 +91,9 @@ fi
 chown -hRP emby:emby /var/lib/emby 2>/dev/null || true
 
 report_progress 90 "Starting and enabling emby-server service on port ${APP_PORT}..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now emby-server >> "$LOGFILE" 2>&1
-systemctl restart emby-server >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now emby-server
+af_logged systemctl restart emby-server
 systemctl is-active --quiet emby-server
 verify_systemd_service_active emby-server
 seed_jellyfin_master_user ${APP_PORT}

@@ -1157,24 +1157,33 @@ stage_running_release_manager() {
         return 1
     fi
     mkdir -p "${RELEASE_DIR}/deploy"
-    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" || -L "${RELEASE_DIR}/deploy/verify-provenance.py" ]]; then
+    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" || -L "${RELEASE_DIR}/deploy/verify-provenance.py" || -L "${RELEASE_DIR}/deploy/log-retention.py" ]]; then
         log_error "Refusing to overwrite symlink inside ${RELEASE_DIR}/deploy."
         return 1
     fi
-    if [[ -f "${SCRIPT_DIR}/release-manager.sh" ]]; then
-        rm -f "${RELEASE_DIR}/deploy/release-manager.sh"
+    if [[ -f "${RELEASE_DIR}/deploy/release-manager.sh" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/release-manager.sh"
+    elif [[ -f "${SCRIPT_DIR}/release-manager.sh" ]]; then
         cp -f "${SCRIPT_DIR}/release-manager.sh" "${RELEASE_DIR}/deploy/release-manager.sh"
-        chmod +x "${RELEASE_DIR}/deploy/release-manager.sh"
-        log_info "Staged the executing release-manager.sh into ${RELEASE_DIR}/deploy (published artifacts can predate this fix)."
+        chmod 0755 "${RELEASE_DIR}/deploy/release-manager.sh"
+        log_info "Backfilled missing release-manager.sh into ${RELEASE_DIR}/deploy."
     fi
-    if [[ -f "${SCRIPT_DIR}/verify-provenance.py" ]]; then
-        rm -f "${RELEASE_DIR}/deploy/verify-provenance.py"
+    if [[ -f "${RELEASE_DIR}/deploy/verify-provenance.py" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/verify-provenance.py"
+    elif [[ -f "${SCRIPT_DIR}/verify-provenance.py" ]]; then
         cp -f "${SCRIPT_DIR}/verify-provenance.py" "${RELEASE_DIR}/deploy/verify-provenance.py"
-        chmod +x "${RELEASE_DIR}/deploy/verify-provenance.py"
+        chmod 0755 "${RELEASE_DIR}/deploy/verify-provenance.py"
+    fi
+    if [[ -f "${RELEASE_DIR}/deploy/log-retention.py" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/log-retention.py"
+    elif [[ -f "${SCRIPT_DIR}/log-retention.py" ]]; then
+        cp -f "${SCRIPT_DIR}/log-retention.py" "${RELEASE_DIR}/deploy/log-retention.py"
+        chmod 0755 "${RELEASE_DIR}/deploy/log-retention.py"
     fi
     if [[ -f "${CONF_FILE}" ]]; then
         rm -f "${RELEASE_DIR}/deploy/release-manager.conf"
         cp -f "${CONF_FILE}" "${RELEASE_DIR}/deploy/release-manager.conf"
+        chmod 0644 "${RELEASE_DIR}/deploy/release-manager.conf"
     fi
 }
 
@@ -2009,15 +2018,8 @@ rollback() {
     fi
 
     if [[ "${DRY_RUN}" == false ]]; then
-        if [[ "${COMMAND}" == "rollback" ]]; then
-            if ! health_probe; then
-                log_fatal "Health probe failed after rollback to ${previous_target}."
-            fi
-        else
-            restart_systemd_units
-            if ! systemctl is-active --quiet aetherflow-runner.service || ! systemctl is-active --quiet aetherflow-api.service; then
-                log_error "Post-rollback systemd unit activation check failed on ${previous_target}; manual operator inspection required."
-            fi
+        if ! health_probe; then
+            log_fatal "Health probe failed after rollback to ${previous_target}."
         fi
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="

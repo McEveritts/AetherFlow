@@ -630,11 +630,19 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 
 	if revoked {
 		slog.Warn("OIDC: refresh token reuse detected; revoking token family", "client_id", clientID, "user_id", userID)
-		_, _ = tx.Exec(
-			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND (family_id = ? OR token = ?)",
-			clientID, effFamily, refreshToken,
-		)
-		_ = tx.Commit()
+		if _, revErr := tx.Exec(
+			"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ? AND user_id = ? AND (family_id = ? OR token = ?)",
+			clientID, userID, effFamily, refreshToken,
+		); revErr != nil {
+			slog.Error("OIDC: failed to revoke reused refresh token family", "client_id", clientID, "user_id", userID, "error", revErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			slog.Error("OIDC: failed to commit reused refresh token family revocation", "client_id", clientID, "user_id", userID, "error", commitErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "token already consumed"})
 		return
 	}
@@ -1274,6 +1282,15 @@ func verifyPKCE(verifier, challenge, method string) bool {
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
+func sqlTableExists(q oidcDBExecer, table string) bool {
+	if q == nil {
+		return false
+	}
+	var exists int
+	err := q.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1", table).Scan(&exists)
+	return err == nil && exists == 1
+}
+
 func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authTime int64, familyID string, credentialVer int64) (string, string, error) {
 	now := time.Now().UTC()
 	nowUnix := now.Unix()
@@ -1323,20 +1340,23 @@ func createSessionJWTInTx(execer oidcDBExecer, userID int, c *gin.Context, authT
 		}
 		expiresAt := time.Unix(retainUnix, 0).UTC().Format(time.RFC3339)
 
-		_, insErr := execer.Exec(
-			`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
-			 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
-			jti, userID, ip, ua, expiresAt, effFamily,
-		)
-		if insErr != nil && strings.Contains(insErr.Error(), "no such column") {
-			_, insErr = execer.Exec(
-				`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active)
-				 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-				jti, userID, ip, ua, expiresAt,
+		if sqlTableExists(execer, "active_sessions") {
+			_, insErr := execer.Exec(
+				`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
+				 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+				jti, userID, ip, ua, expiresAt, effFamily,
 			)
-		}
-		if insErr != nil {
-			slog.Warn("session tracking: failed to record session", "error", insErr)
+			if insErr != nil && strings.Contains(insErr.Error(), "no such column") {
+				_, insErr = execer.Exec(
+					`INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active)
+					 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+					jti, userID, ip, ua, expiresAt,
+				)
+			}
+			if insErr != nil {
+				slog.Error("session tracking: failed to record active session", "error", insErr)
+				return "", "", fmt.Errorf("failed to record active session: %w", insErr)
+			}
 		}
 	}
 

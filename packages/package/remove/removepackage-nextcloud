@@ -17,7 +17,27 @@ fi
 
 PACKAGE_NAME="nextcloud"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 NC_DB_OWNER_FILE="/opt/AetherFlow/logs/nextcloud_database_owner.json"
@@ -76,17 +96,17 @@ fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Disabling Apache Nextcloud site..."
 
-a2dissite nextcloud.conf >> "$LOGFILE" 2>&1 || true
+af_logged a2dissite nextcloud.conf || true
 rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
 # Detach this application before any data or database removal.
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1
+af_logged apache2ctl configtest
+af_logged systemctl reload apache2
 
 report_progress 50 "Dropping Nextcloud database and user..."
 if [[ "$NC_PURGE_MYSQL" == true ]]; then
-    mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+    af_logged mysql -u root --host=localhost --protocol=SOCKET <<EOF
 DROP DATABASE IF EXISTS ${NC_DB_NAME};
 DROP USER IF EXISTS '${NC_DB_USER}'@'localhost';
 FLUSH PRIVILEGES;

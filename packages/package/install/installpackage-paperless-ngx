@@ -18,7 +18,28 @@ PACKAGE_NAME="paperless-ngx"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8010}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+mkdir -p /install /run/lock
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 exec 9>/run/lock/aetherflow-paperless.lock
 flock -n 9 || { log_error "Another Paperless-ngx installation is running."; exit 1; }
 
@@ -81,14 +102,14 @@ cleanup() {
                 if [[ -f "$BACKUP_DIR/$unit" ]]; then
                     safe_restore_path_from_backup "$BACKUP_DIR/$unit" "/etc/systemd/system/$unit" || restore_failed=true
                 else
-                    systemctl disable "${unit%.service}" >> "$LOGFILE" 2>&1 || restore_failed=true
+                    af_logged systemctl disable "${unit%.service}" || restore_failed=true
                     rm -f "/etc/systemd/system/$unit" || restore_failed=true
                 fi
             done
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start paperless-webserver paperless-worker paperless-scheduler >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start paperless-webserver paperless-worker paperless-scheduler || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
@@ -107,15 +128,15 @@ trap 'exit 143' TERM
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing OCR, Redis, and Python system dependencies for Paperless-ngx..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     redis-server tesseract-ocr tesseract-ocr-eng imagemagick ghostscript \
     poppler-utils gnupg libpq-dev libmagic-dev pkg-config default-libmysqlclient-dev \
-    python3 python3-pip python3-venv python3-dev postgresql-client build-essential xz-utils curl git ca-certificates >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0t64 >> "$LOGFILE" 2>&1 || \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0 >> "$LOGFILE" 2>&1 || true
+    python3 python3-pip python3-venv python3-dev postgresql-client build-essential xz-utils curl git ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq libzbar0t64 || \
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq libzbar0 || true
 
-systemctl enable --now redis-server >> "$LOGFILE" 2>&1
+af_logged systemctl enable --now redis-server
 
 if ! id -u paperless >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/paperless --shell /usr/sbin/nologin paperless
@@ -134,12 +155,12 @@ PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PN
 report_progress 55 "Downloading and extracting Paperless-ngx ${PNGX_VER} in staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.paperless-build.XXXXXX)"
 TMP_XZ=$(mktemp /tmp/paperless-XXXXXX.tar.xz)
-if download_file "$PNGX_URL" "$TMP_XZ" >> "$LOGFILE" 2>&1; then
-    tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" >> "$LOGFILE" 2>&1
+if af_logged download_file "$PNGX_URL" "$TMP_XZ"; then
+    tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR"
     rm -f "$TMP_XZ"
 else
     rm -f "$TMP_XZ"
-    git clone --depth 1 https://github.com/paperless-ngx/paperless-ngx.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+    af_logged git clone --depth 1 https://github.com/paperless-ngx/paperless-ngx.git "$BUILD_DIR"
 fi
 test -f "$BUILD_DIR/src/manage.py" || { log_error "Failed to verify Paperless-ngx manage.py"; exit 1; }
 queue_app_version "/opt/paperless/.af-version" "${PNGX_VER#v}"
@@ -186,13 +207,13 @@ if [[ -e /opt/paperless/.venv || -L /opt/paperless/.venv ]]; then
     mv /opt/paperless/.venv "$BACKUP_DIR/venv"
     VENV_MOVED=1
 fi
-python3 -m venv /opt/paperless/.venv >> "$LOGFILE" 2>&1
+af_logged python3 -m venv /opt/paperless/.venv
 VENV_ACTIVATED=1
-/opt/paperless/.venv/bin/pip install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+af_logged /opt/paperless/.venv/bin/pip install --upgrade pip setuptools wheel
 if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
-    /opt/paperless/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+    af_logged /opt/paperless/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
 fi
-/opt/paperless/.venv/bin/pip install gunicorn psycopg2-binary >> "$LOGFILE" 2>&1 || true
+af_logged /opt/paperless/.venv/bin/pip install gunicorn psycopg2-binary || true
 test -x /opt/paperless/.venv/bin/python || { log_error "Failed to verify Paperless-ngx virtual environment"; exit 1; }
 chown -hRP paperless:paperless /opt/paperless/.venv "$BUILD_DIR" /var/lib/paperless
 
@@ -277,8 +298,8 @@ if [[ -f /opt/paperless/src/manage.py ]]; then
     export DJANGO_SUPERUSER_USERNAME="${MASTER_USER}"
     export DJANGO_SUPERUSER_PASSWORD="${MASTER_PASS}"
     export DJANGO_SUPERUSER_EMAIL="${MASTER_USER}@aether.local"
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate >> "$LOGFILE" 2>&1
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py shell >> "$LOGFILE" 2>&1 <<'PYEOF'
+    af_logged /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate
+    af_logged /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py shell <<'PYEOF'
 import os
 from django.contrib.auth import get_user_model
 UserModel = get_user_model()
@@ -289,7 +310,7 @@ if not UserModel.objects.filter(is_superuser=True).exists():
         password=os.environ['DJANGO_SUPERUSER_PASSWORD'],
     )
 PYEOF
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input >> "$LOGFILE" 2>&1
+    af_logged /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input
 fi
 
 chown -hRP paperless:paperless /opt/paperless /var/lib/paperless
@@ -360,10 +381,10 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now paperless-webserver >> "$LOGFILE" 2>&1
-systemctl enable --now paperless-worker >> "$LOGFILE" 2>&1
-systemctl enable --now paperless-scheduler >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now paperless-webserver
+af_logged systemctl enable --now paperless-worker
+af_logged systemctl enable --now paperless-scheduler
 
 HEALTHY=0
 for attempt in {1..15}; do

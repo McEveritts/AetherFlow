@@ -20,7 +20,28 @@ PACKAGE_NAME="filebrowser"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8095}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /opt/AetherFlow/logs/filebrowser_credentials.txt
@@ -28,8 +49,8 @@ install -d -m 0700 /opt/AetherFlow/logs
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing dependencies for File Browser..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar openssl ca-certificates apache2-utils >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar openssl ca-certificates apache2-utils
 
 if ! id -u filebrowser >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/filebrowser --shell /usr/sbin/nologin filebrowser
@@ -48,10 +69,10 @@ FB_VERSION="$(github_latest_tag "filebrowser/filebrowser" "v2.31.2" "false")"
 FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSION}/${FB_ARCH}-filebrowser.tar.gz"
 
 TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
-download_file "$FB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "$FB_URL" "$TMP_TAR"
 TMP_DIR="$(mktemp -d /tmp/filebrowser-extract-XXXXXX)"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
-tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser >> "$LOGFILE" 2>&1
+af_logged tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser
 rm -f "$TMP_TAR"
 chmod 755 "$TMP_DIR/filebrowser"
 stage_app_archive "$TMP_DIR" /usr/local/bin/filebrowser filebrowser /opt/filebrowser "$PACKAGE_NAME" "." "" "" binary
@@ -64,13 +85,13 @@ queue_app_version /opt/filebrowser/.af-version "${FB_VERSION#v}"
 
 FB_NEW_DATABASE=0
 if [[ ! -s /opt/filebrowser/filebrowser.db ]]; then
-    /usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+    af_logged /usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db
     FB_NEW_DATABASE=1
 fi
 if [[ "$FB_NEW_DATABASE" == 1 ]]; then
-    /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --root /srv --minimum-password-length 12 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+    af_logged /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --root /srv --minimum-password-length 12 --database /opt/filebrowser/filebrowser.db
 else
-    /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+    af_logged /usr/local/bin/filebrowser config set --address "${AF_BIND_ADDRESS:-127.0.0.1}" --port "${APP_PORT}" --database /opt/filebrowser/filebrowser.db
 fi
 
 FB_USER="${MASTER_USER}"
@@ -83,7 +104,7 @@ AF_SEED_USER="$FB_USER" AF_SEED_HASH="$FB_PASSWORD_HASH" safe_config_python "$FB
 import json, sys
 safe_write_text(sys.argv[1], json.dumps([{'id': 0, 'username': os.environ['AF_SEED_USER'], 'password': os.environ['AF_SEED_HASH'], 'scope': '/srv', 'perm': {'admin': True}}]), 0o600)
 PYEOF
-/usr/local/bin/filebrowser users import "$FB_USERS_FILE" --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+af_logged /usr/local/bin/filebrowser users import "$FB_USERS_FILE" --database /opt/filebrowser/filebrowser.db
 rm -f -- "$FB_USERS_FILE"
 (umask 077; printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" | write_config_file /opt/AetherFlow/logs/filebrowser_credentials.txt 0600)
 fi
@@ -107,9 +128,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now filebrowser >> "$LOGFILE" 2>&1
-systemctl restart filebrowser >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now filebrowser
+af_logged systemctl restart filebrowser
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/health"
 systemctl is-active --quiet filebrowser
 

@@ -20,7 +20,28 @@ PACKAGE_NAME="syncthing"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8384}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/apt/keyrings/syncthing-archive-keyring.gpg
@@ -31,18 +52,18 @@ prepare_apt_package_transaction /var/lib/syncthing/.af-version syncthing
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Syncthing..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https apache2-utils >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-certificates apt-transport-https apache2-utils
 
 report_progress 35 "Adding official Syncthing APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-download_file https://syncthing.net/release-key.gpg /etc/apt/keyrings/syncthing-archive-keyring.gpg >> "$LOGFILE" 2>&1
+af_logged download_file https://syncthing.net/release-key.gpg /etc/apt/keyrings/syncthing-archive-keyring.gpg
 chmod a+r /etc/apt/keyrings/syncthing-archive-keyring.gpg
 echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
 
 report_progress 60 "Installing Syncthing package..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq syncthing >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq syncthing
 
 if ! id -u syncthing >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/syncthing --shell /usr/sbin/nologin syncthing
@@ -51,7 +72,7 @@ fi
 mkdir -p /var/lib/syncthing
 chown -hRP syncthing:syncthing /var/lib/syncthing
 if [[ ! -s /var/lib/syncthing/config.xml && ! -s /var/lib/syncthing/.local/state/syncthing/config.xml ]]; then
-sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing >> "$LOGFILE" 2>&1
+af_logged sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing
 ST_PASSWORD_HASH="$(printf '%s\n' "$MASTER_PASS" | htpasswd -niBC 10 "$MASTER_USER")"
 ST_PASSWORD_HASH="${ST_PASSWORD_HASH#*:}"
 for st_cfg in /var/lib/syncthing/config.xml /var/lib/syncthing/.local/state/syncthing/config.xml; do
@@ -102,10 +123,10 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now syncthing >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now syncthing
 
-systemctl restart syncthing >> "$LOGFILE" 2>&1
+af_logged systemctl restart syncthing
 systemctl is-active --quiet syncthing
 queue_app_version /var/lib/syncthing/.af-version "$(dpkg-query -W -f='${Version}' syncthing)"
 

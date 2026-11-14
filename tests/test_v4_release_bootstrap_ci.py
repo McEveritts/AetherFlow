@@ -78,7 +78,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "Bash retry behavior requires the remote Linux test environment")
     def test_boot_readiness_retry_survives_strict_shell_and_stays_bounded(self):
         source = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
-        loop = "local _api_try=0" + source.split("local _api_try=0", 1)[1].split("python3 -c", 1)[0]
+        loop = "local _api_try=0" + source.split("local _api_try=0", 1)[1].split("AF_SETUP_USER=", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             for ready_after, expected_attempts in ((3, 3), (40, 20)):
                 probe = (

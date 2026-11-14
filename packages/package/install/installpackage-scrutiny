@@ -20,14 +20,35 @@ PACKAGE_NAME="scrutiny"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8098}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing SMART drive telemetry utilities and libraries..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl smartmontools udev ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl smartmontools udev ca-certificates
 
 if ! id -u scrutiny >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/scrutiny --shell /usr/sbin/nologin scrutiny
@@ -52,8 +73,8 @@ report_progress 60 "Downloading Scrutiny Web UI and Collector binaries..."
 BUILD_DIR="$(mktemp -d /opt/.scrutiny-build.XXXXXX)"
 trap 'rm -rf -- "$BUILD_DIR"' EXIT
 mkdir "$BUILD_DIR/bin"
-download_file "$WEB_URL" "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
-download_file "$COLLECTOR_URL" "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+af_logged download_file "$WEB_URL" "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
+af_logged download_file "$COLLECTOR_URL" "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
 test -s "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
 test -s "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
 chmod +x "$BUILD_DIR/bin/"*
@@ -169,10 +190,10 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now scrutiny >> "$LOGFILE" 2>&1
-systemctl enable --now scrutiny-collector.timer >> "$LOGFILE" 2>&1
-systemctl restart scrutiny >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now scrutiny
+af_logged systemctl enable --now scrutiny-collector.timer
+af_logged systemctl restart scrutiny
 systemctl is-active --quiet scrutiny-collector.timer
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 

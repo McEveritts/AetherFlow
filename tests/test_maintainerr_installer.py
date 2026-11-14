@@ -990,8 +990,8 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
                 "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\nfi",
                 "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    pkill -KILL -u \"$BUILD_USER\" >/dev/null 2>&1 || true\nfi",
             ).replace(
-                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\n    if ! userdel",
-                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    if ! userdel",
+                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\n    if ! af_logged userdel",
+                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    if ! af_logged userdel",
             )
         )
         self.clear_builder_state()

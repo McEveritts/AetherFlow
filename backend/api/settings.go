@@ -106,45 +106,47 @@ func updateSettings(c *gin.Context) {
 		req.UpdateChannel = "stable"
 	}
 
-	// Handle API key encryption individually 
-	var err error
-	
-	geminiKeyStr := ""
-	if strings.HasPrefix(req.GeminiApiKey, "****") || req.GeminiApiKey == "" {
-		// Don't overwrite existing
-		geminiKeyStr = "gemini_api_key" // sql identifier workaround
-	} else {
-		if encrypted, err := EncryptKey(req.GeminiApiKey); err == nil {
-			geminiKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			geminiKeyStr = "'" + strings.ReplaceAll(req.GeminiApiKey, "'", "''") + "'"
+	// Fail-closed encryption of third-party API keys using parameterized SQL.
+	updateGeminiKey := 0
+	geminiEncrypted := ""
+	if !strings.HasPrefix(req.GeminiApiKey, "****") && req.GeminiApiKey != "" {
+		enc, encErr := EncryptKey(req.GeminiApiKey)
+		if encErr != nil {
+			slog.Error("failed to encrypt gemini_api_key", "error", encErr)
+			InternalError(c, "Failed to encrypt API key")
+			return
 		}
+		updateGeminiKey = 1
+		geminiEncrypted = enc
 	}
 
-	openaiKeyStr := ""
-	if strings.HasPrefix(req.OpenaiApiKey, "****") || req.OpenaiApiKey == "" {
-		openaiKeyStr = "openai_api_key"
-	} else {
-		if encrypted, err := EncryptKey(req.OpenaiApiKey); err == nil {
-			openaiKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			openaiKeyStr = "'" + strings.ReplaceAll(req.OpenaiApiKey, "'", "''") + "'"
+	updateOpenAIKey := 0
+	openaiEncrypted := ""
+	if !strings.HasPrefix(req.OpenaiApiKey, "****") && req.OpenaiApiKey != "" {
+		enc, encErr := EncryptKey(req.OpenaiApiKey)
+		if encErr != nil {
+			slog.Error("failed to encrypt openai_api_key", "error", encErr)
+			InternalError(c, "Failed to encrypt API key")
+			return
 		}
+		updateOpenAIKey = 1
+		openaiEncrypted = enc
 	}
 
-	anthropicKeyStr := ""
-	if strings.HasPrefix(req.AnthropicApiKey, "****") || req.AnthropicApiKey == "" {
-		anthropicKeyStr = "anthropic_api_key"
-	} else {
-		if encrypted, err := EncryptKey(req.AnthropicApiKey); err == nil {
-			anthropicKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			anthropicKeyStr = "'" + strings.ReplaceAll(req.AnthropicApiKey, "'", "''") + "'"
+	updateAnthropicKey := 0
+	anthropicEncrypted := ""
+	if !strings.HasPrefix(req.AnthropicApiKey, "****") && req.AnthropicApiKey != "" {
+		enc, encErr := EncryptKey(req.AnthropicApiKey)
+		if encErr != nil {
+			slog.Error("failed to encrypt anthropic_api_key", "error", encErr)
+			InternalError(c, "Failed to encrypt API key")
+			return
 		}
+		updateAnthropicKey = 1
+		anthropicEncrypted = enc
 	}
 
-	// Because of our conditional logic to ignore masked strings, building query dynamically is safer
-	_, err = db.DB.Exec(`
+	_, err := db.DB.Exec(`
 		UPDATE settings SET 
 			ai_model = ?, 
 			system_prompt = ?,
@@ -154,15 +156,30 @@ func updateSettings(c *gin.Context) {
 			default_dashboard = ?,
 			setup_completed = ?,
 			base_domain = ?,
-			gemini_api_key = `+geminiKeyStr+`,
-			openai_api_key = `+openaiKeyStr+`,
-			anthropic_api_key = `+anthropicKeyStr+`,
+			gemini_api_key = CASE WHEN ? = 1 THEN ? ELSE gemini_api_key END,
+			openai_api_key = CASE WHEN ? = 1 THEN ? ELSE openai_api_key END,
+			anthropic_api_key = CASE WHEN ? = 1 THEN ? ELSE anthropic_api_key END,
 			lm_studio_endpoint = ?,
 			ollama_endpoint = ?,
 			anthropic_endpoint = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = 1
-	`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, req.BaseDomain, req.LmStudioEndpoint, req.OllamaEndpoint, req.AnthropicEndpoint)
+	`,
+		req.AiModel,
+		req.SystemPrompt,
+		req.Language,
+		req.Timezone,
+		req.UpdateChannel,
+		req.DefaultDashboard,
+		req.SetupCompleted,
+		req.BaseDomain,
+		updateGeminiKey, geminiEncrypted,
+		updateOpenAIKey, openaiEncrypted,
+		updateAnthropicKey, anthropicEncrypted,
+		req.LmStudioEndpoint,
+		req.OllamaEndpoint,
+		req.AnthropicEndpoint,
+	)
 
 
 	if err != nil {

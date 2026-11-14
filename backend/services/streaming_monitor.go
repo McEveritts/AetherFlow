@@ -1177,15 +1177,17 @@ func RecordLiveSessionsSnapshot(provider string, sessions []ActiveStreamSession,
 	if len(activeKeys) == 0 {
 		_, _ = db.DB.Exec(`UPDATE streaming_history SET is_active = 0, ended_at = CURRENT_TIMESTAMP WHERE provider = ? AND is_active = 1`, provider)
 	} else {
-		placeholders := make([]string, 0, len(activeKeys))
-		args := make([]interface{}, 0, len(activeKeys)+1)
-		args = append(args, provider)
+		keysSlice := make([]string, 0, len(activeKeys))
 		for k := range activeKeys {
-			placeholders = append(placeholders, "?")
-			args = append(args, k)
+			keysSlice = append(keysSlice, k)
 		}
-		query := fmt.Sprintf(`UPDATE streaming_history SET is_active = 0, ended_at = CURRENT_TIMESTAMP WHERE provider = ? AND is_active = 1 AND session_key NOT IN (%s)`, strings.Join(placeholders, ","))
-		_, _ = db.DB.Exec(query, args...)
+		if keysJSON, err := json.Marshal(keysSlice); err == nil {
+			_, _ = db.DB.Exec(
+				`UPDATE streaming_history SET is_active = 0, ended_at = CURRENT_TIMESTAMP WHERE provider = ? AND is_active = 1 AND session_key NOT IN (SELECT value FROM json_each(?))`,
+				provider,
+				string(keysJSON),
+			)
+		}
 	}
 
 	if len(sessions) > 0 && intervalSecs > 0 {

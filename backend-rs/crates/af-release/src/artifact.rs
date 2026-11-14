@@ -14,6 +14,7 @@ use std::time::Duration;
 use tar::{Archive, EntryType};
 
 const EMBEDDED_VERIFY_PROVENANCE_PY: &str = include_str!("../../../../deploy/verify-provenance.py");
+const EMBEDDED_LOG_RETENTION_PY: &str = include_str!("../../../../deploy/log-retention.py");
 
 const PROVENANCE_VERIFIER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -850,8 +851,9 @@ pub fn resolve_managed_current_source_path(
     }
 }
 
-/// Stages the executing `release-manager.sh`, embedded `verify-provenance.py`, and `release-manager.conf`
-/// into `${RELEASE_DIR}/deploy` when configured, matching `stage_running_release_manager` in `deploy/release-manager.sh`.
+/// Ensures `release-manager.sh`, `verify-provenance.py`, `log-retention.py`, and `release-manager.conf`
+/// are present and executable in `${RELEASE_DIR}/deploy`, preserving candidate archive deploy scripts when
+/// already shipped in the release bundle and backfilling from the running release only when absent.
 pub fn stage_running_release_manager(
     release_dir: &Path,
     config: &ReleaseConfig,
@@ -860,11 +862,30 @@ pub fn stage_running_release_manager(
     let deploy_dir = release_dir.join("deploy");
     crate::fs_security::create_dir_all_no_symlinks(&deploy_dir, 0o755)?;
 
+    for candidate_helper in [
+        "release-manager.sh",
+        "verify-provenance.py",
+        "log-retention.py",
+    ] {
+        let helper_path = deploy_dir.join(candidate_helper);
+        if let Ok(meta) = fs::symlink_metadata(&helper_path) {
+            if meta.file_type().is_symlink() {
+                return Err(ReleaseError::PathValidation {
+                    path: helper_path,
+                    reason: format!("refusing symlinked deploy helper {candidate_helper}"),
+                });
+            }
+            if meta.is_file() {
+                set_executable_permission(&helper_path)?;
+            }
+        }
+    }
+
     let mut staged_script = false;
     if let Some(ref script_src) = config.stage_script_path {
         if let Some(resolved_src) = resolve_managed_current_source_path(script_src, config)? {
             let dst = deploy_dir.join("release-manager.sh");
-            if resolved_src != dst {
+            if !dst.exists() {
                 crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o755, None)?;
             }
             set_executable_permission(&dst)?;
@@ -873,24 +894,69 @@ pub fn stage_running_release_manager(
     }
     if staged_script || deploy_dir.join("release-manager.sh").is_file() {
         let verifier_dst = deploy_dir.join("verify-provenance.py");
-        if let Ok(meta) = fs::symlink_metadata(&verifier_dst) {
-            if meta.file_type().is_symlink() {
-                return Err(ReleaseError::PathValidation {
-                    path: verifier_dst,
-                    reason: "refusing to overwrite symlinked verify-provenance.py".to_string(),
-                });
+        if !verifier_dst.exists() {
+            let mut copied_verifier = false;
+            if let Some(parent) = config.stage_script_path.as_deref().and_then(Path::parent) {
+                if let Some(resolved_vp) = resolve_managed_current_source_path(
+                    &parent.join("verify-provenance.py"),
+                    config,
+                )? {
+                    crate::fs_security::atomic_copy_file_with_mode(
+                        &resolved_vp,
+                        &verifier_dst,
+                        0o755,
+                        None,
+                    )?;
+                    copied_verifier = true;
+                }
+            }
+            if !copied_verifier {
+                crate::fs_security::atomic_write_bytes_with_mode(
+                    &verifier_dst,
+                    EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes(),
+                    0o755,
+                )?;
             }
         }
-        crate::fs_security::atomic_write_bytes_with_mode(
-            &verifier_dst,
-            EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes(),
-            0o755,
-        )?;
         set_executable_permission(&verifier_dst)?;
+
+        let retention_dst = deploy_dir.join("log-retention.py");
+        if !retention_dst.exists() {
+            let mut copied_retention = false;
+            if let Some(parent) = config.stage_script_path.as_deref().and_then(Path::parent) {
+                if let Some(resolved_lr) =
+                    resolve_managed_current_source_path(&parent.join("log-retention.py"), config)?
+                {
+                    crate::fs_security::atomic_copy_file_with_mode(
+                        &resolved_lr,
+                        &retention_dst,
+                        0o755,
+                        None,
+                    )?;
+                    copied_retention = true;
+                }
+            }
+            if !copied_retention {
+                crate::fs_security::atomic_write_bytes_with_mode(
+                    &retention_dst,
+                    EMBEDDED_LOG_RETENTION_PY.as_bytes(),
+                    0o755,
+                )?;
+            }
+        }
+        set_executable_permission(&retention_dst)?;
     }
     if let Some(ref conf_src) = config.stage_conf_path {
         if let Some(resolved_src) = resolve_managed_current_source_path(conf_src, config)? {
             let dst = deploy_dir.join("release-manager.conf");
+            if let Ok(meta) = fs::symlink_metadata(&dst) {
+                if meta.file_type().is_symlink() {
+                    return Err(ReleaseError::PathValidation {
+                        path: dst,
+                        reason: "refusing to overwrite symlinked release-manager.conf".to_string(),
+                    });
+                }
+            }
             if resolved_src != dst {
                 crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o644, None)?;
             }
@@ -941,7 +1007,7 @@ fn set_executable_permission(path: &Path) -> ReleaseResult<()> {
             });
         }
         let mut perms = meta.permissions();
-        perms.set_mode(perms.mode() | 0o755);
+        perms.set_mode((perms.mode() & !0o022) | 0o755);
         fs::set_permissions(path, perms)
             .map_err(|e| ReleaseError::io(format!("chmod +x {}", path.display()), e))?;
     }
@@ -1692,5 +1758,86 @@ mod tests {
         assert!(is_trusted_github_auth_url(&https_obj));
         assert!(!is_trusted_github_auth_url(&http_downgrade));
         assert!(!is_trusted_github_auth_url(&untrusted_host));
+    }
+
+    #[test]
+    fn test_round7_stage_running_release_manager_preserves_candidate_scripts() {
+        let root = create_isolated_root("preserve_candidate_scripts");
+        let mut cfg = base_config(&root);
+
+        let active_release = cfg.releases_dir.join("v4-active-old");
+        fs::create_dir_all(active_release.join("deploy")).unwrap();
+        fs::write(
+            active_release.join("deploy/release-manager.sh"),
+            b"#!/usr/bin/env bash\necho old-active-rm\n",
+        )
+        .unwrap();
+        fs::write(
+            active_release.join("deploy/verify-provenance.py"),
+            b"#!/usr/bin/env python3\n# old-active-vp\n",
+        )
+        .unwrap();
+        fs::write(
+            active_release.join("deploy/log-retention.py"),
+            b"#!/usr/bin/env python3\n# backfilled-lr\n",
+        )
+        .unwrap();
+        fs::write(
+            active_release.join("deploy/release-manager.conf"),
+            b"RELEASE_CHANNEL=nightly\n",
+        )
+        .unwrap();
+        symlink(&active_release, &cfg.current_link).unwrap();
+
+        cfg.stage_script_path = Some(cfg.current_link.join("deploy/release-manager.sh"));
+        cfg.stage_conf_path = Some(cfg.current_link.join("deploy/release-manager.conf"));
+
+        let candidate_release = cfg.releases_dir.join("v4-candidate-new");
+        fs::create_dir_all(candidate_release.join("deploy")).unwrap();
+        fs::write(
+            candidate_release.join("deploy/release-manager.sh"),
+            b"#!/usr/bin/env bash\necho new-candidate-rm\n",
+        )
+        .unwrap();
+        fs::write(
+            candidate_release.join("deploy/verify-provenance.py"),
+            b"#!/usr/bin/env python3\n# new-candidate-vp\n",
+        )
+        .unwrap();
+
+        stage_running_release_manager(&candidate_release, &cfg)
+            .expect("staging must preserve candidate scripts and backfill missing helpers");
+
+        assert_eq!(
+            fs::read_to_string(candidate_release.join("deploy/release-manager.sh")).unwrap(),
+            "#!/usr/bin/env bash\necho new-candidate-rm\n"
+        );
+        assert_eq!(
+            fs::read_to_string(candidate_release.join("deploy/verify-provenance.py")).unwrap(),
+            "#!/usr/bin/env python3\n# new-candidate-vp\n"
+        );
+        assert_eq!(
+            fs::read_to_string(candidate_release.join("deploy/log-retention.py")).unwrap(),
+            "#!/usr/bin/env python3\n# backfilled-lr\n"
+        );
+        assert_eq!(
+            fs::read_to_string(candidate_release.join("deploy/release-manager.conf")).unwrap(),
+            "RELEASE_CHANNEL=nightly\n"
+        );
+
+        for rel in [
+            "deploy/release-manager.sh",
+            "deploy/verify-provenance.py",
+            "deploy/log-retention.py",
+        ] {
+            let mode = fs::symlink_metadata(candidate_release.join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o755, "{} must have executable 0755 mode", rel);
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

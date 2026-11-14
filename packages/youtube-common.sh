@@ -39,8 +39,8 @@ youtube_init() {
     install -d -m 755 "$INSTALL_DIR" "$DATA_DIR"
     install -d -m 750 -o root -g "$APP_NAME" "$CONFIG_DIR"
     chown "$APP_NAME:$APP_NAME" "$INSTALL_DIR" "$DATA_DIR"
-    apt-get update -qq >> "${LOGFILE:-/dev/null}" 2>&1
-    apt-get install --no-remove -y -qq ca-certificates curl git jq openssl python3 postgresql >> "${LOGFILE:-/dev/null}" 2>&1
+    af_logged apt-get update -qq
+    af_logged apt-get install --no-remove -y -qq ca-certificates curl git jq openssl python3 postgresql
 }
 
 youtube_abort_install() {
@@ -72,24 +72,23 @@ youtube_source() {
                 ;;
         esac
     fi
-    local OUTPUT_LOG="${LOGFILE:-/dev/null}"
     if [[ -d "${dir}/.git" ]]; then
         if [[ -z "$target_ref" ]]; then
             if [[ -n "${APP_NAME:-}" ]] && id "$APP_NAME" >/dev/null 2>&1; then
-                runuser -u "$APP_NAME" -- git -C "$dir" fetch --depth 1 origin HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && \
-                runuser -u "$APP_NAME" -- git -C "$dir" checkout --detach FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && \
-                runuser -u "$APP_NAME" -- git -C "$dir" reset --hard FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1
+                af_logged runuser -u "$APP_NAME" -- git -C "$dir" fetch --depth 1 origin HEAD && \
+                af_logged runuser -u "$APP_NAME" -- git -C "$dir" checkout --detach FETCH_HEAD && \
+                af_logged runuser -u "$APP_NAME" -- git -C "$dir" reset --hard FETCH_HEAD
             else
-                git -C "$dir" fetch --depth 1 origin HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && git -C "$dir" checkout --detach FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1 && git -C "$dir" reset --hard FETCH_HEAD >>"${OUTPUT_LOG:-/dev/null}" 2>&1
+                af_logged git -C "$dir" fetch --depth 1 origin HEAD && af_logged git -C "$dir" checkout --detach FETCH_HEAD && af_logged git -C "$dir" reset --hard FETCH_HEAD
             fi
         fi
     else
-        runuser -u "$APP_NAME" -- git clone --depth 1 "https://github.com/${repo}.git" "$destination" >> "${OUTPUT_LOG}" 2>&1
+        af_logged runuser -u "$APP_NAME" -- git clone --depth 1 "https://github.com/${repo}.git" "$destination"
     fi
     if [[ -n "$target_ref" ]]; then
-        if ! runuser -u "$APP_NAME" -- git -C "$destination" fetch --depth 1 origin "$target_ref" >> "${OUTPUT_LOG}" 2>&1 || \
-           ! runuser -u "$APP_NAME" -- git -C "$destination" checkout --detach FETCH_HEAD >> "${OUTPUT_LOG}" 2>&1; then
-            if ! runuser -u "$APP_NAME" -- git -C "$destination" checkout "$target_ref" >> "${OUTPUT_LOG}" 2>&1; then
+        if ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" fetch --depth 1 origin "$target_ref" || \
+           ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" checkout --detach FETCH_HEAD; then
+            if ! af_logged runuser -u "$APP_NAME" -- git -C "$destination" checkout "$target_ref"; then
                 youtube_abort_install "Failed to check out requested target ref ${target_ref} for ${repo}"
                 exit 1
             fi
@@ -141,7 +140,7 @@ youtube_database() {
     systemctl enable --now postgresql.service
     (
     export AF_YOUTUBE_DB_PASSWORD="$DB_PASSWORD"
-    runuser --preserve-environment -u postgres -- psql -v ON_ERROR_STOP=1 --set="app=$APP_NAME" >> "${LOGFILE:-/dev/null}" 2>&1 <<'SQL'
+    af_logged runuser --preserve-environment -u postgres -- psql -v ON_ERROR_STOP=1 --set="app=$APP_NAME" <<'SQL'
 \getenv password AF_YOUTUBE_DB_PASSWORD
 SELECT format('CREATE ROLE %I LOGIN', :'app') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app') \gexec
 SELECT format('ALTER ROLE %I PASSWORD %L', :'app', :'password') \gexec
@@ -233,10 +232,14 @@ youtube_remove() {
     shift
     case "$app" in piped|invidious) ;; *) return 1 ;; esac
     export LOGFILE="/var/log/aetherflow/remove-${app}.log"
-    mkdir -p "$(dirname "$LOGFILE")" || return 1
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+        af_prepare_logfile_path "$LOGFILE" || return 1
+    else
+        mkdir -p "$(dirname "$LOGFILE")" || return 1
+    fi
     purge_systemd_unit "af-${app}" "$@" || return 1
     if [[ "${DELETE_DATA:-false}" == true ]]; then
-        runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" >> "${LOGFILE:-/dev/null}" 2>&1 <<'SQL' || return 1
+        af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL' || return 1
 SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
 SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
 SQL

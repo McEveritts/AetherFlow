@@ -13,6 +13,7 @@ from installer_test_helpers import ROOT, replace_paths_once
 REMOVE_DIR = ROOT / "packages/package/remove"
 
 def production_functions(*names):
+    names = tuple(dict.fromkeys(('af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', *names)))
     if 'safe_rm_rf' in names:
         names = tuple(dict.fromkeys((*names, 'validate_config_paths', 'safe_config_python')))
     source = (ROOT / "packages/common.sh").read_text()

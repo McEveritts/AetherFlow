@@ -300,23 +300,34 @@ _stage_prebuilt_release_archive() {
     fi
 
     if [[ -f "${af_root}/deploy/release-manager.sh" ]]; then
-        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" || -L "${release_dir}/deploy/verify-provenance.py" ]]; then
+        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" || -L "${release_dir}/deploy/verify-provenance.py" || -L "${release_dir}/deploy/log-retention.py" ]]; then
             echo "[ERROR] Refusing to stage release-manager into symlinked deploy path." >&2
             rm -rf "${release_dir}"
             return 1
         fi
         mkdir -p "${release_dir}/deploy"
-        rm -f "${release_dir}/deploy/release-manager.sh"
-        cp -f "${af_root}/deploy/release-manager.sh" "${release_dir}/deploy/release-manager.sh"
-        chmod 0755 "${release_dir}/deploy/release-manager.sh"
-        if [[ -f "${af_root}/deploy/verify-provenance.py" ]]; then
-            rm -f "${release_dir}/deploy/verify-provenance.py"
+        if [[ -f "${release_dir}/deploy/release-manager.sh" ]]; then
+            chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        else
+            cp -f "${af_root}/deploy/release-manager.sh" "${release_dir}/deploy/release-manager.sh"
+            chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        fi
+        if [[ -f "${release_dir}/deploy/verify-provenance.py" ]]; then
+            chmod 0755 "${release_dir}/deploy/verify-provenance.py"
+        elif [[ -f "${af_root}/deploy/verify-provenance.py" ]]; then
             cp -f "${af_root}/deploy/verify-provenance.py" "${release_dir}/deploy/verify-provenance.py"
             chmod 0755 "${release_dir}/deploy/verify-provenance.py"
+        fi
+        if [[ -f "${release_dir}/deploy/log-retention.py" ]]; then
+            chmod 0755 "${release_dir}/deploy/log-retention.py"
+        elif [[ -f "${af_root}/deploy/log-retention.py" ]]; then
+            cp -f "${af_root}/deploy/log-retention.py" "${release_dir}/deploy/log-retention.py"
+            chmod 0755 "${release_dir}/deploy/log-retention.py"
         fi
         if [[ -f "${af_root}/deploy/release-manager.conf" ]]; then
             rm -f "${release_dir}/deploy/release-manager.conf"
             cp -f "${af_root}/deploy/release-manager.conf" "${release_dir}/deploy/release-manager.conf"
+            chmod 0644 "${release_dir}/deploy/release-manager.conf"
         fi
     fi
 

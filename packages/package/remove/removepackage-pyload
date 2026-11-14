@@ -24,13 +24,33 @@ APP_USER="pyload"
 INSTALL_DIR="/opt/pyload"
 DATA_DIR="/var/lib/pyload"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} service..."
 
 purge_systemd_unit "pyload"
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 
 report_progress 60 "Removing ${APP_NAME} virtualenv..."
 safe_rm_rf "${INSTALL_DIR}"

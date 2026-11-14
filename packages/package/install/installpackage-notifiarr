@@ -31,7 +31,28 @@ SERVICE_FILE="/etc/systemd/system/notifiarr.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5454}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -41,8 +62,8 @@ ADMIN_USER="${MASTER_USER}"
 ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 20 "Installing dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 curl wget jq tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 curl wget jq tar ca-certificates
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -81,9 +102,9 @@ fi
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
 TMP_TAR="$(mktemp --suffix=.tar.gz)"
 TMP_DIR="$(mktemp -d)"
-download_file "${ASSET_URL}" "${TMP_TAR}" >> "$LOGFILE" 2>&1
+af_logged download_file "${ASSET_URL}" "${TMP_TAR}"
 
-tar -xzf "${TMP_TAR}" -C "${TMP_DIR}" >> "$LOGFILE" 2>&1
+af_logged tar -xzf "${TMP_TAR}" -C "${TMP_DIR}"
 EXTRACTED_BIN="$(find "${TMP_DIR}" -type f -name "notifiarr" -print -quit)"
 if [[ -n "${EXTRACTED_BIN}" && -f "${EXTRACTED_BIN}" ]]; then
     chmod 755 "${EXTRACTED_BIN}"
@@ -226,9 +247,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now notifiarr.service >> "$LOGFILE" 2>&1
-systemctl restart notifiarr.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now notifiarr.service
+af_logged systemctl restart notifiarr.service
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/version"
 
 commit_app_versions

@@ -27,7 +27,27 @@ INSTALL_DIR="/opt/dispatcharr"
 DATA_DIR="/var/lib/dispatcharr"
 CONFIG_DIR="/etc/dispatcharr"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 dispatcharr_confined_path() {
     local path="$1"
@@ -68,7 +88,7 @@ log_info "Removing ${APP_NAME}..."
 report_progress 15 "Stopping ${APP_NAME} services..."
 
 purge_systemd_unit "dispatcharr-celerybeat" "dispatcharr-celery" "dispatcharr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 
 report_progress 55 "Removing ${APP_NAME} runtime files..."
 safe_rm_rf "${INSTALL_DIR}"
@@ -77,8 +97,8 @@ if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and PostgreSQL database..."
     # SQL teardown is required. Keep configuration, credentials, data and the
     # installation marker available if PostgreSQL cannot confirm either step.
-    su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
-    su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP USER IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
+    af_logged su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS dispatcharr;'"
+    af_logged su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP USER IF EXISTS dispatcharr;'"
     if [[ "${DATA_OWNED}" -eq 1 ]]; then
         safe_rm_rf "/var/lib/dispatcharr"
         [[ ! -e "${DATA_DIR}" && ! -L "${DATA_DIR}" ]]

@@ -46,59 +46,23 @@ import (
 
 var version = "3.2.5"
 
-// discoverOrigins auto-detects loopback and LAN interface origins for local/dev CORS.
-// External public IP lookups (api.ipify.org) are intentionally excluded so the server
-// never phones home or auto-whitelists untrusted public HTTP origins at boot.
+// discoverOrigins returns explicit loopback dev/API origins when ALLOWED_CORS_ORIGIN
+// is unset. Portless loopback, LAN interface IPs, and hostnames are intentionally
+// excluded so co-hosted services on other ports cannot perform credentialed CORS reads.
 func discoverOrigins() []string {
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		port = "8080"
+	}
 	origins := map[string]bool{
-		"http://localhost":      true,
-		"https://localhost":     true,
 		"http://localhost:3000": true,
 		"http://localhost:8080": true,
-		"http://127.0.0.1":      true,
-		"https://127.0.0.1":     true,
 		"http://127.0.0.1:3000": true,
 		"http://127.0.0.1:8080": true,
 	}
+	origins[fmt.Sprintf("http://localhost:%s", port)] = true
+	origins[fmt.Sprintf("http://127.0.0.1:%s", port)] = true
 
-	// Detect local IPs from network interfaces
-	ifaces, err := net.Interfaces()
-	if err == nil {
-		for _, iface := range ifaces {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				var ip net.IP
-				switch v := addr.(type) {
-				case *net.IPNet:
-					ip = v.IP
-				case *net.IPAddr:
-					ip = v.IP
-				}
-				if ip == nil || ip.IsLoopback() {
-					continue
-				}
-				ipStr := ip.String()
-				// Add base IP and common dev/proxy ports
-				origins[fmt.Sprintf("http://%s", ipStr)] = true
-				origins[fmt.Sprintf("https://%s", ipStr)] = true
-				origins[fmt.Sprintf("http://%s:3000", ipStr)] = true
-				origins[fmt.Sprintf("http://%s:8080", ipStr)] = true
-			}
-		}
-	}
-
-	// Also add the machine's hostname if it resolves
-	hostname, err := os.Hostname()
-	if err == nil && hostname != "" {
-		origins[fmt.Sprintf("http://%s", hostname)] = true
-		origins[fmt.Sprintf("http://%s:3000", hostname)] = true
-		origins[fmt.Sprintf("http://%s:8080", hostname)] = true
-	}
-
-	// Convert map to slice
 	result := make([]string, 0, len(origins))
 	for origin := range origins {
 		result = append(result, origin)
@@ -284,12 +248,17 @@ func main() {
 	// Register all API routes from the api package
 	api.RegisterRoutes(r)
 
-	port := os.Getenv("PORT")
+	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8080"
 	}
+	bindAddr := strings.TrimSpace(os.Getenv("BIND_ADDR"))
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
+	listenAddr := net.JoinHostPort(bindAddr, port)
 
-	slog.Info("AetherFlow backend starting", "addr", "0.0.0.0:"+port, "version", version)
+	slog.Info("AetherFlow backend starting", "addr", listenAddr, "version", version)
 
 	// Start Phase 14: Automated Auto-Heal Recovery process
 	services.StartHealWorker(10 * time.Second)
@@ -297,7 +266,7 @@ func main() {
 	// ── Phase 24: Graceful Shutdown ─────────────────────────────────────
 	// Use http.Server directly for proper lifecycle control
 	srv := &http.Server{
-		Addr:    "0.0.0.0:" + port,
+		Addr:    listenAddr,
 		Handler: r,
 	}
 

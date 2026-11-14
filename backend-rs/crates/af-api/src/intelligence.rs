@@ -869,19 +869,13 @@ pub fn resolve_provider_settings() -> ProviderSettings {
     }
 
     if !ps.gemini_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.gemini_api_key) {
-            ps.gemini_api_key = dec;
-        }
+        ps.gemini_api_key = af_db::decrypt_key(&ps.gemini_api_key).unwrap_or_default();
     }
     if !ps.openai_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.openai_api_key) {
-            ps.openai_api_key = dec;
-        }
+        ps.openai_api_key = af_db::decrypt_key(&ps.openai_api_key).unwrap_or_default();
     }
     if !ps.anthropic_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.anthropic_api_key) {
-            ps.anthropic_api_key = dec;
-        }
+        ps.anthropic_api_key = af_db::decrypt_key(&ps.anthropic_api_key).unwrap_or_default();
     }
 
     if ps.gemini_api_key.is_empty() {

@@ -141,19 +141,29 @@ fn build_cors_layer() -> CorsLayer {
             })
             .collect()
     } else {
-        [
-            "http://localhost",
-            "https://localhost",
-            "http://localhost:3000",
-            "http://localhost:8080",
-            "http://127.0.0.1",
-            "https://127.0.0.1",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:8080",
-        ]
-        .iter()
-        .filter_map(|s| HeaderValue::from_str(s).ok())
-        .collect()
+        let port = env::var("PORT")
+            .ok()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "8080".to_string());
+        let mut defaults = vec![
+            "http://localhost:3000".to_string(),
+            "http://localhost:8080".to_string(),
+            "http://127.0.0.1:3000".to_string(),
+            "http://127.0.0.1:8080".to_string(),
+        ];
+        let custom_local = format!("http://localhost:{}", port);
+        if !defaults.contains(&custom_local) {
+            defaults.push(custom_local);
+        }
+        let custom_loopback = format!("http://127.0.0.1:{}", port);
+        if !defaults.contains(&custom_loopback) {
+            defaults.push(custom_loopback);
+        }
+        defaults
+            .iter()
+            .filter_map(|s| HeaderValue::from_str(s).ok())
+            .collect()
     };
 
     CorsLayer::new()
@@ -182,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
             return af_runner::run_privileged_daemon().await;
         }
     }
+
+    // Fail closed if JWT_SECRET is missing or too short when starting the HTTP control plane
+    auth::validate_startup_jwt_secret()?;
 
     // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
     af_db::init_db()?;

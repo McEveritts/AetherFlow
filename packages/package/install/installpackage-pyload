@@ -28,7 +28,28 @@ SERVICE_FILE="/etc/systemd/system/pyload.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8000}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -36,12 +57,12 @@ report_progress 10 "Preparing ${APP_NAME} installation..."
 load_master_credentials
 
 report_progress 25 "Installing Python build dependencies, libcurl, and OCR tools..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl wget jq ca-certificates build-essential \
     python3 python3-venv python3-dev python3-pip \
     libcurl4-openssl-dev libssl-dev libffi-dev \
-    tesseract-ocr p7zip-full unrar-free ffmpeg >> "$LOGFILE" 2>&1
+    tesseract-ocr p7zip-full unrar-free ffmpeg
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -64,9 +85,9 @@ rollback_runtime() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" == true ]]; then
-            systemctl restart pyload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl restart pyload || restore_failed=true
         fi
     fi
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
@@ -93,16 +114,16 @@ done
 report_progress 50 "Creating Python virtualenv and installing pyload-ng..."
 RUNTIME_MUTATED=1
 if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
-    python3 -m venv "${INSTALL_DIR}/.venv" >> "$LOGFILE" 2>&1
+    af_logged python3 -m venv "${INSTALL_DIR}/.venv"
 fi
-"${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     TARGET_VER="${AF_TARGET_VERSION#v}"
-    "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng[plugins]==${TARGET_VER}" >> "$LOGFILE" 2>&1 || \
-        "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng==${TARGET_VER}" >> "$LOGFILE" 2>&1
+    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng[plugins]==${TARGET_VER}" || \
+        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng==${TARGET_VER}"
 else
-    "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" >> "$LOGFILE" 2>&1 || \
-        "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng >> "$LOGFILE" 2>&1
+    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" || \
+        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng
 fi
 
 PYLOAD_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || true)"
@@ -161,10 +182,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now pyload.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now pyload.service
 
-systemctl restart pyload >> "$LOGFILE" 2>&1
+af_logged systemctl restart pyload
 systemctl is-active --quiet pyload
 
 commit_app_versions

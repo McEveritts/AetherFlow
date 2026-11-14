@@ -47,20 +47,29 @@ func ResolveProviderSettings() (*ProviderSettings, error) {
 		slog.Warn("Using fallback AI settings. DB Error", "error", err)
 	}
 
-	// Decrypt API keys
+	// Decrypt API keys (fail closed to empty on decryption error so raw enc:v1: ciphertext is never leaked)
 	if ps.GeminiAPIKey != "" {
 		if decrypted, decErr := DecryptKey(ps.GeminiAPIKey); decErr == nil {
 			ps.GeminiAPIKey = decrypted
+		} else {
+			slog.Warn("Failed to decrypt stored gemini_api_key; clearing stored value", "error", decErr)
+			ps.GeminiAPIKey = ""
 		}
 	}
 	if ps.OpenAIAPIKey != "" {
 		if decrypted, decErr := DecryptKey(ps.OpenAIAPIKey); decErr == nil {
 			ps.OpenAIAPIKey = decrypted
+		} else {
+			slog.Warn("Failed to decrypt stored openai_api_key; clearing stored value", "error", decErr)
+			ps.OpenAIAPIKey = ""
 		}
 	}
 	if ps.AnthropicAPIKey != "" {
 		if decrypted, decErr := DecryptKey(ps.AnthropicAPIKey); decErr == nil {
 			ps.AnthropicAPIKey = decrypted
+		} else {
+			slog.Warn("Failed to decrypt stored anthropic_api_key; clearing stored value", "error", decErr)
+			ps.AnthropicAPIKey = ""
 		}
 	}
 

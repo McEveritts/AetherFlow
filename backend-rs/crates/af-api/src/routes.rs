@@ -984,7 +984,7 @@ fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
         return (is_authed, false);
     }
     if let Ok(claims) = crate::auth::decode_session_claims(&token, false) {
-        if !matches!(af_db::token_revocation_status(&claims.jti), Ok(false)) {
+        if crate::auth::is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id) {
             return (false, false);
         }
         if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
@@ -1014,15 +1014,27 @@ fn get_marketplace_auth_info(headers: &HeaderMap) -> (bool, bool) {
         let Ok(conn) = af_db::get_conn() else {
             return (false, false);
         };
-        let role: Result<String, _> = conn.query_row(
-            "SELECT role FROM users WHERE id = ?1",
-            rusqlite::params![claims.user_id],
-            |row| row.get(0),
-        );
-        if let Ok(r) = role {
-            let is_admin = r.trim().eq_ignore_ascii_case("admin");
-            return (true, is_admin);
+        let Ok(subj) = crate::auth::load_active_human_subject(&conn, claims.user_id) else {
+            return (false, false);
+        };
+        if claims.ver < subj.sessions_revoked_after {
+            return (false, false);
         }
+        if crate::auth::table_exists(&conn, "active_sessions").unwrap_or(false) {
+            let resolved_jti = crate::auth::resolve_current_session_jti(&claims.jti);
+            let session_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3))",
+                    rusqlite::params![claims.user_id, claims.jti, resolved_jti],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !session_exists {
+                return (false, false);
+            }
+        }
+        let is_admin = subj.role.trim().eq_ignore_ascii_case("admin");
+        return (true, is_admin);
     }
     (false, false)
 }

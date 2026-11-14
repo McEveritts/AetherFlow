@@ -21,14 +21,35 @@ PACKAGE_NAME="autobrr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-7474}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing dependencies for Autobrr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget tar openssl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl wget tar openssl ca-certificates
 
 if ! id -u autobrr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/autobrr --shell /usr/sbin/nologin autobrr
@@ -50,10 +71,10 @@ AB_URL="https://github.com/autobrr/autobrr/releases/download/v${AB_VERSION}/auto
 
 report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."
 TMP_TAR=$(mktemp /tmp/autobrr-XXXXXX.tar.gz)
-download_file "$AB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "$AB_URL" "$TMP_TAR"
 TMP_DIR="$(mktemp -d /tmp/autobrr-extract-XXXXXX)"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
-tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl >> "$LOGFILE" 2>&1
+af_logged tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl
 rm -f "$TMP_TAR"
 chmod 755 "$TMP_DIR/autobrr" "$TMP_DIR/autobrrctl"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autobrr autobrr /var/lib/autobrr "$PACKAGE_NAME" "." /usr/local/bin/autobrrctl "" binary
@@ -74,10 +95,10 @@ fi
 
 stop_systemd_unit autobrr
 if [[ ! -s /var/lib/autobrr/autobrr.db ]]; then
-    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" >> "$LOGFILE" 2>&1
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | af_logged /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}"
 elif [[ -n "${AF_CONFIG_PASS:-}" && "${AF_KEEP_EXISTING_SECRETS:-1}" != "1" ]]; then
-    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" >> "$LOGFILE" 2>&1 \
-        || printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr change-password "${MASTER_USER}" >> "$LOGFILE" 2>&1
+    printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | af_logged /usr/local/bin/autobrrctl --config=/var/lib/autobrr create-user "${MASTER_USER}" \
+        || printf '%s\n' "${AF_CONFIG_PASS:-$MASTER_PASS}" | af_logged /usr/local/bin/autobrrctl --config=/var/lib/autobrr change-password "${MASTER_USER}"
 fi
 
 set_config_value "/var/lib/autobrr/config.toml" ini "port" "$APP_PORT" ""
@@ -104,9 +125,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now autobrr >> "$LOGFILE" 2>&1
-systemctl restart autobrr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now autobrr
+af_logged systemctl restart autobrr
 systemctl is-active --quiet autobrr
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/healthz"
 

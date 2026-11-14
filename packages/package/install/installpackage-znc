@@ -20,7 +20,28 @@ PACKAGE_NAME="znc"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6501}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /var/lib/znc/znc.pem
@@ -31,8 +52,8 @@ prepare_apt_package_transaction /var/lib/znc/.af-version znc
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing ZNC packages and cryptographic libraries via apt..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq znc openssl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq znc openssl ca-certificates
 
 if ! id -u znc >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/znc --shell /usr/sbin/nologin znc
@@ -46,7 +67,7 @@ queue_app_version /var/lib/znc/.af-version "$ZNC_VER"
 
 report_progress 50 "Generating initial ZNC configuration and SSL certificate..."
 if [[ ! -f /var/lib/znc/znc.pem ]]; then
-    openssl req -x509 -nodes -newkey rsa:2048 -keyout /var/lib/znc/znc.pem -out /var/lib/znc/znc.pem -days 3650 -subj "/CN=znc" >> "$LOGFILE" 2>&1 || true
+    af_logged openssl req -x509 -nodes -newkey rsa:2048 -keyout /var/lib/znc/znc.pem -out /var/lib/znc/znc.pem -days 3650 -subj "/CN=znc" || true
     chmod 600 /var/lib/znc/znc.pem
 fi
 
@@ -134,9 +155,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now znc >> "$LOGFILE" 2>&1
-systemctl restart znc >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now znc
+af_logged systemctl restart znc
 systemctl is-active --quiet znc
 
 commit_app_versions

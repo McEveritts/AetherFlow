@@ -17,7 +17,27 @@ fi
 
 PACKAGE_NAME="n8n"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
@@ -26,7 +46,7 @@ report_progress 25 "Stopping and removing n8n.service..."
 purge_systemd_unit "n8n"
 
 report_progress 65 "Uninstalling npm package and removing state directories..."
-npm uninstall -g n8n >> "$LOGFILE" 2>&1 || true
+af_logged npm uninstall -g n8n || true
 rm -f /usr/bin/n8n /usr/local/bin/n8n
 safe_rm_rf /opt/n8n
 if [[ "${DELETE_DATA:-false}" == true ]]; then
@@ -34,7 +54,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     safe_rm_rf /var/lib/n8n
     purge_system_user "n8n"
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 
 rm -f -- /var/lib/n8n/.af-version
 remove_lock "${PACKAGE_NAME}"

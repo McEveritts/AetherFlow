@@ -143,10 +143,7 @@ def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
     descriptor = _open_file(directory, name, os.O_RDWR, allowed_owners)
     pending = name + ".af-retention.pending"
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
         try:
             metadata = os.fstat(descriptor)
             archives = _archive_entries(directory, name, group_id, allowed_owners)

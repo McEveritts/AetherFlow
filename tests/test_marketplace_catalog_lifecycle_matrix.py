@@ -1972,6 +1972,7 @@ class CatalogCredentialAndFailureTests(unittest.TestCase):
         for app in ("sonarr", "radarr"):
             self.assertIn(f"{app}:\n  {app}:\n    base_url:", generated)
         self.assertNotIn("- name:", generated)
+        self.assertNotIn("replace_existing_custom_formats", generated)
         operator_config = generated.replace("  sonarr:", "  operator_instance:")
         config.write_text(operator_config)
         self.assert_success(fixture.run("update"))

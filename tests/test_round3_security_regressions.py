@@ -413,9 +413,11 @@ false || cleanup
         self.assertIn("systemctl restart aetherflow-runner.service || return 1", rm_src)
         self.assertIn("if ! restart_systemd_units; then", rm_src)
 
-    def test_log_retention_skips_active_flock_holder_from_common_sh(self) -> None:
+    def test_log_retention_serializes_with_active_flock_holder_from_common_sh(self) -> None:
         import fcntl
         import importlib.util
+        import threading
+        import time
 
         spec = importlib.util.spec_from_file_location(
             "af_log_retention_r6", ROOT / "deploy/log-retention.py"
@@ -428,18 +430,30 @@ false || cleanup
             log_dir = Path(tmp)
             os.chmod(log_dir, 0o750)
             log_path = log_dir / "install-sabnzbd.log"
-            log_path.write_bytes(b"X" * 1024 + b"\nACTIVE_INSTALL_LINE\n")
+            log_path.write_bytes(b"X" * 1024)
             os.chmod(log_path, 0o640)
 
-            with open(log_path, "rb") as active_holder:
-                fcntl.flock(active_holder.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-                try:
-                    self.assertEqual(mod.retain_logs(str(log_dir), max_bytes=256, keep=2), (0, []))
-                    self.assertIn(b"ACTIVE_INSTALL_LINE\n", log_path.read_bytes())
-                finally:
-                    fcntl.flock(active_holder.fileno(), fcntl.LOCK_UN)
+            locked_evt = threading.Event()
+            done_evt = threading.Event()
 
+            def writer() -> None:
+                with open(log_path, "ab") as active_holder:
+                    fcntl.flock(active_holder.fileno(), fcntl.LOCK_SH)
+                    try:
+                        locked_evt.set()
+                        time.sleep(0.15)
+                        active_holder.write(b"\nACTIVE_INSTALL_LINE\n")
+                        active_holder.flush()
+                    finally:
+                        fcntl.flock(active_holder.fileno(), fcntl.LOCK_UN)
+                        done_evt.set()
+
+            t = threading.Thread(target=writer, daemon=True)
+            t.start()
+            self.assertTrue(locked_evt.wait(timeout=2.0))
             self.assertEqual(mod.retain_logs(str(log_dir), max_bytes=256, keep=2), (1, []))
+            self.assertTrue(done_evt.is_set())
+            t.join(timeout=2.0)
             archive_bytes = (log_dir / "install-sabnzbd.log.af-retention.1").read_bytes()
             self.assertIn(b"ACTIVE_INSTALL_LINE\n", archive_bytes)
 

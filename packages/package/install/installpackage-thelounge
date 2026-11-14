@@ -20,15 +20,36 @@ PACKAGE_NAME="thelounge"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9000}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/systemd/system/thelounge.service
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Setting up Node.js runtime and prerequisites for The Lounge..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certificates build-essential python3 python3-setuptools
 
 ensure_node 22
 
@@ -36,8 +57,8 @@ NODE_PATH="$(command -v node)"
 NODE_ARGS=()
 TL_BIN=/usr/local/bin/thelounge
 SQLITE_CHECK="const { DatabaseSync } = require(\"node:sqlite\"); new DatabaseSync(\":memory:\").close();"
-if ! "${NODE_PATH}" -e "$SQLITE_CHECK" >> "$LOGFILE" 2>&1; then
-    if "${NODE_PATH}" --experimental-sqlite -e "$SQLITE_CHECK" >> "$LOGFILE" 2>&1; then
+if ! af_logged "${NODE_PATH}" -e "$SQLITE_CHECK"; then
+    if af_logged "${NODE_PATH}" --experimental-sqlite -e "$SQLITE_CHECK"; then
         NODE_ARGS=(--experimental-sqlite)
     else
         log_error "The Lounge requires a Node.js runtime with working node:sqlite support."
@@ -69,12 +90,12 @@ rollback_runtime() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
-            systemctl restart thelounge >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl restart thelounge || restore_failed=true
         fi
     elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
-        systemctl restart thelounge >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl restart thelounge || restore_failed=true
     fi
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
     if [[ "$restore_failed" == true ]]; then
@@ -130,14 +151,14 @@ set_config_value /var/lib/thelounge/config.js js port "$APP_PORT"
 chown -hRP thelounge:thelounge /var/lib/thelounge
 
 if ! compgen -G '/var/lib/thelounge/users/*.json' > /dev/null; then
-    printf '%s' "${MASTER_PASS}" | sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge \
+    printf '%s' "${MASTER_PASS}" | af_logged sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge \
         "${NODE_PATH}" "${NODE_ARGS[@]}" -e '
 const fs = require("fs");
 const [binary, username] = process.argv.slice(1);
 process.argv = [process.execPath, binary, "add", username,
     "--password", fs.readFileSync(0, "utf8"), "--save-logs"];
 require(binary);
-' "${TL_BIN}" "${MASTER_USER}" >> "$LOGFILE" 2>&1
+' "${TL_BIN}" "${MASTER_USER}"
     if [[ ! -s "/var/lib/thelounge/users/${MASTER_USER}.json" ]]; then
         log_error "The Lounge did not create the configured user account."
         exit 1
@@ -164,13 +185,13 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable thelounge >> "$LOGFILE" 2>&1
-systemctl restart thelounge >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable thelounge
+af_logged systemctl restart thelounge
 
-if ! curl --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 \
+if ! af_logged curl --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 \
     --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
-    "http://127.0.0.1:${APP_PORT}/" >> "$LOGFILE" 2>&1 \
+    "http://127.0.0.1:${APP_PORT}/" \
     || ! systemctl is-active --quiet thelounge; then
     log_error "The Lounge failed its HTTP and service readiness checks."
     exit 1

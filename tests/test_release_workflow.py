@@ -66,6 +66,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.env_file.touch()
         self.commands = self.root / "gh-commands.json"
         self.notes = self.root / "published-notes.md"
+        (self.root / "release-dist").mkdir()
+        self.attest_bundle = self.root / "attest.sigstore.json"
+        self.attest_bundle.write_text('{"mediaType":"application/vnd.dev.sigstore.bundle+json;version=0.3"}\n')
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         gh = bin_dir / "gh"
@@ -89,6 +92,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "GITHUB_RUN_NUMBER": "123",
             "GITHUB_RUN_ATTEMPT": "1",
             "REQUESTED_CHANNEL": "",
+            "ATTEST_BUNDLE_PATH": str(self.attest_bundle),
             "TEST_GH_COMMANDS": str(self.commands),
             "TEST_RELEASE_NOTES": str(self.notes),
         }
@@ -115,8 +119,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(command[command.index("--target") + 1], self.env["GITHUB_SHA"])
         self.assertIn("release-dist/aetherflow-linux-amd64.tar.gz", command)
         self.assertIn("release-dist/SHA256SUMS", command)
+        self.assertIn("release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json", command)
         self.assertNotIn("--clobber", command)
         return command
+
+    def test_publish_fails_closed_without_sigstore_bundle(self):
+        for missing in ("", str(self.root / "missing.sigstore.json")):
+            with self.subTest(missing=missing):
+                result = self.run_step(
+                    "Publish to GitHub Releases",
+                    RELEASE_TAG="v4.0.0-nightly.123.1",
+                    ATTEST_BUNDLE_PATH=missing,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.commands.exists())
 
     def test_nightly_uses_unique_versioned_prerelease_not_base_version(self):
         identity = self.resolve()

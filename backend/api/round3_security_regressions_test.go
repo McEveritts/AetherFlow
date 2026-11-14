@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -870,4 +872,164 @@ func TestRound6_ChainedNormalRotationPreservesGraceAndOIDCWriteFailureRollsBack(
 		t.Fatalf("expected revokeAllUserCredentialsInTx to fail closed when OIDC revocation fails")
 	}
 	_ = tx.Rollback()
+}
+
+func TestRound7_ConcurrentSetupAdminOIDCReuseSettingsEncryptAndLegacySecretMigration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTestDB(t)
+	db.RedisClient = nil
+	prevKey := append([]byte(nil), aesMasterKey...)
+	aesMasterKey = bytes.Repeat([]byte{0x77}, 32)
+	t.Cleanup(func() {
+		aesMasterKey = prevKey
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+
+	// Ensure users table starts completely empty for SetupAdmin race test
+	if _, err := db.DB.Exec(`DELETE FROM active_sessions; DELETE FROM users;`); err != nil {
+		t.Fatalf("clear users/sessions: %v", err)
+	}
+
+	r := gin.New()
+	r.POST("/setup", SetupAdmin)
+	r.POST("/oidc/token", OIDCToken)
+	r.POST("/2fa/disable", AuthMiddleware(), Disable2FA)
+
+	// 1. Concurrent SetupAdmin: strictly 1 winner (200 OK) and 5 conflicts (409 Conflict)
+	const workers = 6
+	codes := make([]int, workers)
+	startCh := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-startCh
+			body := fmt.Sprintf(`{"username":"admin_%d","password":"StrongSetupPassword!99"}`, idx)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = fmt.Sprintf("127.0.0.1:4700%d", idx)
+			req.Header.Set("User-Agent", "SetupRaceUA/1.0")
+			r.ServeHTTP(w, req)
+			codes[idx] = w.Code
+		}(i)
+	}
+	close(startCh)
+	wg.Wait()
+
+	var okCount, conflictCount int
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusConflict:
+			conflictCount++
+		default:
+			t.Fatalf("unexpected SetupAdmin status code %d in %v", code, codes)
+		}
+	}
+	if okCount != 1 || conflictCount != workers-1 {
+		t.Fatalf("expected 1x200 and %dx409 from concurrent SetupAdmin, got codes=%v", workers-1, codes)
+	}
+	var userCount, sessionCount int
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&userCount)
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM active_sessions`).Scan(&sessionCount)
+	if userCount != 1 || sessionCount != 1 {
+		t.Fatalf("expected 1 user and 1 initial session after concurrent SetupAdmin, got users=%d sessions=%d", userCount, sessionCount)
+	}
+
+	// 2. MigrateLegacySecrets encrypts settings AI keys, users.totp_secret, and streaming_servers.api_key
+	var adminID int
+	_ = db.DB.QueryRow(`SELECT id FROM users LIMIT 1`).Scan(&adminID)
+	if _, err := db.DB.Exec(
+		`UPDATE settings SET gemini_api_key = 'leg-gem', openai_api_key = 'leg-oai', anthropic_api_key = 'leg-ant' WHERE id = 1`,
+	); err != nil {
+		t.Fatalf("seed legacy settings keys: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`UPDATE users SET totp_secret = 'JBSWY3DPEHPK3PXP', totp_enabled = 1 WHERE id = ?`,
+		adminID,
+	); err != nil {
+		t.Fatalf("seed legacy totp_secret: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`INSERT INTO streaming_servers (provider, name, url, api_key, enabled) VALUES ('jellyfin', 'JF', 'http://127.0.0.1:8096', 'leg-jf-key', 1)`,
+	); err != nil {
+		t.Fatalf("seed legacy streaming_servers key: %v", err)
+	}
+
+	if err := MigrateLegacySecrets(); err != nil {
+		t.Fatalf("MigrateLegacySecrets failed: %v", err)
+	}
+
+	var gemEnc, oaiEnc, antEnc, totpEnc, jfEnc string
+	_ = db.DB.QueryRow(`SELECT gemini_api_key, openai_api_key, anthropic_api_key FROM settings WHERE id = 1`).Scan(&gemEnc, &oaiEnc, &antEnc)
+	_ = db.DB.QueryRow(`SELECT totp_secret FROM users WHERE id = ?`, adminID).Scan(&totpEnc)
+	_ = db.DB.QueryRow(`SELECT api_key FROM streaming_servers WHERE provider = 'jellyfin'`).Scan(&jfEnc)
+
+	for label, pair := range map[string][2]string{
+		"gemini":    {gemEnc, "leg-gem"},
+		"openai":    {oaiEnc, "leg-oai"},
+		"anthropic": {antEnc, "leg-ant"},
+		"totp":      {totpEnc, "JBSWY3DPEHPK3PXP"},
+		"jellyfin":  {jfEnc, "leg-jf-key"},
+	} {
+		if !strings.HasPrefix(pair[0], "enc:v1:") {
+			t.Fatalf("expected %s secret to be enc:v1: encrypted, got %q", label, pair[0])
+		}
+		dec, err := DecryptKey(pair[0])
+		if err != nil || dec != pair[1] {
+			t.Fatalf("DecryptKey(%s) = %q, %v; want %q", label, dec, err, pair[1])
+		}
+	}
+
+	// 3. Disable2FA fails closed (500) when stored totp_secret ciphertext is tampered
+	if _, err := db.DB.Exec(`UPDATE users SET totp_secret = 'enc:v1:!!!tampered!!!', totp_enabled = 1 WHERE id = ?`, adminID); err != nil {
+		t.Fatalf("tamper totp_secret: %v", err)
+	}
+	adminTok := mintSessionTokenForTest(t, adminID, "127.0.0.1:47099", "AdminUA/1.0")
+	w2FA := httptest.NewRecorder()
+	req2FA := httptest.NewRequest(http.MethodPost, "/2fa/disable", strings.NewReader(`{"code":"123456"}`))
+	req2FA.Header.Set("Content-Type", "application/json")
+	req2FA.Header.Set("Authorization", "Bearer "+adminTok)
+	req2FA.RemoteAddr = "127.0.0.1:47099"
+	req2FA.Header.Set("User-Agent", "AdminUA/1.0")
+	r.ServeHTTP(w2FA, req2FA)
+	if w2FA.Code != http.StatusInternalServerError {
+		t.Fatalf("expected Disable2FA with tampered ciphertext to fail closed with 500, got %d: %s", w2FA.Code, w2FA.Body.String())
+	}
+
+	// 4. OIDCToken refresh_token reuse revocation DB write error fails closed with 500
+	if _, err := db.DB.Exec(
+		`INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) VALUES ('pub-r7', '', 'PubR7', '["https://example.com/cb"]')`,
+	); err != nil {
+		t.Fatalf("insert public oidc client: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at, revoked, family_id) VALUES ('reused-rt-r7', 'pub-r7', ?, 'openid', datetime('now', '+1 hour'), 1, 'fam-r7')`,
+		adminID,
+	); err != nil {
+		t.Fatalf("insert revoked refresh token: %v", err)
+	}
+	if _, err := db.DB.Exec(
+		`CREATE TRIGGER fail_r7_reuse_revoke BEFORE UPDATE ON oidc_refresh_tokens BEGIN SELECT RAISE(ABORT, 'simulated reuse revoke write failure'); END;`,
+	); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", "pub-r7")
+	form.Set("refresh_token", "reused-rt-r7")
+	wOIDC := httptest.NewRecorder()
+	reqOIDC := httptest.NewRequest(http.MethodPost, "/oidc/token", strings.NewReader(form.Encode()))
+	reqOIDC.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.ServeHTTP(wOIDC, reqOIDC)
+	if wOIDC.Code != http.StatusInternalServerError {
+		t.Fatalf("expected OIDCToken reuse revocation DB write failure to return 500, got %d: %s", wOIDC.Code, wOIDC.Body.String())
+	}
 }

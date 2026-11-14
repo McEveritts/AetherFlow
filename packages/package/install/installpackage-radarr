@@ -20,14 +20,35 @@ PACKAGE_NAME="radarr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-7878}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Radarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev mediainfo ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl sqlite3 libicu-dev mediainfo ca-certificates
 
 if ! id -u radarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/radarr --shell /usr/sbin/nologin radarr
@@ -46,7 +67,7 @@ esac
 report_progress 35 "Downloading Radarr (${RADARR_ARCH})..."
 RADARR_VERSION="$(github_latest_tag "Radarr/Radarr" "5.16.3.9541")"
 TMP_TAR=$(mktemp /tmp/radarr-XXXXXX.tar.gz)
-download_file "https://radarr.servarr.com/v1/update/master/updatefile?version=${RADARR_VERSION#v}&os=linux&runtime=netcore&arch=${RADARR_ARCH}" "$TMP_TAR" >> "$LOGFILE" 2>&1
+af_logged download_file "https://radarr.servarr.com/v1/update/master/updatefile?version=${RADARR_VERSION#v}&os=linux&runtime=netcore&arch=${RADARR_ARCH}" "$TMP_TAR"
 
 report_progress 65 "Extracting Radarr to /opt/Radarr..."
 stage_app_archive "$TMP_TAR" "/opt/Radarr" "Radarr" "/var/lib/radarr" "${PACKAGE_NAME}"
@@ -119,9 +140,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now radarr >> "$LOGFILE" 2>&1
-systemctl restart radarr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now radarr
+af_logged systemctl restart radarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "radarr" ${APP_PORT} "v3"

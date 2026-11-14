@@ -20,7 +20,28 @@ PACKAGE_NAME="plex"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-32400}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/apt/keyrings/plex.gpg
@@ -35,25 +56,25 @@ prepare_apt_package_transaction /var/lib/plexmediaserver/.af-version plexmediase
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Plex Media Server..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-certificates apt-transport-https
 
 report_progress 30 "Configuring official Plex APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-install_apt_signing_key https://downloads.plex.tv/plex-keys/PlexSign.key /etc/apt/keyrings/plex.gpg >> "$LOGFILE" 2>&1
+af_logged install_apt_signing_key https://downloads.plex.tv/plex-keys/PlexSign.key /etc/apt/keyrings/plex.gpg
 chmod a+r /etc/apt/keyrings/plex.gpg
 echo "deb [signed-by=/etc/apt/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
 
 report_progress 55 "Installing plexmediaserver package..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" plexmediaserver >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" plexmediaserver
 verify_deb_installed plexmediaserver
 
 report_progress 85 "Starting and enabling plexmediaserver service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now plexmediaserver >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now plexmediaserver
 
-systemctl restart plexmediaserver >> "$LOGFILE" 2>&1
+af_logged systemctl restart plexmediaserver
 systemctl is-active --quiet plexmediaserver
 mkdir -p /var/lib/plexmediaserver
 queue_app_version /var/lib/plexmediaserver/.af-version "$(dpkg-query -W -f='${Version}' plexmediaserver)"

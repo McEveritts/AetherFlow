@@ -20,15 +20,36 @@ PACKAGE_NAME="readarr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8787}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 print_warn "Readarr upstream retired on June 27, 2025 because its metadata became unusable. Discovery and updates may not work; this installer preserves Readarr and existing data without substituting an unofficial fork."
 report_progress 10 "Installing dependencies for Readarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl sqlite3 libicu-dev ca-certificates
 
 if ! id -u readarr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/readarr --shell /usr/sbin/nologin readarr
@@ -53,7 +74,7 @@ if [[ -n "$READARR_VERSION" ]]; then
     report_progress 50 "Using verified existing Readarr binary (version ${READARR_VERSION})..."
 elif [[ -n "${AF_READARR_VERIFIED_ARCHIVE:-}" && -f "${AF_READARR_VERIFIED_ARCHIVE}" && -n "${AF_READARR_SHA256:-}" ]]; then
     report_progress 35 "Verifying pinned Readarr archive..."
-    printf '%s  %s\n' "${AF_READARR_SHA256}" "${AF_READARR_VERIFIED_ARCHIVE}" | sha256sum -c - >> "$LOGFILE" 2>&1 || {
+    printf '%s  %s\n' "${AF_READARR_SHA256}" "${AF_READARR_VERIFIED_ARCHIVE}" | af_logged sha256sum -c - || {
         af_write_failure_receipt 1 "verify" "archive_corrupt" "Readarr archive SHA256 verification failed"
         exit 1
     }
@@ -97,9 +118,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now readarr >> "$LOGFILE" 2>&1
-systemctl restart readarr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now readarr
+af_logged systemctl restart readarr
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$READY_URL"
 seed_servarr_master_user "readarr" ${APP_PORT} "v1"

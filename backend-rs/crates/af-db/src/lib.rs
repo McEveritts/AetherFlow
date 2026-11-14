@@ -272,27 +272,127 @@ pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     anyhow::bail!("ciphertext tampered or missing required version prefix")
 }
 
-/// Migrates any plaintext `gemini_api_key` in `settings` to `enc:v1:` format.
+/// Migrates any unprefixed plaintext secrets in `settings`, `users`, and `streaming_servers` to `enc:v1:` format.
 pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
     if !is_encryption_enabled() {
         return Ok(());
     }
     let conn = get_conn()?;
-    let api_key: String = conn
-        .query_row(
-            "SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1",
-            [],
+    let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+    let mut migrated = 0usize;
+
+    let has_table = |name: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![name],
             |r| r.get(0),
         )
-        .unwrap_or_default();
+    };
+    let has_column = |table: &str, col: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"),
+            params![col],
+            |r| r.get(0),
+        )
+    };
 
-    if !api_key.is_empty() && !api_key.starts_with(CIPHERTEXT_PREFIX) {
-        let enc = encrypt_key(&api_key)?;
-        conn.execute(
-            "UPDATE settings SET gemini_api_key = ?1 WHERE id = 1",
-            params![enc],
-        )?;
-        tracing::info!("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format");
+    if has_table("settings")? {
+        for col in ["gemini_api_key", "openai_api_key", "anthropic_api_key"] {
+            if !has_column("settings", col)? {
+                continue;
+            }
+            let raw: Option<String> = tx
+                .query_row(
+                    &format!("SELECT COALESCE({col}, '') FROM settings WHERE id = 1"),
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(val) = raw {
+                if !val.is_empty() && !val.starts_with(CIPHERTEXT_PREFIX) {
+                    let enc = encrypt_key(&val)?;
+                    tx.execute(
+                        &format!("UPDATE settings SET {col} = ?1 WHERE id = 1"),
+                        params![enc],
+                    )?;
+                    migrated += 1;
+                }
+            }
+        }
+    }
+
+    if has_table("users")? && has_column("users", "totp_secret")? {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, COALESCE(totp_secret, '') FROM users WHERE COALESCE(totp_secret, '') != ''")?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut batch = Vec::new();
+        for (uid, raw) in rows {
+            if !raw.is_empty() && !raw.starts_with(CIPHERTEXT_PREFIX) {
+                let enc = encrypt_key(&raw)?;
+                batch.push(serde_json::json!({ "id": uid, "enc": enc }));
+            }
+        }
+        if !batch.is_empty() {
+            let payload = serde_json::Value::Array(batch.clone()).to_string();
+            tx.execute(
+                "UPDATE users
+                 SET totp_secret = (
+                     SELECT json_extract(value, '$.enc')
+                     FROM json_each(?1)
+                     WHERE CAST(json_extract(value, '$.id') AS INTEGER) = users.id
+                 )
+                 WHERE id IN (
+                     SELECT CAST(json_extract(value, '$.id') AS INTEGER)
+                     FROM json_each(?1)
+                 )",
+                params![payload],
+            )?;
+            migrated += batch.len();
+        }
+    }
+
+    if has_table("streaming_servers")? && has_column("streaming_servers", "api_key")? {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT provider, COALESCE(api_key, '') FROM streaming_servers WHERE COALESCE(api_key, '') != ''",
+            )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut batch = Vec::new();
+        for (provider, raw) in rows {
+            if !raw.is_empty() && !raw.starts_with(CIPHERTEXT_PREFIX) {
+                let enc = encrypt_key(&raw)?;
+                batch.push(serde_json::json!({ "provider": provider, "enc": enc }));
+            }
+        }
+        if !batch.is_empty() {
+            let payload = serde_json::Value::Array(batch.clone()).to_string();
+            tx.execute(
+                "UPDATE streaming_servers
+                 SET api_key = (
+                     SELECT json_extract(value, '$.enc')
+                     FROM json_each(?1)
+                     WHERE json_extract(value, '$.provider') = streaming_servers.provider
+                 )
+                 WHERE provider IN (
+                     SELECT json_extract(value, '$.provider')
+                     FROM json_each(?1)
+                 )",
+                params![payload],
+            )?;
+            migrated += batch.len();
+        }
+    }
+
+    tx.commit()?;
+    if migrated > 0 {
+        tracing::info!(
+            "[crypto] Successfully migrated {migrated} legacy secret(s) to enc:v1: format"
+        );
     }
     Ok(())
 }
@@ -2404,5 +2504,68 @@ pub(crate) mod tests {
         assert_eq!(ver, 10);
         assert!(!consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 11).unwrap());
         assert!(consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 10).unwrap());
+    }
+
+    #[test]
+    fn test_round7_migrate_legacy_secrets_encrypts_settings_totp_and_streaming() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        env::set_var("AES_MASTER_KEY", "c".repeat(64));
+        init_aes_key().unwrap();
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+
+        {
+            let conn = get_conn().unwrap();
+            conn.execute(
+                "UPDATE settings SET gemini_api_key = 'plain-gemini', openai_api_key = 'plain-openai', anthropic_api_key = 'plain-anthropic' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role, totp_secret, totp_enabled) VALUES (888, 'r7_mfa_user', 'admin', 'JBSWY3DPEHPK3PXP', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO streaming_servers (provider, name, url, api_key, enabled) VALUES ('jellyfin', 'JF', 'http://127.0.0.1:8096', 'plain-jf-api-key', 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        migrate_legacy_secrets().expect("migrate_legacy_secrets must succeed");
+
+        let conn = get_conn().unwrap();
+        let (gem, oai, ant): (String, String, String) = conn
+            .query_row(
+                "SELECT gemini_api_key, openai_api_key, anthropic_api_key FROM settings WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(gem.starts_with("enc:v1:"));
+        assert!(oai.starts_with("enc:v1:"));
+        assert!(ant.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&gem).unwrap(), "plain-gemini");
+        assert_eq!(decrypt_key(&oai).unwrap(), "plain-openai");
+        assert_eq!(decrypt_key(&ant).unwrap(), "plain-anthropic");
+
+        let totp_enc: String = conn
+            .query_row("SELECT totp_secret FROM users WHERE id = 888", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(totp_enc.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&totp_enc).unwrap(), "JBSWY3DPEHPK3PXP");
+
+        let stream_enc: String = conn
+            .query_row(
+                "SELECT api_key FROM streaming_servers WHERE provider = 'jellyfin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(stream_enc.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&stream_enc).unwrap(), "plain-jf-api-key");
     }
 }

@@ -27,7 +27,28 @@ LOG_DIR="/var/log/quassel"
 LISTEN_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4242}}"
 export AF_APP_PORT="$LISTEN_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-quassel}"
 begin_state_transaction "quasselcore.service" "0" "/" "/var/lib/quassel" "/etc/default/quasselcore" "/etc/systemd/system/quasselcore.service" "/usr/bin/quasselcore" "/usr/lib/quassel" "/usr/share/quassel"
@@ -37,8 +58,8 @@ log_info "Starting ${APP_NAME} installation (target port: ${LISTEN_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
 report_progress 45 "Installing quassel-core via APT..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq quassel-core openssl >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq quassel-core openssl
 
 mkdir -p "${DATA_DIR}" "${LOG_DIR}"
 if id -u quasselcore >/dev/null 2>&1; then
@@ -53,10 +74,10 @@ fi
 
 report_progress 75 "Generating TLS certificate and default configuration for Quassel Core..."
 if [[ ! -f "${DATA_DIR}/quasselCert.pem" ]]; then
-    openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+    af_logged openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
         -keyout "${DATA_DIR}/quasselCert.pem" \
         -out "${DATA_DIR}/quasselCert.pem" \
-        -subj "/CN=quassel.aether.local" >> "$LOGFILE" 2>&1
+        -subj "/CN=quassel.aether.local"
     chmod 600 "${DATA_DIR}/quasselCert.pem"
 fi
 
@@ -77,9 +98,9 @@ INSTALLED_VER="$(dpkg-query -W -f='${Version}' quassel-core 2>/dev/null | cut -d
 queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting quasselcore.service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now quasselcore.service >> "$LOGFILE" 2>&1
-systemctl restart quasselcore.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now quasselcore.service
+af_logged systemctl restart quasselcore.service
 systemctl is-active --quiet quasselcore.service
 
 commit_app_versions

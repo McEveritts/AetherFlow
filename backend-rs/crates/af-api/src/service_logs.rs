@@ -186,7 +186,10 @@ fn tail(path: &std::path::Path) -> io::Result<String> {
 
 fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
     let files: Vec<(&str, &str)> = match source {
-        "application" | "deploy" => vec![("application", "/var/log/aetherflow-deploy.log")],
+        "application" | "deploy" => vec![
+            ("application", "/var/log/aetherflow/deploy.log"),
+            ("application", "/var/log/aetherflow-deploy.log"),
+        ],
         "syslog" => vec![
             ("syslog", "/var/log/syslog"),
             ("syslog", "/var/log/messages"),
@@ -196,6 +199,7 @@ fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
             ("apache", "/var/log/apache2/access.log"),
         ],
         "" => vec![
+            ("application", "/var/log/aetherflow/deploy.log"),
             ("application", "/var/log/aetherflow-deploy.log"),
             ("syslog", "/var/log/syslog"),
             ("apache", "/var/log/apache2/error.log"),

@@ -17,7 +17,28 @@ fi
 PACKAGE_NAME="maintainerr"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 require_root
-mkdir -p "$(dirname "$LOGFILE")" /run/lock
+mkdir -p /run/lock
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 exec 9>/run/lock/aetherflow-maintainerr.lock
 flock -n 9 || { log_error "Another Maintainerr lifecycle operation is running."; exit 1; }
 
@@ -30,7 +51,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     safe_rm_rf /var/lib/maintainerr
     purge_system_user "maintainerr"
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 remove_lock "$PACKAGE_NAME"
 report_progress 100 "Maintainerr removed; database and settings retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -17,7 +17,27 @@ fi
 
 PACKAGE_NAME="wireguard"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 APT_REMOVE_ACTION=remove
@@ -28,15 +48,15 @@ report_progress 20 "Stopping and disabling wg-quick@wg0 service..."
 purge_systemd_unit "wg-quick@wg0"
 
 report_progress 50 "Purging WireGuard APT packages..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq wireguard wireguard-tools >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq wireguard wireguard-tools
+DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 
 report_progress 80 "Removing WireGuard keys, configuration, and sysctl rules..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     safe_rm_rf /var/lib/wireguard /etc/wireguard /etc/sysctl.d/99-wireguard.conf
 fi
-sysctl --system >> "$LOGFILE" 2>&1 || true
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged sysctl --system || true
+af_logged systemctl daemon-reload
 
 rm -f -- /etc/wireguard/.af-version
 remove_lock "${PACKAGE_NAME}"

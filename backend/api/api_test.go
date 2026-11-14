@@ -349,16 +349,23 @@ func TestControlServiceAcceptsValidAction(t *testing.T) {
 // --- WebSocket origin validation ---
 
 func TestWebSocketOriginCheck(t *testing.T) {
+	t.Setenv("ALLOWED_CORS_ORIGIN", "")
 	tests := []struct {
 		origin string
 		host   string
+		proto  string
+		cookie string
 		want   bool
 	}{
-		{"https://example.com", "example.com", true},
-		{"http://example.com", "example.com", true},
-		{"https://evil.com", "example.com", false},
-		{"", "example.com", true},                         // Non-browser clients
-		{"https://sub.example.com", "example.com", false}, // Subdomain mismatch
+		{"https://example.com", "example.com", "https", "", true},
+		{"http://example.com", "example.com", "https", "", false}, // Scheme downgrade rejected
+		{"http://example.com", "example.com", "", "", true},
+		{"https://evil.com", "example.com", "https", "", false},
+		{"", "example.com", "", "", true},                                   // Non-browser CLI/Bearer clients
+		{"", "example.com", "", "aetherflow_session=tok", false},            // Browser cookie upgrade requires Origin
+		{"http://localhost:9999", "localhost:8080", "", "", false},          // Cross-port loopback CSWSH rejected
+		{"http://localhost:8080", "localhost:8080", "", "", true},           // Exact loopback host:port allowed
+		{"https://sub.example.com", "example.com", "https", "", false},      // Subdomain mismatch
 	}
 
 	for _, tt := range tests {
@@ -367,9 +374,15 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		if tt.origin != "" {
 			req.Header.Set("Origin", tt.origin)
 		}
+		if tt.proto != "" {
+			req.Header.Set("X-Forwarded-Proto", tt.proto)
+		}
+		if tt.cookie != "" {
+			req.Header.Set("Cookie", tt.cookie)
+		}
 		got := upgrader.CheckOrigin(req)
 		if got != tt.want {
-			t.Errorf("CheckOrigin(origin=%q, host=%q) = %v, want %v", tt.origin, tt.host, got, tt.want)
+			t.Errorf("CheckOrigin(origin=%q, host=%q, proto=%q, cookie=%q) = %v, want %v", tt.origin, tt.host, tt.proto, tt.cookie, got, tt.want)
 		}
 	}
 }

@@ -20,7 +20,41 @@ PACKAGE_NAME="transmission"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9091}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
+if ! declare -F af_logged_stderr >/dev/null 2>&1; then
+    af_logged_stderr() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" 2>/dev/null; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" 2>&"$lock_fd" || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-transmission}"
@@ -48,8 +82,8 @@ wait_for_service_ready() {
     local service="${1:-transmission-daemon}" port="${2:-$APP_PORT}" status
     local url="http://127.0.0.1:${port}/transmission/rpc"
     systemctl is-active --quiet "$service" || return 1
-    if status="$(transmission_curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
-        --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "$url" 2>> "$LOGFILE")"; then
+    if status="$(af_logged_stderr transmission_curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
+        --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "$url")"; then
         :
     else
         status=""
@@ -57,7 +91,7 @@ wait_for_service_ready() {
     case "$status" in
         200|401|409) ;;
         [0-9][0-9][0-9]) return 1 ;;
-        *) transmission_curl -fsS --connect-timeout 2 --max-time 5 "$url" >> "$LOGFILE" 2>&1 || return 1 ;;
+        *) af_logged transmission_curl -fsS --connect-timeout 2 --max-time 5 "$url" || return 1 ;;
     esac
     systemctl is-active --quiet "$service"
 }
@@ -67,10 +101,10 @@ prepare_apt_package_transaction /var/lib/transmission-daemon/.af-version transmi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing transmission-daemon and transmission-cli..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq transmission-cli transmission-common transmission-daemon curl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq transmission-cli transmission-common transmission-daemon curl ca-certificates
 
-systemctl stop transmission-daemon >> "$LOGFILE" 2>&1 || true
+af_logged systemctl stop transmission-daemon || true
 
 # Remove any legacy transmission.service unit so transmission-daemon.service is canonical
 rm -f /etc/systemd/system/transmission.service
@@ -129,13 +163,13 @@ TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1
 TWC_URL="https://github.com/ronggang/transmission-web-control/archive/refs/tags/${TWC_TAG}.tar.gz"
 if [[ -n "$TWC_URL" ]]; then
     TMP_TAR=$(mktemp /tmp/twc-XXXXXX.tar.gz)
-    if download_file "$TWC_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+    if af_logged download_file "$TWC_URL" "$TMP_TAR"; then
         WEB_DIR="/usr/share/transmission/web"
         mkdir -p "$WEB_DIR"
         if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
             cp "${WEB_DIR}/index.html" "${WEB_DIR}/index.original.html"
         fi
-        tar -xzf "$TMP_TAR" --strip-components=2 -C "$WEB_DIR" --wildcards '*/src/*' >> "$LOGFILE" 2>&1 || true
+        af_logged tar -xzf "$TMP_TAR" --strip-components=2 -C "$WEB_DIR" --wildcards '*/src/*' || true
     fi
     rm -f "$TMP_TAR"
 fi
@@ -164,9 +198,9 @@ WantedBy=multi-user.target
 EOF
 
 report_progress 90 "Starting and enabling transmission-daemon.service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now transmission-daemon >> "$LOGFILE" 2>&1
-systemctl restart transmission-daemon >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now transmission-daemon
+af_logged systemctl restart transmission-daemon
 wait_for_service_ready transmission-daemon "$APP_PORT" "/transmission/rpc"
 queue_app_version /var/lib/transmission-daemon/.af-version "$(dpkg-query -W -f='${Version}' transmission-daemon)"
 

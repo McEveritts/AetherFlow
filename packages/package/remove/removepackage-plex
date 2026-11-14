@@ -17,7 +17,27 @@ fi
 
 PACKAGE_NAME="plex"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 APT_REMOVE_ACTION=remove
@@ -28,8 +48,8 @@ report_progress 20 "Stopping and disabling plexmediaserver service..."
 purge_systemd_unit "plexmediaserver"
 
 report_progress 50 "Purging plexmediaserver APT package and repositories..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver
+DEBIAN_FRONTEND=noninteractive af_logged apt-get autoremove -y -qq
 rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/keyrings/plex.gpg
 
 report_progress 80 "Removing Plex data, caches, and user account..."
@@ -38,7 +58,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     safe_rm_rf /var/lib/plex /var/lib/plexmediaserver /etc/plexmediaserver /etc/default/plexmediaserver
     purge_system_user "plex"
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
 
 rm -f -- /var/lib/plexmediaserver/.af-version
 remove_lock "${PACKAGE_NAME}"

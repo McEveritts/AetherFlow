@@ -225,7 +225,7 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         script = (PACKAGE_DIR / action / (action + "package-" + package)).read_text()
         script = 'set -euo pipefail\nsource "$TEST_ROOT/common.sh"\n' + script.split("require_root\n", 1)[1]
         script = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root)/", lambda match: str(self.root) + match.group(), script)
-        script = script.replace("| " + str(self.root) + "/usr/bin/kasmvncpasswd ", "| kasmvncpasswd ")
+        script = script.replace(str(self.root) + "/usr/bin/kasmvncpasswd ", "kasmvncpasswd ")
         script = script.replace('ARCH="$(dpkg --print-architecture)"', 'ARCH="amd64"')
         script_path = self.root / "run.sh"
         script_path.write_text(script)

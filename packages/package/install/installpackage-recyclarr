@@ -25,6 +25,19 @@ elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE
     echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
     exit 1
 fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 af_prepare_job_scratch "$PACKAGE_NAME"
@@ -32,8 +45,8 @@ validate_config_paths /var/lib/recyclarr/recyclarr.yml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and archive tools for Recyclarr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xz-utils tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl xz-utils tar ca-certificates
 
 if ! id -u recyclarr >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/recyclarr --shell /usr/sbin/nologin recyclarr
@@ -54,10 +67,10 @@ REC_URL="https://github.com/recyclarr/recyclarr/releases/download/v${REC_VERSION
 
 report_progress 60 "Downloading Recyclarr ${REC_VERSION} (${REC_ARCH})..."
 TMP_XZ="$(mktemp "${AF_JOB_SCRATCH_DIR}/recyclarr-XXXXXX.tar.xz")"
-download_file "$REC_URL" "$TMP_XZ" >> "$LOGFILE" 2>&1
+af_logged download_file "$REC_URL" "$TMP_XZ"
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/recyclarr-extract-XXXXXX")"
 trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"; rm -f -- "$TMP_XZ"; af_cleanup_job_scratch 1 || true' EXIT
-tar -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr >> "$LOGFILE" 2>&1
+af_logged tar -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr
 rm -f -- "$TMP_XZ"
 chmod 755 "$TMP_DIR/recyclarr"
 stage_app_archive "$TMP_DIR" /usr/local/bin/recyclarr recyclarr /var/lib/recyclarr "$PACKAGE_NAME" "." /opt/recyclarr "" binary
@@ -89,7 +102,6 @@ sonarr:
     base_url: http://127.0.0.1:8989
     api_key: "${SONARR_KEY}"
     delete_old_custom_formats: true
-    replace_existing_custom_formats: true
     quality_definition:
       type: series
     custom_formats:
@@ -105,7 +117,6 @@ radarr:
     base_url: http://127.0.0.1:7878
     api_key: "${RADARR_KEY}"
     delete_old_custom_formats: true
-    replace_existing_custom_formats: true
     quality_definition:
       type: movie
     custom_formats:
@@ -155,8 +166,8 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now recyclarr.timer >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now recyclarr.timer
 systemctl is-active --quiet recyclarr.timer
 rm -rf -- "$AF_ARCHIVE_BACKUP/release"
 

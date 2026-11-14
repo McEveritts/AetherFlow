@@ -20,7 +20,28 @@ PACKAGE_NAME="deluge"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8112}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-deluge}"
@@ -30,15 +51,15 @@ prepare_apt_package_transaction /var/lib/deluge/.af-version deluged deluge-web d
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing deluged, deluge-web, and deluge-console..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq deluged deluge-web deluge-console python3-libtorrent >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq deluged deluge-web deluge-console python3-libtorrent
 
 if ! id -u deluge >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/deluge --shell /usr/sbin/nologin deluge
 fi
 
 report_progress 55 "Configuring Deluge daemon and WebUI on port ${APP_PORT}..."
-systemctl stop deluge-web deluged >> "$LOGFILE" 2>&1 || true
+af_logged systemctl stop deluge-web deluged || true
 validate_config_paths /var/lib/deluge/.config/deluge/auth /var/lib/deluge/.config/deluge/web.conf /var/log/deluge/.af-directory-check
 mkdir -p /var/lib/deluge/Downloads
 DELUGE_VER="$(deluged --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' deluged 2>/dev/null || echo "2.1.1")"
@@ -116,9 +137,9 @@ WantedBy=multi-user.target
 EOF
 
 report_progress 85 "Starting deluged and deluge-web services..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now deluged >> "$LOGFILE" 2>&1
-systemctl enable --now deluge-web >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now deluged
+af_logged systemctl enable --now deluge-web
 systemctl is-active --quiet deluged
 systemctl is-active --quiet deluge-web
 

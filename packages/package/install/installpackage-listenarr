@@ -35,6 +35,19 @@ elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE
     echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
     exit 1
 fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -42,9 +55,9 @@ report_progress 10 "Preparing ${APP_NAME} installation..."
 load_master_credentials
 
 report_progress 25 "Installing system dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -130,12 +143,12 @@ cleanup() {
         if [[ -f "$BACKUP_DIR/listenarr.service" ]]; then
             safe_restore_path_from_backup "$BACKUP_DIR/listenarr.service" "$SERVICE_FILE" || restore_failed=true
         else
-            systemctl disable listenarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl disable listenarr.service || restore_failed=true
             rm -f -- "$SERVICE_FILE" || restore_failed=true
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
-            systemctl start listenarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start listenarr.service || restore_failed=true
         fi
     fi
     rm -f -- "$TMP_ZIP"
@@ -150,10 +163,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-download_file "${ASSET_URL}" "${TMP_ZIP}" >> "$LOGFILE" 2>&1
+af_logged download_file "${ASSET_URL}" "${TMP_ZIP}"
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
-unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}" >> "$LOGFILE" 2>&1
+af_logged unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}"
 rm -f "${TMP_ZIP}"
 
 STAGE_SRC="$TMP_EXTRACT"
@@ -216,9 +229,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now listenarr.service >> "$LOGFILE" 2>&1
-systemctl restart listenarr.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now listenarr.service
+af_logged systemctl restart listenarr.service
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 wait_for_service_ready "listenarr.service" "$APP_PORT" "$READY_URL"
 

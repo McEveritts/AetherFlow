@@ -23,7 +23,28 @@ PACKAGE_NAME="x2go"
 APP_NAME="x2go"
 DATA_DIR="/var/lib/x2go"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-x2go}"
 begin_state_transaction "x2goserver.service" "0" "/" "/var/lib/x2go" "/etc/x2go" "/etc/systemd/system/x2goserver.service" "/usr/bin/x2gostartagent" "/usr/bin/x2goruncommand" "/usr/sbin/x2gocleansessions" "/usr/lib/x2go" "/usr/share/x2go"
@@ -33,24 +54,24 @@ log_info "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
 report_progress 15 "Preparing ${APP_NAME} installation..."
 
 report_progress 45 "Installing x2goserver, x2goserver-xsession, and XFCE4 desktop environment..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils
 
 mkdir -p "${DATA_DIR}"
 report_progress 75 "Initializing X2Go SQLite session database..."
 if command -v x2godbadmin >/dev/null 2>&1; then
-    x2godbadmin --createdb >> "$LOGFILE" 2>&1 || true
+    af_logged x2godbadmin --createdb || true
 fi
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
 queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting x2goserver.service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now x2goserver.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now x2goserver.service
 
-systemctl restart x2goserver >> "$LOGFILE" 2>&1
+af_logged systemctl restart x2goserver
 systemctl is-active --quiet x2goserver
 
 commit_app_versions

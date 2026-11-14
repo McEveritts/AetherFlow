@@ -6,7 +6,15 @@ set -euo pipefail
 umask 077
 
 export PATH="/usr/local/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
-export LOGFILE="${LOGFILE:-/var/log/aetherflow/install.log}"
+if [[ -z "${LOGFILE:-}" ]]; then
+    case "${0##*/}" in
+        installpackage-*) export LOGFILE="/var/log/aetherflow/install-${0##*installpackage-}.log" ;;
+        removepackage-*)  export LOGFILE="/var/log/aetherflow/remove-${0##*removepackage-}.log" ;;
+        *)                export LOGFILE="/var/log/aetherflow/install.log" ;;
+    esac
+else
+    export LOGFILE
+fi
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
 
@@ -37,7 +45,7 @@ af_prepare_logfile_path() {
         mkdir -p -m 0750 -- "$parent_dir" || return 1
     fi
     python3 - "$target" "$parent_dir" <<'PYEOF'
-import grp, os, stat, sys
+import fcntl, grp, os, stat, sys
 
 target, parent_dir = sys.argv[1], sys.argv[2]
 parent_st = os.lstat(parent_dir)
@@ -56,32 +64,21 @@ if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.ends
 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
 fd = os.open(target, flags, 0o640)
 try:
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        raise SystemExit(f"Refusing non-regular or hardlinked logfile target: {target}")
-    if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
-        if st.st_uid != 0 or st.st_gid != target_gid:
-            os.fchown(fd, 0, target_gid)
-        if stat.S_IMODE(st.st_mode) != 0o640:
-            os.fchmod(fd, 0o640)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise SystemExit(f"Refusing non-regular or hardlinked logfile target: {target}")
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 finally:
     os.close(fd)
 PYEOF
-    if [[ -n "${AF_LOGFILE_LOCK_FD:-}" ]]; then
-        flock -u "$AF_LOGFILE_LOCK_FD" 2>/dev/null || true
-        eval "exec ${AF_LOGFILE_LOCK_FD}<&-" 2>/dev/null || true
-        unset AF_LOGFILE_LOCK_FD
-    fi
-    if command -v flock >/dev/null 2>&1 && [[ ! -L "$target" && -f "$target" ]]; then
-        local _af_lfd=""
-        if exec {_af_lfd}<"$target" 2>/dev/null; then
-            if flock -s -n "$_af_lfd" 2>/dev/null; then
-                AF_LOGFILE_LOCK_FD="$_af_lfd"
-            else
-                exec {_af_lfd}<&- 2>/dev/null || true
-            fi
-        fi
-    fi
 }
 
 mkdir -p "$LOCK_DIR"
@@ -145,9 +142,16 @@ af_logged() {
         parent_dir="${target%/*}"
         [[ -n "$parent_dir" ]] || parent_dir="/"
     fi
-    if [[ -L "$parent_dir" || -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
-        printf 'Refusing unsafe logfile target: %s\n' "$target" >&2
+    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
+        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
         return 1
+    fi
+    if [[ ! -f "$target" ]]; then
+        af_prepare_logfile_path "$target" || return 1
+    fi
+    local _flock_bin="flock"
+    if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
+        _flock_bin="/usr/bin/flock"
     fi
     local lock_fd=""
     exec {lock_fd}>>"$target" || return 1
@@ -156,13 +160,73 @@ af_logged() {
         printf 'Refusing symlinked logfile target: %s\n' "$target" >&2
         return 1
     fi
-    flock -s "$lock_fd" || {
+    "$_flock_bin" -s "$lock_fd" || {
         exec {lock_fd}>&-
         return 1
     }
+    if [[ -x /usr/bin/stat && -e "/proc/self/fd/${lock_fd}" ]]; then
+        local fd_meta=""
+        fd_meta="$(/usr/bin/stat -Lc '%F:%h' "/proc/self/fd/${lock_fd}" 2>/dev/null || true)"
+        if [[ "$fd_meta" != "regular file:1" && "$fd_meta" != "regular empty file:1" ]]; then
+            "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+            exec {lock_fd}>&-
+            printf 'Refusing non-regular or hardlinked logfile target: %s\n' "$target" >&2
+            return 1
+        fi
+    fi
     local rc=0
     "$@" >&"$lock_fd" 2>&1 || rc=$?
-    flock -u "$lock_fd" 2>/dev/null || true
+    "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
+}
+
+af_logged_stderr() {
+    local target="${LOGFILE:-/dev/null}"
+    if [[ "$target" == "/dev/null" ]]; then
+        "$@" 2>/dev/null
+        return $?
+    fi
+    local parent_dir="."
+    if [[ "$target" == */* ]]; then
+        parent_dir="${target%/*}"
+        [[ -n "$parent_dir" ]] || parent_dir="/"
+    fi
+    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
+        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
+        return 1
+    fi
+    if [[ ! -f "$target" ]]; then
+        af_prepare_logfile_path "$target" || return 1
+    fi
+    local _flock_bin="flock"
+    if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
+        _flock_bin="/usr/bin/flock"
+    fi
+    local lock_fd=""
+    exec {lock_fd}>>"$target" || return 1
+    if [[ -L "$target" ]]; then
+        exec {lock_fd}>&-
+        printf 'Refusing symlinked logfile target: %s\n' "$target" >&2
+        return 1
+    fi
+    "$_flock_bin" -s "$lock_fd" || {
+        exec {lock_fd}>&-
+        return 1
+    }
+    if [[ -x /usr/bin/stat && -e "/proc/self/fd/${lock_fd}" ]]; then
+        local fd_meta=""
+        fd_meta="$(/usr/bin/stat -Lc '%F:%h' "/proc/self/fd/${lock_fd}" 2>/dev/null || true)"
+        if [[ "$fd_meta" != "regular file:1" && "$fd_meta" != "regular empty file:1" ]]; then
+            "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+            exec {lock_fd}>&-
+            printf 'Refusing non-regular or hardlinked logfile target: %s\n' "$target" >&2
+            return 1
+        fi
+    fi
+    local rc=0
+    "$@" 2>&"$lock_fd" || rc=$?
+    "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
     exec {lock_fd}>&-
     return "$rc"
 }
@@ -305,7 +369,7 @@ install_npm_app() (
     trap 'exit 143' TERM
     # mktemp creates a private directory; the service user must traverse it.
     chmod 755 "$staged"
-    node_build npm install --prefix "$staged" --no-audit --no-fund "$package" >>"${LOGFILE:-/dev/null}" 2>&1 || return $?
+    af_logged node_build npm install --prefix "$staged" --no-audit --no-fund "$package" || return $?
     if [[ ! -x "$staged/node_modules/.bin/$bin_name" ]]; then
         print_error "npm package $package did not provide executable $bin_name"
         return 1
@@ -615,9 +679,9 @@ rollback_apt_packages() {
         AF_APT_ROLLBACK_MUTATED=true
         reconciled=true
         if [[ "$previous" == '<none>' ]]; then
-            DEBIAN_FRONTEND=noninteractive command apt-get remove -y --no-auto-remove "$package" >>"${LOGFILE:-/dev/null}" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
         else
-            DEBIAN_FRONTEND=noninteractive command apt-get install -y --allow-downgrades --reinstall "$package=$previous" >>"${LOGFILE:-/dev/null}" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "$package=$previous" || reconciled=false
         fi
         installed="$(installed_apt_package_version "$package")"
         if [[ "$reconciled" != true || "$installed" != "$previous" ]]; then
@@ -645,9 +709,9 @@ install_deb_verified() {
     local archive="$1" package="$2" expected="${3:-}"
     [[ -n "$expected" ]] || expected="$(dpkg-deb -f "$archive" Version)" || return 1
     [[ -n "$expected" ]] || return 1
-    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >>"${LOGFILE:-/dev/null}" 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >>"${LOGFILE:-/dev/null}" 2>&1 || return 1
-        DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >>"${LOGFILE:-/dev/null}" 2>&1 || return 1
+    if ! DEBIAN_FRONTEND=noninteractive af_logged dpkg -i "$archive"; then
+        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -f -y -qq || return 1
+        DEBIAN_FRONTEND=noninteractive af_logged dpkg -i "$archive" || return 1
     fi
     verify_deb_installed "$package" "$expected"
 }
@@ -838,11 +902,11 @@ cleanup_state_transaction() {
                     fi
                 fi
             fi
-            systemctl daemon-reload >>"${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$AF_STATE_WAS_ACTIVE" == true && ( "$AF_STATE_SNAPSHOT_READY" != true || "${AF_STATE_RESTART_ON_ROLLBACK:-false}" == true ) ]]; then
             for unit in "${AF_STATE_PREVIOUS_UNITS[@]}"; do
-                systemctl start "$unit" >>"${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
+                af_logged systemctl start "$unit" || restore_failed=true
             done
         fi
     fi
@@ -1067,7 +1131,7 @@ verify_download_sha256() {
         release_repository="${release_repository%%/releases/download/*}"
         release_tag="${source_url#*/releases/download/}"
         release_tag="${release_tag%%/*}"
-        release_metadata="$(curl -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag" 2>> "${LOGFILE:-/dev/null}")" || release_metadata=""
+        release_metadata="$(af_logged_stderr curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag")" || release_metadata=""
     fi
     if [[ -n "$release_metadata" && -n "$source_url" ]]; then
         local release_digest
@@ -1123,7 +1187,9 @@ PYMANIFESTS
             fetched="$checksum_directory/node-shasums.txt"
         fi
         for checksum_url in "${checksum_urls[@]}"; do
-            if curl -fsSL --connect-timeout 2 --max-time 4 "$checksum_url" -o "$fetched" 2>> "${LOGFILE:-/dev/null}"; then
+            local -a _chk_proto=()
+            [[ "$checksum_url" == https://* ]] && _chk_proto=(--proto '=https' --proto-redir '=https')
+            if af_logged_stderr curl "${_chk_proto[@]}" -fsSL --connect-timeout 2 --max-time 4 "$checksum_url" -o "$fetched"; then
                 while read -r digest candidate || [[ -n "$digest" ]]; do
                     [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]] || continue
                     candidate="${candidate#\*}"
@@ -1167,10 +1233,12 @@ download_file() {
         return 0
     fi
     local source_url="$1" file_path="$2" app_id="${3:-${PACKAGE_NAME:-}}"
+    local -a proto_args=()
+    [[ "$source_url" == https://* ]] && proto_args=(--proto '=https' --proto-redir '=https')
     if declare -F curl >/dev/null; then
-        curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
+        curl "${proto_args[@]}" -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
     else
-        download_file --transport -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
+        download_file --transport "${proto_args[@]}" -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
     fi
     if ! verify_download_sha256 "$file_path" "$app_id" "$source_url" "${4:-}"; then
         print_error "Refusing unverified download from $source_url"
@@ -1725,7 +1793,7 @@ restore_configured_database() (
     case "$backend" in
         mysql|mariadb)
             configured_database_connection "$backend" "$host" "$username" || return 1
-            MYSQL_PWD="$password" mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql" >>"${LOGFILE:-/dev/null}" 2>&1
+            MYSQL_PWD="$password" af_logged mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql"
             ;;
         postgres|pgsql)
             configured_database_connection "$backend" "$host" "$username" || return 1
@@ -1734,7 +1802,7 @@ restore_configured_database() (
                 [[ -f "$backup/$artifact" && ( "$artifact" == postgres-recovery.log || -s "$backup/$artifact" ) ]] || return 1
             done
             [[ "$(cat "$backup/.af-postgres-ready")" == in-database-v1 ]] || return 1
-            printf '%s\n' 'Restoring configured PostgreSQL database in one transaction' >> "${LOGFILE:-/dev/null}" || return 1
+            af_logged printf '%s\n' 'Restoring configured PostgreSQL database in one transaction' || return 1
             if ! PGPASSWORD="$password" PGCONNECT_TIMEOUT=5 psql "${AF_DATABASE_ARGS[@]}" --no-psqlrc --no-password "--dbname=$database" --set=ON_ERROR_STOP=1 --single-transaction --file="$backup/postgres-identity.sql" --file="$backup/postgres-clean.sql" --file="$backup/postgres-schemas.sql" --file="$backup/database.sql" --file="$backup/postgres-metadata.sql" >> "$backup/postgres-recovery.log" 2>&1; then
                 print_error "Configured PostgreSQL recovery failed; retained database transaction was not committed"
                 return 1
@@ -1765,10 +1833,10 @@ restore_postgresql_database() {
     local backup="$1" database="$2" restored=true database_file relative
     [[ -f "$backup/.af-database-ready" ]] || return 0
     [[ "$database" =~ ^[a-z_][a-z0-9_-]*$ && ! -L "$backup" && ! -L "$backup/.af-database-ready" && ! -L "$backup/$database.sql" && "$(cat "$backup/.af-database-ready")" == "$database" ]] || return 1
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" >>"${LOGFILE:-/dev/null}" 2>&1 <<'SQL' || restored=false
+    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" <<'SQL' || restored=false
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'database' AND pid <> pg_backend_pid();
 SQL
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" || restored=false
     if [[ -n "${AETHERFLOW_INSTALL_ROOT:-}" && /var/lib/postgresql == "${AETHERFLOW_INSTALL_ROOT%/}/"* && -d "$backup/postgresql-database" ]]; then
         [[ ! -L "$backup/postgresql-database" && ! -L /var/lib/postgresql ]] || return 1
         while IFS= read -r -d '' database_file; do
@@ -2140,33 +2208,33 @@ rollback_app_archive_update() {
         if [[ -e "$AF_ARCHIVE_BACKUP/unit" ]]; then
             safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/unit" "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         else
-            systemctl disable -- "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+            af_logged systemctl disable -- "$AF_ARCHIVE_UNIT" || restored=false
             rm -f -- "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         fi
         if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
             if [[ -e "$AF_ARCHIVE_BACKUP/timer_unit" ]]; then
                 safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/timer_unit" "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
             elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
-                systemctl disable -- "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+                af_logged systemctl disable -- "$AF_ARCHIVE_TIMER_UNIT" || restored=false
                 rm -f -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
             fi
         fi
-        systemctl daemon-reload >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+        af_logged systemctl daemon-reload || restored=false
     fi
     if [[ "$restored" == true ]]; then
         for entry in "${AF_ARCHIVE_ROLLBACK_RESTART_UNITS[@]}"; do
-            systemctl restart "$entry" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+            af_logged systemctl restart "$entry" || restored=false
         done
     fi
     if [[ "$restored" == true && "${AF_ARCHIVE_STOPPED:-false}" == true && "${AF_ARCHIVE_PREVIOUS:-false}" == true ]]; then
-        systemctl restart "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+        af_logged systemctl restart "$AF_ARCHIVE_UNIT" || restored=false
     fi
     if [[ "$restored" == true && -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
         if [[ "${AF_ARCHIVE_TIMER_ENABLED:-false}" == true ]]; then
-            systemctl enable -- "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+            af_logged systemctl enable -- "$AF_ARCHIVE_TIMER_UNIT" || restored=false
         fi
         if [[ "$restored" == true && "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ]]; then
-            systemctl restart "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+            af_logged systemctl restart "$AF_ARCHIVE_TIMER_UNIT" || restored=false
         fi
     fi
     rm -f -- "${AF_ARCHIVE_ARCHIVE:-}"
@@ -2347,7 +2415,9 @@ fetch_and_run() {
     fi
     
     log_info "Downloading install script from $url"
-    if ! curl -fsSL -o "$tmp_script" "$url"; then
+    local -a _boot_proto=()
+    [[ "$url" == https://* ]] && _boot_proto=(--proto '=https' --proto-redir '=https')
+    if ! curl "${_boot_proto[@]}" -fsSL -o "$tmp_script" "$url"; then
         print_error "Failed to download $url"
         rm -f "$tmp_script"
         return 1
@@ -2360,7 +2430,7 @@ fetch_and_run() {
         return 1
     fi
     log_info "Checksum validation passed."
-    echo "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" >>"${LOGFILE:-/dev/null}" 2>/dev/null || true
+    af_logged printf '%s\n' "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" || true
 
     if ! bash "$tmp_script" "$@"; then
         print_error "Script execution failed for $url"
@@ -4001,7 +4071,7 @@ github_latest_tag() {
         auth_header=(-H "Authorization: Bearer $token")
     fi
 
-    eff_url="$(curl -fsSL "${auth_header[@]}" -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
+    eff_url="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
     if [[ "$eff_url" == *"/releases/tag/"* ]]; then
         tag="${eff_url##*/releases/tag/}"
         tag="${tag%%\?*}"
@@ -4009,7 +4079,7 @@ github_latest_tag() {
     fi
 
     if [[ -z "$tag" ]]; then
-        tag="$(curl -fsSL "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+        tag="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
             | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1 || true)"
     fi
 
@@ -4132,15 +4202,15 @@ ensure_node() {
     local have_major=0
     # Native addons and Git prepare scripts need these on already-provisioned
     # Node hosts too, not just when Node itself is first installed.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates git build-essential python3 python3-setuptools pkg-config >>"${LOGFILE:-/dev/null}" 2>&1
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+        ca-certificates git build-essential python3 python3-setuptools pkg-config
     if command_exists node; then
         have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
     fi
     if [[ "${have_major:-0}" -lt "$want_major" ]]; then
         local nodesource_sha256="${AF_NODESOURCE_BOOTSTRAP_SHA256:-2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be}"
         fetch_and_run "https://deb.nodesource.com/setup_${want_major}.x" "$nodesource_sha256" || return 1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >>"${LOGFILE:-/dev/null}" 2>&1
+        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq nodejs
     fi
     sync_node_global_bins
 }
@@ -4175,7 +4245,7 @@ quiesce_services_for_rollback() {
     local backup="${AF_ROLLBACK_BACKUP:-${BACKUP_DIR:-${RUNTIME_BACKUP:-${ABS_BACKUP_DIR:-${AF_STATE_BACKUP:-${AF_ARCHIVE_BACKUP:-unknown}}}}}}"
     for unit in "$@"; do
         stop_status=0
-        systemctl stop -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || stop_status=$?
+        af_logged systemctl stop -- "$unit" || stop_status=$?
         if [[ "$stop_status" -ne 0 ]]; then
             print_error "Incomplete rollback: failed to stop $unit; recovery backup preserved at $backup"
             failed=true
@@ -4234,8 +4304,8 @@ stop_systemd_unit() {
     local unit stop_status
     for unit in "$@"; do
         stop_status=0
-        systemctl stop -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || stop_status=$?
-        systemctl reset-failed -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || true
+        af_logged systemctl stop -- "$unit" || stop_status=$?
+        af_logged systemctl reset-failed -- "$unit" || true
         if [[ "$stop_status" == 0 ]]; then
             continue
         fi
@@ -4271,7 +4341,7 @@ purge_systemd_unit() {
         fi
     done
     for unit in "${units[@]}"; do
-        if ! systemctl reset-failed -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1; then
+        if ! af_logged systemctl reset-failed -- "$unit"; then
             systemd_unit_inactive "$unit" true || return 1
         fi
         rm -f "/etc/systemd/system/${unit}" || return 1
@@ -4932,7 +5002,7 @@ seed_servarr_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" python3 - "$app" "$port" "$api_ver" "$cfg_xml" >>"${LOGFILE:-/dev/null}" 2>&1 <<'PYEOF'
+    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" af_logged python3 - "$app" "$port" "$api_ver" "$cfg_xml" <<'PYEOF'
 import sys, os, re, time, json, urllib.request
 
 app, port, api_ver, cfg_xml = sys.argv[1:]
@@ -5007,7 +5077,7 @@ seed_jellyfin_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" python3 - "$port" >>"${LOGFILE:-/dev/null}" 2>&1 <<'PYEOF'
+    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" af_logged python3 - "$port" <<'PYEOF'
 import os, sys, time, json, urllib.request
 
 port = sys.argv[1]

@@ -28,6 +28,19 @@ elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE
     echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
     exit 1
 fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 APP_PORT="${AF_APP_PORT:-6081}"
 DATA_DIR="/var/lib/kasmvnc"
 CONFIG_DIR="/etc/kasmvnc"
@@ -58,7 +71,7 @@ cleanup_kasmvnc() {
     cleanup_state_transaction "$status" return
     status=$?
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$KASMVNC_WAS_ENABLED" != true ]]; then
-        systemctl disable af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
+        af_logged systemctl disable af-kasmvnc.service || true
     fi
     if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
         af_cleanup_job_scratch "$rc" || true
@@ -70,8 +83,8 @@ trap cleanup_kasmvnc EXIT
 prepare_apt_package_transaction /var/lib/kasmvnc/.af-version kasmvncserver
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq python3 python3-yaml curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
+af_logged apt-get update -qq
+af_logged apt-get install --no-remove -y -qq python3 python3-yaml curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth
 
 report_progress 30 "Resolving the matching KasmVNC release..."
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/kasmvnc.XXXXXX")"
@@ -103,9 +116,9 @@ fi
 
 report_progress 50 "Downloading and verifying KasmVNC ${VERSION}..."
 download_file "$ASSET_URL" "${TMP_DIR}/kasmvnc.deb" kasmvnc "${ASSET_DIGEST#sha256:}"
-printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | sha256sum -c - >> "$LOGFILE" 2>&1
+printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | af_logged sha256sum -c -
 KASMVNC_DEB_VERSION="$(dpkg-deb -f "${TMP_DIR}/kasmvnc.deb" Version)"
-apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb" >> "$LOGFILE" 2>&1
+af_logged apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb"
 verify_deb_installed kasmvncserver "$KASMVNC_DEB_VERSION"
 
 if ! id -u af-kasmvnc >/dev/null 2>&1; then
@@ -128,7 +141,7 @@ if [[ ! -s "${DATA_DIR}/.kasmpasswd" ]]; then
     chmod 600 "${CONFIG_DIR}/aetherflow-password"
     chown root:root "${CONFIG_DIR}/aetherflow-password"
     PASSWORD="$(cat "${CONFIG_DIR}/aetherflow-password")"
-    printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | /usr/bin/kasmvncpasswd -u admin -r -w "${DATA_DIR}/.kasmpasswd" >> "$LOGFILE" 2>&1
+    printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | af_logged /usr/bin/kasmvncpasswd -u admin -r -w "${DATA_DIR}/.kasmpasswd"
     unset PASSWORD
 fi
 chmod 600 "${DATA_DIR}/.kasmpasswd"
@@ -141,7 +154,7 @@ if [[ -L "$VNC_TLS_CERT" ]]; then rm -f -- "$VNC_TLS_CERT"; fi
 if [[ -L "$VNC_TLS_KEY" ]]; then rm -f -- "$VNC_TLS_KEY"; fi
 validate_config_paths "$TLS_CERT" "$TLS_KEY" "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 if [[ ! -s "$TLS_CERT" || ! -s "$TLS_KEY" ]]; then
-    (umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$TLS_KEY" -out "$TLS_CERT") >> "$LOGFILE" 2>&1
+    af_logged bash -euc 'umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$1" -out "$2"' _ "$TLS_KEY" "$TLS_CERT"
 fi
 chmod 0600 "$TLS_KEY" "$TLS_CERT"
 chown af-kasmvnc:af-kasmvnc "$TLS_KEY" "$TLS_CERT"
@@ -150,7 +163,7 @@ install -m 0600 "$TLS_KEY" "$VNC_TLS_KEY"
 chown af-kasmvnc:af-kasmvnc "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-    apt-get install --no-remove -y -qq python3-yaml >> "$LOGFILE" 2>&1 || true
+    af_logged apt-get install --no-remove -y -qq python3-yaml || true
 fi
 
 for cfg_yaml in "/etc/kasmvnc/kasmvnc.yaml" "${DATA_DIR}/.vnc/kasmvnc.yaml"; do
@@ -278,8 +291,8 @@ KASMVNC_DISPLAY=""
 if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
     EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
     if [[ -n "$EXISTING_DISPLAY" ]]; then
-        systemctl stop af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
-        python3 - "$EXISTING_DISPLAY" <<'PYEOF' >> "$LOGFILE" 2>&1 || true
+        af_logged systemctl stop af-kasmvnc.service || true
+        af_logged python3 - "$EXISTING_DISPLAY" <<'PYEOF' || true
 import os, pwd, stat, sys
 disp = sys.argv[1]
 try:
@@ -334,8 +347,8 @@ EOF
 
 report_progress 90 "Starting KasmVNC..."
 systemctl daemon-reload
-systemctl enable af-kasmvnc.service >> "$LOGFILE" 2>&1
-systemctl restart af-kasmvnc.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable af-kasmvnc.service
+af_logged systemctl restart af-kasmvnc.service
 systemctl is-active --quiet af-kasmvnc.service
 READY=false
 for attempt in {1..30}; do

@@ -15,14 +15,35 @@ fi
 
 require_root
 export LOGFILE="/var/log/aetherflow/remove-xrdp.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 trap 'print_error "XRDP removal failed; see ${LOGFILE}."' ERR
 report_progress 20 "Stopping XRDP and its session manager..."
 purge_systemd_unit xrdp.service xrdp-sesman.service
 rollback_file /etc/xrdp/startwm.sh
 report_progress 60 "Removing XRDP; preserving Linux users and shared desktop dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get remove -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get remove -y xrdp xorgxrdp
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get purge -y xrdp xorgxrdp
     safe_rm_rf /etc/xrdp /var/lib/xrdp
 fi
 systemctl daemon-reload

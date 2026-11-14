@@ -20,7 +20,28 @@ PACKAGE_NAME="nzbget"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6789}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /var/lib/nzbget/nzbget.conf
@@ -30,9 +51,9 @@ fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for NZBGet..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl p7zip-full par2 unzip unrar-free python3 ca-certificates >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unrar >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl p7zip-full par2 unzip unrar-free python3 ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq unrar || true
 
 if ! id -u nzbget >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/nzbget --shell /usr/sbin/nologin nzbget
@@ -46,10 +67,10 @@ NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/download/v${NZBGET_VERS
 
 report_progress 60 "Downloading and installing NZBGet ${NZBGET_VERSION}..."
 TMP_RUN=$(mktemp /tmp/nzbget-XXXXXX.run)
-download_file "$NZBGET_URL" "$TMP_RUN" >> "$LOGFILE" 2>&1
+af_logged download_file "$NZBGET_URL" "$TMP_RUN"
 BUILD_DIR="$(mktemp -d /opt/.nzbget-build.XXXXXX)"
 trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_RUN"' EXIT
-sh "$TMP_RUN" --destdir "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged sh "$TMP_RUN" --destdir "$BUILD_DIR"
 rm -f "$TMP_RUN"
 stage_app_archive "$BUILD_DIR" /opt/nzbget nzbget /var/lib/nzbget "$PACKAGE_NAME" "." "" preserve
 BUILD_DIR=""
@@ -97,15 +118,15 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now nzbget >> "$LOGFILE" 2>&1
-systemctl restart nzbget >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now nzbget
+af_logged systemctl restart nzbget
 wait_for_service_ready() {
     local service="${1:-nzbget}" port="${2:-$APP_PORT}" path="${3:-/jsonrpc/version}"
     systemctl is-active --quiet "$service" || return 1
-    safe_config_python /var/lib/nzbget/nzbget.conf <<'PYEOF' | curl -K - -fsS -o /dev/null \
+    safe_config_python /var/lib/nzbget/nzbget.conf <<'PYEOF' | af_logged curl -K - -fsS -o /dev/null \
         --connect-timeout 2 --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
-        "http://127.0.0.1:${port}${path}" >> "$LOGFILE" 2>&1 || return 1
+        "http://127.0.0.1:${port}${path}" || return 1
 import json
 settings = {}
 for line in safe_read_text('/var/lib/nzbget/nzbget.conf').splitlines():

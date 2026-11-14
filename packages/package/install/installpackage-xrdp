@@ -16,6 +16,27 @@ fi
 require_root
 validate_config_paths /etc/xrdp/startwm.sh
 export LOGFILE="/var/log/aetherflow/install-xrdp.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 trap 'print_error "XRDP installation failed; see ${LOGFILE}."' ERR
 PACKAGE_NAME="${PACKAGE_NAME:-xrdp}"
 begin_state_transaction "xrdp-sesman.service xrdp.service" "0" "/" "/var/lib/xrdp" "/etc/xrdp" "/etc/systemd/system/xrdp-sesman.service" "/etc/systemd/system/xrdp.service" "/usr/sbin/xrdp" "/usr/sbin/xrdp-sesman" "/usr/lib/xrdp" "/usr/share/xrdp"
@@ -23,8 +44,8 @@ begin_state_transaction "xrdp-sesman.service xrdp.service" "0" "/" "/var/lib/xrd
 prepare_apt_package_transaction /var/lib/xrdp/.af-version xrdp xorgxrdp
 report_progress 15 "Installing XRDP, Xorg backend, and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq xrdp xorgxrdp xfce4 xfce4-terminal dbus-x11 ssl-cert >> "$LOGFILE" 2>&1
+af_logged apt-get update -qq
+af_logged apt-get install --no-remove -y -qq xrdp xorgxrdp xfce4 xfce4-terminal dbus-x11 ssl-cert
 
 report_progress 60 "Configuring XRDP desktop sessions and TLS certificate access..."
 usermod -a -G ssl-cert xrdp
@@ -40,8 +61,8 @@ fi
 
 report_progress 85 "Starting XRDP and its session manager..."
 systemctl daemon-reload
-systemctl enable xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
-systemctl restart xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable xrdp-sesman.service xrdp.service
+af_logged systemctl restart xrdp-sesman.service xrdp.service
 systemctl is-active --quiet xrdp-sesman.service xrdp.service
 mkdir -p /var/lib/xrdp
 queue_app_version /var/lib/xrdp/.af-version "$(dpkg-query -W -f='${Version}' xrdp)"

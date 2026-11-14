@@ -42,11 +42,55 @@ type App struct {
 	UpdateError           string  `json:"update_error,omitempty"`
 }
 
+func resolveMarketplaceViewer(c *gin.Context) (isAuthenticated bool, isAdmin bool) {
+	if _, exists := c.Get("user_id"); exists {
+		role, _ := c.Get("user_role")
+		return true, role == "admin"
+	}
+	if db.DB == nil {
+		return false, false
+	}
+	_, _, subj, err := resolveSessionTokenWithSubject(c)
+	if err != nil {
+		return false, false
+	}
+	return true, subj.role == "admin"
+}
+
 // GetMarketplaceApps returns the list of marketplace apps
 func GetMarketplaceApps(c *gin.Context) {
+	isAuthenticated, isAdmin := resolveMarketplaceViewer(c)
 	pkgs, err := services.GetPackages()
 	if err != nil {
 		InternalError(c, "Failed to load package catalog configuration")
+		return
+	}
+
+	if !isAuthenticated {
+		publicApps := make([]gin.H, 0, len(pkgs))
+		for _, p := range pkgs {
+			entry := gin.H{
+				"id":                      p.Name,
+				"name":                    p.Label,
+				"desc":                    p.Description,
+				"hits":                    p.Hits,
+				"category":                p.Category,
+				"status":                  "not_installed",
+				"inventory_known":         false,
+				"inventory_authenticated": false,
+				"inventory_mode":          "public_redacted",
+			}
+			if p.DefaultPort > 0 {
+				entry["default_port"] = p.DefaultPort
+			}
+			if p.WebPath != "" {
+				entry["web_path"] = p.WebPath
+			}
+			publicApps = append(publicApps, entry)
+		}
+		c.Header("X-Aetherflow-Inventory-Mode", "public_redacted")
+		c.Header("X-Aetherflow-Inventory-Authenticated", "false")
+		c.JSON(http.StatusOK, publicApps)
 		return
 	}
 
@@ -57,8 +101,6 @@ func GetMarketplaceApps(c *gin.Context) {
 		}
 	}
 
-	role, _ := c.Get("user_role")
-	isAdmin := role == "admin"
 	baseDomain := services.ResolveBaseDomain()
 	apps := []App{}
 	for _, p := range pkgs {

@@ -20,7 +20,28 @@ PACKAGE_NAME="netdata"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-19999}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 PACKAGE_NAME="${PACKAGE_NAME:-netdata}"
@@ -30,16 +51,16 @@ prepare_apt_package_transaction /etc/netdata/.af-version netdata
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Netdata..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl ca-certificates
 
 report_progress 45 "Installing Netdata from the package repository..."
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq netdata >> "$LOGFILE" 2>&1; then
+if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq netdata; then
     if [[ ! "${NETDATA_KICKSTART_SHA256:-}" =~ ^[a-fA-F0-9]{64}$ ]]; then
         print_error "Netdata APT installation failed; a verified NETDATA_KICKSTART_SHA256 is required for bootstrap."
         exit 1
     fi
-    fetch_and_run "https://get.netdata.cloud/kickstart.sh" "$NETDATA_KICKSTART_SHA256" --non-interactive --stable-channel --disable-telemetry >> "$LOGFILE" 2>&1
+    af_logged fetch_and_run "https://get.netdata.cloud/kickstart.sh" "$NETDATA_KICKSTART_SHA256" --non-interactive --stable-channel --disable-telemetry
 fi
 
 NETDATA_BIN="$(command -v netdata || true)"
@@ -49,15 +70,15 @@ if [[ -z "$NETDATA_BIN" ]]; then
     print_error "Netdata installation did not provide an executable."
     exit 1
 fi
-systemctl cat netdata.service >> "$LOGFILE" 2>&1
+af_logged systemctl cat netdata.service
 
 report_progress 85 "Starting and enabling netdata.service on port ${APP_PORT}..."
 
 set_config_value "/etc/netdata/netdata.conf" ini "default port" "$APP_PORT" "web"
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now netdata >> "$LOGFILE" 2>&1
-systemctl restart netdata >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now netdata
+af_logged systemctl restart netdata
 systemctl is-active --quiet netdata
 NETDATA_VERSION="$("$NETDATA_BIN" -v 2>/dev/null | sed -n 's/^netdata v\{0,1\}//p' | head -n1)"
 [[ -n "$NETDATA_VERSION" ]] || NETDATA_VERSION="$(dpkg-query -W -f='${Version}' netdata)"

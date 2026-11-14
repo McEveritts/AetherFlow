@@ -32,7 +32,28 @@ APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6080}}"
 VNC_PORT="5901"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-novnc}"
 begin_state_transaction "novnc-xvnc.service novnc.service" "$APP_PORT" "/" "/var/lib/novnc" "/etc/novnc" "/usr/local/bin/af-novnc-start" "/usr/local/bin/af-novnc-xvnc-start" "/etc/systemd/system/novnc-xvnc.service" "/etc/systemd/system/novnc.service" "/usr/bin/Xtigervnc" "/usr/bin/tigervncserver" "/usr/bin/x11vnc" "/usr/bin/websockify" "/usr/share/novnc" "/usr/lib/python3/dist-packages/websockify"
@@ -45,10 +66,10 @@ load_master_credentials
 ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 30 "Installing noVNC, websockify, TigerVNC, and XFCE4 desktop environment..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     novnc python3-websockify tigervnc-standalone-server tigervnc-common \
-    dbus-x11 xfce4 xfce4-terminal x11-xserver-utils curl jq >> "$LOGFILE" 2>&1
+    dbus-x11 xfce4 xfce4-terminal x11-xserver-utils curl jq
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -118,10 +139,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now novnc-xvnc.service novnc.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now novnc-xvnc.service novnc.service
 
-systemctl restart novnc-xvnc.service novnc.service >> "$LOGFILE" 2>&1
+af_logged systemctl restart novnc-xvnc.service novnc.service
 systemctl is-active --quiet novnc-xvnc.service novnc.service
 
 commit_app_versions

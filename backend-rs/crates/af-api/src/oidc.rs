@@ -1905,8 +1905,10 @@ fn oidc_client_exists(conn: &rusqlite::Connection, client_id: &str) -> bool {
     if client_id.trim().is_empty() {
         return false;
     }
-    if !crate::auth::table_exists(conn, "oidc_clients").unwrap_or(false) {
-        return true;
+    match crate::auth::table_exists(conn, "oidc_clients") {
+        Ok(false) => return true,
+        Err(_) => return false,
+        Ok(true) => {}
     }
     conn.query_row(
         "SELECT 1 FROM oidc_clients WHERE id = ?1",
@@ -2190,7 +2192,12 @@ pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response 
 }
 
 fn oidc_device_verify_blocking(req: serde_json::Value) -> Response {
-    let user_code = req.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
+    let user_code = req
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
     if user_code.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2287,7 +2294,12 @@ pub async fn oidc_device_consent(req: Request) -> Response {
 }
 
 fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Response {
-    let user_code = body.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
+    let user_code = body
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
     let approved = body
         .get("approved")
         .and_then(|v| v.as_bool())

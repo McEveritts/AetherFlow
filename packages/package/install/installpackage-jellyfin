@@ -20,7 +20,28 @@ PACKAGE_NAME="jellyfin"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8096}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local lock_fd="" rc=0
+        exec {lock_fd}>>"$target" || return 1
+        flock -s "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/apt/keyrings/jellyfin.gpg /etc/jellyfin/network.xml
@@ -31,12 +52,12 @@ prepare_apt_package_transaction /var/lib/jellyfin/.af-version jellyfin jellyfin-
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Jellyfin..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https lsb-release >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl gnupg ca-certificates apt-transport-https lsb-release
 
 report_progress 30 "Configuring official Jellyfin APT repository..."
 install -m 0755 -d /etc/apt/keyrings
-install_apt_signing_key https://repo.jellyfin.org/jellyfin_team.gpg.key /etc/apt/keyrings/jellyfin.gpg >> "$LOGFILE" 2>&1
+af_logged install_apt_signing_key https://repo.jellyfin.org/jellyfin_team.gpg.key /etc/apt/keyrings/jellyfin.gpg
 chmod a+r /etc/apt/keyrings/jellyfin.gpg
 
 # Detect Debian vs Ubuntu codename and distro ID
@@ -65,8 +86,8 @@ EOF
 rm -f /etc/apt/sources.list.d/jellyfin.list
 
 report_progress 60 "Installing Jellyfin server..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jellyfin >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq jellyfin
 verify_deb_installed jellyfin
 
 report_progress 85 "Starting and enabling Jellyfin service..."
@@ -74,9 +95,9 @@ report_progress 85 "Starting and enabling Jellyfin service..."
 set_config_value "/etc/jellyfin/network.xml" xml "InternalHttpPort" "$APP_PORT" "NetworkConfiguration"
 chown jellyfin:jellyfin /etc/jellyfin/network.xml
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now jellyfin >> "$LOGFILE" 2>&1
-systemctl restart jellyfin >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now jellyfin
+af_logged systemctl restart jellyfin
 systemctl is-active --quiet jellyfin
 verify_systemd_service_active jellyfin
 seed_jellyfin_master_user ${APP_PORT}

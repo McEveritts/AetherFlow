@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"aetherflow/db"
 
@@ -28,16 +29,17 @@ func readLastAESKeyFromEnvFile(path string) string {
 	if cleaned == "" || !filepath.IsAbs(cleaned) {
 		return ""
 	}
-	lst, err := os.Lstat(cleaned) // #nosec G703 -- validated absolute operator env file path
-	if err != nil || lst.Mode()&os.ModeSymlink != 0 || !lst.Mode().IsRegular() {
-		return ""
-	}
-	f, err := os.Open(cleaned) // #nosec G304,G703 -- validated regular non-symlink operator AETHERFLOW_ENV_FILE path
+	fd, err := syscall.Open(cleaned, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return ""
 	}
+	f := os.NewFile(uintptr(fd), cleaned)
+	if f == nil {
+		_ = syscall.Close(fd)
+		return ""
+	}
 	defer f.Close()
-	if fst, err := f.Stat(); err != nil || !fst.Mode().IsRegular() || !os.SameFile(lst, fst) {
+	if fst, err := f.Stat(); err != nil || !fst.Mode().IsRegular() {
 		return ""
 	}
 
@@ -197,23 +199,127 @@ func decryptGCM(data []byte) (string, error) {
 
 // MigrateLegacySecrets scans the database for known sensitive keys that lack the enc:v1: prefix and encrypts them.
 func MigrateLegacySecrets() error {
-	if !IsEncryptionEnabled() {
+	if !IsEncryptionEnabled() || db.DB == nil {
 		return nil
 	}
-	var apiKey string
-	err := db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
+
+	tx, err := db.DB.Begin()
 	if err != nil {
 		return err
 	}
-	if apiKey != "" && !strings.HasPrefix(apiKey, ciphertextPrefix) {
-		enc, err := EncryptKey(apiKey)
-		if err != nil {
-			return err
+	defer func() { _ = tx.Rollback() }()
+
+	if sqlTableExists(tx, "settings") {
+		var geminiKey, openaiKey, anthropicKey string
+		if sErr := tx.QueryRow(
+			"SELECT COALESCE(gemini_api_key, ''), COALESCE(openai_api_key, ''), COALESCE(anthropic_api_key, '') FROM settings WHERE id = 1",
+		).Scan(&geminiKey, &openaiKey, &anthropicKey); sErr == nil {
+			if geminiKey != "" && !strings.HasPrefix(geminiKey, ciphertextPrefix) {
+				enc, encErr := EncryptKey(geminiKey)
+				if encErr != nil {
+					return encErr
+				}
+				if _, uErr := tx.Exec("UPDATE settings SET gemini_api_key = ? WHERE id = 1", enc); uErr != nil {
+					return uErr
+				}
+				slog.Info("[crypto] Migrated legacy settings.gemini_api_key to enc:v1: format")
+			}
+			if openaiKey != "" && !strings.HasPrefix(openaiKey, ciphertextPrefix) {
+				enc, encErr := EncryptKey(openaiKey)
+				if encErr != nil {
+					return encErr
+				}
+				if _, uErr := tx.Exec("UPDATE settings SET openai_api_key = ? WHERE id = 1", enc); uErr != nil {
+					return uErr
+				}
+				slog.Info("[crypto] Migrated legacy settings.openai_api_key to enc:v1: format")
+			}
+			if anthropicKey != "" && !strings.HasPrefix(anthropicKey, ciphertextPrefix) {
+				enc, encErr := EncryptKey(anthropicKey)
+				if encErr != nil {
+					return encErr
+				}
+				if _, uErr := tx.Exec("UPDATE settings SET anthropic_api_key = ? WHERE id = 1", enc); uErr != nil {
+					return uErr
+				}
+				slog.Info("[crypto] Migrated legacy settings.anthropic_api_key to enc:v1: format")
+			}
 		}
-		if _, err := db.DB.Exec("UPDATE settings SET gemini_api_key = ? WHERE id = 1", enc); err != nil {
-			return err
-		}
-		slog.Info("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format")
 	}
-	return nil
+
+	if sqlTableExists(tx, "users") {
+		type userTotpRow struct {
+			id     int
+			secret string
+		}
+		var pending []userTotpRow
+		rows, qErr := tx.Query("SELECT id, COALESCE(totp_secret, '') FROM users WHERE COALESCE(totp_secret, '') != ''")
+		if qErr != nil {
+			return qErr
+		}
+		for rows.Next() {
+			var r userTotpRow
+			if sErr := rows.Scan(&r.id, &r.secret); sErr != nil {
+				_ = rows.Close()
+				return sErr
+			}
+			if r.secret != "" && !strings.HasPrefix(r.secret, ciphertextPrefix) {
+				pending = append(pending, r)
+			}
+		}
+		if rErr := rows.Err(); rErr != nil {
+			_ = rows.Close()
+			return rErr
+		}
+		_ = rows.Close()
+		for _, r := range pending {
+			enc, encErr := EncryptKey(r.secret)
+			if encErr != nil {
+				return encErr
+			}
+			if _, uErr := tx.Exec("UPDATE users SET totp_secret = ? WHERE id = ?", enc, r.id); uErr != nil {
+				return uErr
+			}
+			slog.Info("[crypto] Migrated legacy users.totp_secret to enc:v1: format", "user_id", r.id)
+		}
+	}
+
+	if sqlTableExists(tx, "streaming_servers") {
+		type srvRow struct {
+			id  int
+			key string
+		}
+		var pending []srvRow
+		rows, qErr := tx.Query("SELECT id, COALESCE(api_key, '') FROM streaming_servers WHERE COALESCE(api_key, '') != ''")
+		if qErr != nil {
+			return qErr
+		}
+		for rows.Next() {
+			var r srvRow
+			if sErr := rows.Scan(&r.id, &r.key); sErr != nil {
+				_ = rows.Close()
+				return sErr
+			}
+			if r.key != "" && !strings.HasPrefix(r.key, ciphertextPrefix) {
+				pending = append(pending, r)
+			}
+		}
+		if rErr := rows.Err(); rErr != nil {
+			_ = rows.Close()
+			return rErr
+		}
+		_ = rows.Close()
+		for _, r := range pending {
+			enc, encErr := EncryptKey(r.key)
+			if encErr != nil {
+				return encErr
+			}
+			if _, uErr := tx.Exec("UPDATE streaming_servers SET api_key = ? WHERE id = ?", enc, r.id); uErr != nil {
+				return uErr
+			}
+			slog.Info("[crypto] Migrated legacy streaming_servers.api_key to enc:v1: format", "server_id", r.id)
+		}
+	}
+
+	return tx.Commit()
 }
