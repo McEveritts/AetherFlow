@@ -505,6 +505,28 @@ describe('ServicesTab Loopback, Protocol, Update, Component & Control Contracts'
         expect(screen.getByText(new RegExp(unit.replaceAll('.', '\\.') + '.*down'))).toBeInTheDocument();
     });
 
+    it.each(['idle', 'failed'])('reports a Recyclarr oneshot in state %s accurately', (status) => {
+        mockServicesPayload = {
+            Recyclarr: {
+                id: 'recyclarr', process: 'recyclarr.timer', status: status === 'failed' ? 'degraded' : 'running',
+                version: '8.8.1', uptime: '1d', managed_by: 'systemd', default_port: 0,
+                components: [
+                    { unit: 'recyclarr', role: 'oneshot', status, configured: true },
+                    { unit: 'recyclarr.timer', role: 'timer', status: 'running', configured: true },
+                ],
+            },
+        };
+        render(<ServicesTab />);
+        if (status === 'idle') {
+            expect(screen.queryByText(/Degraded \(/i)).not.toBeInTheDocument();
+            expect(screen.queryByText('degraded')).not.toBeInTheDocument();
+            expect(screen.queryByText(/recyclarr down/i)).not.toBeInTheDocument();
+        } else {
+            expect(screen.getByText('degraded')).toBeInTheDocument();
+            expect(screen.getByText(/recyclarr down/i)).toBeInTheDocument();
+        }
+    });
+
     it('shows degraded required-component status distinctly while exempting idle timers, oneshots, and unconfigured optional mounts, and passes all units to ServiceLogsModal', () => {
         mockServicesPayload = {
             Deluge: {

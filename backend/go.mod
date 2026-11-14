@@ -1,6 +1,6 @@
 module aetherflow
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/gin-contrib/cors v1.7.6

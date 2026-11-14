@@ -3442,17 +3442,10 @@ pub fn remove_hosts_file_at_path(hosts_path: &Path, domains: &[String]) -> anyho
 
 fn resolve_hosts_lock_path(hosts_path: &Path) -> PathBuf {
     if hosts_path == Path::new("/etc/hosts") {
-        let var_lock = Path::new("/var/lock");
-        if var_lock.is_dir() {
-            var_lock.join("aetherflow-hosts.lock")
-        } else {
-            let run_lock = Path::new("/run/lock");
-            if run_lock.is_dir() {
-                run_lock.join("aetherflow-hosts.lock")
-            } else {
-                hosts_path.with_extension("lock")
-            }
-        }
+        // A shared sticky /var/lock may contain a user-owned legacy lock.
+        // Linux protected_regular rejects O_CREAT on that file even for root.
+        // Use the runner's protected runtime directory and verified lock opener.
+        PathBuf::from("/run/aetherflow/hosts.lock")
     } else {
         hosts_path.with_extension("lock")
     }
@@ -3502,25 +3495,9 @@ pub fn modify_hosts_file_at_path(
         }
         HostsModifyAction::Remove => None,
     };
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|e| anyhow::anyhow!("failed to open hosts lockfile {}: {}", lock_path.display(), e))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(anyhow::anyhow!(
-                "failed to acquire exclusive lock on {}: {}",
-                lock_path.display(),
-                std::io::Error::last_os_error()
-            ).into());
-        }
-    }
+    let hosts_lock = af_host::HostMaintenanceLockGuard::acquire(
+        lock_path, std::time::Duration::from_secs(10),
+    ).map_err(|e| anyhow::anyhow!("failed to acquire hosts lock {}: {}", lock_path.display(), e))?;
 
     let existing = match fs::read_to_string(hosts_path) {
         Ok(s) => s,
@@ -3677,6 +3654,7 @@ pub fn modify_hosts_file_at_path(
         out.push('\n');
     }
 
+    hosts_lock.verify_still_active().map_err(anyhow::Error::from)?;
     write_hosts_file_atomically(hosts_path, &out).map_err(RunnerError::from)
 }
 
@@ -8365,6 +8343,29 @@ mod tests {
         assert!(is_exempt_sandbox_unit("wg-quick@wg0.service"));
         assert!(is_exempt_sandbox_unit("wireguard.service"));
         assert!(!is_exempt_sandbox_unit("sonarr.service"));
+    }
+
+    #[test]
+    fn production_hosts_lock_uses_protected_runtime_directory() {
+        assert_eq!(resolve_hosts_lock_path(Path::new("/etc/hosts")), Path::new("/run/aetherflow/hosts.lock"));
+        assert_eq!(resolve_hosts_lock_path(Path::new("/tmp/fixture/hosts")), Path::new("/tmp/fixture/hosts.lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosts_reconciliation_rejects_a_symlink_lock_without_changing_hosts() {
+        let scratch_dir = env::temp_dir().join(format!("af-hosts-lock-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        let lock_file = scratch_dir.join("hosts.lock");
+        let unrelated_file = scratch_dir.join("unrelated");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        fs::write(&unrelated_file, "preserve me").unwrap();
+        std::os::unix::fs::symlink(&unrelated_file, &lock_file).unwrap();
+        assert!(reconcile_hosts_file_at_path(&hosts_file, &lock_file, &["app.aether.local".into()], "127.0.0.1").is_err());
+        assert_eq!(fs::read_to_string(&hosts_file).unwrap(), "127.0.0.1 localhost\n");
+        assert_eq!(fs::read_to_string(&unrelated_file).unwrap(), "preserve me");
+        fs::remove_dir_all(&scratch_dir).unwrap();
     }
 
     #[test]

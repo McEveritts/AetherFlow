@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import hashlib
 import io
 import os
@@ -293,7 +294,7 @@ os.execvp(inner[0], inner)
         owner = str(uuid.uuid4())
         owners = database.with_suffix(".lifecycle-owners")
         owners.mkdir()
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE package_lifecycle_jobs(package_id TEXT,job_id TEXT,action TEXT,status TEXT,started_at TEXT,finished_at TEXT,owner_id TEXT)")
             connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('fixture','job','update','updating','now','',?)", (owner,))
@@ -305,7 +306,7 @@ os.execvp(inner[0], inner)
         self.assertFalse((self.releases / ".release.lock").exists())
         recovered = self.run_manager("cleanup")
         self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM package_lifecycle_jobs").fetchone()[0], "interrupted")
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX advisory locks")
@@ -647,13 +648,12 @@ os.execvp(inner[0], inner)
         import sqlite3
         import sys
         database = self.data / "lifecycle.sqlite"
-        connection = sqlite3.connect(database)
-        connection.execute("CREATE TABLE package_lifecycle_jobs (status TEXT)")
-        connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('completed')")
-        connection.commit()
-        root_page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='package_lifecycle_jobs'").fetchone()[0]
-        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
-        connection.close()
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("CREATE TABLE package_lifecycle_jobs (status TEXT)")
+            connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('completed')")
+            connection.commit()
+            root_page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='package_lifecycle_jobs'").fetchone()[0]
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
         content = bytearray(database.read_bytes())
         content[(root_page - 1) * page_size] = 255
         database.write_bytes(content)

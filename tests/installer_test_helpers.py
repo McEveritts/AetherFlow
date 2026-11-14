@@ -13,7 +13,7 @@ def common_functions(*names):
     if 'begin_state_transaction' in names:
         names = tuple(dict.fromkeys((*names, 'installed_apt_package_version', 'apt_reinstall_marker_path',
                                      'record_apt_package_for_rollback', 'prepare_apt_package_transaction',
-                                     'apt-get', 'rollback_apt_packages', 'clear_apt_reinstall_markers', 'write_config_file')))
+                                     'apt-get', 'rollback_apt_packages', 'clear_apt_reinstall_markers', 'write_config_file', 'check_disk_space')))
     if 'stop_systemd_unit' in names:
         names = tuple(dict.fromkeys((*names, 'quiesce_services_for_rollback', 'retained_bind_address')))
     source = (ROOT / "packages/common.sh").read_text()

@@ -29,7 +29,6 @@ af-hardware = { path = "crates/af-hardware", version = "=4.0.0" }
 af-runner = { path = "crates/af-runner", version = "=4.0.0" }
 af-release = { path = "crates/af-release", version = "=4.0.0" }
 af-host = { path = "crates/af-host", version = "=4.0.0" }
-af-cli = { path = "crates/af-cli", version = "=4.0.0" }
 af-services = { path = "crates/af-services", version = "=4.0.0" }
 
 tokio = { version = "1.43", features = ["full"] }
@@ -86,8 +85,6 @@ lz4_flex = "0.14.0"
 snap = "1.1.1"
 brotli = "8.0.2"
 zstd = { version = "0.13.3", default-features = false }
-prost = "0.13"
-tonic = { version = "0.12", features = ["tls"] }
 rsa = "0.10"
 
 [profile.release]

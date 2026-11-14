@@ -50,6 +50,7 @@ describe('FileshareTab Chunked Upload Contract', () => {
         expect(identity).toHaveClass('break-words', '[overflow-wrap:anywhere]');
         expect(identity).toHaveAttribute('title', filename);
         expect(identity).not.toHaveClass('truncate');
+        expect(screen.getByText('5 MiB Chunk Streaming · 50 MiB Max')).toBeInTheDocument();
     });
 
     it('splits multi-chunk uploads into 5 MiB chunks with a stable 32-hex X-Upload-ID and exact chunk headers', async () => {

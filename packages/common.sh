@@ -17,7 +17,7 @@ timestamp() {
 }
 
 log() {
-    printf '[%s] %s\n' "$(timestamp)" "$*" >>"$LOGFILE"
+    printf '[%s] %s\n' "$(timestamp)" "$*" >>"${LOGFILE:-/dev/null}"
 }
 
 log_info() {
@@ -128,7 +128,7 @@ install_npm_app() (
     trap 'exit 143' TERM
     # mktemp creates a private directory; the service user must traverse it.
     chmod 755 "$staged"
-    node_build npm install --prefix "$staged" --no-audit --no-fund "$package" >> "$LOGFILE" 2>&1 || return $?
+    node_build npm install --prefix "$staged" --no-audit --no-fund "$package" >>"${LOGFILE:-/dev/null}" 2>&1 || return $?
     if [[ ! -x "$staged/node_modules/.bin/$bin_name" ]]; then
         print_error "npm package $package did not provide executable $bin_name"
         return 1
@@ -438,9 +438,9 @@ rollback_apt_packages() {
         AF_APT_ROLLBACK_MUTATED=true
         reconciled=true
         if [[ "$previous" == '<none>' ]]; then
-            DEBIAN_FRONTEND=noninteractive command apt-get remove -y --no-auto-remove "$package" >> "$LOGFILE" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive command apt-get remove -y --no-auto-remove "$package" >>"${LOGFILE:-/dev/null}" 2>&1 || reconciled=false
         else
-            DEBIAN_FRONTEND=noninteractive command apt-get install -y --allow-downgrades --reinstall "$package=$previous" >> "$LOGFILE" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive command apt-get install -y --allow-downgrades --reinstall "$package=$previous" >>"${LOGFILE:-/dev/null}" 2>&1 || reconciled=false
         fi
         installed="$(installed_apt_package_version "$package")"
         if [[ "$reconciled" != true || "$installed" != "$previous" ]]; then
@@ -468,9 +468,9 @@ install_deb_verified() {
     local archive="$1" package="$2" expected="${3:-}"
     [[ -n "$expected" ]] || expected="$(dpkg-deb -f "$archive" Version)" || return 1
     [[ -n "$expected" ]] || return 1
-    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >> "$LOGFILE" 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1 || return 1
-        DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >> "$LOGFILE" 2>&1 || return 1
+    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >>"${LOGFILE:-/dev/null}" 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >>"${LOGFILE:-/dev/null}" 2>&1 || return 1
+        DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >>"${LOGFILE:-/dev/null}" 2>&1 || return 1
     fi
     verify_deb_installed "$package" "$expected"
 }
@@ -661,11 +661,11 @@ cleanup_state_transaction() {
                     fi
                 fi
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            systemctl daemon-reload >>"${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$AF_STATE_WAS_ACTIVE" == true && ( "$AF_STATE_SNAPSHOT_READY" != true || "${AF_STATE_RESTART_ON_ROLLBACK:-false}" == true ) ]]; then
             for unit in "${AF_STATE_PREVIOUS_UNITS[@]}"; do
-                systemctl start "$unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+                systemctl start "$unit" >>"${LOGFILE:-/dev/null}" 2>&1 || restore_failed=true
             done
         fi
     fi
@@ -1548,7 +1548,7 @@ restore_configured_database() (
     case "$backend" in
         mysql|mariadb)
             configured_database_connection "$backend" "$host" "$username" || return 1
-            MYSQL_PWD="$password" mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql" >> "$LOGFILE" 2>&1
+            MYSQL_PWD="$password" mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql" >>"${LOGFILE:-/dev/null}" 2>&1
             ;;
         postgres|pgsql)
             configured_database_connection "$backend" "$host" "$username" || return 1
@@ -1588,10 +1588,10 @@ restore_postgresql_database() {
     local backup="$1" database="$2" restored=true database_file relative
     [[ -f "$backup/.af-database-ready" ]] || return 0
     [[ "$database" =~ ^[a-z_][a-z0-9_-]*$ && ! -L "$backup" && ! -L "$backup/.af-database-ready" && ! -L "$backup/$database.sql" && "$(cat "$backup/.af-database-ready")" == "$database" ]] || return 1
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" >> "$LOGFILE" 2>&1 <<'SQL' || restored=false
+    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" >>"${LOGFILE:-/dev/null}" 2>&1 <<'SQL' || restored=false
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'database' AND pid <> pg_backend_pid();
 SQL
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" >> "$LOGFILE" 2>&1 || restored=false
+    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
     if [[ -n "${AETHERFLOW_INSTALL_ROOT:-}" && /var/lib/postgresql == "${AETHERFLOW_INSTALL_ROOT%/}/"* && -d "$backup/postgresql-database" ]]; then
         [[ ! -L "$backup/postgresql-database" && ! -L /var/lib/postgresql ]] || return 1
         while IFS= read -r -d '' database_file; do
@@ -1939,18 +1939,18 @@ rollback_app_archive_update() {
         if [[ -e "$AF_ARCHIVE_BACKUP/unit" ]]; then
             safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/unit" "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         else
-            systemctl disable -- "$AF_ARCHIVE_UNIT" >> "$LOGFILE" 2>&1 || restored=false
+            systemctl disable -- "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
             rm -f -- "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restored=false
+        systemctl daemon-reload >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
     fi
     if [[ "$restored" == true ]]; then
         for entry in "${AF_ARCHIVE_ROLLBACK_RESTART_UNITS[@]}"; do
-            systemctl restart "$entry" >> "$LOGFILE" 2>&1 || restored=false
+            systemctl restart "$entry" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
         done
     fi
     if [[ "$restored" == true && "${AF_ARCHIVE_STOPPED:-false}" == true && "${AF_ARCHIVE_PREVIOUS:-false}" == true ]]; then
-        systemctl restart "$AF_ARCHIVE_UNIT" >> "$LOGFILE" 2>&1 || restored=false
+        systemctl restart "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
     fi
     rm -f -- "${AF_ARCHIVE_ARCHIVE:-}"
     rm -rf -- "${AF_ARCHIVE_BACKUP:-}/release"
@@ -2143,7 +2143,7 @@ fetch_and_run() {
         return 1
     fi
     log_info "Checksum validation passed."
-    echo "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" >> "$LOGFILE" 2>/dev/null || true
+    echo "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" >>"${LOGFILE:-/dev/null}" 2>/dev/null || true
 
     if ! bash "$tmp_script" "$@"; then
         print_error "Script execution failed for $url"
@@ -3916,14 +3916,14 @@ ensure_node() {
     # Native addons and Git prepare scripts need these on already-provisioned
     # Node hosts too, not just when Node itself is first installed.
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates git build-essential python3 python3-setuptools pkg-config >> "$LOGFILE" 2>&1
+        ca-certificates git build-essential python3 python3-setuptools pkg-config >>"${LOGFILE:-/dev/null}" 2>&1
     if command_exists node; then
         have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
     fi
     if [[ "${have_major:-0}" -lt "$want_major" ]]; then
         local nodesource_sha256="${AF_NODESOURCE_BOOTSTRAP_SHA256:-2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be}"
         fetch_and_run "https://deb.nodesource.com/setup_${want_major}.x" "$nodesource_sha256" || return 1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >> "$LOGFILE" 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >>"${LOGFILE:-/dev/null}" 2>&1
     fi
     sync_node_global_bins
 }
@@ -3940,7 +3940,8 @@ systemd_unit_inactive() {
         esac
     done <<< "$state"
     case "$active_state" in
-        inactive|failed) [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1 ;;
+        inactive) [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1 ;;
+        failed) [[ "$main_pid" == 0 ]] || return 1 ;;
         *) return 1 ;;
     esac
     [[ "$load_state" == loaded || "$load_state" == masked || "$load_state" == not-found ]] || return 1
@@ -4345,7 +4346,7 @@ seed_servarr_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" python3 - "$app" "$port" "$api_ver" "$cfg_xml" >> "$LOGFILE" 2>&1 <<'PYEOF'
+    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" python3 - "$app" "$port" "$api_ver" "$cfg_xml" >>"${LOGFILE:-/dev/null}" 2>&1 <<'PYEOF'
 import sys, os, re, time, json, urllib.request
 
 app, port, api_ver, cfg_xml = sys.argv[1:]
@@ -4420,7 +4421,7 @@ seed_jellyfin_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" python3 - "$port" >> "$LOGFILE" 2>&1 <<'PYEOF'
+    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" python3 - "$port" >>"${LOGFILE:-/dev/null}" 2>&1 <<'PYEOF'
 import os, sys, time, json, urllib.request
 
 port = sys.argv[1]

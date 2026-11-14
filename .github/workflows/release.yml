@@ -31,14 +31,14 @@ jobs:
         working-directory: backend-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Secret Scan (Gitleaks Gate)
         working-directory: .
         run: |
-          GITLEAKS_VERSION="8.24.2"
+          GITLEAKS_VERSION="8.30.1"
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks dir . --verbose --redact
 
@@ -104,7 +104,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -149,12 +149,12 @@ jobs:
 
       - name: Secret Scan (Gitleaks Gate)
         run: |
-          GITLEAKS_VERSION="8.24.2"
+          GITLEAKS_VERSION="8.30.1"
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks dir . --verbose --redact
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24.22.2"
           cache: npm
@@ -243,7 +243,7 @@ jobs:
           (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             release-dist/aetherflow-linux-amd64.tar.gz

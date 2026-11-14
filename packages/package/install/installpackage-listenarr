@@ -66,11 +66,12 @@ fi
 RELEASES_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
 
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" '
-        .[] | select((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) |
-        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
-    ' | head -n1 || true)"
-    if [[ -z "$MATCH_LINE" ]]; then
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) else (if ((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then .tag_name else empty end) end' || true)"
+    ASSET_URL=""
+    if [[ -n "$LATEST_TAG" ]]; then
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(.tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) end' || true)"
+    fi
+    if [[ -z "$LATEST_TAG" || -z "$ASSET_URL" ]]; then
         TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
         TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         if [[ -z "$TAG_RELEASE_JSON" && ! "$TARGET_TAG_LOOKUP" =~ ^v ]]; then
@@ -78,20 +79,16 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
             TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         fi
         if [[ -n "$TAG_RELEASE_JSON" ]]; then
-            MATCH_LINE="$(echo "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
-                "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url // empty)"
-            ' || true)"
+            LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
+            ASSET_URL="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '[.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty' || true)"
         fi
     fi
-    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
-    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
 else
-    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
-        .[] | select(any(.assets[]?; .name | endswith($arch))) |
-        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
-    ' | sort -V -k1,1 | tail -n1 || true)"
-    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
-    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(any(.assets[]?; .name | endswith($arch))) | .tag_name][]) else (.tag_name // empty) end' | sort -V | tail -n1 || true)"
+    ASSET_URL=""
+    if [[ -n "$LATEST_TAG" ]]; then
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(.tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) end' || true)"
+    fi
 fi
 
 if [[ -z "${LATEST_TAG}" ]]; then

@@ -471,7 +471,14 @@ elif command == "su":
 elif command == "systemctl":
     units = [arg for arg in args[1:] if arg.endswith(".service")]
     if args[0] == "is-active":
-        sys.exit(0 if (root / ("active-" + units[0])).exists() else 3)
+        is_up = (root / ("active-" + units[0])).exists()
+        if "--quiet" not in args:
+            print("active" if is_up else "inactive")
+        sys.exit(0 if is_up else 3)
+    elif args[0] == "show":
+        is_up = (root / ("active-" + units[0])).exists()
+        print(f"LoadState=loaded\nActiveState={'active' if is_up else 'inactive'}\nMainPID={1234 if is_up else 0}\nUnitFileState={'enabled' if is_up else 'disabled'}")
+        sys.exit(0)
     elif args[0] == "stop":
         for unit in units:
             (root / ("active-" + unit)).unlink(missing_ok=True)

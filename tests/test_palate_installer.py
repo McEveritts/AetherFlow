@@ -79,7 +79,14 @@ elif command == 'systemctl':
     if 'af-palate.service' in args:
         running = root / 'running'
         if args[0] == 'is-active':
-            sys.exit(0 if running.exists() else 3)
+            is_up = running.exists()
+            if '--quiet' not in args:
+                print('active' if is_up else 'inactive')
+            sys.exit(0 if is_up else 3)
+        elif args[0] == 'show':
+            is_up = running.exists()
+            print(f"LoadState=loaded\nActiveState={'active' if is_up else 'inactive'}\nMainPID={1234 if is_up else 0}\nUnitFileState={'enabled' if is_up else 'disabled'}")
+            sys.exit(0)
         elif args[0] == 'stop':
             running.unlink(missing_ok=True)
         elif args[0] in ('restart', 'start'):

@@ -71,7 +71,6 @@ else
 fi
 
 queue_app_version /opt/Readarr/.af-version "${READARR_VERSION#v}"
-printf '%s\n' "${READARR_VERSION#v}" > /opt/Readarr/.af-version 2>/dev/null || true
 set_config_value "/var/lib/readarr/config.xml" xml "Port" "$APP_PORT" "Config"
 
 chown -hRP readarr:readarr /opt/Readarr /var/lib/readarr

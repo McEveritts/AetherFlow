@@ -2,6 +2,7 @@
 
 Django, pip, systemd, and authentication calls are mocked, not vendor execution.
 """
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -13,13 +14,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_marketplace_servarr import ArchiveFixture, HOST_COMMAND
 
-MANAGE = '''import os, pathlib, sqlite3, sys
+MANAGE = '''import contextlib, os, pathlib, sqlite3, sys
 root = pathlib.Path(os.environ['TEST_ROOT'])
 assert os.environ['DJANGO_SETTINGS_MODULE'] == 'af_settings'
 if sys.argv[1] == 'migrate':
     database = root / 'var/lib/seedcross/db/db.sqlite3'
     assert database.parent.is_dir()
-    with sqlite3.connect(database) as connection:
+    with contextlib.closing(sqlite3.connect(database)) as connection, connection:
         connection.execute('CREATE TABLE IF NOT EXISTS fixture_migration (value TEXT)')
         connection.execute("INSERT INTO fixture_migration VALUES ('migration ran')")
     if os.environ.get('FAIL_STAGE') == 'migration': raise SystemExit(75)
@@ -83,7 +84,7 @@ elif command == 'getent':''')
     def legacy(self):
         database = self.root / 'opt/seedcross/db/db.sqlite3'
         database.parent.mkdir(parents=True)
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
             connection.execute('CREATE TABLE operator_history (value TEXT)')
             connection.execute("INSERT INTO operator_history VALUES ('retain cross-seed history')")
         self.file('opt/seedcross/manage.py', 'old source')
@@ -99,7 +100,7 @@ elif command == 'getent':''')
         return database
 
     def history(self, database):
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection:
             return connection.execute('SELECT value FROM operator_history').fetchone()[0]
 
     def test_real_legacy_sqlite_survives_default_removal_and_retained_reinstall(self):

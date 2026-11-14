@@ -19,6 +19,7 @@ check_disk_space "${AF_JOB_SCRATCH_DIR}" 512
 check_disk_space "/opt" 512
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}" # Fallback when test harnesses enter past preflight.
 validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password /etc/kasmvnc/kasmvnc.crt /etc/kasmvnc/kasmvnc.key /etc/kasmvnc/kasmvnc.yaml
 export LOGFILE="/var/log/aetherflow/install-kasmvnc.log"
 APP_PORT="${AF_APP_PORT:-6081}"
@@ -46,14 +47,15 @@ begin_state_transaction "af-kasmvnc.service" "0" "/" "/var/lib/kasmvnc" "/etc/ka
 cleanup_kasmvnc() {
     local rc="$?"
     local status="$rc"
+    set +e
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
-    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
-        af_cleanup_job_scratch "$rc"
-    fi
     cleanup_state_transaction "$status" return
     status=$?
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$KASMVNC_WAS_ENABLED" != true ]]; then
         systemctl disable af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
+    fi
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
     fi
     exit "$status"
 }
@@ -103,6 +105,10 @@ verify_deb_installed kasmvncserver "$KASMVNC_DEB_VERSION"
 if ! id -u af-kasmvnc >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-kasmvnc
 fi
+if [[ -L "$DATA_DIR" || -L "${DATA_DIR}/.vnc" ]]; then
+    print_error "Refusing symlinked KasmVNC state directory"
+    exit 1
+fi
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "$DATA_DIR"
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "${DATA_DIR}/.vnc"
 install -d -m 755 "$CONFIG_DIR"
@@ -123,14 +129,19 @@ chmod 600 "${DATA_DIR}/.kasmpasswd"
 chown af-kasmvnc:af-kasmvnc "${DATA_DIR}/.kasmpasswd"
 TLS_CERT="/etc/kasmvnc/kasmvnc.crt"
 TLS_KEY="/etc/kasmvnc/kasmvnc.key"
-validate_config_paths "$TLS_CERT" "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-cert.pem" "${DATA_DIR}/.vnc/aetherflow-key.pem"
+VNC_TLS_CERT="${DATA_DIR}/.vnc/aetherflow-cert.pem"
+VNC_TLS_KEY="${DATA_DIR}/.vnc/aetherflow-key.pem"
+if [[ -L "$VNC_TLS_CERT" ]]; then rm -f -- "$VNC_TLS_CERT"; fi
+if [[ -L "$VNC_TLS_KEY" ]]; then rm -f -- "$VNC_TLS_KEY"; fi
+validate_config_paths "$TLS_CERT" "$TLS_KEY" "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 if [[ ! -s "$TLS_CERT" || ! -s "$TLS_KEY" ]]; then
     (umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$TLS_KEY" -out "$TLS_CERT") >> "$LOGFILE" 2>&1
 fi
 chmod 0600 "$TLS_KEY" "$TLS_CERT"
 chown af-kasmvnc:af-kasmvnc "$TLS_KEY" "$TLS_CERT"
-ln -sf "$TLS_CERT" "${DATA_DIR}/.vnc/aetherflow-cert.pem"
-ln -sf "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-key.pem"
+install -m 0600 "$TLS_CERT" "$VNC_TLS_CERT"
+install -m 0600 "$TLS_KEY" "$VNC_TLS_KEY"
+chown af-kasmvnc:af-kasmvnc "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
     apt-get install --no-remove -y -qq python3-yaml >> "$LOGFILE" 2>&1 || true
@@ -138,7 +149,7 @@ fi
 
 for cfg_yaml in "/etc/kasmvnc/kasmvnc.yaml" "${DATA_DIR}/.vnc/kasmvnc.yaml"; do
     validate_config_paths "$cfg_yaml"
-    python3 - "$cfg_yaml" "$TLS_CERT" "$TLS_KEY" "$APP_PORT" <<'PYEOF'
+    python3 - "$cfg_yaml" "$VNC_TLS_CERT" "$VNC_TLS_KEY" "$APP_PORT" <<'PYEOF'
 import os, sys, tempfile
 try:
     import yaml
@@ -259,7 +270,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :20 -fg -interface 127.0.0.1 -cert ${TLS_CERT} -key ${TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/bin/vncserver :20 -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077

@@ -975,6 +975,56 @@ pub fn validate_github_releases_next_url(next_url: &str, github_api_base: &str, 
     repo_suffix.eq_ignore_ascii_case(&expected_repo_suffix)
 }
 
+const GITHUB_RELEASE_PAGE_SIZE: usize = 100;
+
+/// GitHub uses `/repositories/<id>/releases` in Link headers even when the
+/// request used `/repos/<owner>/<repo>/releases`. Only take pagination parameters
+/// from that alias: construct the next request against our configured repo,
+/// so an unverified numeric repository ID cannot change the release source.
+fn github_releases_next_request_url(
+    next_url: &str,
+    github_api_base: &str,
+    clean_repo: &str,
+) -> Option<String> {
+    if !validate_release_url_origin(next_url, github_api_base) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(next_url).ok()?;
+    let base = reqwest::Url::parse(github_api_base).ok()?;
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    let suffix = parsed.path().strip_prefix(base.path().trim_end_matches('/'))?;
+    let numeric_alias = suffix
+        .strip_prefix("/repositories/")
+        .and_then(|s| s.trim_end_matches('/').strip_suffix("/releases"))
+        .map(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or(false);
+    if !numeric_alias && !validate_github_releases_next_url(next_url, github_api_base, clean_repo) {
+        return None;
+    }
+    let pages: Vec<_> = parsed.query_pairs().filter(|(key, _)| key == "page").collect();
+    if pages.len() != 1 {
+        return None;
+    }
+    let page = pages[0].1.parse::<u32>().ok().filter(|page| *page > 0)?;
+    let sizes: Vec<_> = parsed.query_pairs().filter(|(key, _)| key == "per_page").collect();
+    let size = match sizes.as_slice() {
+        [] => GITHUB_RELEASE_PAGE_SIZE,
+        [(_, value)] => value.parse::<usize>().ok().filter(|size| (1..=100).contains(size))?,
+        _ => return None,
+    };
+    let mut request = reqwest::Url::parse(&format!(
+        "{}/repos/{}/releases",
+        github_api_base.trim_end_matches('/'),
+        clean_repo.trim_matches('/'),
+    )).ok()?;
+    request.query_pairs_mut()
+        .append_pair("per_page", &size.to_string())
+        .append_pair("page", &page.to_string());
+    Some(request.to_string())
+}
+
 fn extract_canonical_query_hash_suffix(raw: &str) -> (&str, Option<String>) {
     if let Some(idx) = raw.find("?q#") {
         if raw.len() >= idx + 15 {
@@ -1943,8 +1993,8 @@ async fn github_release_observation_follows_canonical_repository_redirect() {
             let length = socket.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..length]);
             let repository = if redirect { "davidnewhall/unpackerr" } else { "Unpackerr/unpackerr" };
-            let (target_path, is_matched) = if request.starts_with(&format!("GET /repos/{repository}/releases?per_page=30 ")) {
-                ("releases?per_page=30", true)
+            let (target_path, is_matched) = if request.starts_with(&format!("GET /repos/{repository}/releases?per_page=100 ")) {
+                ("releases?per_page=100", true)
             } else if request.starts_with(&format!("GET /repos/{repository}/releases/latest ")) {
                 ("releases/latest", true)
             } else {
@@ -2375,7 +2425,7 @@ async fn probe_live_git_version(pkg: &Package, budget: Duration) -> Option<Resul
 
             let run_rev_parse = |git_dir: PathBuf| async move {
                 let mut cmd = Command::new("git");
-                cmd.args(["--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
+                cmd.args(["-c", "safe.directory=*", "--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
                 let out = update_probe_output(cmd, budget).await?;
                 if !out.status.success() {
                     anyhow::bail!("git rev-parse HEAD failed in {}", git_dir.display());
@@ -2407,15 +2457,12 @@ async fn probe_live_git_version(pkg: &Package, budget: Duration) -> Option<Resul
         } else {
             None
         }
-    } else if pkg.update_source == "git"
-        || resolve_git_dir_for_probe(&format!("/opt/{}/source/.git", pkg.name)).is_some()
-        || resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name)).is_some()
-    {
+    } else if pkg.update_source.eq_ignore_ascii_case("git") {
         if let Some(git_dir) = resolve_git_dir_for_probe(&format!("/opt/{}/source/.git", pkg.name))
             .or_else(|| resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name)))
         {
             let mut cmd = Command::new("git");
-            cmd.args(["--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
+            cmd.args(["-c", "safe.directory=*", "--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
             match update_probe_output(cmd, budget).await {
                 Ok(out) if out.status.success() => {
                     let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -2847,6 +2894,33 @@ fn has_independent_runtime_evidence(pkg: &Package) -> bool {
     false
 }
 
+fn apt_receipt_matches_live_debian_revision(
+    update_source: &str,
+    receipt_ver: &str,
+    live_ver: &str,
+) -> bool {
+    if !matches!(
+        update_source.trim().to_ascii_lowercase().as_str(),
+        "apt" | "deb" | "dpkg"
+    ) {
+        return false;
+    }
+    let live_trimmed = live_ver.trim();
+    let without_epoch = match live_trimmed.split_once(':') {
+        Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) => {
+            rest
+        }
+        _ => live_trimmed,
+    };
+    let Some((live_upstream, deb_rev)) = without_epoch.rsplit_once('-') else {
+        return false;
+    };
+    !live_upstream.contains('~')
+        && af_release::lifecycle::is_valid_apt_debian_revision_suffix(deb_rev)
+        && (af_release::lifecycle::versions_match_target(receipt_ver, live_upstream)
+            || af_release::lifecycle::versions_match_target(live_upstream, receipt_ver))
+}
+
 pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Result<String> {
     let receipt_opt = read_af_version_receipt(pkg);
     let cmd_only_reads_af_ver = pkg
@@ -2889,6 +2963,11 @@ pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Re
         (Some(Ok(live_ver)), Some(receipt_ver)) => {
             if !af_release::lifecycle::versions_match_target(&receipt_ver, &live_ver)
                 && !af_release::lifecycle::versions_match_target(&live_ver, &receipt_ver)
+                && !apt_receipt_matches_live_debian_revision(
+                    &pkg.update_source,
+                    &receipt_ver,
+                    &live_ver,
+                )
             {
                 anyhow::bail!(
                     "Stale or mismatched .af-version receipt ({receipt_ver}) vs live runtime ({live_ver})"
@@ -3635,7 +3714,7 @@ pub async fn detect_latest_github_release_for_channel(
 
     let is_stable = effective_channel == "stable";
     let mut all_releases: Vec<GitHubReleaseResponse> = Vec::new();
-    let mut current_url = format!("{}/repos/{}/releases?per_page=30", github_api_base.trim_end_matches('/'), clean_repo);
+    let mut current_url = format!("{}/repos/{}/releases?per_page={GITHUB_RELEASE_PAGE_SIZE}", github_api_base.trim_end_matches('/'), clean_repo);
     let mut page_count = 0;
     const MAX_RELEASE_PAGES: usize = 10;
 
@@ -3836,7 +3915,7 @@ pub async fn detect_latest_github_release_for_channel(
         all_releases.extend(page_releases);
 
         let next_from_link = link_hdr.as_deref().and_then(parse_github_link_next_url);
-        let has_another_page = next_from_link.is_some() || page_len >= 30;
+        let has_another_page = next_from_link.is_some() || page_len >= GITHUB_RELEASE_PAGE_SIZE;
         if page_count >= MAX_RELEASE_PAGES && has_another_page {
             anyhow::bail!(
                 "GitHub release pagination exceeded maximum page limit ({}) for '{}'; refusing to cache incomplete release set",
@@ -3846,8 +3925,8 @@ pub async fn detect_latest_github_release_for_channel(
         }
 
         if let Some(next_url) = next_from_link {
-            if validate_github_releases_next_url(&next_url, github_api_base, clean_repo) {
-                current_url = next_url;
+            if let Some(request_url) = github_releases_next_request_url(&next_url, github_api_base, clean_repo) {
+                current_url = request_url;
                 continue;
             }
             anyhow::bail!(
@@ -3857,9 +3936,9 @@ pub async fn detect_latest_github_release_for_channel(
             );
         }
 
-        if page_len >= 30 {
+        if page_len >= GITHUB_RELEASE_PAGE_SIZE {
             current_url = format!(
-                "{}/repos/{}/releases?per_page=30&page={}",
+                "{}/repos/{}/releases?per_page={GITHUB_RELEASE_PAGE_SIZE}&page={}",
                 github_api_base.trim_end_matches('/'),
                 clean_repo,
                 page_count + 1
@@ -7448,7 +7527,7 @@ signal.pause()'
                             "200 OK",
                             r#"{"tag_name":"v1.9.0","html_url":"http://mock/release/v1.9.0","prerelease":false,"draft":false}"#.to_string(),
                         )
-                    } else if req.contains("/releases?per_page=30") {
+                    } else if req.contains("/releases?per_page=100") {
                         (
                             "200 OK",
                             r#"[
@@ -7476,14 +7555,14 @@ signal.pause()'
         let origin = format!("http://{addr}");
         let repo = "owner/prerelease-discovery-repo";
 
-        // 1. Beta channel queries /releases?per_page=30, skips draft v3.0.0-draft, discovers v2.0.0-beta.1 over v1.9.0
+        // 1. Beta channel queries /releases?per_page=100, skips draft v3.0.0-draft, discovers v2.0.0-beta.1 over v1.9.0
         let res_beta = detect_latest_github_release_for_channel(&client, &origin, repo, "beta").await;
         assert!(res_beta.is_ok(), "Beta channel discovery failed: {:?}", res_beta.err());
         let (ver_beta, url_beta, _) = res_beta.unwrap();
         assert_eq!(ver_beta, "2.0.0-beta.1");
         assert_eq!(url_beta, "http://mock/release/v2.0.0-beta.1");
 
-        // 2. Nightly channel queries /releases?per_page=30, skips draft, discovers v2.0.0-beta.1 over v1.9.0
+        // 2. Nightly channel queries /releases?per_page=100, skips draft, discovers v2.0.0-beta.1 over v1.9.0
         let repo_nightly = "owner/prerelease-discovery-nightly";
         let res_nightly = detect_latest_github_release_for_channel(&client, &origin, repo_nightly, "nightly").await;
         assert!(res_nightly.is_ok(), "Nightly channel discovery failed: {:?}", res_nightly.err());
@@ -7930,6 +8009,78 @@ signal.pause()'
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    #[test]
+    fn github_numeric_release_links_keep_the_configured_repository() {
+        let base = "https://api.github.com";
+        assert_eq!(
+            github_releases_next_request_url(
+                "https://api.github.com/repositories/17803236/releases?per_page=30&page=2",
+                base,
+                "rclone/rclone",
+            ).as_deref(),
+            Some("https://api.github.com/repos/rclone/rclone/releases?per_page=30&page=2"),
+        );
+        assert_eq!(
+            github_releases_next_request_url(
+                "https://ghe.internal/api/v3/repositories/123/releases?page=3",
+                "https://ghe.internal/api/v3",
+                "org/repo",
+            ).as_deref(),
+            Some("https://ghe.internal/api/v3/repos/org/repo/releases?per_page=100&page=3"),
+        );
+        for url in [
+            "https://evil.example/repositories/17803236/releases?page=2",
+            "https://api.github.com/repos/other/repo/releases?page=2",
+            "https://api.github.com/repositories/17803236/issues?page=2",
+            "https://api.github.com/repositories/not-an-id/releases?page=2",
+            "https://api.github.com/repositories/17803236/releases?page=0",
+            "https://api.github.com/repositories/17803236/releases?page=2&page=3",
+            "https://api.github.com/repositories/17803236/releases?per_page=0&page=2",
+            "https://api.github.com/repositories/17803236/releases?per_page=101&page=2",
+            "https://api.github.com/repositories/17803236/releases?per_page=30&per_page=100&page=2",
+            "https://api.github.com/repositories/17803236/releases?page=2#fragment",
+            "https://user@api.github.com/repositories/17803236/releases?page=2",
+        ] {
+            assert!(github_releases_next_request_url(url, base, "rclone/rclone").is_none(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn github_numeric_release_pagination_observes_the_next_page() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for page in [1, 2] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let expected = if page == 1 {
+                    "GET /repos/owner/numeric-links/releases?per_page=100 HTTP/1.1".to_string()
+                } else {
+                    "GET /repos/owner/numeric-links/releases?per_page=100&page=2 HTTP/1.1".to_string()
+                };
+                assert!(request.starts_with(&expected), "{request}");
+                let body = format!(r#"[{{"tag_name":"v{page}.0.0","html_url":"https://github.com/owner/numeric-links/releases/tag/v{page}.0.0"}}]"#);
+                let link = if page == 1 {
+                    format!("Link: <http://{addr}/repositories/123/releases?per_page=100&page=2>; rel=\"next\"\r\n")
+                } else {
+                    String::new()
+                };
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let result = detect_latest_github_release_for_channel(
+            &build_github_http_client(), &format!("http://{addr}"), "owner/numeric-links", "stable",
+        ).await.unwrap();
+        assert_eq!(result.0, "2.0.0");
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_github_release_discovery_multi_page_pagination() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7950,7 +8101,7 @@ signal.pause()'
                     r#"[{"tag_name": "v2.1.0-beta.1", "html_url": "https://github.com/org/repo/releases/v2.1.0-beta.1", "prerelease": true, "draft": false}]"#.to_string()
                 } else {
                     let mut items = Vec::new();
-                    for i in 1..=30 {
+                    for i in 1..=GITHUB_RELEASE_PAGE_SIZE {
                         items.push(format!(
                             r#"{{"tag_name": "v1.9.{}", "html_url": "https://github.com/org/repo/releases/v1.9.{}", "prerelease": false, "draft": false}}"#,
                             i, i
@@ -7972,7 +8123,7 @@ signal.pause()'
         let origin = format!("http://{addr}");
 
         let res = detect_latest_github_release_for_channel(&client, &origin, "test-owner/multi-page-repo", "prerelease").await.unwrap();
-        assert_eq!(res.0, "2.1.0-beta.1", "Pagination must fetch page 2 and discover higher 2.1.0-beta.1 over page 1's v1.9.30");
+        assert_eq!(res.0, "2.1.0-beta.1", "Pagination must fetch page 2 and discover higher 2.1.0-beta.1 over page 1's v1.9.100");
 
         server.abort();
     }
@@ -8017,7 +8168,7 @@ signal.pause()'
                         "HTTP/1.1 200 OK",
                         r#"{"tag_name": "v1.9.4", "html_url": "https://github.com/org/repo/releases/v1.9.4", "prerelease": false, "draft": false}"#,
                     )
-                } else if req_str.contains("/releases?per_page=30") {
+                } else if req_str.contains("/releases?per_page=100") {
                     (
                         "HTTP/1.1 200 OK",
                         r#"[
@@ -8069,7 +8220,7 @@ signal.pause()'
                     ("HTTP/1.1 500 Internal Server Error", r#"{"message": "Server Error"}"#.to_string())
                 } else {
                     let mut items = Vec::new();
-                    for i in 1..=30 {
+                    for i in 1..=GITHUB_RELEASE_PAGE_SIZE {
                         items.push(format!(
                             r#"{{"tag_name": "v1.0.{}", "html_url": "https://github.com/org/repo/releases/v1.0.{}", "prerelease": false, "draft": false}}"#,
                             i, i
@@ -8219,14 +8370,14 @@ signal.pause()'
                 let _ = socket.read(&mut buf).await.unwrap_or(0);
 
                 let mut items = Vec::new();
-                for i in 1..=30 {
+                for i in 1..=GITHUB_RELEASE_PAGE_SIZE {
                     items.push(format!(
                         r#"{{"tag_name": "v1.0.{}", "html_url": "https://github.com/org/repo/releases/v1.0.{}", "prerelease": false, "draft": false}}"#,
                         i, i
                     ));
                 }
                 let body = format!("[{}]", items.join(","));
-                let next_link = format!("<http://{addr}/repos/test-owner/overflow-repo/releases?per_page=30&page=99>; rel=\"next\"");
+                let next_link = format!("<http://{addr}/repos/test-owner/overflow-repo/releases?per_page=100&page=99>; rel=\"next\"");
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nLink: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     next_link,
@@ -8359,29 +8510,29 @@ signal.pause()'
         let ghe_base = "https://ghe.internal/api/v3";
         // Same repo, same origin -> allowed
         assert!(validate_github_releases_next_url(
-            "https://api.github.com/repos/org/repo/releases?per_page=30&page=2",
+            "https://api.github.com/repos/org/repo/releases?per_page=100&page=2",
             api_base,
             "org/repo"
         ));
         assert!(validate_github_releases_next_url(
-            "https://ghe.internal/api/v3/repos/org/repo/releases?per_page=30&page=2",
+            "https://ghe.internal/api/v3/repos/org/repo/releases?per_page=100&page=2",
             ghe_base,
             "org/repo"
         ));
         // Cross-repository -> rejected
         assert!(!validate_github_releases_next_url(
-            "https://api.github.com/repos/attacker/evil/releases?per_page=30&page=2",
+            "https://api.github.com/repos/attacker/evil/releases?per_page=100&page=2",
             api_base,
             "org/repo"
         ));
         assert!(!validate_github_releases_next_url(
-            "https://ghe.internal/api/v3/repos/other/repo/releases?per_page=30&page=2",
+            "https://ghe.internal/api/v3/repos/other/repo/releases?per_page=100&page=2",
             ghe_base,
             "org/repo"
         ));
         // Off-origin -> rejected
         assert!(!validate_github_releases_next_url(
-            "https://evil.attacker.com/repos/org/repo/releases?per_page=30&page=2",
+            "https://evil.attacker.com/repos/org/repo/releases?per_page=100&page=2",
             api_base,
             "org/repo"
         ));
@@ -8570,6 +8721,92 @@ signal.pause()'
         assert_eq!(parse_synthetic_commit_version("1.0.0-1234567890123456789012345678901234567890"), None);
         assert_eq!(parse_synthetic_commit_version("1.0.0-1234567"), None);
         assert_eq!(parse_synthetic_commit_version("1.0.0-6e840ac"), Some(("1.0.0", "6e840ac")));
+    }
+
+    #[tokio::test]
+    async fn test_github_package_with_git_checkout_uses_version_command_not_git_head() {
+        let _env_guard = TEST_ENV_MUTEX.lock().await;
+        let temp_dir = std::env::temp_dir().join(format!("af-test-gh-git-{}", uuid::Uuid::new_v4()));
+        let opt_dir = temp_dir.join("opt/demo-gh");
+        std::fs::create_dir_all(&opt_dir).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&opt_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&opt_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&opt_dir)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(opt_dir.join(".af-version"), "1.4.2").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", ".af-version"])
+            .current_dir(&opt_dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&opt_dir)
+            .status()
+            .unwrap()
+            .success());
+
+        std::env::set_var("AETHERFLOW_FS_ROOT", &temp_dir);
+        let pkg = Package {
+            name: "demo-gh".into(),
+            update_source: "github".into(),
+            version_command: vec!["printf".into(), "%s".into(), "1.4.2".into()],
+            ..Default::default()
+        };
+        let res = probe_installed_package_version_strict(&pkg).await.unwrap();
+        assert_eq!(res, "1.4.2");
+
+        std::env::remove_var("AETHERFLOW_FS_ROOT");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_apt_receipt_matches_live_debian_revision() {
+        assert!(apt_receipt_matches_live_debian_revision(
+            "apt",
+            "1.9.1",
+            "1.9.1-2+deb13u1"
+        ));
+        assert!(apt_receipt_matches_live_debian_revision(
+            "apt",
+            "1.9.1",
+            "1:1.9.1-1+b1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "apt",
+            "1.9.1",
+            "1.9.2-1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "apt",
+            "1.9.1",
+            "1.9.1-rc1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "apt",
+            "1.9.1",
+            "1.9.1~rc1-1"
+        ));
+        assert!(!apt_receipt_matches_live_debian_revision(
+            "github",
+            "1.9.1",
+            "1.9.1-2+deb13u1"
+        ));
     }
 
 }

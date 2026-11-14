@@ -78,7 +78,7 @@ EOF
 if [[ -n "$SONARR_KEY" ]]; then
     cat <<EOF >> /var/lib/recyclarr/recyclarr.yml
 sonarr:
-  - name: sonarr
+  sonarr:
     base_url: http://127.0.0.1:8989
     api_key: "${SONARR_KEY}"
     delete_old_custom_formats: true
@@ -94,7 +94,7 @@ fi
 if [[ -n "$RADARR_KEY" ]]; then
     cat <<EOF >> /var/lib/recyclarr/recyclarr.yml
 radarr:
-  - name: radarr
+  radarr:
     base_url: http://127.0.0.1:7878
     api_key: "${RADARR_KEY}"
     delete_old_custom_formats: true
@@ -111,7 +111,7 @@ if [[ -z "$SONARR_KEY" && -z "$RADARR_KEY" ]]; then
     cat <<'EOF' >> /var/lib/recyclarr/recyclarr.yml
 # Example template (waiting for Sonarr or Radarr installation):
 # sonarr:
-#   - name: sonarr
+#   sonarr:
 #     base_url: http://127.0.0.1:8989
 #     api_key: YOUR_API_KEY
 EOF

@@ -1418,11 +1418,7 @@ pub fn is_debian_revision_suffix(suffix: &str) -> bool {
         || lower.contains(':');
 
     let is_numeric_dots = s.chars().all(|c| c.is_ascii_digit() || c == '.') && s.contains('.');
-    if is_numeric_dots && !has_debian_marker {
-        return false;
-    }
-
-    true
+    !is_numeric_dots || has_debian_marker
 }
 
 pub fn is_valid_apt_debian_revision_suffix(suffix: &str) -> bool {

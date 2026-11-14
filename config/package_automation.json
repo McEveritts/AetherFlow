@@ -97,7 +97,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Sonarr/Sonarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Sonarr/Sonarr.dll /opt/Sonarr/Sonarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Sonarr/Sonarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -131,7 +131,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Radarr/Radarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Radarr/Radarr.dll /opt/Radarr/Radarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Radarr/Radarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -165,7 +165,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Lidarr/Lidarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Lidarr/Lidarr.dll /opt/Lidarr/Lidarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Lidarr/Lidarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -200,7 +200,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Readarr/Readarr.dll /opt/Readarr/Readarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Readarr/Readarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -234,7 +234,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Prowlarr/Prowlarr.dll /opt/Prowlarr/Prowlarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -379,7 +379,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
+      "git -c safe.directory=* -C /opt/Tautulli describe --tags --exact-match 2>/dev/null || git -c safe.directory=* -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -c safe.directory=* -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -439,7 +439,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/flaresolverr/package.json 2>/dev/null | head -n1"
+      "jq -r '.version // empty' /opt/flaresolverr/package.json /opt/flaresolverr/_internal/package.json 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1442,7 +1442,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "/usr/local/bin/recyclarr --version 2>/dev/null"
+      "env -u RECYCLARR_APP_DATA HOME=/tmp /usr/local/bin/recyclarr --version 2>/dev/null"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1508,7 +1508,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Kavita/Kavita.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Kavita/Kavita.Common.dll 2>/dev/null; strings /opt/Kavita/Kavita.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | grep -Ev '^(0\\.0\\.0\\.0|1\\.0\\.0(\\.0)?)$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1543,7 +1543,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null || git -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
+      "PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -c safe.directory=* -C /opt/calibre-web describe --tags --exact-match 2>/dev/null || git -c safe.directory=* -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1576,9 +1576,8 @@
     "require_download_sha256": true,
     "update_repo": "librespeed/speedtest-go",
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/librespeed/speedtest-go --version 2>/dev/null"
+      "cat",
+      "/opt/librespeed/.af-version"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1634,7 +1633,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' znc 2>/dev/null"
+      "dpkg-query -W -f='${Version}' znc 2>/dev/null || znc --version 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1813,7 +1812,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
+      "python3 -c \"import pathlib,re; t=pathlib.Path('/opt/dispatcharr/version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\\x27\\\"]([^\\x27\\\"]+)', t).group(1))\" 2>/dev/null || git -c safe.directory=* -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -c safe.directory=* -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [

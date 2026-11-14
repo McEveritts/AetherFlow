@@ -299,10 +299,21 @@ elif command == "curl":
 elif command == "systemctl":
     action = arguments[0]
     if action == "show":
-        print("maintainerr")
+        if "-P" in arguments and "User" in arguments:
+            print("maintainerr")
+        else:
+            is_up = running.exists()
+            is_loaded = unit.exists() or is_up
+            print("LoadState=" + ("loaded" if is_loaded else "not-found"))
+            print("ActiveState=" + ("active" if is_up else "inactive"))
+            print("MainPID=" + ("1234" if is_up else "0"))
+            print("UnitFileState=" + ("enabled" if unit.exists() else "disabled"))
         sys.exit(0)
     elif action == "is-active":
-        sys.exit(0 if running.exists() else 3)
+        is_up = running.exists()
+        if "--quiet" not in arguments and "-q" not in arguments:
+            print("active" if is_up else "inactive")
+        sys.exit(0 if is_up else 3)
     elif action == "stop":
         if not unit.exists() and not running.exists():
             sys.exit(5)

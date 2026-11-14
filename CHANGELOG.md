@@ -1,3 +1,19 @@
+## Nightly Patch Notes — November 13, 2026 — Toolchain Hygiene, Probe Hardening & Installer Reliability
+
+### Toolchain, Dependencies & CI Actions
+
+* Bump `backend/go.mod` from Go `1.26.10` to `1.26.11` and remove unused workspace dependencies (`thiserror` in `af-db`, `anyhow` and `tracing` in `af-host`) from `backend-rs`.
+* Upgrade GitHub Actions across `ci.yml`, `release.yml`, `security.yml`, and `deploy-pages.yml` onto Node-24 compatible majors (`actions/checkout@v7`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `actions/setup-go@v7`, `actions/configure-pages@v6`, `actions/upload-pages-artifact@v5`, `actions/deploy-pages@v5`, `actions/attest-build-provenance@v4`) and bump `GITLEAKS_VERSION` to `8.30.1`.
+* Update `frontend/` dependencies (`next` `16.4.6`, `tailwindcss` `4.3.5`, `@types/react*` `19.3.0`, pinned `@playwright/test` `1.59.1`, and compatible runtime packages) with zero `npm audit` findings, and document changes in `docs/codebase-version-audit-2026-11-13.md`.
+
+### Service Version Probes, Installers & Frontend Polish
+
+* Restrict generic live git version probing in `af-services` to `git`-sourced packages with `-c safe.directory=*`, add `apt_receipt_matches_live_debian_revision` receipt reconciliation, and refresh `version_command` entries in `backend/config/package_automation.json` across 13 packages while keeping `piped` and `invidious` probes unchanged.
+* Require `MainPID == 0` for `failed` units in `systemd_unit_inactive`, guard `$LOGFILE` redirections with `${LOGFILE:-/dev/null}`, split `installpackage-listenarr` `jq` filters onto single lines, and harden `installpackage-kasmvnc` TLS credential copying, state-dir symlink checks, and rollback scratch cleanup ordering.
+* Clarify `FileshareTab` chunk-streaming messaging (`5 MiB Chunk Streaming · 50 MiB Max`) and clamp all four Recharts chart tooltips in `StreamingTab` inside viewbox and viewport bounds; resolve unclosed `sqlite3.connect` handles and align mock `systemctl` fixtures across the Python installer test suite.
+
+---
+
 ## Nightly Patch Notes — November 13, 2026 — Streaming Proxy Timeouts
 
 * Replace the subdomain proxy's 60-second total HTTP deadline with a 10-second connection timeout. Long-lived Jellyfin, media, and download response bodies can continue streaming beyond 60 seconds while connection setup remains bounded.

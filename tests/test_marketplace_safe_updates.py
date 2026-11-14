@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import hashlib
 import json
 import os
@@ -741,7 +742,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
     def test_calibreweb_existing_db_with_matching_port_succeeds(self):
         db_path = self.root / "var/lib/calibre-web/app.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(db_path)) as conn:
+        with contextlib.closing(sqlite3.connect(str(db_path))) as conn, conn:
             conn.execute("CREATE TABLE settings (config_port INTEGER);")
             conn.execute("INSERT INTO settings VALUES (17803);")
 

@@ -133,7 +133,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
         build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af")
-        attest_idx = build_job.index("actions/attest-build-provenance@v2")
+        attest_idx = build_job.index("actions/attest-build-provenance@v4")
         publish_idx = build_job.index("- name: Publish to GitHub Releases")
 
         self.assertLess(clippy_idx, test_idx)
@@ -193,7 +193,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
             line for line in workspace_manifest.splitlines()
             if re.match(r"^af-[a-z]+ = \{ path =", line)
         ]
-        self.assertEqual(len(local_dependencies), 9)
+        self.assertEqual(len(local_dependencies), 8)
         for dependency in local_dependencies:
             self.assertIn('version = "=4.0.0"', dependency)
 

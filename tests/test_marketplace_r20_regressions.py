@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,7 @@ class RetainedNavidromeTests(unittest.TestCase):
         for action in ('update', 'reinstall'):
             with self.subTest(action=action), InstallerFixture('navidrome') as fixture:
                 database = fixture.file('srv/navidrome-data/navidrome.db', '')
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection, connection:
                     connection.execute('CREATE TABLE operator_data (value TEXT)')
                     connection.execute("INSERT INTO operator_data VALUES ('retained')")
                 database.chmod(0o640)
@@ -63,7 +64,7 @@ class RetainedNavidromeTests(unittest.TestCase):
                 self.assertEqual([path.read_text() for path in sidecars], ['-wal', '-shm'])
                 for path in sidecars:
                     path.unlink()
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection:
                     self.assertEqual(connection.execute('SELECT value FROM operator_data').fetchone(), ('retained',))
                     self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone(), ('ok',))
                 self.assertEqual((fixture.root / 'opt/navidrome/.af-version').read_text(), '1.0.0\n')

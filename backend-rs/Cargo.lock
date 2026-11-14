@@ -148,7 +148,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -183,7 +182,6 @@ name = "af-host"
 version = "4.0.0"
 dependencies = [
  "af-models",
- "anyhow",
  "chrono",
  "flate2",
  "hex",
@@ -196,7 +194,6 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "thiserror 2.0.21",
- "tracing",
  "uuid",
 ]
 

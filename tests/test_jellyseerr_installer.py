@@ -65,7 +65,14 @@ elif command == "curl":
 elif command == "systemctl":
     action = arguments[0]
     if action == "is-active":
-        sys.exit(0 if running.exists() else 3)
+        is_up = running.exists()
+        if "--quiet" not in arguments:
+            print("active" if is_up else "inactive")
+        sys.exit(0 if is_up else 3)
+    elif action == "show":
+        is_up = running.exists()
+        print(f"LoadState=loaded\nActiveState={'active' if is_up else 'inactive'}\nMainPID={1234 if is_up else 0}\nUnitFileState={'enabled' if is_up else 'disabled'}")
+        sys.exit(0)
     elif action == "stop":
         running.unlink(missing_ok=True)
     elif action == "restart":
