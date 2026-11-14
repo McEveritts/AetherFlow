@@ -1516,6 +1516,7 @@ pub fn get_stored_emby_config_fail_closed() -> crate::streaming_emby::EmbyServer
     cfg
 }
 
+#[allow(clippy::result_large_err)]
 pub fn save_emby_server_configuration(
     name_raw: &str,
     url_raw: &str,
@@ -1856,6 +1857,7 @@ fn enrich_emby_sessions_with_observed_metrics(sessions: &mut [ActiveStreamSessio
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_target_session_provider(
     session_id: &str,
     explicit_provider: &str,
@@ -2223,16 +2225,15 @@ async fn fetch_jellyfin_live_sessions_for_server(
                         audio_bitrate = ms.bit_rate.max(0);
                     }
                 }
-                "Subtitle" => {
+                "Subtitle"
                     if s.play_state
                         .as_ref()
                         .and_then(|ps| ps.subtitle_stream_index)
                         == Some(ms.index)
-                    {
+                    => {
                         subtitle_codec = ms.codec.to_uppercase();
                         subtitle_language = ms.language.to_uppercase();
                     }
-                }
                 _ => {}
             }
         }
@@ -2726,8 +2727,8 @@ fn record_live_sessions_snapshot_for_source(
     } else {
         0
     };
-    let stored_server_id = query_stored_provider_server_id(&conn, provider);
-    let reconnect_window_secs = query_reconnect_window_secs(&conn);
+    let stored_server_id = query_stored_provider_server_id(conn, provider);
+    let reconnect_window_secs = query_reconnect_window_secs(conn);
 
     let mut active_keys = HashSet::new();
     let mut direct_play_count = 0i32;
@@ -2742,7 +2743,7 @@ fn record_live_sessions_snapshot_for_source(
             continue;
         }
         let (session_key, has_observation_gap) = resolve_observed_session_key(
-            &conn,
+            conn,
             provider,
             &stored_server_id,
             reconnect_window_secs,
@@ -4596,6 +4597,7 @@ pub async fn get_streaming_dashboard_handler(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock, clippy::type_complexity)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -4648,7 +4650,7 @@ mod tests {
             assert!(estimate.time_series.iter().any(|point| point.date == old[..10] && point.watch_time_secs == 3600));
             assert!(estimate.time_series.iter().all(|point| point.data_used_bytes == 0 && point.direct_play_count == 0));
         }
-        assert!(all.time_series.first().unwrap().date <= old[..10].to_string());
+        assert!(all.time_series.first().unwrap().date.as_str() <= &old[..10]);
         assert!(query_streaming_analytics(7, "all", "all", false, true, 0.0).historical_estimates.is_empty());
         assert!(query_streaming_analytics(0, "transcode", "all", false, true, 0.0).historical_estimates.is_empty());
         assert!(query_streaming_analytics(0, "all", "episode", false, true, 0.0).historical_estimates.is_empty());
@@ -4670,14 +4672,14 @@ mod tests {
         let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = init_isolated_streaming_db("elapsed_accounting");
         let session = ActiveStreamSession { session_id: "elapsed".into(), item_id: "movie".into(), state: "playing".into(), bitrate_bps: 8_000_000, ..Default::default() };
-        record_live_sessions_snapshot("jellyfin", &[session.clone()], 15);
-        record_live_sessions_snapshot("jellyfin", &[session.clone()], 15);
+        record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
+        record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
         let conn = af_db::get_conn().unwrap();
         assert_eq!(conn.query_row("SELECT watched_secs FROM streaming_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM streaming_bandwidth_samples", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         conn.execute("UPDATE streaming_session_samples SET sampled_at=CAST(strftime('%s','now') AS INTEGER)-15", []).unwrap();
         drop(conn);
-        record_live_sessions_snapshot("jellyfin", &[session.clone()], 15);
+        record_live_sessions_snapshot("jellyfin", std::slice::from_ref(&session), 15);
         let conn = af_db::get_conn().unwrap();
         assert_eq!(conn.query_row("SELECT watched_secs,data_used_bytes FROM streaming_history", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).unwrap(), (15,15_000_000));
         conn.execute("DELETE FROM streaming_session_samples", []).unwrap();
@@ -4767,11 +4769,11 @@ mod tests {
         assert!(persist_verified_monitor_source(&conn, "jellyfin", "http://127.0.0.1:9999", "Server-Verified").is_err());
         let session = ActiveStreamSession { session_id: "source-session".to_string(), item_id: "source-item".to_string(), item_name: "Source item".to_string(), ..Default::default() };
         drop(conn);
-        record_live_sessions_snapshot_for_source("jellyfin", &[session.clone()], 15, Some(("http://127.0.0.1:8096", "different-server")));
+        record_live_sessions_snapshot_for_source("jellyfin", std::slice::from_ref(&session), 15, Some(("http://127.0.0.1:8096", "different-server")));
         let conn = af_db::get_conn().unwrap();
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM streaming_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         drop(conn);
-        record_live_sessions_snapshot_for_source("jellyfin", &[session.clone()], 15, Some(("http://127.0.0.1:8096", "Server-Verified")));
+        record_live_sessions_snapshot_for_source("jellyfin", std::slice::from_ref(&session), 15, Some(("http://127.0.0.1:8096", "Server-Verified")));
         let conn = af_db::get_conn().unwrap();
         assert_eq!(conn.query_row("SELECT server_id FROM streaming_history", [], |row| row.get::<_, String>(0)).unwrap(), "Server-Verified");
         conn.execute("UPDATE streaming_servers SET enabled=0 WHERE provider='jellyfin'", []).unwrap();

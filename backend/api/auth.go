@@ -304,13 +304,80 @@ func GoogleLogin(c *gin.Context) {
 	c.Redirect(http.StatusTemporaryRedirect, authUrl)
 }
 
-func GoogleCallback(c *gin.Context) {
-	// Dynamically build base URL from request
-	baseURL := getBaseURL(c)
+const minRevocationTTL = 2 * time.Hour
 
+func clearOAuthStateCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("oauth2_state", "", -1, "/", "", secureCookie(), true)
+}
+
+func isGoogleEmailAllowedForProvision(email string) bool {
+	allowedEmailsRaw := strings.TrimSpace(os.Getenv("AETHERFLOW_GOOGLE_ALLOWED_EMAILS"))
+	allowedDomainsRaw := strings.TrimSpace(os.Getenv("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS"))
+	if allowedEmailsRaw == "" && allowedDomainsRaw == "" {
+		return true
+	}
+
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+	if normalizedEmail == "" {
+		return false
+	}
+
+	for _, entry := range strings.Split(allowedEmailsRaw, ",") {
+		if candidate := strings.ToLower(strings.TrimSpace(entry)); candidate != "" && candidate == normalizedEmail {
+			return true
+		}
+	}
+
+	if at := strings.LastIndex(normalizedEmail, "@"); at != -1 {
+		domain := normalizedEmail[at+1:]
+		for _, entry := range strings.Split(allowedDomainsRaw, ",") {
+			candidate := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(entry)), "@")
+			if candidate != "" && domain == candidate {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func isTrustedProxyPeer(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	remoteAddr := strings.TrimSpace(c.Request.RemoteAddr)
+	if remoteAddr == "" {
+		return false
+	}
+	host := remoteAddr
+	if splitHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = splitHost
+	} else if strings.HasPrefix(remoteAddr, "[") && strings.HasSuffix(remoteAddr, "]") {
+		host = remoteAddr[1 : len(remoteAddr)-1]
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+func isLoopbackHost(host string) bool {
+	hostname := host
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		hostname = splitHost
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		hostname = host[1 : len(host)-1]
+	}
+	return strings.EqualFold(hostname, "localhost") || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+func GoogleCallback(c *gin.Context) {
 	errParam := c.Query("error")
 	if errParam != "" {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+url.QueryEscape(errParam))
+		clearOAuthStateCookie(c)
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error="+url.QueryEscape(errParam))
 		return
 	}
 
@@ -318,8 +385,9 @@ func GoogleCallback(c *gin.Context) {
 	state := c.Query("state")
 
 	cookieState, err := c.Cookie("oauth2_state")
-	if err != nil || state != cookieState {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=invalid_state")
+	clearOAuthStateCookie(c)
+	if err != nil || state == "" || state != cookieState {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=invalid_state")
 		return
 	}
 
@@ -335,56 +403,105 @@ func GoogleCallback(c *gin.Context) {
 	data.Set("redirect_uri", redirectUri)
 	data.Set("grant_type", "authorization_code")
 
-	resp, err := http.PostForm("https://oauth2.googleapis.com/token", data)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	tokenReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(data.Encode()))
 	if err != nil {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=token_exchange_failed")
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=token_exchange_failed")
+		return
+	}
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := httpClient.Do(tokenReq)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=token_exchange_failed")
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=token_exchange_failed")
+	if resp.StatusCode != http.StatusOK {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=token_exchange_failed")
 		return
 	}
 
 	var tokenRes map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&tokenRes)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenRes); err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=token_exchange_failed")
+		return
+	}
 	accessToken, ok := tokenRes["access_token"].(string)
 	if !ok || accessToken == "" {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=no_access_token")
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=no_access_token")
 		return
 	}
 
 	// Fetch user info
-	req, _ := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
-	req.Header.Add("Authorization", "Bearer "+accessToken)
-	infoResp, err := http.DefaultClient.Do(req)
-	if err != nil || infoResp.StatusCode != 200 {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=userinfo_failed")
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=userinfo_failed")
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	infoResp, err := httpClient.Do(req)
+	if err != nil || infoResp.StatusCode != http.StatusOK {
+		if infoResp != nil {
+			infoResp.Body.Close()
+		}
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=userinfo_failed")
 		return
 	}
 	defer infoResp.Body.Close()
 
-	infoBytes, _ := io.ReadAll(infoResp.Body)
-	var userInfo map[string]interface{}
-	json.Unmarshal(infoBytes, &userInfo)
-
-	googleId, _ := userInfo["id"].(string)
-	email, _ := userInfo["email"].(string)
-	name, _ := userInfo["name"].(string)
-	avatarUrl, _ := userInfo["picture"].(string)
-
-	if googleId == "" {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=no_google_id")
+	var googleUser struct {
+		ID            string `json:"id"`
+		Email         string `json:"email"`
+		VerifiedEmail bool   `json:"verified_email"`
+		Name          string `json:"name"`
+		Picture       string `json:"picture"`
+	}
+	if err := json.NewDecoder(io.LimitReader(infoResp.Body, 1<<20)).Decode(&googleUser); err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=userinfo_failed")
 		return
 	}
 
-	// Upsert user
+	googleId := googleUser.ID
+	email := strings.TrimSpace(googleUser.Email)
+	name := googleUser.Name
+	avatarUrl := googleUser.Picture
+
+	if googleId == "" {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=no_google_id")
+		return
+	}
+	if !googleUser.VerifiedEmail || email == "" {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=email_not_verified")
+		return
+	}
+
+	// Lookup or provision user
 	var user models.User
-	err = db.DB.QueryRow("SELECT id, username, email, avatar_url, role FROM users WHERE google_id = ?", googleId).
-		Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role)
+	var totpEnabled bool
+	err = db.DB.QueryRow(
+		"SELECT id, username, email, avatar_url, role, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?",
+		googleId,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &totpEnabled)
+
+	matchedByEmail := false
+	if err == sql.ErrNoRows {
+		err = db.DB.QueryRow(
+			"SELECT id, username, email, avatar_url, role, COALESCE(totp_enabled, 0) FROM users WHERE LOWER(email) = LOWER(?) AND (google_id IS NULL OR google_id = '')",
+			email,
+		).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &totpEnabled)
+		if err == nil {
+			matchedByEmail = true
+		}
+	}
 
 	if err == sql.ErrNoRows {
+		if !isGoogleEmailAllowedForProvision(email) {
+			c.Redirect(http.StatusTemporaryRedirect, "/login?error=not_authorized")
+			return
+		}
+
 		// Create new user
 		username := name
 		if i := strings.Index(email, "@"); i != -1 {
@@ -398,16 +515,19 @@ func GoogleCallback(c *gin.Context) {
 			}
 			return -1
 		}, username)
+		if username == "" {
+			username = "user"
+		}
 
 		var count int
 		if err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
 			slog.Error("failed to query user count during OAuth", "error", err)
-			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
+			c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
 			return
 		}
 
 		role := "user"
-		if count == 0 || email == os.Getenv("ADMIN_EMAIL") {
+		if count == 0 || (os.Getenv("ADMIN_EMAIL") != "" && strings.EqualFold(email, os.Getenv("ADMIN_EMAIL"))) {
 			role = "admin"
 		}
 
@@ -416,7 +536,7 @@ func GoogleCallback(c *gin.Context) {
 
 		if err != nil {
 			slog.Error("user creation error during OAuth", "error", err)
-			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
+			c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
 			return
 		}
 
@@ -427,13 +547,38 @@ func GoogleCallback(c *gin.Context) {
 		user.AvatarURL = avatarUrl
 		user.Role = role
 	} else if err == nil {
-		// Update existing user
-		db.DB.Exec("UPDATE users SET email = ?, avatar_url = ? WHERE google_id = ?", email, avatarUrl, googleId)
+		// Update existing user (and bind google_id when matched by verified email)
+		if matchedByEmail {
+			if _, updErr := db.DB.Exec("UPDATE users SET google_id = ?, email = ?, avatar_url = ? WHERE id = ?", googleId, email, avatarUrl, user.ID); updErr != nil {
+				slog.Error("failed to bind google account during OAuth", "user_id", user.ID, "error", updErr)
+				c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
+				return
+			}
+		} else {
+			_, _ = db.DB.Exec("UPDATE users SET email = ?, avatar_url = ? WHERE google_id = ?", email, avatarUrl, googleId)
+		}
 		user.Email = email
 		user.AvatarURL = avatarUrl
 	} else {
 		slog.Error("database error during OAuth callback", "error", err)
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=db_error")
+		return
+	}
+
+	if totpEnabled {
+		mfaBytes := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, mfaBytes); err != nil {
+			slog.Error("crypto/rand failure generating OAuth MFA challenge", "error", err)
+			InternalError(c, "Failed to generate MFA challenge")
+			return
+		}
+		challengeToken := hex.EncodeToString(mfaBytes)
+		if err := db.StoreMFAChallenge(challengeToken, user.ID, 5*time.Minute); err != nil {
+			slog.Error("failed to persist OAuth MFA challenge", "user_id", user.ID, "error", err)
+			InternalError(c, "Failed to store MFA challenge")
+			return
+		}
+		c.Redirect(http.StatusTemporaryRedirect, "/login?mfa="+url.QueryEscape(challengeToken))
 		return
 	}
 
@@ -445,49 +590,66 @@ func GoogleCallback(c *gin.Context) {
 	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
 	tokenString, err := createStandardJWT(user.ID, c)
 	if err != nil {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=jwt_failed")
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=jwt_failed")
 		return
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
-	c.Redirect(http.StatusTemporaryRedirect, baseURL+"/")
+	c.Redirect(http.StatusTemporaryRedirect, "/")
 }
 
 // getBaseURL determines the scheme + host from the incoming request,
 // with protection against host header injection (CWE-601).
 func getBaseURL(c *gin.Context) string {
+	trustProxy := strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") && isTrustedProxyPeer(c)
+
 	scheme := "https"
 	if c.Request.TLS == nil {
-		// Check X-Forwarded-Proto from reverse proxy
-		if proto := c.GetHeader("X-Forwarded-Proto"); proto == "http" || proto == "https" {
-			scheme = proto
-		} else {
-			scheme = "http"
+		scheme = "http"
+		// Check X-Forwarded-Proto only from an explicitly trusted reverse proxy peer
+		if trustProxy {
+			if proto := strings.ToLower(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))); proto == "http" || proto == "https" {
+				scheme = proto
+			}
 		}
 	}
 
-	// Validate X-Forwarded-Host against whitelist to prevent open redirect
+	// Validate X-Forwarded-Host against whitelist only from a trusted reverse proxy peer
 	host := c.Request.Host
-	if fwdHost := c.GetHeader("X-Forwarded-Host"); fwdHost != "" {
-		if isAllowedHost(fwdHost) {
+	if trustProxy {
+		if fwdHost := strings.TrimSpace(c.GetHeader("X-Forwarded-Host")); fwdHost != "" && isAllowedHost(fwdHost) {
 			host = fwdHost
 		}
-		// If not in whitelist, silently ignore and use c.Request.Host
 	}
 
 	return scheme + "://" + host
 }
 
-// isAllowedHost checks if the given host is in the ALLOWED_HOSTS whitelist.
-// If ALLOWED_HOSTS is not set, allows all hosts (backwards compatible for dev).
+// isAllowedHost checks if the given host is syntactically safe and permitted by ALLOWED_HOSTS
+// (or is a loopback host when ALLOWED_HOSTS is unset).
 func isAllowedHost(host string) bool {
-	allowed := os.Getenv("ALLOWED_HOSTS")
-	if allowed == "" {
-		return true // No whitelist configured — allow all (dev mode)
+	if host == "" {
+		return false
 	}
+	for _, r := range host {
+		if r < 0x20 || r == 0x7f || r == ' ' || r == '\t' || r == '/' || r == '\\' || r == '@' {
+			return false
+		}
+	}
+
+	allowed := os.Getenv("ALLOWED_HOSTS")
+	var entries []string
 	for _, h := range strings.Split(allowed, ",") {
-		if strings.TrimSpace(h) == host {
+		if trimmed := strings.TrimSpace(h); trimmed != "" {
+			entries = append(entries, trimmed)
+		}
+	}
+	if len(entries) == 0 {
+		return isLoopbackHost(host)
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry, host) {
 			return true
 		}
 	}
@@ -514,12 +676,33 @@ func validateSessionToken(tokenString string) (jwt.MapClaims, error) {
 	return claims, nil
 }
 
+func validateResolvedSessionClaims(c *gin.Context, claims jwt.MapClaims) bool {
+	userIdFloat, ok := claims["user_id"].(float64)
+	if !ok {
+		return false
+	}
+	userId := int(userIdFloat)
+
+	if jti, hasJti := claims["jti"].(string); hasJti && jti != "" && db.IsTokenRevoked(jti) {
+		if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
+			return false
+		}
+	}
+
+	if cfp, hasCfp := claims["cfp"].(string); hasCfp && cfp != "" {
+		if !matchesClientFingerprint(cfp, c) {
+			return false
+		}
+	}
+	return true
+}
+
 func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
 	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil {
+			if claims, err := validateSessionToken(tokenString); err == nil && validateResolvedSessionClaims(c, claims) {
 				return tokenString, claims, nil
 			}
 		}
@@ -529,7 +712,7 @@ func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
 	if err == nil {
 		tokenString := strings.TrimSpace(cookie)
 		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil {
+			if claims, err := validateSessionToken(tokenString); err == nil && validateResolvedSessionClaims(c, claims) {
 				return tokenString, claims, nil
 			}
 		}
@@ -587,15 +770,19 @@ func GetSession(c *gin.Context) {
 // @Success      200  {object}  map[string]interface{}
 // @Router       /auth/logout [post]
 func Logout(c *gin.Context) {
-	// Attempt to revoke the token intelligently (Phase 10 integration)
+	// Attempt to revoke the token durably with >= 2h floor covering refresh grace window
 	if _, claims, err := resolveSessionToken(c); err == nil {
-		if jti, ok := claims["jti"].(string); ok {
+		if jti, ok := claims["jti"].(string); ok && jti != "" {
 			rotatedTokenGrace.Delete(jti)
+			ttl := minRevocationTTL
 			if exp, ok := claims["exp"].(float64); ok {
-				remaining := time.Until(time.Unix(int64(exp), 0))
-				if remaining > 0 {
-					db.RevokeToken(jti, remaining)
+				if remaining := time.Until(time.Unix(int64(exp), 0)); remaining > ttl {
+					ttl = remaining
 				}
+			}
+			if err := db.RevokeToken(jti, ttl); err != nil {
+				InternalError(c, "Failed to revoke session")
+				return
 			}
 		}
 	}
@@ -698,7 +885,10 @@ func RefreshSession(c *gin.Context) {
 			Unauthorized(c, "Session has been revoked")
 			return
 		}
-		db.RevokeToken(jti, 15*time.Minute)
+		if err := db.RevokeToken(jti, minRevocationTTL); err != nil {
+			InternalError(c, "Failed to revoke rotated session")
+			return
+		}
 	}
 
 	newToken, err := GenerateJWT(user.ID, c)
@@ -1027,13 +1217,17 @@ func RevokeSession(c *gin.Context) {
 		return
 	}
 
-	// Revoke the token via the blacklist
+	// Revoke the token via the durable blacklist (>= 2h floor covering refresh grace window)
 	rotatedTokenGrace.Delete(fullJTI)
+	ttl := minRevocationTTL
 	if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-		remaining := time.Until(expTime)
-		if remaining > 0 {
-			db.RevokeToken(fullJTI, remaining)
+		if remaining := time.Until(expTime); remaining > ttl {
+			ttl = remaining
 		}
+	}
+	if err := db.RevokeToken(fullJTI, ttl); err != nil {
+		InternalError(c, "Failed to revoke session")
+		return
 	}
 
 	// Remove from active sessions

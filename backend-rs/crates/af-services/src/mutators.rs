@@ -142,13 +142,10 @@ fn is_allowed_os_root_symlink(path: &Path) -> bool {
         return true;
     }
     #[cfg(not(target_os = "macos"))]
-    if matches!(
+    matches!(
         path.to_str(),
         Some("/var/run" | "/bin" | "/sbin" | "/lib" | "/lib32" | "/lib64" | "/libx32")
-    ) {
-        return true;
-    }
-    false
+    )
 }
 
 /// Walks all ancestor directory components of `file_path` using `fs::symlink_metadata`
@@ -1041,10 +1038,6 @@ pub fn detect_lan_ip_strict() -> Result<String, String> {
     Ok("127.0.0.1".to_string())
 }
 
-fn detect_primary_lan_ip() -> String {
-    detect_lan_ip()
-}
-
 pub fn detect_lan_ip() -> String {
     detect_lan_ip_strict().unwrap_or_else(|_| "127.0.0.1".to_string())
 }
@@ -1524,13 +1517,12 @@ pub fn sync_apache_app_vhost(
                     listen_port,
                     &preserved_blocks,
                 );
-                if prev_raw != updated {
-                    if write_file_atomic(&path, updated.as_bytes()).is_ok() {
+                if prev_raw != updated
+                    && write_file_atomic(&path, updated.as_bytes()).is_ok() {
                         backups.push((path.clone(), Some(prev_raw)));
                         modified_any = true;
                         wrote_any = true;
                     }
-                }
             }
         }
     }
@@ -4301,6 +4293,9 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
         }
     };
 
+    static KNOWN_PROXIES_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?is)<KnownProxies>\s*(.*?)\s*</KnownProxies>").expect("valid regex")
+    });
     for raw_path in &spec.config_paths {
         let resolved = resolve_config_path(raw_path);
         if !resolved.is_file() {
@@ -4344,9 +4339,8 @@ async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -
                 let existing_xml = fs::read_to_string(&resolved).unwrap_or_default();
                 let has_remote_access = extract_xml_tag_text(&existing_xml, "EnableRemoteAccess")
                     .is_some_and(|v| !v.trim().is_empty());
-                let has_known_proxies = Regex::new(r"(?is)<KnownProxies>\s*(.*?)\s*</KnownProxies>")
-                    .ok()
-                    .and_then(|re| re.captures(&existing_xml))
+                let has_known_proxies = KNOWN_PROXIES_RE
+                    .captures(&existing_xml)
                     .and_then(|c| c.get(1))
                     .is_some_and(|m| !m.as_str().trim().is_empty());
                 if effective_port > 0 {

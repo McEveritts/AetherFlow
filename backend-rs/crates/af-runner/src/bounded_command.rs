@@ -55,11 +55,16 @@ pub async fn output(
             },
             _ = send.closed() => Err(io::Error::new(io::ErrorKind::Interrupted, "command caller cancelled")),
         };
+        kill_group(group);
         if result.is_err() {
-            kill_group(group);
             let _ = child.start_kill();
+        }
+        let _ = child.wait().await;
+        if tokio::task::spawn_blocking(move || group_is_live(group))
+            .await
+            .unwrap_or(false)
+        {
             let cleanup = async {
-                let _ = child.wait().await;
                 while tokio::task::spawn_blocking(move || group_is_live(group))
                     .await
                     .unwrap_or(true)
@@ -297,5 +302,30 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn successful_command_with_closed_stdio_background_descendant_kills_group_before_return() {
+        let root = std::env::temp_dir().join(format!("af-command-succ-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let pid_file = root.join("descendant.pid");
+        let mut command = shell("nohup sleep 60 >/dev/null 2>&1 </dev/null & echo $! > \"$AF_BG_PID\"; exit 0");
+        command.env("AF_BG_PID", &pid_file);
+        let out = output(command, Duration::from_secs(2), 1024).await.unwrap();
+        assert!(out.status.success());
+        let child_pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{child_pid}/stat")).unwrap_or_default();
+        let alive = stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, fields)| !matches!(fields.split_whitespace().next(), Some("Z" | "X")));
+        assert!(
+            !alive,
+            "background descendant pid={child_pid} stayed alive after successful bounded_command::output return"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

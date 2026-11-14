@@ -885,6 +885,7 @@ enum OverlapClassification {
 ///     inside a broader reconnect/pause slack window (`tolerance + max(180, reconnect_window_secs)`)
 ///     or watched duration diverges sharply, making it impossible to distinguish a paused/resumed
 ///     session from a separate repeat playback with certainty.
+#[allow(clippy::too_many_arguments)]
 fn classify_event_overlap(
     tx: &Connection,
     provider: &str,
@@ -1194,7 +1195,7 @@ pub fn import_events_batch(
             let (started_sql, start_unix) = parse_event_timestamp(&event.started_at, "startedAt")?;
 
             let watched_secs = match event.watched_secs {
-                Some(w) if w < 0 || w > 86_400 * 7 => {
+                Some(w) if !(0..=86_400 * 7).contains(&w) => {
                     return Err(StreamingImportError::bad_request(
                         "invalid_watched_secs",
                         "watchedSecs must be between 0 and 604800 seconds",

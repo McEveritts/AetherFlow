@@ -22,6 +22,12 @@ require_root
 PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}" # Fallback when test harnesses enter past preflight.
 validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password /etc/kasmvnc/kasmvnc.crt /etc/kasmvnc/kasmvnc.key /etc/kasmvnc/kasmvnc.yaml
 export LOGFILE="/var/log/aetherflow/install-kasmvnc.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+fi
 APP_PORT="${AF_APP_PORT:-6081}"
 DATA_DIR="/var/lib/kasmvnc"
 CONFIG_DIR="/etc/kasmvnc"
@@ -259,6 +265,26 @@ EOF
 fi
 chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 
+KASMVNC_DISPLAY=""
+if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
+    EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
+    if [[ -n "$EXISTING_DISPLAY" && ! -e "/tmp/.X${EXISTING_DISPLAY}-lock" && ! -e "/tmp/.X11-unix/X${EXISTING_DISPLAY}" ]]; then
+        KASMVNC_DISPLAY="$EXISTING_DISPLAY"
+    fi
+fi
+if [[ -z "$KASMVNC_DISPLAY" ]]; then
+    for candidate_display in $(seq 20 59); do
+        if [[ ! -e "/tmp/.X${candidate_display}-lock" && ! -e "/tmp/.X11-unix/X${candidate_display}" ]]; then
+            KASMVNC_DISPLAY="$candidate_display"
+            break
+        fi
+    done
+fi
+if [[ -z "$KASMVNC_DISPLAY" ]]; then
+    print_error "No free X display found in range :20..:59 for KasmVNC."
+    exit 1
+fi
+
 cat > /etc/systemd/system/af-kasmvnc.service <<EOF
 [Unit]
 Description=AetherFlow KasmVNC Desktop
@@ -270,7 +296,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :20 -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/bin/vncserver :${KASMVNC_DISPLAY} -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -297,7 +323,7 @@ for attempt in {1..30}; do
     sleep 1
 done
 if [[ "$READY" != "true" ]]; then
-    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :20."
+    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :${KASMVNC_DISPLAY}."
     exit 1
 fi
 VERSION_FILE=/var/lib/kasmvnc/.af-version

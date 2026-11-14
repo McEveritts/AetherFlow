@@ -57,11 +57,11 @@ download_file "$KAV_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 BUILD_DIR="$(mktemp -d /opt/.kavita-build.XXXXXX)"
 trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"; rm -f "$TMP_TAR"' EXIT
 tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
 [[ -s "$BUILD_DIR/Kavita" ]]
 chmod 755 "$BUILD_DIR/Kavita"
 stage_app_archive "$BUILD_DIR" /opt/Kavita Kavita "" "$PACKAGE_NAME" "." "" preserve
 BUILD_DIR=""
-rm -f "$TMP_TAR"
 chmod +x /opt/Kavita/Kavita
 queue_app_version /opt/Kavita/.af-version "${KAV_VERSION#v}"
 

@@ -1175,8 +1175,7 @@ async fn local_service_admission_types_reservation_and_updater_contention() {
         None,
     )
     .await
-    .err()
-    .expect("live package reservation must exclude unrelated local control");
+    .expect_err("live package reservation must exclude unrelated local control");
     assert!(is_lifecycle_busy(&error), "{error:#}");
     drop(owner);
     conn.execute("UPDATE package_lifecycle_jobs SET status='completed'", [])
@@ -1194,8 +1193,7 @@ async fn local_service_admission_types_reservation_and_updater_contention() {
         None,
     )
     .await
-    .err()
-    .expect("an active updater must exclude local control");
+    .expect_err("an active updater must exclude local control");
     assert!(is_lifecycle_busy(&error), "{error:#}");
     drop(launch_owner);
     drop(conn);
@@ -1270,7 +1268,7 @@ async fn legacy_cancellation_after_output_eof_reaps_child_and_releases_locks() {
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     assert!(!package_executor::is_package_execution_active("fixture"));
     assert!(af_release::ReleaseLockGuard::acquire(
-        &af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
+        af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
         Duration::ZERO
     )
     .is_ok());
@@ -1336,7 +1334,7 @@ async fn legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maint
                 );
                 assert!(
                     af_release::ReleaseLockGuard::acquire(
-                        &af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
+                        af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
                         Duration::ZERO
                     )
                     .is_err(),
@@ -1349,9 +1347,9 @@ async fn legacy_output_overflow_is_failed_and_reaps_child_before_releasing_maint
     .await
     .unwrap();
     assert!(failed, "oversized installer output must fail explicitly");
-    drop(stream);
+    let _ = stream;
     assert!(af_release::ReleaseLockGuard::acquire(
-        &af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
+        af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap(),
         Duration::ZERO
     )
     .is_ok());

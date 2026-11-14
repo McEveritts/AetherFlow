@@ -50,7 +50,7 @@ UP_GZ_URL="https://github.com/davidnewhall/unpackerr/releases/download/v${UP_VER
 report_progress 60 "Downloading Unpackerr ${UP_VERSION}..."
 TMP_ARCHIVE=$(mktemp /tmp/unpackerr-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/unpackerr-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_ARCHIVE"' EXIT
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_ARCHIVE"' EXIT
 if download_file "$UP_TAR_URL" "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1; then
     tar --no-same-owner -xzf "$TMP_ARCHIVE" -C "$TMP_DIR" unpackerr >> "$LOGFILE" 2>&1
 else
@@ -61,6 +61,7 @@ rm -f "$TMP_ARCHIVE"
 systemctl stop unpackerr >> "$LOGFILE" 2>&1 || true
 chmod 755 "$TMP_DIR/unpackerr"
 stage_app_archive "$TMP_DIR" /usr/local/bin/unpackerr unpackerr /etc/unpackerr "$PACKAGE_NAME" "." /opt/unpackerr "" binary
+TMP_DIR=""
 queue_app_version /opt/unpackerr/.af-version "${UP_VERSION#v}"
 
 report_progress 75 "Executing Zero-Touch Arr API discovery..."

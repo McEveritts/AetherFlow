@@ -52,7 +52,7 @@ AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/au
 report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
 TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/autoscan-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
 download_file "$AS_URL" "$TMP_BIN" >> "$LOGFILE" 2>&1
 if [[ "$AS_URL" == *.tar.gz ]]; then
     tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan >> "$LOGFILE" 2>&1
@@ -63,7 +63,7 @@ else
 fi
 chmod 755 "$TMP_DIR/autoscan"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autoscan autoscan /etc/autoscan "$PACKAGE_NAME" "." /opt/autoscan "" binary
-rm -rf "$TMP_DIR"
+TMP_DIR=""
 queue_app_version /opt/autoscan/.af-version "${AS_VERSION#v}"
 
 report_progress 75 "Performing Zero-Touch Arr API key auto-discovery for Autoscan..."

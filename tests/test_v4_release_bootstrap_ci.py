@@ -16,7 +16,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_CLIPPY = "cargo clippy --workspace --all-targets --locked"
+WORKSPACE_CLIPPY = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 STRICT_CORE_CLIPPY = "cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings"
 
 
@@ -106,40 +106,53 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         release_yml = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         jobs = parse_workflow_jobs(release_yml)
 
+        self.assertIn("validate-release", jobs)
         self.assertIn("security-gate", jobs)
         self.assertIn("release-build", jobs)
+        self.assertIn("release-publish", jobs)
 
+        val_job = jobs["validate-release"]
         sec_job = jobs["security-gate"]
         build_job = jobs["release-build"]
+        pub_job = jobs["release-publish"]
 
-        # 1. Both security-gate and release-build must run on ubuntu-22.04 (GLIBC 2.35 baseline), never ubuntu-latest
-        self.assertIn("runs-on: ubuntu-22.04", sec_job)
-        self.assertIn("runs-on: ubuntu-22.04", build_job)
+        # 1. All release pipeline jobs must run on ubuntu-22.04 (GLIBC 2.35 baseline), never ubuntu-latest
+        for job_name, job_text in (("validate-release", val_job), ("security-gate", sec_job), ("release-build", build_job), ("release-publish", pub_job)):
+            with self.subTest(job=job_name):
+                self.assertIn("runs-on: ubuntu-22.04", job_text)
         self.assertNotIn("runs-on: ubuntu-latest", release_yml)
 
-        # 2. release-build must depend on security-gate in the workflow DAG
-        self.assertRegex(build_job, r"needs:\s*\[?\s*security-gate\s*\]?")
+        # 2. release-build must depend on validate-release + security-gate and keep contents: read;
+        # release-publish must depend on security-gate and release-build
+        self.assertRegex(build_job, r"needs:\s*\[.*security-gate.*\]")
+        self.assertIn("contents: read", build_job)
+        self.assertNotIn("contents: write", build_job)
+        self.assertRegex(pub_job, r"needs:\s*\[.*security-gate.*release-build.*\]")
 
-        # 3. security-gate must run gitleaks, cargo-deny, cargo-audit, clippy, and locked workspace tests
+        # 3. security-gate must run gitleaks dir + git, cargo-deny, cargo-audit, clippy, and locked workspace tests
         self.assertIn("gitleaks dir . --verbose --redact", sec_job)
+        self.assertIn("gitleaks git . --verbose --redact", sec_job)
         self.assertIn("cargo deny --locked check advisories bans sources", sec_job)
         self.assertIn("cargo audit --file Cargo.lock", sec_job)
         self.assertIn(WORKSPACE_CLIPPY, sec_job)
         self.assertIn(STRICT_CORE_CLIPPY, sec_job)
         self.assertIn("cargo test --workspace --locked", sec_job)
 
-        # 4. Inside release-build, locked clippy, locked tests, and locked build of both binaries must precede Publish
+        # 4. Inside release-build, locked clippy, locked tests, and locked build of both binaries must precede Upload;
+        # inside release-publish, SHA-pinned attest-build-provenance must precede Publish
         clippy_idx = build_job.index(WORKSPACE_CLIPPY)
         strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
         build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af")
-        attest_idx = build_job.index("actions/attest-build-provenance@v4")
-        publish_idx = build_job.index("- name: Publish to GitHub Releases")
+        upload_idx = build_job.index("- name: Upload Release Bundle Artifact")
 
         self.assertLess(clippy_idx, test_idx)
         self.assertLess(strict_clippy_idx, test_idx)
         self.assertLess(test_idx, build_idx)
-        self.assertLess(build_idx, attest_idx)
+        self.assertLess(build_idx, upload_idx)
+
+        attest_idx = pub_job.index("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8")
+        publish_idx = pub_job.index("- name: Publish to GitHub Releases")
         self.assertLess(attest_idx, publish_idx)
 
         self.assertIn('node-version: "24.22.2"', build_job)

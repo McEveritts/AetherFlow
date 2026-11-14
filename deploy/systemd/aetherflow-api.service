@@ -15,12 +15,11 @@ SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/current
 
 # ── FHS Managed Directories ──────────────────────────────────────────────────
-# Automatically provisions /var/lib/aetherflow and /var/log/aetherflow owned by
-# aetherflow:aetherflow and grants write access inside ProtectSystem=strict.
+# Automatically provisions /var/lib/aetherflow owned by aetherflow:aetherflow and
+# grants write access inside ProtectSystem=strict. /var/log/aetherflow is owned
+# by root:aetherflow via aetherflow-runner.service so log-retention stays strict.
 StateDirectory=aetherflow
 StateDirectoryMode=0700
-LogsDirectory=aetherflow
-LogsDirectoryMode=0750
 
 # ── Execution ────────────────────────────────────────────────────────────────
 ExecStart=/opt/AetherFlow/current/aetherflow-api

@@ -937,6 +937,74 @@ os.execvp(inner[0], inner)
         self.assertEqual(escape_res.returncode, 4, escape_res.stdout + escape_res.stderr)
         self.assertIn("escapes isolated release root", escape_res.stdout + escape_res.stderr)
 
+    def test_log_json_escaping_and_staging_cleanup_ignore_dotfiles(self):
+        import json
+
+        (self.dry / "releases").mkdir(parents=True, exist_ok=True)
+        staging_dir = self.dry / "releases" / ".staging.9999999.fixture"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (staging_dir / "keep").write_text("active staging\n")
+        for epoch in ("10", "20", "30", "40"):
+            old_rel = self.dry / "releases" / epoch
+            old_rel.mkdir(parents=True, exist_ok=True)
+            (old_rel / "aetherflow-api").write_text("old")
+
+        conf_path = self.root / 'quote"slash\\name.conf'
+        conf_path.write_text('RELEASE_CHANNEL="nightly"\n')
+        res = self.run_manager("cleanup", "--dry-run", "--config", str(conf_path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(staging_dir.exists())
+        self.assertFalse((self.dry / "releases" / "10").exists())
+        self.assertTrue((self.dry / "releases" / "40").exists())
+        log_file = self.dry / "deploy.log"
+        for line in log_file.read_text().splitlines():
+            if line.strip():
+                json.loads(line)
+
+    def test_symlinked_systemd_unit_is_refused(self):
+        self.prepare_live_units()
+        (self.units / "aetherflow-api.service").unlink()
+        victim = self.root / "unit-symlink-victim"
+        victim.write_text("UNTOUCHED\n")
+        (self.units / "aetherflow-api.service").symlink_to(victim)
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("Refusing symlinked systemd unit path", result.stdout + result.stderr)
+        self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+    def test_explicit_rollback_runs_health_probe_and_fails_when_unhealthy(self):
+        database_path, _ = self.prepare_rejected_snapshot_rollback()
+        result = self.run_manager(
+            "rollback",
+            TEST_HEALTH_CODE="503",
+            TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable"}',
+        )
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("Health probe failed after rollback", result.stdout + result.stderr)
+        self.assertEqual(self.marker(database_path), "verified golden fixture")
+
+    def test_lifecycle_admission_uses_read_only_sqlite_unless_reaping_stale_lease(self):
+        import sqlite3
+        import sys
+
+        database = self.data / "readonly-check.sqlite"
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("CREATE TABLE package_lifecycle_jobs(package_id TEXT,job_id TEXT,action TEXT,status TEXT,started_at TEXT,finished_at TEXT,owner_id TEXT)")
+            connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('fixture','job','update','completed','now','later','owner')")
+        script = SCRIPT.read_text().split('check_package_lifecycle_reservations() {', 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        prelude = textwrap.dedent("""\
+            import sqlite3
+            real_connect = sqlite3.connect
+            modes = []
+            def spying_connect(database, *args, **kwargs):
+                modes.append(str(database))
+                assert "?mode=rw" not in str(database), f"unexpected rw connect: {database}"
+                return real_connect(database, *args, **kwargs)
+            sqlite3.connect = spying_connect
+        """)
+        result = subprocess.run([sys.executable, "-c", prelude + script, str(database), "deploy"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

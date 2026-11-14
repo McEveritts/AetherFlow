@@ -12,10 +12,13 @@ Group=aetherflow
 UMask=0077
 WorkingDirectory=/opt/AetherFlow/current
 
-# Creates /run/aetherflow owned by root:aetherflow (0750)
+# Creates /run/aetherflow and /var/log/aetherflow owned by root:aetherflow (0750)
 RuntimeDirectory=aetherflow
-RuntimeDirectoryMode=1770
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
+LogsDirectory=aetherflow
+LogsDirectoryMode=0750
+LogsDirectoryPreserve=yes
 
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock

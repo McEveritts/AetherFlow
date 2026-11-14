@@ -1765,6 +1765,17 @@ impl HostMaintenanceLockGuard {
                     "maintenance lockfile created concurrently during openat".to_string(),
                 ));
             }
+            if lock_fd >= 0 {
+                // Ensure group-writable permissions even under restrictive runner UMask=0077
+                if unsafe { libc::fchmod(lock_fd, 0o660) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    unsafe { libc::close(lock_fd) };
+                    return Err(AcquireAttemptError::Fatal(HostBackupError::io(
+                        format!("fchmod maintenance lockfile {}", path.display()),
+                        err,
+                    )));
+                }
+            }
         }
         if lock_fd < 0 {
             let open_err = std::io::Error::last_os_error();

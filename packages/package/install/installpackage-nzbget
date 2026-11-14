@@ -48,10 +48,11 @@ report_progress 60 "Downloading and installing NZBGet ${NZBGET_VERSION}..."
 TMP_RUN=$(mktemp /tmp/nzbget-XXXXXX.run)
 download_file "$NZBGET_URL" "$TMP_RUN" >> "$LOGFILE" 2>&1
 BUILD_DIR="$(mktemp -d /opt/.nzbget-build.XXXXXX)"
-trap 'rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_RUN"' EXIT
+trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_RUN"' EXIT
 sh "$TMP_RUN" --destdir "$BUILD_DIR" >> "$LOGFILE" 2>&1
 rm -f "$TMP_RUN"
 stage_app_archive "$BUILD_DIR" /opt/nzbget nzbget /var/lib/nzbget "$PACKAGE_NAME" "." "" preserve
+BUILD_DIR=""
 
 queue_app_version /opt/nzbget/.af-version "${NZBGET_VERSION#v}"
 

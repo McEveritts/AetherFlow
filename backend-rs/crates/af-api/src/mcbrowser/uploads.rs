@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! Resumable / chunked TUS 1.0.0 upload backend for McBrowser (`uploads.rs`).
 //!
 //! Owns:
@@ -183,8 +184,10 @@ pub(crate) fn authorize_conflict_policy_permissions_with_conn(
 /// Supported upload conflict resolution policies for McBrowser TUS uploads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ConflictPolicy {
     /// Fail with `409 Conflict` if the target file already exists (`RENAME_NOREPLACE`).
+    #[default]
     Error,
     /// Atomically replace an existing regular file (`BrowserFs::begin_replace` + `PendingUpload::commit_replace`),
     /// bound to the original `(st_dev, st_ino, st_size)` observed at session creation.
@@ -197,11 +200,6 @@ pub enum ConflictPolicy {
     Resume,
 }
 
-impl Default for ConflictPolicy {
-    fn default() -> Self {
-        Self::Error
-    }
-}
 
 impl ConflictPolicy {
     pub const fn as_str(self) -> &'static str {
@@ -297,6 +295,7 @@ pub(crate) struct UploadSessionRecord {
     pub base_target_ino: u64,
     pub base_target_size: u64,
     pub audit_event_id: String,
+    #[allow(dead_code)]
     pub created_at: i64,
     pub updated_at: i64,
     pub expires_at: i64,
@@ -1918,7 +1917,7 @@ fn prepared_publication_matches(file: &File, device: u64, inode: u64, nonce: Opt
     let Ok(metadata) = fstat_fd(file.as_raw_fd()) else {
         return false;
     };
-    if metadata.st_dev as u64 != device || metadata.st_ino as u64 != inode || metadata.st_nlink != 1
+    if metadata.st_dev != device || metadata.st_ino != inode || metadata.st_nlink != 1
     {
         return false;
     }
@@ -3899,7 +3898,7 @@ fn skipped_upload_patch_response(skipped: &UploadSessionRecord) -> Response {
     }
     headers.insert("Upload-Status", HeaderValue::from_static("completed"));
     headers.insert("Upload-Skipped", HeaderValue::from_static("true"));
-    if let Ok(value) = HeaderValue::from_str(&encode_session_metadata_header(&skipped)) {
+    if let Ok(value) = HeaderValue::from_str(&encode_session_metadata_header(skipped)) {
         headers.insert("Upload-Metadata", value);
     }
     if let Ok(value) = HeaderValue::from_str(&skipped.target_path) {
@@ -4094,7 +4093,7 @@ pub(crate) fn finalize_patch_upload_at(
     if let Ok(st_hv) = HeaderValue::from_str(final_status) {
         h.insert("Upload-Status", st_hv);
     }
-    let encoded_meta = encode_session_metadata_header(&session);
+    let encoded_meta = encode_session_metadata_header(session);
     if let Ok(meta_hv) = HeaderValue::from_str(&encoded_meta) {
         h.insert("Upload-Metadata", meta_hv);
     }

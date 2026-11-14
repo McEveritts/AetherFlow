@@ -52,7 +52,7 @@ fn human_user(user_id: i64) -> AuthUser {
 fn plugin_user(user_id: i64) -> AuthUser {
     AuthUser {
         user_id,
-        username: format!("plugin:sonarr"),
+        username: "plugin:sonarr".to_string(),
         role: "plugin".to_string(),
         jti: "jti-plugin".to_string(),
         plugin_id: Some("sonarr".to_string()),
@@ -2346,8 +2346,10 @@ async fn scope_remap_or_directory_replacement_fails_closed_on_discover_head_and_
     raw_bfs.create_directory_all("scope_b/sub").unwrap();
 
     // 1. Configure Alice's scope to `scope_a`
-    let mut policy_a = crate::mcbrowser::policy::PolicyDocument::default();
-    policy_a.scope = "scope_a".to_string();
+    let policy_a = crate::mcbrowser::policy::PolicyDocument {
+        scope: "scope_a".to_string(),
+        ..Default::default()
+    };
     crate::mcbrowser::policy::save_user_policy_conn(&conn, &admin, 1, policy_a).unwrap();
 
     // Create upload session for relative target `sub/plugin.jar` (12 bytes) under `scope_a`
@@ -2376,8 +2378,10 @@ async fn scope_remap_or_directory_replacement_fails_closed_on_discover_head_and_
     assert_eq!(p1.status(), StatusCode::NO_CONTENT);
 
     // 2. Admin remaps Alice's scope from `scope_a` to `scope_b`
-    let mut policy_b = crate::mcbrowser::policy::PolicyDocument::default();
-    policy_b.scope = "scope_b".to_string();
+    let policy_b = crate::mcbrowser::policy::PolicyDocument {
+        scope: "scope_b".to_string(),
+        ..Default::default()
+    };
     crate::mcbrowser::policy::save_user_policy_conn(&conn, &admin, 1, policy_b).unwrap();
 
     // Discovery under `scope_b` must NOT return the `scope_a` session

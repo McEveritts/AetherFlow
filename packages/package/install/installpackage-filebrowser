@@ -50,12 +50,12 @@ FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSIO
 TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
 download_file "$FB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 TMP_DIR="$(mktemp -d /tmp/filebrowser-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
 chmod 755 "$TMP_DIR/filebrowser"
 stage_app_archive "$TMP_DIR" /usr/local/bin/filebrowser filebrowser /opt/filebrowser "$PACKAGE_NAME" "." "" "" binary
-rm -rf "$TMP_DIR"
-rm -f "$TMP_TAR"
+TMP_DIR=""
 chmod +x /usr/local/bin/filebrowser
 
 report_progress 70 "Initializing File Browser database on port ${APP_PORT}..."

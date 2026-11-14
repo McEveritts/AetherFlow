@@ -10,14 +10,72 @@ export LOGFILE="${LOGFILE:-/var/log/aetherflow/install.log}"
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
 
-mkdir -p "$LOCK_DIR" "$(dirname "$LOGFILE")"
+af_prepare_logfile_path() {
+    local target="${1:-${LOGFILE:-/var/log/aetherflow/install.log}}"
+    [[ "$target" != "/dev/null" ]] || return 0
+    [[ -n "$target" ]] || return 1
+    local parent_dir="."
+    if [[ "$target" == */* ]]; then
+        parent_dir="${target%/*}"
+        [[ -n "$parent_dir" ]] || parent_dir="/"
+    fi
+    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
+        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
+        return 1
+    fi
+    if [[ "$parent_dir" == /var/log/aetherflow || "$target" == /var/log/aetherflow/* ]] && [[ -L /var/log/aetherflow ]]; then
+        printf 'Refusing symlinked /var/log/aetherflow directory\n' >&2
+        return 1
+    fi
+    if [[ "${EUID:-$(id -u)}" -eq 0 && ( "$parent_dir" == /var/log/aetherflow || "$parent_dir" == */var/log/aetherflow ) ]]; then
+        install -d -m 0750 -o root -g root "$parent_dir" || return 1
+    else
+        mkdir -p -m 0750 -- "$parent_dir" || return 1
+    fi
+    python3 - "$target" "$parent_dir" <<'PYEOF'
+import os, stat, sys
+
+target, parent_dir = sys.argv[1], sys.argv[2]
+parent_st = os.lstat(parent_dir)
+if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
+    raise SystemExit(f"Unsafe log directory: {parent_dir}")
+if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+    if parent_st.st_uid != 0 or parent_st.st_gid != 0:
+        os.chown(parent_dir, 0, 0)
+    if stat.S_IMODE(parent_st.st_mode) != 0o750:
+        os.chmod(parent_dir, 0o750)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(target, flags, 0o640)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit(f"Refusing non-regular logfile target: {target}")
+finally:
+    os.close(fd)
+PYEOF
+}
+
+mkdir -p "$LOCK_DIR"
+af_prepare_logfile_path "$LOGFILE"
 
 timestamp() {
     date "+%Y-%m-%d %H:%M:%S"
 }
 
 log() {
-    printf '[%s] %s\n' "$(timestamp)" "$*" >>"${LOGFILE:-/dev/null}"
+    local target="${LOGFILE:-/dev/null}"
+    if [[ "$target" != "/dev/null" ]]; then
+        local parent_dir="."
+        if [[ "$target" == */* ]]; then
+            parent_dir="${target%/*}"
+            [[ -n "$parent_dir" ]] || parent_dir="/"
+        fi
+        if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) || -L "$parent_dir" ]]; then
+            printf 'Refusing unsafe logfile target: %s\n' "$target" >&2
+            return 1
+        fi
+    fi
+    printf '[%s] %s\n' "$(timestamp)" "$*" >>"$target"
 }
 
 log_info() {
@@ -1809,6 +1867,12 @@ stage_app_archive() {
         fi
     done
     AF_ARCHIVE_UNIT="$unit"
+    AF_ARCHIVE_TIMER_UNIT=""
+    AF_ARCHIVE_TIMER_ACTIVE=false
+    AF_ARCHIVE_TIMER_ENABLED=false
+    if [[ "$unit" != *.timer && "$unit" != *.socket ]]; then
+        AF_ARCHIVE_TIMER_UNIT="${unit%.service}.timer"
+    fi
     AF_ARCHIVE_ARCHIVE="$archive"
     AF_ARCHIVE_ACTIVATED=false
     AF_ARCHIVE_ORIGINAL_PRESENT=false
@@ -1877,6 +1941,20 @@ PYEOF
     fi
     [[ "${9:-}" != binary ]] || extracted="$extracted/${candidates[0]}"
     touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+    if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+        if systemctl is-active --quiet "$AF_ARCHIVE_TIMER_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_TIMER_ACTIVE=true
+        fi
+        if systemctl is-enabled --quiet "$AF_ARCHIVE_TIMER_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_TIMER_ENABLED=true
+        fi
+        if [[ -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+            cp -a -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" "$AF_ARCHIVE_BACKUP/timer_unit"
+        fi
+        if [[ "$AF_ARCHIVE_TIMER_ACTIVE" == true || -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+            stop_systemd_unit "$AF_ARCHIVE_TIMER_UNIT"
+        fi
+    fi
     stop_systemd_unit "$unit"
     AF_ARCHIVE_STOPPED=true
     for state_index in "${!AF_ARCHIVE_STATE_PATHS[@]}"; do
@@ -1920,7 +1998,11 @@ rollback_app_archive_update() {
     [[ "${INSTALL_COMMITTED:-false}" != true ]] || exit "$status"
     [[ "$status" -ne 0 ]] || status=1
     if [[ "${AF_ARCHIVE_ACTIVATED:-false}" == true && ( "${AF_ARCHIVE_ORIGINAL_PRESENT:-false}" != true || -e "${AF_ARCHIVE_BACKUP:-}/app" ) ]]; then
-        if ! quiesce_services_for_rollback "$AF_ARCHIVE_UNIT"; then
+        local -a quiesce_units=("$AF_ARCHIVE_UNIT")
+        if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" && ( -e "${AF_ARCHIVE_BACKUP:-}/timer_unit" || -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ) ]]; then
+            quiesce_units=("$AF_ARCHIVE_TIMER_UNIT" "$AF_ARCHIVE_UNIT")
+        fi
+        if ! quiesce_services_for_rollback "${quiesce_units[@]}"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt "$status" "rollback" "incomplete_rollback" "Application archive rollback aborted because service quiescence failed; recovery backup preserved at ${AF_ARCHIVE_BACKUP:-unknown} (incomplete-rollback)"
             else
@@ -1942,6 +2024,14 @@ rollback_app_archive_update() {
             systemctl disable -- "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
             rm -f -- "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         fi
+        if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+            if [[ -e "$AF_ARCHIVE_BACKUP/timer_unit" ]]; then
+                safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/timer_unit" "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
+            elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+                systemctl disable -- "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+                rm -f -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
+            fi
+        fi
         systemctl daemon-reload >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
     fi
     if [[ "$restored" == true ]]; then
@@ -1951,6 +2041,14 @@ rollback_app_archive_update() {
     fi
     if [[ "$restored" == true && "${AF_ARCHIVE_STOPPED:-false}" == true && "${AF_ARCHIVE_PREVIOUS:-false}" == true ]]; then
         systemctl restart "$AF_ARCHIVE_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+    fi
+    if [[ "$restored" == true && -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+        if [[ "${AF_ARCHIVE_TIMER_ENABLED:-false}" == true ]]; then
+            systemctl enable -- "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+        fi
+        if [[ "$restored" == true && "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ]]; then
+            systemctl restart "$AF_ARCHIVE_TIMER_UNIT" >>"${LOGFILE:-/dev/null}" 2>&1 || restored=false
+        fi
     fi
     rm -f -- "${AF_ARCHIVE_ARCHIVE:-}"
     rm -rf -- "${AF_ARCHIVE_BACKUP:-}/release"

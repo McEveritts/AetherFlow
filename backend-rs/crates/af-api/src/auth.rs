@@ -597,7 +597,7 @@ pub struct CredentialsRequest {
 }
 
 pub async fn check_setup_needed() -> Response {
-    blocking_response(move || check_setup_needed_blocking()).await
+    blocking_response(check_setup_needed_blocking).await
 }
 
 fn check_setup_needed_blocking() -> Response {

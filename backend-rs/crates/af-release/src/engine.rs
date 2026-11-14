@@ -1021,6 +1021,19 @@ where
                 let _ = recovery.save(&cfg.releases_dir);
                 return Err(err);
             }
+            if let Err(err) = poll_readiness_probe(
+                &self.health_prober,
+                &cfg.health_endpoint,
+                cfg.health_retries,
+                cfg.health_interval,
+            )
+            .and_then(|_| self.lifecycle.verify_running_release(cfg))
+            {
+                recovery.phase = ReleasePhase::Failed;
+                recovery.last_error = Some(err.to_string());
+                let _ = recovery.save(&cfg.releases_dir);
+                return Err(err);
+            }
         }
 
         append_jsonl_log(

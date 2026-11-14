@@ -1024,11 +1024,10 @@ pub fn aggregate_component_statuses(
                     configured_optional_failed = true;
                 }
             }
-            "oneshot" => {
-                if comp.status == "failed" {
+            "oneshot"
+                if comp.status == "failed" => {
                     oneshot_failed = true;
                 }
-            }
             _ => {}
         }
     }

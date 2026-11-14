@@ -1243,7 +1243,7 @@ async fn admin_get_user_policy_http_route_enforces_live_db_and_max_size_one_pool
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/mcbrowser/policy/{invalid_target}"))
+                    .uri(format!("/mcbrowser/policy/{invalid_target}"))
                     .body(Body::empty())
                     .unwrap(),
             )

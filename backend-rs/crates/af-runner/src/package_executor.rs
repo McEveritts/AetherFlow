@@ -4746,9 +4746,9 @@ pub fn detect_rclone_separate_api_port_for_root(
         .map(|s| s.trim());
 
     let is_rclone_web_requested = requested_unit
-        .map_or(false, |u| u == "rclone-web" || u == "rclone-web.service");
+        .is_some_and(|u| u == "rclone-web" || u == "rclone-web.service");
     let is_rclone_requested = requested_unit
-        .map_or(false, |u| u == "rclone" || u == "rclone.service");
+        .is_some_and(|u| u == "rclone" || u == "rclone.service");
 
     let units_to_check: Vec<(&str, PathBuf)> = if is_rclone_web_requested {
         vec![("rclone-web.service", rclone_web_svc_path)]
@@ -5169,7 +5169,7 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
                 }
             }
             DeclarativeStep::WriteTemplateFile { path, .. }
-            | DeclarativeStep::MergeIniSettings { path, .. } => {
+            | DeclarativeStep::MergeIniSettings { path, .. }
                 if (path.starts_with("/var/lib/")
                     || path.starts_with("/etc/")
                     || path.contains("/.config/")
@@ -5179,14 +5179,13 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
                     && !path.starts_with("/etc/nginx/")
                     && !path.starts_with("/etc/sudoers")
                     && !path.starts_with("/etc/cron")
-                {
+                => {
                     if let Some(parent) = Path::new(path).parent().and_then(|p| p.to_str()) {
                         if parent != "/etc" && parent != "/var/lib" && parent != "/var" {
                             push_unique(parent);
                         }
                     }
                 }
-            }
             _ => {}
         }
     }
@@ -6165,13 +6164,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             DeclarativeStep::AptRemove {
                 packages,
                 autoremove,
-                ignore_errors: _,
                 ..
             }
             | DeclarativeStep::AptPurge {
                 packages,
                 autoremove,
-                ignore_errors: _,
                 ..
             } => {
                 let removal_action = if self.env_cfg.delete_data { "purge" } else { "remove" };
@@ -6685,7 +6682,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         .await?;
                     if out.success() && !out.stdout.trim().is_empty() {
                         let ver = out.stdout.trim().trim_start_matches('v').to_string();
-                        let clean = ver.split(':').last().unwrap_or(&ver).split('-').next().unwrap_or(&ver);
+                        let clean = ver.split(':').next_back().unwrap_or(&ver).split('-').next().unwrap_or(&ver);
                         target_version = Some(clean.to_string());
                     }
                 }
@@ -7072,7 +7069,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     })?;
 
                     let bin_bytes = fs::read(&bin_path)?;
-                    if bin_bytes.len() < 4 || &bin_bytes[0..4] != &[0x7f, b'E', b'L', b'F'] {
+                    if bin_bytes.len() < 4 || bin_bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
                         let _ = fs::remove_dir_all(&staging_dir);
                         return Err(PackageExecutorError::ArtifactVerification(
                             "extracted rclone binary failed ELF magic header check".to_string(),
@@ -8064,13 +8061,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         }
                         if let Some((k, v)) = line.split_once('=') {
                             let mut val = v.trim();
-                            if (val.starts_with('"') && val.ends_with('"'))
-                                || (val.starts_with('\'') && val.ends_with('\''))
-                            {
-                                if val.len() >= 2 {
+                            if ((val.starts_with('"') && val.ends_with('"'))
+                                || (val.starts_with('\'') && val.ends_with('\'')))
+                                && val.len() >= 2 {
                                     val = &val[1..val.len() - 1];
                                 }
-                            }
                             if (k.trim() == "RCLONE_RC_USER" || k.trim() == "RCLONE_USER")
                                 && !val.is_empty()
                                 && user.is_none()
@@ -8492,9 +8487,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             }
         }
 
-        if self.env_cfg.fs_root.is_none() && cfg!(target_os = "linux") {
-            if matches!(norm_logical, "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote")
-                || norm_logical.starts_with("/mnt/")
+        if self.env_cfg.fs_root.is_none() && cfg!(target_os = "linux")
+            && (matches!(norm_logical, "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote")
+                || norm_logical.starts_with("/mnt/"))
             {
                 if let Ok(status) = std::process::Command::new("mountpoint")
                     .arg("-q")
@@ -8509,7 +8504,6 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
             }
-        }
 
         false
     }
@@ -9107,11 +9101,11 @@ fn des_subkeys_vnc() -> [u64; 16] {
 fn des_feistel(r: u32, k: u64) -> u32 {
     let er = des_permute(r as u64, 32, &DES_E) ^ k;
     let mut s_out = 0u32;
-    for i in 0..8 {
+    for (i, sbox) in DES_SBOX.iter().enumerate() {
         let chunk = ((er >> (42 - 6 * i)) & 0x3f) as u8;
         let row = (((chunk >> 5) & 1) << 1) | (chunk & 1);
         let col = (chunk >> 1) & 0x0f;
-        let val = DES_SBOX[i][row as usize][col as usize];
+        let val = sbox[row as usize][col as usize];
         s_out = (s_out << 4) | (val as u32);
     }
     des_permute(s_out as u64, 32, &DES_P) as u32
@@ -11533,14 +11527,10 @@ pub(crate) fn format_exit_failure_diagnostics(
             "__RUNNER_EXIT_ERROR__:exit status {} [STAGE:{}] [CATEGORY:{}] [SUMMARY:{}] | AF_DIAG_FAILURE={}\n",
             code, stage, category, summary, diag_json
         ))
-    } else if let Some(inc_line) = saw_incomplete_rollback_line {
-        Some(format!(
+    } else { saw_incomplete_rollback_line.map(|inc_line| format!(
             "__RUNNER_EXIT_ERROR__:exit status {} [STAGE:rollback] [CATEGORY:incomplete_rollback] [SUMMARY:{}] | incomplete-rollback\n",
             code, inc_line
-        ))
-    } else {
-        None
-    }
+        )) }
 }
 
 /// Streams a package lifecycle operation (`install`, `remove`, or `update`) as newline-delimited
@@ -14559,7 +14549,7 @@ sleep 30
                 let passwd_path = root.join("var/lib/novnc/.vnc/passwd");
                 fs::create_dir_all(passwd_path.parent().unwrap()).unwrap();
                 let encoded = encode_tigervnc_passwd("OpVncS3c");
-                fs::write(&passwd_path, &encoded).unwrap();
+                fs::write(&passwd_path, encoded).unwrap();
                 vec![
                     (passwd_path, hex::encode(encoded)),
                     write_sentinel(
@@ -15171,7 +15161,7 @@ sleep 30
 
             // Verify service was stopped before state restoration, state was restored to schema-v1, package was downgraded, and .af-version is 1.0.0
             assert_eq!(
-                fs::read(&state_dir.join("index-v0.14.0.db")).unwrap(),
+                fs::read(state_dir.join("index-v0.14.0.db")).unwrap(),
                 b"schema-v1-original"
             );
             assert_eq!(
@@ -15279,7 +15269,7 @@ sleep 30
 
             // Live mutable state directory must not be overwritten while service is still active, and recovery backup is preserved
             assert_eq!(
-                fs::read(&state_dir.join("index-v0.14.0.db")).unwrap(),
+                fs::read(state_dir.join("index-v0.14.0.db")).unwrap(),
                 b"schema-v2-migrated"
             );
             assert_eq!(

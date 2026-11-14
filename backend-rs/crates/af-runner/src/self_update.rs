@@ -208,6 +208,7 @@ fn write_environment_handoff() -> Result<PathBuf, LaunchError> {
     Ok(path)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn systemd_arguments(
     request: &af_release::admin::ValidatedSelfUpdateRequest,
     executable: &Path,

@@ -20,6 +20,17 @@ youtube_init() {
     CONFIG_DIR="/etc/${APP_NAME}"
     validate_config_paths "$INSTALL_DIR/.af-version" "$DATA_DIR/.af-version" "$CONFIG_DIR/runtime.env" "$CONFIG_DIR/companion.env" "$CONFIG_DIR/config.yml" "$CONFIG_DIR/config.properties" "$CONFIG_DIR/httpd.conf"
     export LOGFILE="/var/log/aetherflow/install-${APP_NAME}.log"
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+        af_prepare_logfile_path "$LOGFILE"
+    else
+        local _log_dir
+        _log_dir="${LOGFILE%/*}"
+        if [[ -L "$_log_dir" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+            echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+            return 1
+        fi
+        mkdir -p -m 0750 "$_log_dir" 2>/dev/null || true
+    fi
     export DEBIAN_FRONTEND=noninteractive
     trap 'youtube_abort_install "Installation failed; see ${LOGFILE}."' ERR
     if ! id "$APP_NAME" >/dev/null 2>&1; then

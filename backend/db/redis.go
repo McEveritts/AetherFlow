@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -61,14 +62,37 @@ func InitRedis() {
 	}()
 }
 
+// minRevocationTTL enforces a minimum 2-hour floor on JTI revocations so short-TTL
+// caller durations or refresh grace windows cannot expire a revocation prematurely.
+const minRevocationTTL = 2 * time.Hour
+
 // RevokeToken adds a token's JTI to the blacklist with a given expiration.
 func RevokeToken(jti string, expiration time.Duration) error {
-	expTime := time.Now().Add(expiration).Unix()
+	if jti == "" {
+		return nil
+	}
+	if expiration < minRevocationTTL {
+		expiration = minRevocationTTL
+	}
+
+	now := time.Now().UTC()
+	expTime := now.Add(expiration).Unix()
 	localBlacklist.Store(jti, expTime) // Always store locally for immediate consistency/failover
 
+	if DB != nil {
+		expiresAt := now.Add(expiration).Format("2006-01-02 15:04:05")
+		if _, err := DB.Exec(
+			"INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)",
+			jti, expiresAt,
+		); err != nil {
+			return fmt.Errorf("failed to persist revoked token: %w", err)
+		}
+	}
+
 	if RedisClient != nil {
-		ctx := context.Background()
-		// TTL exactly matches remaining lifespan to optimize memory
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// TTL matches remaining/grace lifespan
 		return RedisClient.Set(ctx, "blacklist:"+jti, "true", expiration).Err()
 	}
 	return nil
@@ -76,6 +100,10 @@ func RevokeToken(jti string, expiration time.Duration) error {
 
 // IsTokenRevoked checks if a JWT was blacklisted
 func IsTokenRevoked(jti string) bool {
+	if jti == "" {
+		return false
+	}
+
 	// Fast local path
 	if expRaw, ok := localBlacklist.Load(jti); ok {
 		if exp, ok := expRaw.(int64); ok && time.Now().Unix() <= exp {
@@ -92,6 +120,23 @@ func IsTokenRevoked(jti string) bool {
 			// Found in Redis
 			return true
 		}
+	}
+
+	if DB != nil {
+		var one int
+		err := DB.QueryRow(
+			"SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at >= datetime('now') LIMIT 1",
+			jti,
+		).Scan(&one)
+		if err == sql.ErrNoRows {
+			return false
+		}
+		if err != nil {
+			slog.Error("Revocation check failed closed due to SQLite error", "jti", jti, "error", err)
+			return true
+		}
+		localBlacklist.Store(jti, time.Now().Add(2*time.Hour).Unix())
+		return true
 	}
 	return false
 }

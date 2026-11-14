@@ -1,3 +1,12 @@
+## Nightly Patch Notes — November 14, 2026 — Control-Plane Hardening, Durable Revocation & Supply-Chain Isolation
+
+### Highlights
+- **Control-Plane & Sandboxing**: Hardened systemd unit sandboxing across `aetherflow-api` and `aetherflow-runner`, preserved `fs_root`-scoped probe binary resolution under fail-closed `env_clear()` sandboxing, enforced trusted ancestor validation for release/probe binaries, and strengthened retained-ingress and storage path confinement.
+- **Durable Auth & Session Revocation**: Hardened OAuth consent error handling and durable session/token revocation persistence across Go and Rust backends (`af-db` and `backend/db`).
+- **Installer & Supply-Chain Security**: Updated Next.js (`16.4.6`) in the marketing website, updated Calibre-Web automation metadata in `config/package_automation.json`, tightened marketplace installer and release-manager receipt/archive validation, and refined `.gitleaks.toml` plus CI/Security/Release GitHub Actions workflows.
+
+---
+
 ## Nightly Patch Notes — November 13, 2026 — Toolchain Hygiene, Probe Hardening & Installer Reliability
 
 ### Toolchain, Dependencies & CI Actions

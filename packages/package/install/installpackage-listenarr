@@ -28,7 +28,13 @@ SERVICE_FILE="/etc/systemd/system/listenarr.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4546}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -66,10 +72,10 @@ fi
 RELEASES_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
 
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) else (if ((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then .tag_name else empty end) end' || true)"
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) elif (type == "object" and ((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' || true)"
     ASSET_URL=""
     if [[ -n "$LATEST_TAG" ]]; then
-        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(.tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) end' || true)"
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
     fi
     if [[ -z "$LATEST_TAG" || -z "$ASSET_URL" ]]; then
         TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
@@ -79,15 +85,15 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
             TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         fi
         if [[ -n "$TAG_RELEASE_JSON" ]]; then
-            LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r '.tag_name // empty' || true)"
-            ASSET_URL="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '[.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty' || true)"
+            LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r 'if type == "object" and ((.draft // false) | not) then (.tag_name // empty) else empty end' || true)"
+            ASSET_URL="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "object" and ((.draft // false) | not) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
         fi
     fi
 else
-    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(any(.assets[]?; .name | endswith($arch))) | .tag_name][]) else (.tag_name // empty) end' | sort -V | tail -n1 || true)"
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) | .tag_name][]) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' | sort -V | tail -n1 || true)"
     ASSET_URL=""
     if [[ -n "$LATEST_TAG" ]]; then
-        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(.tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) end' || true)"
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
     fi
 fi
 
@@ -183,6 +189,10 @@ mkdir -p "${DATA_DIR}/config"
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
+LISTENARR_BIND_HOST="${AF_BIND_ADDRESS:-127.0.0.1}"
+if [[ -f "$SERVICE_FILE" ]] && ! grep -Eq 'ASPNETCORE_URLS=http://\*:' "$SERVICE_FILE" 2>/dev/null; then
+    LISTENARR_BIND_HOST="$(retained_bind_address "$SERVICE_FILE" 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
+fi
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Listenarr Audiobook Collection Manager
@@ -194,7 +204,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${INSTALL_DIR}
-Environment="ASPNETCORE_URLS=http://*:${APP_PORT}"
+Environment="ASPNETCORE_URLS=http://${LISTENARR_BIND_HOST}:${APP_PORT}"
 Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false"
 Environment="HOME=${DATA_DIR}"
 Environment="XDG_CONFIG_HOME=${DATA_DIR}/config"

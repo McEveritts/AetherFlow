@@ -93,7 +93,18 @@ export default function ConsentPage() {
             const data = await res.json();
             const redirectTarget = data.redirect_uri || data.redirect_url;
             if (res.ok && redirectTarget) {
-                window.location.assign(redirectTarget);
+                try {
+                    const parsedRedirect = new URL(redirectTarget);
+                    if (parsedRedirect.protocol !== 'https:' && parsedRedirect.protocol !== 'http:') {
+                        setError('Blocked unsafe redirect URI protocol.');
+                        setIsSubmitting(false);
+                        return;
+                    }
+                    window.location.assign(parsedRedirect.toString());
+                } catch {
+                    setError('Invalid authorization redirect target returned by server.');
+                    setIsSubmitting(false);
+                }
             } else {
                 setError(data.message || data.error || 'Authorization sequence refused by operator core.');
                 setIsSubmitting(false);

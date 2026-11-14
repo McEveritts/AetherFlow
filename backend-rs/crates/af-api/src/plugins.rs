@@ -250,6 +250,7 @@ fn default_plugin_aud() -> String {
 struct ActivePluginProcess {
     child: Child,
     port: u16,
+    pgid: Option<i32>,
 }
 
 static ACTIVE_PROCESSES: Lazy<Mutex<HashMap<String, ActivePluginProcess>>> =
@@ -1073,12 +1074,15 @@ fn configure_unprivileged_command(
         .env("AETHERFLOW_PLUGIN_TOKEN", scoped_token);
 
     #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            // Ensure no new privileges can be acquired by plugin child processes
-            let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-            Ok(())
-        });
+    {
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                // Ensure no new privileges can be acquired by plugin child processes
+                let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                Ok(())
+            });
+        }
     }
 }
 
@@ -1132,8 +1136,12 @@ pub async fn start_plugin_instance(
         match cmd.spawn() {
             Ok(child) => {
                 spawned_managed = true;
+                let pgid = child.id().and_then(|id| i32::try_from(id).ok());
                 if let Ok(mut map) = ACTIVE_PROCESSES.lock() {
-                    map.insert(manifest.id.clone(), ActivePluginProcess { child, port });
+                    map.insert(
+                        manifest.id.clone(),
+                        ActivePluginProcess { child, port, pgid },
+                    );
                 }
             }
             Err(err) => {
@@ -1163,20 +1171,74 @@ pub async fn start_plugin_instance(
     Ok(build_runtime_view(manifest, &state, healthy))
 }
 
+fn send_signal_to_process_group(pgid: Option<i32>, sig: i32) {
+    #[cfg(unix)]
+    if let Some(pg) = pgid.filter(|&p| p > 0) {
+        unsafe {
+            libc::kill(-pg, sig);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (pgid, sig);
+}
+
 async fn stop_running_process(plugin_id: &str) {
     let maybe_proc = ACTIVE_PROCESSES
         .lock()
         .ok()
         .and_then(|mut map| map.remove(plugin_id));
     if let Some(mut proc_entry) = maybe_proc {
-        let _ = proc_entry.child.kill().await;
-        let _ = proc_entry.child.wait().await;
+        #[cfg(unix)]
+        send_signal_to_process_group(proc_entry.pgid, libc::SIGTERM);
+        let exited = tokio::time::timeout(Duration::from_secs(2), proc_entry.child.wait())
+            .await
+            .is_ok();
+        if !exited {
+            #[cfg(unix)]
+            send_signal_to_process_group(proc_entry.pgid, libc::SIGKILL);
+            let _ = proc_entry.child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), proc_entry.child.wait()).await;
+        }
+    }
+}
+
+async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
+    let raw_hook = manifest.lifecycle_hooks.on_stop.trim();
+    if raw_hook.is_empty() || !cfg!(unix) {
+        return;
+    }
+    let Ok(hook_path) = validate_relative_plugin_subpath(&manifest.plugin_dir, raw_hook, true)
+    else {
+        return;
+    };
+    if !hook_path.is_file() {
+        return;
+    }
+    let scoped_token = mint_scoped_plugin_token(manifest, Some(60))
+        .map(|(t, _)| t)
+        .unwrap_or_default();
+    let mut cmd = Command::new("/bin/bash");
+    cmd.arg(&hook_path);
+    configure_unprivileged_command(&mut cmd, manifest, port, &scoped_token);
+    if let Ok(mut child) = cmd.spawn() {
+        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
+        if tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .is_err()
+        {
+            #[cfg(unix)]
+            send_signal_to_process_group(pgid, libc::SIGKILL);
+            let _ = child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+        }
     }
 }
 
 pub async fn stop_plugin_instance(
     manifest: &ValidatedPluginManifest,
 ) -> Result<PluginRuntimeView, String> {
+    let existing = get_or_init_registry_state(&manifest.id);
+    run_plugin_stop_hook(manifest, existing.allocated_port).await;
     stop_running_process(&manifest.id).await;
     revoke_all_tokens_for_plugin(&manifest.id);
     let existing = get_or_init_registry_state(&manifest.id);
@@ -1660,6 +1722,7 @@ pub async fn proxy_plugin_wildcard_handler(
     proxy_plugin_request_inner(id, rest, auth_user, req).await
 }
 
+#[allow(clippy::result_large_err)]
 async fn collect_proxy_body(body: Body) -> Result<axum::body::Bytes, Response> {
     match axum::body::to_bytes(body, MAX_PLUGIN_PROXY_BODY_BYTES).await {
         Ok(bytes) => Ok(bytes),
@@ -1685,6 +1748,7 @@ async fn collect_proxy_body(body: Body) -> Result<axum::body::Bytes, Response> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn collect_proxy_response(mut upstream_resp: reqwest::Response) -> Result<Vec<u8>, Response> {
     let mut resp_bytes = Vec::new();
     loop {
@@ -2390,6 +2454,77 @@ pub(crate) mod tests {
             elapsed
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_running_process_terminates_detached_grandchild_in_process_group() {
+        let plugin_id = format!("pgid-test-{}", uuid::Uuid::new_v4());
+        let tmp = env::temp_dir().join(&plugin_id);
+        fs::create_dir_all(&tmp).unwrap();
+        let pid_file = tmp.join("grandchild.pid");
+
+        let manifest = ValidatedPluginManifest {
+            id: plugin_id.clone(),
+            name: "pgid-test".to_string(),
+            version: "1.0.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: Vec::new(),
+            granted_scopes: Vec::new(),
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec::default(),
+            frontend: PluginFrontendSpec::default(),
+            plugin_dir: tmp.clone(),
+        };
+
+        let script = format!("sleep 30 & echo $! > {:?}; wait", pid_file);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        configure_unprivileged_command(&mut cmd, &manifest, 21111, "test-token");
+        let child = cmd.spawn().unwrap();
+        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
+        {
+            let mut map = ACTIVE_PROCESSES.lock().unwrap();
+            map.insert(
+                plugin_id.clone(),
+                ActivePluginProcess {
+                    child,
+                    port: 21111,
+                    pgid,
+                },
+            );
+        }
+
+        let mut gc_pid: i32 = -1;
+        for _ in 0..40 {
+            if let Ok(raw) = fs::read_to_string(&pid_file) {
+                if let Ok(parsed) = raw.trim().parse::<i32>() {
+                    gc_pid = parsed;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(gc_pid > 0, "grandchild pid should be recorded");
+
+        stop_running_process(&plugin_id).await;
+        for _ in 0..20 {
+            let alive = unsafe { libc::kill(gc_pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_ne!(
+            unsafe { libc::kill(gc_pid, 0) },
+            0,
+            "grandchild pid {gc_pid} must be terminated when plugin process group stops"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

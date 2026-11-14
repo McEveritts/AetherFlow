@@ -502,19 +502,19 @@ fn valid_history_text(row: &HistoryRecord) -> bool {
         && row
             .started_at
             .as_deref()
-            .map_or(true, |value| valid_text(value, 128))
+            .is_none_or(|value| valid_text(value, 128))
         && row
             .last_seen_at
             .as_deref()
-            .map_or(true, |value| valid_text(value, 128))
+            .is_none_or(|value| valid_text(value, 128))
         && row
             .ended_at
             .as_deref()
-            .map_or(true, |value| valid_text(value, 128))
+            .is_none_or(|value| valid_text(value, 128))
         && row
             .source_event_id
             .as_deref()
-            .map_or(true, |value| valid_text(value, MAX_TEXT_BYTES))
+            .is_none_or(|value| valid_text(value, MAX_TEXT_BYTES))
 }
 
 fn valid_text(value: &str, max_bytes: usize) -> bool {
@@ -1016,8 +1016,10 @@ fn inspect_restore_in_snapshot(
             )
         }
         RestoreMode::Replace => {
-            let mut plan = PlanCounts::default();
-            plan.insert = archive.data.counts();
+            let plan = PlanCounts {
+                insert: archive.data.counts(),
+                ..Default::default()
+            };
             (plan, Vec::new(), Some(target_counts.clone()), None)
         }
     };

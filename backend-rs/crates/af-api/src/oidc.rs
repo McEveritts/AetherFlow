@@ -139,7 +139,7 @@ fn read_oidc_key(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
             file.metadata()?.permissions().mode() & 0o077 == 0,
             "OIDC key permissions must be 0600 or stricter"
         );
-        return read_oidc_material(file);
+        read_oidc_material(file)
     }
     #[cfg(not(unix))]
     read_oidc_material(options.open(path)?)
@@ -195,6 +195,52 @@ fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<OidcKeyMateria
     result
 }
 
+fn is_valid_host_authority(raw_host: &str) -> bool {
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 253
+        || trimmed.bytes().any(|b| b <= 0x20 || b >= 0x7f)
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('@')
+    {
+        return false;
+    }
+    if trimmed.starts_with('[') {
+        let Some((ipv6, rest)) = trimmed.strip_prefix('[').and_then(|s| s.split_once(']')) else {
+            return false;
+        };
+        if ipv6.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        return rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok());
+    }
+    let (host, port) = trimmed
+        .split_once(':')
+        .map_or((trimmed, None), |(h, p)| (h, Some(p)));
+    if let Some(p) = port {
+        if p.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
 pub fn get_base_url(headers: &HeaderMap) -> String {
     if let Ok(public_url) = env::var("PUBLIC_URL") {
         let trimmed = public_url.trim().trim_end_matches('/');
@@ -202,15 +248,48 @@ pub fn get_base_url(headers: &HeaderMap) -> String {
             return trimmed.to_string();
         }
     }
-    let proto = headers
-        .get("X-Forwarded-Proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("https");
-    let host = headers
-        .get("X-Forwarded-Host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
+    let trust_forwarded = env::var("TRUST_PROXY_HEADERS")
+        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+        .unwrap_or(false);
+
+    let proto = if trust_forwarded {
+        headers
+            .get("X-Forwarded-Proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|raw| raw.split(',').next())
+            .map(str::trim)
+            .and_then(|first| {
+                if first.eq_ignore_ascii_case("http") {
+                    Some("http")
+                } else if first.eq_ignore_ascii_case("https") {
+                    Some("https")
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("https")
+    } else {
+        "https"
+    };
+
+    let host = if trust_forwarded {
+        headers
+            .get("X-Forwarded-Host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|raw| raw.split(',').next())
+            .map(str::trim)
+            .filter(|h| is_valid_host_authority(h))
+    } else {
+        None
+    }
+    .or_else(|| {
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|h| is_valid_host_authority(h))
+    })
+    .unwrap_or("localhost:8080");
     format!("{}://{}", proto, host)
 }
 
@@ -249,7 +328,7 @@ pub async fn oidc_discovery(headers: HeaderMap) -> Response {
 }
 
 pub async fn oidc_jwks() -> Response {
-    blocking_response(move || oidc_jwks_blocking()).await
+    blocking_response(oidc_jwks_blocking).await
 }
 
 fn oidc_jwks_blocking() -> Response {
@@ -278,7 +357,29 @@ fn oidc_jwks_blocking() -> Response {
 // OIDC Authorization & Consent Flow
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn is_safe_redirect_uri(uri: &str) -> bool {
+    let trimmed = uri.trim();
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return false;
+    };
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return false;
+    }
+    if parsed.host_str().is_none_or(|h| h.is_empty())
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+    true
+}
+
 fn is_allowed_redirect_uri(uri: &str, stored_uris_json: &str) -> bool {
+    if !is_safe_redirect_uri(uri) {
+        return false;
+    }
     let Ok(uris) = serde_json::from_str::<Vec<String>>(stored_uris_json) else {
         return false;
     };
@@ -724,10 +825,14 @@ struct IdTokenClaims {
     aud: String,
     exp: i64,
     iat: i64,
-    name: String,
-    email: String,
-    picture: String,
-    role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    picture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nonce: Option<String>,
 }
@@ -781,6 +886,11 @@ fn issue_oidc_tokens(
     let now = Utc::now().timestamp();
     let exp = now + 3600;
 
+    let validated_scope = validate_oidc_scopes(scope);
+    let granted_scopes: HashSet<&str> = validated_scope.split_whitespace().collect();
+    let include_profile = granted_scopes.contains("profile");
+    let include_email = granted_scopes.contains("email");
+
     let mut jwt_header = Header::new(Algorithm::RS256);
     jwt_header.kid = Some(keys.kid.clone());
 
@@ -790,10 +900,10 @@ fn issue_oidc_tokens(
         aud: client_id.to_string(),
         exp,
         iat: now,
-        name: username,
-        email,
-        picture: avatar_url,
-        role,
+        name: include_profile.then_some(username),
+        email: include_email.then_some(email),
+        picture: include_profile.then_some(avatar_url),
+        role: include_profile.then_some(role),
         nonce: nonce.filter(|v| !v.is_empty()).map(str::to_string),
     };
 
@@ -803,7 +913,7 @@ fn issue_oidc_tokens(
         aud: client_id.to_string(),
         exp,
         iat: now,
-        scope: scope.to_string(),
+        scope: validated_scope.clone(),
     };
 
     let Ok(id_token) = encode(&jwt_header, &id_claims, &keys.encoding_key) else {
@@ -829,7 +939,7 @@ fn issue_oidc_tokens(
 
     if conn.execute(
         "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![refresh_token, client_id, user_id, scope, refresh_exp],
+        params![refresh_token, client_id, user_id, validated_scope, refresh_exp],
     ).is_err() { return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to persist OIDC refresh token"); }
 
     Json(serde_json::json!({
@@ -838,7 +948,7 @@ fn issue_oidc_tokens(
         "expires_in": 3600,
         "refresh_token": refresh_token,
         "id_token": id_token,
-        "scope": scope,
+        "scope": validated_scope,
     }))
     .into_response()
 }
@@ -1163,7 +1273,8 @@ fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Res
                             .into_response();
                     }
                     drop(conn);
-                    issue_oidc_tokens(&headers, &client_id, uid, &scope, None)
+                    let granted_scope = validate_oidc_scopes(&scope);
+                    issue_oidc_tokens(&headers, &client_id, uid, &granted_scope, None)
                 }
                 _ => (
                     StatusCode::BAD_REQUEST,
@@ -1210,8 +1321,10 @@ fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
             .into_response();
     };
 
+    let expected_iss = get_oidc_issuer(&headers);
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_aud = false;
+    validation.set_issuer(&[expected_iss.as_str()]);
     let Ok(token_data) =
         decode::<AccessTokenClaims>(token_str.trim(), &keys.decoding_key, &validation)
     else {
@@ -1221,6 +1334,18 @@ fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
         )
             .into_response();
     };
+
+    let granted_scopes: HashSet<&str> = token_data.claims.scope.split_whitespace().collect();
+    if !granted_scopes.contains("openid") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "insufficient_scope",
+                "error_description": "openid scope required"
+            })),
+        )
+            .into_response();
+    }
 
     let sub = token_data.claims.sub;
     let Ok(conn) = af_db::get_read_conn() else {
@@ -1246,14 +1371,17 @@ fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
             .into_response();
     };
 
-    Json(serde_json::json!({
-        "sub": sub,
-        "name": username,
-        "email": email,
-        "picture": avatar_url,
-        "role": role,
-    }))
-    .into_response()
+    let mut claims_obj = serde_json::Map::new();
+    claims_obj.insert("sub".to_string(), serde_json::json!(sub));
+    if granted_scopes.contains("profile") {
+        claims_obj.insert("name".to_string(), serde_json::json!(username));
+        claims_obj.insert("picture".to_string(), serde_json::json!(avatar_url));
+        claims_obj.insert("role".to_string(), serde_json::json!(role));
+    }
+    if granted_scopes.contains("email") {
+        claims_obj.insert("email".to_string(), serde_json::json!(email));
+    }
+    Json(serde_json::Value::Object(claims_obj)).into_response()
 }
 
 pub async fn oidc_revoke(
@@ -1299,11 +1427,25 @@ fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Re
             .into_response();
     }
 
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
+    let Ok(conn) = af_db::get_conn() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "server_error" })),
+        )
+            .into_response();
+    };
+    if conn
+        .execute(
             "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?1 AND client_id = ?2",
             params![token, client_id],
-        );
+        )
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "server_error" })),
+        )
+            .into_response();
     }
     Json(serde_json::json!({})).into_response()
 }
@@ -1482,10 +1624,7 @@ pub async fn oidc_device_authorize(
 
 fn oidc_device_authorize_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let client_id = form.get("client_id").cloned().unwrap_or_default();
-    let mut scope = form.get("scope").cloned().unwrap_or_default();
-    if scope.is_empty() {
-        scope = "openid profile email".to_string();
-    }
+    let scope = validate_oidc_scopes(form.get("scope").map(String::as_str).unwrap_or(""));
 
     let Ok(conn) = af_db::get_conn() else {
         return (
@@ -1691,7 +1830,7 @@ fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Resp
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn get_oidc_clients() -> Response {
-    blocking_response(move || get_oidc_clients_blocking()).await
+    blocking_response(get_oidc_clients_blocking).await
 }
 
 fn get_oidc_clients_blocking() -> Response {
@@ -1765,6 +1904,13 @@ fn create_oidc_client_blocking(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
             "name and at least one redirect_uri are required",
+        );
+    }
+    if redirect_uris.iter().any(|u| !is_safe_redirect_uri(u)) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "redirect_uris must use valid http or https URLs without credentials or fragments",
         );
     }
 
@@ -1998,6 +2144,14 @@ pub async fn google_login(Query(q): Query<HashMap<String, String>>) -> Response 
     resp
 }
 
+static GOOGLE_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
 pub async fn google_callback(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
@@ -2019,7 +2173,7 @@ pub async fn google_callback(
     let client_secret = env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default();
     let redirect_uri = env::var("GOOGLE_REDIRECT_URI").unwrap_or_default();
 
-    let client = reqwest::Client::new();
+    let client = &*GOOGLE_HTTP_CLIENT;
     let token_res = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
@@ -2646,5 +2800,74 @@ mod hardening_tests {
             oidc_token(HeaderMap::new(), Form(form)).await.status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn base_url_ignores_forwarded_headers_unless_trusted() {
+        env::remove_var("PUBLIC_URL");
+        env::remove_var("TRUST_PROXY_HEADERS");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("panel.example.com"));
+        headers.insert("X-Forwarded-Proto", HeaderValue::from_static("http"));
+        headers.insert(
+            "X-Forwarded-Host",
+            HeaderValue::from_static("evil.attacker.test"),
+        );
+        assert_eq!(get_base_url(&headers), "https://panel.example.com");
+
+        let previous = env::var("TRUST_PROXY_HEADERS").ok();
+        env::set_var("TRUST_PROXY_HEADERS", "true");
+        assert_eq!(get_base_url(&headers), "http://evil.attacker.test");
+        match previous {
+            Some(v) => env::set_var("TRUST_PROXY_HEADERS", v),
+            None => env::remove_var("TRUST_PROXY_HEADERS"),
+        }
+    }
+
+    #[test]
+    fn redirect_uri_validation_rejects_unsafe_schemes_fragments_and_userinfo() {
+        assert!(is_safe_redirect_uri("https://app.example.com/cb"));
+        assert!(is_safe_redirect_uri("http://127.0.0.1:8080/cb"));
+        assert!(is_safe_redirect_uri("http://localhost:3000/cb"));
+        for bad in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ftp://files.example.com/cb",
+            "https://app.example.com/cb#frag",
+            "https://user:pass@app.example.com/cb",
+            "/relative/path",
+        ] {
+            assert!(!is_safe_redirect_uri(bad), "expected reject for {bad}");
+        }
+    }
+
+    #[test]
+    fn id_token_claims_omit_pii_when_only_openid_scope_granted() {
+        let minimal = IdTokenClaims {
+            iss: "https://issuer.example".into(),
+            sub: "42".into(),
+            aud: "client".into(),
+            exp: 2000,
+            iat: 1000,
+            name: None,
+            email: None,
+            picture: None,
+            role: None,
+            nonce: None,
+        };
+        let encoded = serde_json::to_value(&minimal).unwrap();
+        assert!(encoded.get("email").is_none());
+        assert!(encoded.get("name").is_none());
+        assert!(encoded.get("picture").is_none());
+        assert!(encoded.get("role").is_none());
+
+        let rich = IdTokenClaims {
+            name: Some("alice".into()),
+            email: Some("alice@example.com".into()),
+            ..minimal
+        };
+        let rich_json = serde_json::to_value(&rich).unwrap();
+        assert_eq!(rich_json["name"], "alice");
+        assert_eq!(rich_json["email"], "alice@example.com");
     }
 }

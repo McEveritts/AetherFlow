@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -255,21 +256,51 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 				if authenticatedUser != "" {
 					pr.Out.Header.Set("X-Aetherflow-User", authenticatedUser)
 				}
+				peerIP := ""
+				if host, _, err := net.SplitHostPort(strings.TrimSpace(pr.In.RemoteAddr)); err == nil {
+					peerIP = strings.Trim(host, "[]")
+				} else if ip := net.ParseIP(strings.Trim(strings.TrimSpace(pr.In.RemoteAddr), "[]")); ip != nil {
+					peerIP = ip.String()
+				}
+				parsedPeer := net.ParseIP(peerIP)
+				trustForwarded := parsedPeer != nil && parsedPeer.IsLoopback()
+				if !trustForwarded {
+					for _, hdr := range []string{
+						"Forwarded",
+						"X-Forwarded-For",
+						"X-Forwarded-Host",
+						"X-Forwarded-Proto",
+						"X-Forwarded-Port",
+						"X-Forwarded-Server",
+						"X-Real-IP",
+					} {
+						pr.Out.Header.Del(hdr)
+					}
+					if peerIP != "" {
+						pr.Out.Header.Set("X-Forwarded-For", peerIP)
+						pr.Out.Header.Set("X-Real-IP", peerIP)
+					}
+					pr.Out.Header.Set("X-Forwarded-Host", incomingHost)
+					pr.Out.Header.Set("X-Forwarded-Proto", "http")
+					return
+				}
+
 				pr.SetXForwarded()
-				if priorHost := pr.In.Header.Get("X-Forwarded-Host"); priorHost != "" {
+				if priorHost := strings.TrimSpace(pr.In.Header.Get("X-Forwarded-Host")); priorHost != "" {
 					pr.Out.Header.Set("X-Forwarded-Host", priorHost)
 				} else {
 					pr.Out.Header.Set("X-Forwarded-Host", incomingHost)
 				}
-				if priorProto := pr.In.Header.Get("X-Forwarded-Proto"); priorProto != "" {
-					pr.Out.Header.Set("X-Forwarded-Proto", priorProto)
+				switch strings.ToLower(strings.TrimSpace(pr.In.Header.Get("X-Forwarded-Proto"))) {
+				case "https":
+					pr.Out.Header.Set("X-Forwarded-Proto", "https")
+				default:
+					pr.Out.Header.Set("X-Forwarded-Proto", "http")
 				}
-				if priorFor := pr.In.Header.Get("X-Forwarded-For"); priorFor != "" {
-					if xff := pr.Out.Header.Get("X-Forwarded-For"); xff != "" {
-						pr.Out.Header.Set("X-Forwarded-For", priorFor+", "+xff)
-					} else {
-						pr.Out.Header.Set("X-Forwarded-For", priorFor)
-					}
+				if realIP := strings.Trim(strings.TrimSpace(pr.In.Header.Get("X-Real-IP")), "[]"); net.ParseIP(realIP) != nil {
+					pr.Out.Header.Set("X-Real-IP", realIP)
+				} else if peerIP != "" {
+					pr.Out.Header.Set("X-Real-IP", peerIP)
 				}
 			},
 		}

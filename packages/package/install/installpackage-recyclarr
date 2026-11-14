@@ -18,9 +18,16 @@ fi
 
 PACKAGE_NAME="recyclarr"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+fi
 
 require_root
+af_prepare_job_scratch "$PACKAGE_NAME"
 validate_config_paths /var/lib/recyclarr/recyclarr.yml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and archive tools for Recyclarr..."
@@ -46,15 +53,15 @@ REC_VERSION="$(github_latest_tag "recyclarr/recyclarr" "7.4.0")"
 REC_URL="https://github.com/recyclarr/recyclarr/releases/download/v${REC_VERSION}/recyclarr-linux-${REC_ARCH}.tar.xz"
 
 report_progress 60 "Downloading Recyclarr ${REC_VERSION} (${REC_ARCH})..."
-TMP_XZ=$(mktemp /tmp/recyclarr-XXXXXX.tar.xz)
+TMP_XZ="$(mktemp "${AF_JOB_SCRATCH_DIR}/recyclarr-XXXXXX.tar.xz")"
 download_file "$REC_URL" "$TMP_XZ" >> "$LOGFILE" 2>&1
-TMP_DIR="$(mktemp -d /tmp/recyclarr-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_XZ"' EXIT
+TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/recyclarr-extract-XXXXXX")"
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"; rm -f -- "$TMP_XZ"; af_cleanup_job_scratch 1 || true' EXIT
 tar -xJf "$TMP_XZ" -C "$TMP_DIR" recyclarr >> "$LOGFILE" 2>&1
-systemctl stop recyclarr.timer recyclarr.service >> "$LOGFILE" 2>&1 || true
+rm -f -- "$TMP_XZ"
 chmod 755 "$TMP_DIR/recyclarr"
 stage_app_archive "$TMP_DIR" /usr/local/bin/recyclarr recyclarr /var/lib/recyclarr "$PACKAGE_NAME" "." /opt/recyclarr "" binary
-rm -f "$TMP_XZ"
+TMP_DIR=""
 chmod 755 /usr/local/bin/recyclarr
 queue_app_version /opt/recyclarr/.af-version "${REC_VERSION#v}"
 
@@ -154,6 +161,7 @@ systemctl is-active --quiet recyclarr.timer
 rm -rf -- "$AF_ARCHIVE_BACKUP/release"
 
 commit_app_versions
+af_cleanup_job_scratch 0 || true
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Recyclarr installed (companion timer active)."
 log_info "${PACKAGE_NAME} installed successfully"

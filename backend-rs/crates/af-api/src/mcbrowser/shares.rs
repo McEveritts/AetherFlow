@@ -84,7 +84,7 @@ pub(super) type PolicyAuthorizer = Arc<
 >;
 
 fn default_policy_authorizer() -> PolicyAuthorizer {
-    Arc::new(|conn, user, perm, path| super::policy::authorize_with_conn(conn, user, perm, path))
+    Arc::new(super::policy::authorize_with_conn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +94,7 @@ fn default_policy_authorizer() -> PolicyAuthorizer {
 #[derive(Clone)]
 pub(crate) enum ShareRuntime {
     Production,
+    #[allow(dead_code)]
     Isolated {
         conn: Arc<Mutex<Connection>>,
         base_root: PathBuf,
@@ -768,6 +769,7 @@ fn fstat_fd(fd: libc::c_int) -> io::Result<libc::stat> {
 
 struct VerifiedScopedUserRoot {
     bfs: BrowserFs,
+    #[allow(dead_code)] // RAII descriptor pin for the open scoped user root
     root_fd: OwnedFd,
     scope: String,
     scope_dev: u64,
@@ -927,6 +929,7 @@ fn authorize_share_resolution(
     Ok(paths)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn authorize_shared_relative_resolution(
     conn: &Connection,
     policy: &PolicyAuthorizer,
@@ -1129,7 +1132,6 @@ fn open_verified_shared_single_file(
     Ok((file, entry))
 }
 
-/// Checks if a relative file beneath `share_dir_fd` is a single-link regular file (`st_nlink == 1`).
 // ─────────────────────────────────────────────────────────────────────────────
 // Database & Owner Re-Evaluation Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1803,6 +1805,7 @@ pub(crate) fn get_public_metadata_at(
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn unlock_public_share_at(
     conn: &Connection,
     base_root: &Path,

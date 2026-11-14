@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
+	"sync"
+	"syscall"
 )
+
+var hostsFileMu sync.Mutex
 
 const (
 	defaultHostsFile = "/etc/hosts"
@@ -51,30 +54,32 @@ func (d *DNSManager) RemoveDomains(domains []string) error {
 	return d.RemoveDomainsLocal(domains)
 }
 
-// AppendOrUpdateDomainsLocal performs the atomic update directly against the local /etc/hosts.
-func (d *DNSManager) AppendOrUpdateDomainsLocal(domains []string) error {
-	targetHostsFile := resolveHostsFilePath()
+func withHostsFileLock(targetHostsFile string, fn func() error) error {
+	hostsFileMu.Lock()
+	defer hostsFileMu.Unlock()
 
-	// Deduplicate domains and build entries map
-	entries := make(map[string]bool)
-	for _, domain := range domains {
-		if !strings.HasSuffix(domain, ".aether.local") {
-			return fmt.Errorf("domain %s is not a valid internal aether.local domain", domain)
-		}
-		entries[domain] = true
+	lockPath := targetHostsFile + ".af.lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return fmt.Errorf("failed to create lock directory for %s: %w", targetHostsFile, err)
 	}
-
-	content, err := os.ReadFile(targetHostsFile)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read %s: %w", targetHostsFile, err)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G703 -- trusted operator hosts file override
+	if err != nil {
+		return fmt.Errorf("failed to open hosts lock %s: %w", lockPath, err)
 	}
+	defer lockFile.Close()
 
-	// Parse current file, preserving content outside our block
-	// and harvesting existing AetherFlow entries inside our block
-	var newVars []string
-	var existingDomains []string
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("failed to lock %s: %w", lockPath, err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	}()
+
+	return fn()
+}
+
+func parseHostsFileContent(content []byte) (outsideLines []string, existingDomains []string, err error) {
 	var insideBlock bool
-
 	scanner := bufio.NewScanner(strings.NewReader(string(content)))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -95,44 +100,95 @@ func (d *DNSManager) AppendOrUpdateDomainsLocal(domains []string) error {
 				existingDomains = append(existingDomains, parts[1:]...)
 			}
 		} else {
-			newVars = append(newVars, line)
+			outsideLines = append(outsideLines, line)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+	return outsideLines, existingDomains, nil
+}
 
-	for _, ed := range existingDomains {
-		entries[ed] = true
+func writeHostsFileAtomically(targetHostsFile, finalContent string) error {
+	tmpFile, err := os.CreateTemp(filepath.Dir(targetHostsFile), ".hosts.af-*") // #nosec G703 -- trusted operator hosts file override
+	if err != nil {
+		return fmt.Errorf("failed to create temporary host file: %w", err)
+	}
+	tmpHosts := tmpFile.Name()
+	cleanupTmp := func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpHosts)
 	}
 
-	sortedDomains := make([]string, 0, len(entries))
-	for domain := range entries {
-		sortedDomains = append(sortedDomains, domain)
-	}
-	sort.Strings(sortedDomains)
-
-	// Rebuild our managed block
-	managedBlock := []string{blockStart}
-	for _, domain := range sortedDomains {
-		managedBlock = append(managedBlock, fmt.Sprintf("%s\t%s", routeTarget, domain))
-	}
-	managedBlock = append(managedBlock, blockEnd)
-
-	// Combine untouched lines + rebuilt block
-	finalLines := append(newVars, "")
-	finalLines = append(finalLines, managedBlock...)
-	finalContent := strings.Join(finalLines, "\n") + "\n"
-
-	// Atomic write sequence
-	tmpHosts := targetHostsFile + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
-	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil { // #nosec G703 -- trusted operator hosts file override
+	if _, err := tmpFile.WriteString(finalContent); err != nil {
+		cleanupTmp()
 		return fmt.Errorf("failed to write temporary host file: %w", err)
 	}
-
+	if err := tmpFile.Chmod(0644); err != nil {
+		cleanupTmp()
+		return fmt.Errorf("failed to set permissions on temporary host file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		cleanupTmp()
+		return fmt.Errorf("failed to sync temporary host file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpHosts)
+		return fmt.Errorf("failed to close temporary host file: %w", err)
+	}
 	if err := os.Rename(tmpHosts, targetHostsFile); err != nil { // #nosec G703 -- trusted operator hosts file override
-		os.Remove(tmpHosts)
+		_ = os.Remove(tmpHosts)
 		return fmt.Errorf("atomic rename on %s failed: %w", targetHostsFile, err)
 	}
-
 	return nil
+}
+
+// AppendOrUpdateDomainsLocal performs the atomic update directly against the local /etc/hosts.
+func (d *DNSManager) AppendOrUpdateDomainsLocal(domains []string) error {
+	targetHostsFile := resolveHostsFilePath()
+
+	// Deduplicate domains and build entries map
+	entries := make(map[string]bool)
+	for _, domain := range domains {
+		if !strings.HasSuffix(domain, ".aether.local") {
+			return fmt.Errorf("domain %s is not a valid internal aether.local domain", domain)
+		}
+		entries[domain] = true
+	}
+
+	return withHostsFileLock(targetHostsFile, func() error {
+		content, err := os.ReadFile(targetHostsFile) // #nosec G703 -- trusted operator hosts file override
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read %s: %w", targetHostsFile, err)
+		}
+
+		outsideLines, existingDomains, err := parseHostsFileContent(content)
+		if err != nil {
+			return fmt.Errorf("failed to scan %s: %w", targetHostsFile, err)
+		}
+
+		for _, ed := range existingDomains {
+			entries[ed] = true
+		}
+
+		sortedDomains := make([]string, 0, len(entries))
+		for domain := range entries {
+			sortedDomains = append(sortedDomains, domain)
+		}
+		sort.Strings(sortedDomains)
+
+		managedBlock := []string{blockStart}
+		for _, domain := range sortedDomains {
+			managedBlock = append(managedBlock, fmt.Sprintf("%s\t%s", routeTarget, domain))
+		}
+		managedBlock = append(managedBlock, blockEnd)
+
+		finalLines := append(outsideLines, "")
+		finalLines = append(finalLines, managedBlock...)
+		finalContent := strings.Join(finalLines, "\n") + "\n"
+
+		return writeHostsFileAtomically(targetHostsFile, finalContent)
+	})
 }
 
 // RemoveDomainsLocal removes specified .aether.local domains from the managed block in /etc/hosts.
@@ -147,74 +203,47 @@ func (d *DNSManager) RemoveDomainsLocal(domains []string) error {
 		toRemove[domain] = true
 	}
 
-	content, err := os.ReadFile(targetHostsFile) // #nosec G703 -- trusted operator hosts file override
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read %s: %w", targetHostsFile, err)
-	}
-
-	var newVars []string
-	entries := make(map[string]bool)
-	var insideBlock bool
-
-	scanner := bufio.NewScanner(strings.NewReader(string(content)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmedLine := strings.TrimSpace(line)
-
-		if trimmedLine == blockStart {
-			insideBlock = true
-			continue
-		}
-		if trimmedLine == blockEnd {
-			insideBlock = false
-			continue
-		}
-
-		if insideBlock {
-			parts := strings.Fields(trimmedLine)
-			if len(parts) >= 2 && parts[0] == routeTarget {
-				for _, ed := range parts[1:] {
-					if !toRemove[ed] {
-						entries[ed] = true
-					}
-				}
+	return withHostsFileLock(targetHostsFile, func() error {
+		content, err := os.ReadFile(targetHostsFile) // #nosec G703 -- trusted operator hosts file override
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
 			}
-		} else {
-			newVars = append(newVars, line)
+			return fmt.Errorf("failed to read %s: %w", targetHostsFile, err)
 		}
-	}
 
-	finalLines := newVars
-	if len(entries) > 0 {
-		sortedDomains := make([]string, 0, len(entries))
-		for domain := range entries {
-			sortedDomains = append(sortedDomains, domain)
+		outsideLines, existingDomains, err := parseHostsFileContent(content)
+		if err != nil {
+			return fmt.Errorf("failed to scan %s: %w", targetHostsFile, err)
 		}
-		sort.Strings(sortedDomains)
 
-		managedBlock := []string{blockStart}
-		for _, domain := range sortedDomains {
-			managedBlock = append(managedBlock, fmt.Sprintf("%s\t%s", routeTarget, domain))
+		entries := make(map[string]bool)
+		for _, ed := range existingDomains {
+			if !toRemove[ed] {
+				entries[ed] = true
+			}
 		}
-		managedBlock = append(managedBlock, blockEnd)
-		finalLines = append(finalLines, "")
-		finalLines = append(finalLines, managedBlock...)
-	}
 
-	finalContent := strings.Join(finalLines, "\n") + "\n"
-	tmpHosts := targetHostsFile + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
-	if err := os.WriteFile(tmpHosts, []byte(finalContent), 0644); err != nil { // #nosec G703 -- trusted operator hosts file override
-		return fmt.Errorf("failed to write temporary host file: %w", err)
-	}
-	if err := os.Rename(tmpHosts, targetHostsFile); err != nil { // #nosec G703 -- trusted operator hosts file override
-		os.Remove(tmpHosts)
-		return fmt.Errorf("atomic rename on %s failed: %w", targetHostsFile, err)
-	}
+		finalLines := outsideLines
+		if len(entries) > 0 {
+			sortedDomains := make([]string, 0, len(entries))
+			for domain := range entries {
+				sortedDomains = append(sortedDomains, domain)
+			}
+			sort.Strings(sortedDomains)
 
-	return nil
+			managedBlock := []string{blockStart}
+			for _, domain := range sortedDomains {
+				managedBlock = append(managedBlock, fmt.Sprintf("%s\t%s", routeTarget, domain))
+			}
+			managedBlock = append(managedBlock, blockEnd)
+			finalLines = append(finalLines, "")
+			finalLines = append(finalLines, managedBlock...)
+		}
+
+		finalContent := strings.Join(finalLines, "\n") + "\n"
+		return writeHostsFileAtomically(targetHostsFile, finalContent)
+	})
 }
 
 // ValidateResolution verifies if parsing changes propagated to the OS

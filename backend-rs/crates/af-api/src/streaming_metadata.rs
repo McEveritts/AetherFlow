@@ -459,6 +459,7 @@ struct AncestorItemRaw {
     r#type: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_single_item_metadata(
     client: &Client,
     clean_url: &str,
@@ -775,10 +776,8 @@ fn apply_scoped_provider_item_metadata(
                 })
                 .map_err(|e| StreamingMetadataError::Database(e.to_string()))?;
 
-            for r in rows {
-                if let Ok((k, v)) = r {
-                    existing.insert(k, v);
-                }
+            for (k, v) in rows.flatten() {
+                existing.insert(k, v);
             }
 
             let mut history_changed = false;

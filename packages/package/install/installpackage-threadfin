@@ -50,11 +50,12 @@ TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_TAG}/${TF_
 report_progress 65 "Downloading and installing Threadfin ${TF_TAG}..."
 TMP_BIN=$(mktemp /tmp/threadfin-XXXXXX)
 download_file "$TF_URL" "$TMP_BIN" >> "$LOGFILE" 2>&1
-BUILD_DIR="$(mktemp -d)"
-trap 'rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_BIN"' EXIT
+BUILD_DIR="$(mktemp -d /tmp/threadfin-extract-XXXXXX)"
+trap '[[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"; rm -f -- "$TMP_BIN"' EXIT
 mv -- "$TMP_BIN" "$BUILD_DIR/threadfin"
 chmod 755 "$BUILD_DIR/threadfin"
 stage_app_archive "$BUILD_DIR" /usr/local/bin/threadfin threadfin /var/lib/threadfin "$PACKAGE_NAME" "." "" "" binary
+BUILD_DIR=""
 queue_app_version /var/lib/threadfin/.af-version "${TF_TAG#v}"
 
 chown -hRP threadfin:threadfin /var/lib/threadfin

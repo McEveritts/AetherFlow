@@ -29,7 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Test Release Routing and Manager
         run: python3 -m unittest discover -s tests -p 'test_release*.py' -v
@@ -39,10 +41,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node with pinned older version for installer npm regression testing (distinct from frontend engine >=22.19)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22.12.0
 
@@ -58,7 +62,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Check Installer and Remover Syntax
         run: |
@@ -73,7 +79,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Check Installer Syntax
         run: bash -n packages/package/install/installpackage-jellyseerr
@@ -86,7 +94,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install SQLite & Shell Dependencies
         run: |
@@ -112,10 +122,12 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24.22.2"
           cache: npm
@@ -140,7 +152,7 @@ jobs:
         run: npm run build
 
       - name: Upload Frontend Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frontend-static-export
           path: frontend/out
@@ -155,7 +167,9 @@ jobs:
         working-directory: backend-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Mold Linker
         run: |
@@ -163,16 +177,16 @@ jobs:
           sudo apt-get install -y mold clang pkg-config libssl-dev
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Setup Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
 
       - name: Download Frontend Static Export (Neutral & Legacy Staging)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-static-export
           path: web/dist
@@ -198,8 +212,7 @@ jobs:
         run: |
           cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
 
-      - name: Evaluate Workspace Clippy Lints (Advisory Diagnostics)
-        continue-on-error: true
+      - name: Enforce Workspace Clippy Lints
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Evaluate Formatting Gate (Advisory Check)
@@ -211,7 +224,7 @@ jobs:
           cargo build --release --locked --bin aetherflow-api --bin af
 
       - name: Upload Rust Single-Binary & CLI Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aetherflow-rs-single-binary
           path: |
@@ -225,17 +238,19 @@ jobs:
     needs: backend-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node (for Playwright Client Runner)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24.22.2"
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Download Rust Single-Binary & CLI Artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: aetherflow-rs-single-binary
           path: backend-rs/target/release
@@ -265,16 +280,18 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
       - name: Download Frontend Static Export
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-static-export
           path: backend/web/dist
@@ -284,6 +301,7 @@ jobs:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          TMPDIR: /tmp
         run: go test ./... -count=1
 
       - name: Build Embedded Single-Binary (CGO_ENABLED=0)
@@ -296,7 +314,7 @@ jobs:
           go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/aetherflow-api .
 
       - name: Upload Single-Binary Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aetherflow-single-binary
           path: backend/dist/aetherflow-api

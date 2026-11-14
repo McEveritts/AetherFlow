@@ -1241,10 +1241,8 @@ impl Manager {
         }
         self.run(
             "tailscale",
-            &vec![
-                "set".into(),
-                format!("--advertise-routes={}", normalized.join(",")),
-            ],
+            &["set".into(),
+                format!("--advertise-routes={}", normalized.join(","))],
             None,
         )
         .await?;

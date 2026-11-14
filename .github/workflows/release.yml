@@ -18,97 +18,26 @@ on:
           - nightly
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
-  security-gate:
-    name: Release Security, SAST & Advisory Gate
+  validate-release:
+    name: Validate Release Identity & Channel Contracts
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        working-directory: backend-rs
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.resolve_identity.outputs.release_tag }}
+      version_stamp: ${{ steps.resolve_identity.outputs.version_stamp }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: Secret Scan (Gitleaks Gate)
-        working-directory: .
-        run: |
-          GITLEAKS_VERSION="8.30.1"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
-          gitleaks dir . --verbose --redact
-
-      - name: Install System Build Dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mold clang pkg-config libssl-dev
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Rust Cargo Dependency Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "backend-rs -> target"
-          cache-targets: "false"
-
-      - name: Prepare Embedded Frontend Staging Directories
-        working-directory: .
-        run: |
-          mkdir -p web/dist backend/web/dist
-          touch web/dist/.keep backend/web/dist/.keep
-
-      - name: Verify Workspace Lockfile & Advisory Policy Presence
-        run: |
-          test -f Cargo.lock
-          test -f deny.toml
-
-      - name: Install cargo-audit and cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit, cargo-deny
-
-      - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
-        run: |
-          cargo deny --locked check advisories bans sources
-
-      - name: RustSec Vulnerability Scan (cargo-audit)
-        run: |
-          cargo audit --file Cargo.lock
-
-      - name: Rust Static Analysis (workspace + strict restore/release core)
-        run: |
-          cargo clippy --workspace --all-targets --locked
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
-
-      - name: Rust Security Unit & Contract Tests (--locked)
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
-        run: |
-          cargo test --workspace --locked -- --test-threads=1
-
-  release-build:
-    name: Build, Verify & Publish Signed Release (Rust Control Plane)
-    needs: [security-gate]
-    runs-on: ubuntu-22.04
-    env:
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve Release Identity
+        id: resolve_identity
         env:
           REQUESTED_CHANNEL: ${{ inputs.channel }}
         run: |
@@ -132,9 +61,133 @@ jobs:
             RELEASE_TAG="${REPO_VERSION}-${RELEASE_CHANNEL}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
           fi
           printf 'RELEASE_TAG=%s\nVERSION_STAMP=%s\n' "${RELEASE_TAG}" "${RELEASE_TAG}" >> "$GITHUB_ENV"
+          if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+            printf 'release_tag=%s\nversion_stamp=%s\n' "${RELEASE_TAG}" "${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Confirm Release Identity
+        run: |
+          echo "Resolved release identity: ${RELEASE_TAG} (${VERSION_STAMP})"
 
       - name: Test Release Routing
         run: python3 -m unittest discover -s tests -p 'test_release_workflow.py' -v
+
+  security-gate:
+    name: Release Security, SAST & Advisory Gate
+    needs: [validate-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Shell Hygiene
+        working-directory: .
+        run: python3 tests/check_shell_hygiene.py
+
+      - name: Secret Scan (Gitleaks Gate)
+        working-directory: .
+        run: |
+          GITLEAKS_VERSION="8.30.1"
+          GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm -f /tmp/gitleaks.tar.gz
+          gitleaks dir . --verbose --redact
+          gitleaks git . --verbose --redact
+
+      - name: Setup Node for Production Dependency Audit
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: NPM Production Dependency Security Audit
+        working-directory: .
+        run: |
+          npm ci --ignore-scripts
+          npm audit --omit=dev --audit-level=high
+
+      - name: Install System Build Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold clang pkg-config libssl-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "backend-rs -> target"
+          cache-targets: "false"
+
+      - name: Prepare Embedded Frontend Staging Directories
+        working-directory: .
+        run: |
+          mkdir -p web/dist backend/web/dist
+          touch web/dist/.keep backend/web/dist/.keep
+
+      - name: Verify Workspace Lockfile & Advisory Policy Presence
+        run: |
+          test -f Cargo.lock
+          test -f deny.toml
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-audit, cargo-deny
+
+      - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
+        run: |
+          cargo deny --locked check advisories bans sources
+
+      - name: RustSec Vulnerability Scan (cargo-audit)
+        run: |
+          cargo audit --file Cargo.lock
+
+      - name: Rust Static Analysis (workspace + strict restore/release core)
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+
+      - name: Rust Security Unit & Contract Tests (--locked)
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          TMPDIR: /tmp
+        run: |
+          cargo test --workspace --locked -- --test-threads=1
+
+  release-build:
+    name: Build & Verify Release Tarball (Rust Control Plane)
+    needs: [validate-release, security-gate]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Test YouTube Marketplace Packages
         run: |
@@ -147,21 +200,15 @@ jobs:
           done
           PATH="/usr/sbin:$PATH" /usr/bin/python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
 
-      - name: Secret Scan (Gitleaks Gate)
-        run: |
-          GITLEAKS_VERSION="8.30.1"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
-          gitleaks dir . --verbose --redact
-
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24.22.2"
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-unknown-linux-gnu
           components: clippy
@@ -172,7 +219,7 @@ jobs:
           sudo apt-get install -y -qq mold clang pkg-config libssl-dev
 
       - name: Rust Cargo Dependency Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
@@ -202,9 +249,10 @@ jobs:
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          TMPDIR: /tmp
         run: |
           test -f Cargo.lock
-          cargo clippy --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
           cargo test --workspace --locked -- --test-threads=1
 
@@ -242,8 +290,43 @@ jobs:
           tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
           (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
+      - name: Upload Release Bundle Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-dist
+          path: |
+            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/SHA256SUMS
+          if-no-files-found: error
+
+  release-publish:
+    name: Attest & Publish Signed Release
+    needs: [validate-release, security-gate, release-build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout Release Changelog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            CHANGELOG.md
+
+      - name: Download Release Bundle Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-dist
+          path: release-dist
+
+      - name: Verify Release Archive Integrity
+        run: |
+          (cd release-dist && sha256sum -c SHA256SUMS)
+
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             release-dist/aetherflow-linux-amd64.tar.gz
@@ -251,7 +334,8 @@ jobs:
 
       - name: Publish to GitHub Releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_FLAGS=(--generate-notes)
           if [[ "${RELEASE_TAG}" == *-* ]]; then

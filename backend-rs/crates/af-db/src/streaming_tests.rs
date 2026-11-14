@@ -24,7 +24,7 @@ fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_s
         crate::init_db().expect("reopening complete schema succeeds");
         let connection = crate::get_conn().unwrap();
         assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get::<_, String>(0)).unwrap(), plugin_description);
-        assert_eq!(connection.query_row("SELECT enabled FROM plugins_registry WHERE plugin_id='retained-fixture'", [], |row| row.get::<_, bool>(0)).unwrap(), true);
+        assert!(connection.query_row("SELECT enabled FROM plugins_registry WHERE plugin_id='retained-fixture'", [], |row| row.get::<_, bool>(0)).unwrap());
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM schema_versions WHERE version=24", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
     {
@@ -228,7 +228,19 @@ fn migration_v20_preserves_v19_legacy_records_as_unverified_and_sets_defaults() 
     );
 
     // Verify row 1 (dated legacy record)
-    let row1: (String, String, Option<String>, String, String, String, Option<i64>, i64, i64, i64) = conn
+    type LegacyStreamingRow = (
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        i64,
+        i64,
+    );
+    let row1: LegacyStreamingRow = conn
         .query_row(
             "SELECT provenance, server_id, source_event_id, timestamp_certainty, byte_accuracy, policy_status, event_unix, event_missing, watched_secs, data_used_bytes FROM streaming_history WHERE session_key = 'legacy:sess:1'",
             [],

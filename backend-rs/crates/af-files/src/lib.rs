@@ -1671,10 +1671,7 @@ fn read_dir_entries_bounded(
             continue;
         }
         if entries.len() >= effective_limit {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "directory entry limit exceeded",
-            ));
+            return Err(Error::other("directory entry limit exceeded"));
         }
         let st = match fstatat_nofollow(dir_raw_fd, c_name) {
             Ok(st) => st,
@@ -1906,9 +1903,9 @@ fn copy_directory_tree(
                     let mut dst_file = File::from(dst_fd);
                     let copied = io::copy(&mut src_file, &mut dst_file)?;
                     dst_file.sync_all()?;
-                    total_bytes = total_bytes.checked_add(copied).ok_or_else(|| {
-                        Error::new(ErrorKind::Other, "copied byte count overflow")
-                    })?;
+                    total_bytes = total_bytes
+                        .checked_add(copied)
+                        .ok_or_else(|| Error::other("copied byte count overflow"))?;
                 }
                 libc::S_IFDIR => {
                     let rc = unsafe { libc::mkdirat(dst_raw, child_name.as_ptr(), 0o755) };
@@ -1942,10 +1939,8 @@ fn copy_directory_tree(
             }
         } else {
             let finished = stack.pop().expect("non-empty stack");
-            if stack.is_empty() {
-                if unsafe { libc::fchmod(finished.dst_fd.as_raw_fd(), 0o755) } < 0 {
-                    return Err(Error::last_os_error());
-                }
+            if stack.is_empty() && unsafe { libc::fchmod(finished.dst_fd.as_raw_fd(), 0o755) } < 0 {
+                return Err(Error::last_os_error());
             }
             sync_dir(finished.dst_fd.as_raw_fd())?;
         }
@@ -1984,10 +1979,7 @@ fn list_raw_copy_children(dir_fd: libc::c_int) -> io::Result<Vec<CString>> {
             continue;
         }
         if names.len() >= MAX_LIST_ENTRIES {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "directory entry limit exceeded",
-            ));
+            return Err(Error::other("directory entry limit exceeded"));
         }
         names.push(c_name.to_owned());
     }

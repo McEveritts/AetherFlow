@@ -157,20 +157,9 @@ pub fn resolve_operation_conflict_policy(
     };
 
     match (conflict, flag_derived) {
-        (Some(explicit), Some(derived)) if explicit != derived => {
-            if explicit != OperationConflictPolicy::Error
-                && overwrite_flag != Some(true)
-                && rename_flag != Some(true)
-            {
-                Err(McBrowserError::BadRequest(
-                    "Conflicting conflict policy and boolean override/rename flags".to_string(),
-                ))
-            } else {
-                Err(McBrowserError::BadRequest(
-                    "Conflicting conflict policy and boolean override/rename flags".to_string(),
-                ))
-            }
-        }
+        (Some(explicit), Some(derived)) if explicit != derived => Err(McBrowserError::BadRequest(
+            "Conflicting conflict policy and boolean override/rename flags".to_string(),
+        )),
         (Some(explicit), _) => Ok(explicit),
         (None, Some(derived)) => Ok(derived),
         (None, None) => Ok(OperationConflictPolicy::Error),
@@ -2257,6 +2246,7 @@ pub fn execute_create_file_conn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_put_content_with_loaded_target_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2341,6 +2331,7 @@ fn execute_put_content_with_loaded_target_conn(
     ))
 }
 
+#[allow(dead_code)]
 fn execute_put_content_for_pinned_target_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2373,6 +2364,7 @@ fn execute_put_content_for_pinned_target_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_put_content_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2462,6 +2454,7 @@ fn open_authorized_file_for_put_content_with_conn(
     }
 }
 
+#[allow(dead_code)]
 pub fn execute_put_content_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3074,6 +3067,7 @@ fn copy_planned_directory_new_with_quota(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_copy_directory_descendants(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3596,6 +3590,7 @@ fn authorize_destination_tree_for_copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_copy_core_with_accounting_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3873,6 +3868,7 @@ fn execute_copy_core_with_accounting_conn(
     }
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3891,6 +3887,7 @@ pub fn execute_copy_conn(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_with_policy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3910,6 +3907,7 @@ pub fn execute_copy_with_policy_conn(
     )
 }
 
+#[allow(dead_code)]
 fn execute_copy_with_accounting_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3931,6 +3929,7 @@ fn execute_copy_with_accounting_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3974,6 +3973,7 @@ fn execute_copy_for_user_with_accounting_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_rename_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4255,6 +4255,7 @@ fn authorize_symlink_target_if_internal(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn execute_rename_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4369,8 +4370,8 @@ fn execute_rename_for_user_with_accounting_conn(
             super::policy::Permission::Rename,
             &dst_descendant,
         )?;
-        if conflict_policy == OperationConflictPolicy::Overwrite && dst_exists {
-            if bfs.metadata(&dst_descendant).is_ok() {
+        if conflict_policy == OperationConflictPolicy::Overwrite && dst_exists
+            && bfs.metadata(&dst_descendant).is_ok() {
                 super::policy::authorize_with_conn(
                     conn,
                     auth_user,
@@ -4378,7 +4379,6 @@ fn execute_rename_for_user_with_accounting_conn(
                     &dst_descendant,
                 )?;
             }
-        }
     }
 
     if conflict_policy == OperationConflictPolicy::KeepBoth && dst_exists {
@@ -4509,6 +4509,7 @@ pub struct DeleteRecursiveOutcome {
     pub accounting_pending: bool,
 }
 
+#[allow(dead_code)]
 pub fn execute_delete_recursive_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -5445,6 +5446,7 @@ struct OpenSslEvpApi {
         unsafe extern "C" fn(*mut libc::c_void, *mut u8, *mut libc::c_uint) -> libc::c_int,
 }
 
+#[allow(clippy::missing_transmute_annotations)]
 static OPENSSL_EVP_API: Lazy<OpenSslEvpApi> = Lazy::new(|| unsafe {
     let libs = [c"libcrypto.so.3", c"libcrypto.so"];
     OpenSslEvpApi {

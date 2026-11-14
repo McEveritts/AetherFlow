@@ -928,6 +928,7 @@ fn extract_archive_rejects_traversal_backslash_staging_duplicates_links_devices_
     let user = make_user(6, "user6", "user");
     enable_execute_for_user(&conn, 6, PolicyDocument::default());
 
+    #[allow(clippy::type_complexity)]
     fn build_custom_tar(entries: &[(&[u8], tar::EntryType, Option<&[u8]>, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         for &(raw_name, entry_type, link_target, payload) in entries {
@@ -956,7 +957,7 @@ fn extract_archive_rejects_traversal_backslash_staging_duplicates_links_devices_
                 out.extend_from_slice(payload);
                 let rem = payload.len() % 512;
                 if rem != 0 {
-                    out.extend(std::iter::repeat(0u8).take(512 - rem));
+                    out.extend(std::iter::repeat_n(0u8, 512 - rem));
                 }
             }
         }
@@ -1702,6 +1703,7 @@ fn zip_central_directory_admission_rejects_excess_entries_malformed_metadata_and
         buf.extend_from_slice(&0u16.to_le_bytes());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_zip64_eocd_and_locator(
         buf: &mut Vec<u8>,
         record_size: u64,

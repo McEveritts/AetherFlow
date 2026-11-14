@@ -179,11 +179,15 @@ pub fn build_router() -> Router {
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
+    let public_well_known = Router::new()
+        .route("/.well-known/openid-configuration", get(oidc_discovery))
+        .layer(middleware::from_fn(host_validation_middleware));
+
     Router::new()
         .nest("/api/v1", v1)
         .nest("/api", legacy)
         .merge(top_level_plugins)
-        .route("/.well-known/openid-configuration", get(oidc_discovery))
+        .merge(public_well_known)
         .route("/health", get(health_check))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
@@ -1186,7 +1190,7 @@ fn get_marketplace_apps_blocking(headers: HeaderMap, require_auth: bool) -> Resp
             app.progress = job.progress;
             app.job_id = Some(job.job_id);
             app.started_at = Some(job.started_at);
-            app.log_line = sanitize_url_or_source_key_for_api(&af_services::package_job_progress_summary(&job.status));
+            app.log_line = sanitize_url_or_source_key_for_api(af_services::package_job_progress_summary(&job.status));
         }
 
         apps.push(app);
@@ -1464,6 +1468,7 @@ pub(crate) fn append_package_job_output(job_id: &str, line: &str) {
 
 /// Ends a lifecycle job: records the terminal outcome (so polling clients can
 /// distinguish failure from success) and broadcasts the terminal event.
+#[allow(clippy::too_many_arguments)]
 fn finish_package_lifecycle(
     pkg_id: &str,
     action: &str,
@@ -1910,6 +1915,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_package_lifecycle_dispatch_gate_with<
     RuntimePortFn,
     LoadIngressFn,
@@ -2677,6 +2683,7 @@ fn restore_candidate_receipts(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_post_script_lifecycle_with<
     LoadIngressFn,
     SaveIngressFn,
@@ -2985,11 +2992,10 @@ pub fn sanitize_url_or_source_key_for_api(raw: &str) -> String {
             parsed.set_fragment(None);
             let mut out = parsed.to_string();
             let base_before = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-            if !trimmed.ends_with('/') && out.ends_with('/') && !base_before.ends_with('/') {
-                if parsed.path() == "/" {
+            if !trimmed.ends_with('/') && out.ends_with('/') && !base_before.ends_with('/')
+                && parsed.path() == "/" {
                     out.pop();
                 }
-            }
             return out;
         }
     }
@@ -3022,6 +3028,7 @@ pub fn sanitize_package_update_record(
     record
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_with<ControlFn, ControlFut, StatusFn>(
     clean_id: &str,
     quiesce_units: &[String],
@@ -3127,17 +3134,17 @@ where
         // Step 5: Verify restart_units active
         for unit in restart_units {
             let st = query_status(unit);
-            if st != "running" && st != "idle" {
-                if !restart_failures.iter().any(|f| f.starts_with(unit)) {
+            if st != "running" && st != "idle"
+                && !restart_failures.iter().any(|f| f.starts_with(unit)) {
                     restart_failures.push(format!("{unit} is {st}"));
                 }
-            }
         }
     }
 
     (receipt_restore_error, restart_failures)
 }
 
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) async fn quiesce_and_restore_candidate_receipts_with<ControlFn, ControlFut, StatusFn>(
     clean_id: &str,
     quiesce_units: &[String],
@@ -3226,6 +3233,7 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime(
     .await
 }
 
+#[allow(dead_code)]
 pub(crate) async fn quiesce_and_restore_candidate_receipts(
     clean_id: &str,
     stopped_units: &[String],
@@ -3252,6 +3260,7 @@ pub(crate) fn should_rollback_post_certification_failure(action: &str, kind: af_
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_post_certification_finalization_failure_with<ControlFn, ControlFut, StatusFn>(
     action: &str,
     mut required_err: PackageLifecycleFailure,
@@ -3328,6 +3337,7 @@ fn resolve_confirmed_latest_version(clean_id: &str) -> Option<String> {
     None
 }
 
+#[allow(dead_code, clippy::result_large_err)]
 pub(crate) async fn dispatch_package_lifecycle(
     pkg_id: String,
     action: &'static str,
@@ -3364,6 +3374,7 @@ async fn dispatch_package_lifecycle_with_target(
             "Data purge is only valid for package removal",
         );
     }
+    #[allow(clippy::result_large_err)]
     let (pkgs, admission_guard) = match tokio::task::spawn_blocking(|| {
         let guard = af_runner::acquire_lifecycle_admission_lock(None).map_err(|error| {
             api_error(
@@ -3532,8 +3543,8 @@ async fn dispatch_package_lifecycle_with_target(
             );
         }
 
-        if is_retired {
-            if !af_runner::af_release::lifecycle::versions_match_target(db_latest, "0.4.18.2805")
+        if is_retired
+            && !af_runner::af_release::lifecycle::versions_match_target(db_latest, "0.4.18.2805")
                 && !af_runner::af_release::lifecycle::versions_match_target("0.4.18.2805", db_latest)
             {
                 return api_error(
@@ -3542,7 +3553,6 @@ async fn dispatch_package_lifecycle_with_target(
                     "Retired package can only target pinned version 0.4.18.2805",
                 );
             }
-        }
 
         let github_api_base = std::env::var("AETHERFLOW_GITHUB_API_BASE_URL")
             .ok()
@@ -3724,6 +3734,7 @@ async fn dispatch_package_lifecycle_with_target(
             cfg!(unix) && fs_root_override.is_none() && std::path::Path::new("/bin/bash").exists();
 
         let expected_target_for_runner = expected_target_version.clone();
+        #[allow(clippy::type_complexity)]
         let captured_receipt_snapshots: std::sync::Arc<
             std::sync::Mutex<Vec<(PathBuf, Option<ReceiptSnapshotEntry>)>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3770,11 +3781,13 @@ async fn dispatch_package_lifecycle_with_target(
                                     return Err(anyhow::anyhow!("Preparation: {err}"));
                                 }
                             }
-                            let mut env_cfg = af_runner::PackageExecutionEnv::default();
-                            env_cfg.fs_root = fs_root_override
-                                .as_ref()
-                                .map(|s| PathBuf::from(s.trim()))
-                                .or_else(|| af_runner::PackageExecutionEnv::default().fs_root);
+                            let env_cfg = af_runner::PackageExecutionEnv {
+                                fs_root: fs_root_override
+                                    .as_ref()
+                                    .map(|s| PathBuf::from(s.trim()))
+                                    .or_else(|| af_runner::PackageExecutionEnv::default().fs_root),
+                                ..af_runner::PackageExecutionEnv::default()
+                            };
                             // The privileged af-runner daemon captures its own root snapshot
                             // when it will execute the installer. A second unprivileged
                             // capture here would either fail or record a partial tree.
@@ -3987,11 +4000,10 @@ async fn dispatch_package_lifecycle_with_target(
                 }
                 for unit in &stopped_units {
                     let (st, _, _) = af_services::get_systemd_unit_info(unit);
-                    if st != "running" && st != "idle" {
-                        if !restart_failures.iter().any(|f| f.starts_with(unit)) {
+                    if st != "running" && st != "idle"
+                        && !restart_failures.iter().any(|f| f.starts_with(unit)) {
                             restart_failures.push(format!("{unit} is {st}"));
                         }
-                    }
                 }
             }
 
@@ -4142,7 +4154,7 @@ async fn dispatch_package_lifecycle_with_target(
                 allocated_port,
                 stopped_units.clone(),
                 &base_domain,
-                |app_id| load_authoritative_app_ingress_config(app_id),
+                load_authoritative_app_ingress_config,
                 |_cfg| {
                     let mut conn = af_db::get_conn()?;
                     af_db::synchronize_lifecycle_ingress(
@@ -6508,6 +6520,7 @@ mod update_error_regressions {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -11065,7 +11078,7 @@ mod hillclimb_tests {
         let items: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         if let Some(item) = items.first() {
             assert_eq!(item["inventory_known"], false);
-            assert_eq!(item["inventory_authenticated"].as_bool().unwrap_or(false), false);
+            assert!(!item["inventory_authenticated"].as_bool().unwrap_or(false));
         }
     }
 }

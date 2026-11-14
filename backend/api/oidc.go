@@ -38,16 +38,22 @@ func init() {
 
 // loadOrGenerateOIDCKey loads the OIDC RSA key from disk, or generates a new one.
 func loadOrGenerateOIDCKey() {
-	keyPath := os.Getenv("OIDC_KEY_PATH")
+	keyPath := strings.TrimSpace(os.Getenv("OIDC_KEY_PATH"))
 	if keyPath == "" {
-		// Anchor to the executable's directory (not CWD) to prevent
-		// silent key regeneration when started from a different directory.
-		exe, exeErr := os.Executable()
-		if exeErr != nil {
-			slog.Warn("OIDC: failed to resolve executable path, using CWD fallback", "error", exeErr)
-			keyPath = "data/oidc_rsa.pem"
+		if sd := strings.TrimSpace(os.Getenv("STATE_DIRECTORY")); sd != "" {
+			keyPath = filepath.Join(sd, "oidc_rsa.pem")
+		} else if dd := strings.TrimSpace(os.Getenv("DATA_DIR")); dd != "" {
+			keyPath = filepath.Join(dd, "oidc_rsa.pem")
 		} else {
-			keyPath = filepath.Join(filepath.Dir(exe), "data", "oidc_rsa.pem")
+			// Anchor to the executable's directory (not CWD) to prevent
+			// silent key regeneration when started from a different directory.
+			exe, exeErr := os.Executable()
+			if exeErr != nil {
+				slog.Warn("OIDC: failed to resolve executable path, using CWD fallback", "error", exeErr)
+				keyPath = "data/oidc_rsa.pem"
+			} else {
+				keyPath = filepath.Join(filepath.Dir(exe), "data", "oidc_rsa.pem")
+			}
 		}
 	}
 
@@ -167,6 +173,7 @@ func OIDCAuthorize(c *gin.Context) {
 	responseType := c.Query("response_type")
 	scope := c.Query("scope")
 	state := c.Query("state")
+	nonce := c.Query("nonce")
 	codeChallenge := c.Query("code_challenge")
 	codeChallengeMethod := c.Query("code_challenge_method")
 
@@ -184,7 +191,7 @@ func OIDCAuthorize(c *gin.Context) {
 	}
 
 	// Validate redirect URI
-	if !isAllowedRedirectURI(redirectURI, storedRedirectURIs) {
+	if !isSafeRedirectURI(redirectURI) || !isAllowedRedirectURI(redirectURI, storedRedirectURIs) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_redirect_uri"})
 		return
 	}
@@ -192,13 +199,13 @@ func OIDCAuthorize(c *gin.Context) {
 	// Check session — user must be logged in
 	cookie, err := c.Cookie("aetherflow_session")
 	if err != nil {
-	// Redirect to login — URL-encode return_to to prevent open redirect (CWE-601)
+		// Redirect to login — URL-encode return_to to prevent open redirect (CWE-601)
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
 
-	_, err = extractUserIDFromJWT(cookie)
+	userID, err := extractUserIDFromJWT(cookie)
 	if err != nil {
 		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
 		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
@@ -210,9 +217,8 @@ func OIDCAuthorize(c *gin.Context) {
 
 	// Check if user has already granted consent for this client + scope combination.
 	// If so, skip the consent screen and issue the authorization code directly.
-	userID, _ := extractUserIDFromJWT(cookie)
 	if hasExistingConsent(userID, clientID, validatedScope) {
-		code, err := generateAndStoreAuthCode(clientID, userID, redirectURI, validatedScope, codeChallenge, codeChallengeMethod)
+		code, err := generateAndStoreAuthCode(clientID, userID, redirectURI, validatedScope, nonce, codeChallenge, codeChallengeMethod)
 		if err != nil {
 			slog.Error("OIDC: failed to issue auth code for returning consent", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -232,9 +238,10 @@ func OIDCAuthorize(c *gin.Context) {
 
 	// Redirect to frontend consent screen instead of auto-approving.
 	// The frontend will prompt the user and then call POST /api/v1/auth/oidc/consent
-	consentURL := fmt.Sprintf("/oauth/consent?client_id=%s&redirect_uri=%s&response_type=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=%s",
+	consentURL := fmt.Sprintf("/oauth/consent?client_id=%s&redirect_uri=%s&response_type=%s&scope=%s&state=%s&nonce=%s&code_challenge=%s&code_challenge_method=%s",
 		url.QueryEscape(clientID), url.QueryEscape(redirectURI), url.QueryEscape(responseType),
-		url.QueryEscape(validatedScope), url.QueryEscape(state), url.QueryEscape(codeChallenge), url.QueryEscape(codeChallengeMethod))
+		url.QueryEscape(validatedScope), url.QueryEscape(state), url.QueryEscape(nonce),
+		url.QueryEscape(codeChallenge), url.QueryEscape(codeChallengeMethod))
 
 	c.Redirect(http.StatusTemporaryRedirect, consentURL)
 }
@@ -254,6 +261,7 @@ func OIDCConsent(c *gin.Context) {
 		ResponseType        string `json:"response_type" binding:"required"`
 		Scope               string `json:"scope"`
 		State               string `json:"state"`
+		Nonce               string `json:"nonce"`
 		CodeChallenge       string `json:"code_challenge"`
 		CodeChallengeMethod string `json:"code_challenge_method"`
 		Approved            bool   `json:"approved"`
@@ -264,8 +272,20 @@ func OIDCConsent(c *gin.Context) {
 		return
 	}
 
+	if req.ResponseType != "code" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_response_type"})
+		return
+	}
+
+	var storedRedirectURIs string
+	err := db.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE id = ?", req.ClientID).Scan(&storedRedirectURIs)
+	if err != nil || !isSafeRedirectURI(req.RedirectURI) || !isAllowedRedirectURI(req.RedirectURI, storedRedirectURIs) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_or_redirect_uri"})
+		return
+	}
+
 	if !req.Approved {
-		// User denied consent
+		// User denied consent (only redirect after validating client and redirect_uri)
 		sep := "?"
 		if strings.Contains(req.RedirectURI, "?") {
 			sep = "&"
@@ -278,24 +298,12 @@ func OIDCConsent(c *gin.Context) {
 		return
 	}
 
-	if req.ResponseType != "code" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_response_type"})
-		return
-	}
-
-	var storedRedirectURIs string
-	err := db.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE id = ?", req.ClientID).Scan(&storedRedirectURIs)
-	if err != nil || !isAllowedRedirectURI(req.RedirectURI, storedRedirectURIs) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_or_redirect_uri"})
-		return
-	}
-
 	scope := validateOIDCScopes(req.Scope)
 	if scope == "" {
 		scope = "openid profile email"
 	}
 
-	code, err := generateAndStoreAuthCode(req.ClientID, userId.(int), req.RedirectURI, scope, req.CodeChallenge, req.CodeChallengeMethod)
+	code, err := generateAndStoreAuthCode(req.ClientID, userId.(int), req.RedirectURI, scope, req.Nonce, req.CodeChallenge, req.CodeChallengeMethod)
 	if err != nil {
 		slog.Error("OIDC: failed to store auth code", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -371,6 +379,7 @@ func handleAuthCodeExchange(c *gin.Context, clientID string) {
 		userID              int
 		storedRedirectURI   string
 		scope               string
+		nonce               string
 		codeChallenge       string
 		codeChallengeMethod string
 		expiresAt           string
@@ -378,10 +387,10 @@ func handleAuthCodeExchange(c *gin.Context, clientID string) {
 	)
 
 	err := db.DB.QueryRow(
-		`SELECT client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, used
+		`SELECT client_id, user_id, redirect_uri, scope, COALESCE(nonce, ''), code_challenge, code_challenge_method, expires_at, used
 		 FROM oidc_auth_codes WHERE code = ?`,
 		code,
-	).Scan(&storedClientID, &userID, &storedRedirectURI, &scope, &codeChallenge, &codeChallengeMethod, &expiresAt, &used)
+	).Scan(&storedClientID, &userID, &storedRedirectURI, &scope, &nonce, &codeChallenge, &codeChallengeMethod, &expiresAt, &used)
 
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
@@ -447,13 +456,19 @@ func handleAuthCodeExchange(c *gin.Context, clientID string) {
 		return
 	}
 
+	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, nonce)
+	if issueErr != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+
 	if commitErr := tx.Commit(); commitErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
-	// Generate tokens
-	issueOIDCTokens(c, clientID, userID, scope)
+	c.JSON(http.StatusOK, payload)
 }
 
 func handleRefreshTokenExchange(c *gin.Context, clientID string) {
@@ -488,8 +503,7 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	// Phase 16: Atomic refresh token rotation.
-	// Revoke-then-issue must be transactional to prevent concurrent refresh attacks.
+	// Atomic refresh token rotation + new refresh token insertion inside one transaction.
 	tx, txErr := db.DB.Begin()
 	if txErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
@@ -511,45 +525,70 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
+	payload, issueErr := prepareOIDCTokenPayload(c, tx, clientID, userID, scope, "")
+	if issueErr != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+
 	if commitErr := tx.Commit(); commitErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
 		return
 	}
 
-	// Issue new tokens
-	issueOIDCTokens(c, clientID, userID, scope)
+	c.JSON(http.StatusOK, payload)
 }
 
-func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope string) {
+type oidcDBExecer interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func hasOIDCScope(scopeStr, target string) bool {
+	for _, s := range strings.Fields(scopeStr) {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
+func prepareOIDCTokenPayload(c *gin.Context, execer oidcDBExecer, clientID string, userID int, scope, nonce string) (gin.H, error) {
 	if oidcPrivateKey == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+		return nil, fmt.Errorf("OIDC private key is uninitialized")
 	}
 
 	issuer := getOIDCIssuer(c)
 
 	// Fetch user info
 	var username, email, avatarURL, role string
-	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", userID).
+	if err := execer.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", userID).
 		Scan(&username, &email, &avatarURL, &role); err != nil {
 		slog.Error("OIDC: failed to fetch user info during token issuance", "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+		return nil, err
 	}
 
 	now := time.Now()
 
-	// ID Token (short-lived, 1 hour)
+	// ID Token (short-lived, 1 hour) with scope-gated claims and optional nonce
 	idTokenClaims := jwt.MapClaims{
-		"iss":     issuer,
-		"sub":     fmt.Sprintf("%d", userID),
-		"aud":     clientID,
-		"exp":     now.Add(1 * time.Hour).Unix(),
-		"iat":     now.Unix(),
-		"name":    username,
-		"email":   email,
-		"picture": avatarURL,
-		"role":    role,
+		"iss": issuer,
+		"sub": fmt.Sprintf("%d", userID),
+		"aud": clientID,
+		"exp": now.Add(1 * time.Hour).Unix(),
+		"iat": now.Unix(),
+	}
+	if nonce != "" {
+		idTokenClaims["nonce"] = nonce
+	}
+	if hasOIDCScope(scope, "profile") {
+		idTokenClaims["name"] = username
+		idTokenClaims["picture"] = avatarURL
+		idTokenClaims["role"] = role
+	}
+	if hasOIDCScope(scope, "email") {
+		idTokenClaims["email"] = email
 	}
 
 	idToken := jwt.NewWithClaims(jwt.SigningMethodRS256, idTokenClaims)
@@ -557,8 +596,7 @@ func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope string) 
 	idTokenString, err := idToken.SignedString(oidcPrivateKey)
 	if err != nil {
 		slog.Error("OIDC: failed to sign id_token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+		return nil, err
 	}
 
 	// Access Token (short-lived, 1 hour)
@@ -576,38 +614,53 @@ func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope string) 
 	accessTokenString, err := accessToken.SignedString(oidcPrivateKey)
 	if err != nil {
 		slog.Error("OIDC: failed to sign access_token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+		return nil, err
 	}
 
 	// Refresh Token (long-lived, 30 days)
 	refreshBytes := make([]byte, 32)
 	if _, err := rand.Read(refreshBytes); err != nil {
 		slog.Error("crypto/rand failure during OIDC refresh token generation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
-		return
+		return nil, err
 	}
 	refreshToken := hex.EncodeToString(refreshBytes)
 
-	db.DB.Exec(
+	if _, err := execer.Exec(
 		`INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		refreshToken, clientID, userID, scope, now.Add(30*24*time.Hour).Format(time.RFC3339),
-	)
+	); err != nil {
+		slog.Error("OIDC: failed to persist refresh token", "client_id", clientID, "error", err)
+		return nil, err
+	}
 
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"access_token":  accessTokenString,
 		"token_type":    "Bearer",
 		"expires_in":    3600,
 		"refresh_token": refreshToken,
 		"id_token":      idTokenString,
 		"scope":         scope,
-	})
+	}, nil
+}
+
+func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope, nonce string) {
+	payload, err := prepareOIDCTokenPayload(c, db.DB, clientID, userID, scope, nonce)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // ---- UserInfo ----
 
 // OIDCUserInfo returns standard OIDC claims for the authenticated user.
 func OIDCUserInfo(c *gin.Context) {
+	if oidcPrivateKey == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
+
 	authHeader := c.GetHeader("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
@@ -636,6 +689,7 @@ func OIDCUserInfo(c *gin.Context) {
 	}
 
 	sub, _ := claims["sub"].(string)
+	scope, _ := claims["scope"].(string)
 	var username, email, avatarURL, role string
 	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", sub).
 		Scan(&username, &email, &avatarURL, &role); err != nil {
@@ -644,13 +698,18 @@ func OIDCUserInfo(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"sub":     sub,
-		"name":    username,
-		"email":   email,
-		"picture": avatarURL,
-		"role":    role,
-	})
+	resp := gin.H{
+		"sub": sub,
+	}
+	if hasOIDCScope(scope, "profile") {
+		resp["name"] = username
+		resp["picture"] = avatarURL
+		resp["role"] = role
+	}
+	if hasOIDCScope(scope, "email") {
+		resp["email"] = email
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // ---- Token Revocation ----
@@ -692,7 +751,11 @@ func OIDCRevoke(c *gin.Context) {
 		return
 	}
 
-	db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID)
+	if _, err := db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID); err != nil {
+		slog.Error("OIDC: failed to revoke refresh token", "client_id", clientID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{}) // RFC 7009: 200 even if token doesn't exist
 }
 
@@ -765,6 +828,10 @@ func OIDCIntrospect(c *gin.Context) {
 
 // introspectAccessToken validates a JWT access token and returns its claims.
 func introspectAccessToken(tokenStr, clientID string) gin.H {
+	if oidcPrivateKey == nil {
+		return nil
+	}
+
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -866,8 +933,27 @@ func extractUserIDFromJWT(tokenString string) (int, error) {
 	return int(userIdFloat), nil
 }
 
-// isAllowedRedirectURI checks if the redirect_uri is registered for the client.
+func isSafeRedirectURI(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Fragment != "" || u.User != nil || u.Host == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return true
+	case "http":
+		h := strings.ToLower(u.Hostname())
+		return h == "localhost" || h == "127.0.0.1" || h == "::1"
+	default:
+		return false
+	}
+}
+
+// isAllowedRedirectURI checks if the redirect_uri is safe and registered for the client.
 func isAllowedRedirectURI(uri, storedURIs string) bool {
+	if !isSafeRedirectURI(uri) {
+		return false
+	}
 	var uris []string
 	if err := json.Unmarshal([]byte(storedURIs), &uris); err != nil {
 		return false
@@ -1076,7 +1162,7 @@ func handleDeviceCodeExchange(c *gin.Context, clientID string) {
 			return
 		}
 		db.DB.Exec("DELETE FROM oidc_device_codes WHERE device_code = ?", deviceCode)
-		issueOIDCTokens(c, clientID, int(userIDErr.Int64), scope)
+		issueOIDCTokens(c, clientID, int(userIDErr.Int64), scope, "")
 		return
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
@@ -1219,7 +1305,7 @@ func recordConsent(userID int, clientID, scope string) {
 }
 
 // generateAndStoreAuthCode creates a cryptographic authorization code, persists it, and returns it.
-func generateAndStoreAuthCode(clientID string, userID int, redirectURI, scope, codeChallenge, codeChallengeMethod string) (string, error) {
+func generateAndStoreAuthCode(clientID string, userID int, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod string) (string, error) {
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
 		return "", fmt.Errorf("crypto/rand failure: %w", err)
@@ -1228,9 +1314,9 @@ func generateAndStoreAuthCode(clientID string, userID int, redirectURI, scope, c
 
 	expiresAt := time.Now().Add(10 * time.Minute)
 	_, err := db.DB.Exec(
-		`INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		code, clientID, userID, redirectURI, scope, codeChallenge, codeChallengeMethod, expiresAt.Format(time.RFC3339),
+		`INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		code, clientID, userID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, expiresAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return "", err

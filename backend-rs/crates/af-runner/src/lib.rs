@@ -50,6 +50,7 @@ mod lifecycle_tests;
 pub mod network;
 pub mod package_executor;
 pub mod package_lifecycle;
+pub mod probe_metadata;
 pub mod quota;
 pub mod self_update;
 
@@ -333,6 +334,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/quota", post(handle_quota))
         .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
+        .route("/v1/package/probe-version", post(handle_package_version_probe))
         .route(
             "/v1/dispatcharr-credentials",
             post(handle_dispatcharr_credentials),
@@ -1551,7 +1553,7 @@ pub async fn execute_self_update_request(
                         });
                     }
                 };
-                return (
+                (
                     StatusCode::OK,
                     self_update_launch_response(
                         "legacy_bash_release",
@@ -1559,7 +1561,7 @@ pub async fn execute_self_update_request(
                         &channel_str,
                         &observed,
                     ),
-                );
+                )
             }
             Err((code, err_msg)) => {
                 if code != StatusCode::GATEWAY_TIMEOUT {
@@ -4212,9 +4214,12 @@ fn write_hosts_file_atomically(hosts_path: &Path, content: &str) -> anyhow::Resu
 
         if is_cross_device {
             use std::io::Write;
+            // Open without truncating upfront so contents aren't cleared before flock is held.
+            #[allow(clippy::suspicious_open_options)]
             let dest_file = fs::OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false)
                 .open(hosts_path)?;
             #[cfg(unix)]
             {
@@ -6373,6 +6378,85 @@ async fn handle_app_meta(
     )
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageVersionProbeRunnerRequest {
+    pub package_id: String,
+}
+
+async fn handle_package_version_probe(
+    Json(req): Json<PackageVersionProbeRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    if !SAFE_SCRIPT_NAME.is_match(&req.package_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "invalid package identifier".to_string(),
+            }),
+        );
+    }
+    let pkg_id = req.package_id;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let env_cfg = package_executor::PackageExecutionEnv::default();
+        package_lifecycle::probe_live_runtime_version(&pkg_id, &env_cfg)
+    })
+    .await;
+
+    match outcome {
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::Verified(ver)) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: ver,
+                error: String::new(),
+            }),
+        ),
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::Failed(err)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err,
+            }),
+        ),
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::NotConfigured) => (
+            StatusCode::NOT_FOUND,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "no live version probe configured".to_string(),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: format!("probe task failed: {}", e),
+            }),
+        ),
+    }
+}
+
+pub async fn probe_package_version_via_runner(package_id: &str) -> anyhow::Result<String> {
+    let req = PackageVersionProbeRunnerRequest {
+        package_id: package_id.to_string(),
+    };
+    let result = post_runner_json("/v1/package/probe-version", &req, Duration::from_secs(12)).await?;
+    if !result.success {
+        anyhow::bail!(
+            "{}",
+            if result.error.is_empty() {
+                "runner version probe failed".to_string()
+            } else {
+                result.error
+            }
+        );
+    }
+    Ok(result.output)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UNIX Domain Socket Client Dispatchers (`backend/services/privileged_runner.go`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7108,6 +7192,21 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     let sock_path = runner_socket_path();
     if let Some(dir) = Path::new(&sock_path).parent() {
         fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() == 0 } {
+            // Keep /run/aetherflow non-group-writable (0750 root:aetherflow) to prevent lock DoS,
+            // and pre-create shared 0660 root:aetherflow lockfiles for aetherflow-api access.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o750));
+            for lock_name in [".snapshot.lock", "hosts.lock"] {
+                let lock_path = dir.join(lock_name);
+                if let Ok(_guard) = af_host::HostMaintenanceLockGuard::acquire(
+                    &lock_path,
+                    Duration::from_secs(1),
+                ) {
+                    let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o660));
+                }
+            }
+        }
     }
     let _ = fs::remove_file(&sock_path);
 

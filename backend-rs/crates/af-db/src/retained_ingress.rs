@@ -134,7 +134,7 @@ pub fn get_retained_app_ingress_config(app: &str) -> anyhow::Result<Option<AppIn
 }
 
 fn read_retained_config(conn: &Connection, app: &str) -> anyhow::Result<Option<AppIngressConfig>> {
-    schema(&conn)?;
+    schema(conn)?;
     let raw: Option<String> = conn
         .query_row(
             "SELECT config_json FROM retained_app_ingress_configs WHERE app_name=?1",

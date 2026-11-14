@@ -1376,6 +1376,7 @@ impl JobRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_with_diagnostics(
         &mut self,
         pkg: &str,
@@ -1643,6 +1644,7 @@ pub fn fail_package_job(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn finish_package_job_with_diagnostics(
     pkg: &str,
     action: &str,

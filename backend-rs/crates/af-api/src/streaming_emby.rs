@@ -1057,16 +1057,15 @@ pub fn normalize_emby_session(
                     audio_bitrate = ms.bit_rate.max(0);
                 }
             }
-            "Subtitle" => {
+            "Subtitle"
                 if s.play_state
                     .as_ref()
                     .and_then(|ps| ps.subtitle_stream_index)
                     == Some(ms.index)
-                {
+                => {
                     subtitle_codec = ms.codec.trim().to_uppercase();
                     subtitle_language = ms.language.trim().to_uppercase();
                 }
-            }
             _ => {}
         }
     }

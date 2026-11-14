@@ -229,15 +229,162 @@ static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .unwrap_or_else(|_| reqwest::Client::new())
 });
 
+fn is_trusted_proxy_ip(ip: IpAddr) -> bool {
+    ip.is_loopback()
+        || (trust_proxy_headers_enabled() && is_private_or_loopback_ip(&ip.to_string()))
+}
+
+fn trust_proxy_headers_enabled() -> bool {
+    env::var("TRUST_PROXY_HEADERS")
+        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn is_forwarded_header_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "forwarded"
+            | "x-forwarded-for"
+            | "x-forwarded-host"
+            | "x-forwarded-proto"
+            | "x-forwarded-port"
+            | "x-forwarded-server"
+            | "x-real-ip"
+    )
+}
+
+fn sanitize_headers_for_peer(
+    headers: &axum::http::HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trust_forwarded: bool,
+) -> axum::http::HeaderMap {
+    let mut sanitized = headers.clone();
+    if !trust_forwarded {
+        for name in [
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-forwarded-port",
+            "x-forwarded-server",
+            "x-real-ip",
+        ] {
+            sanitized.remove(name);
+        }
+        if let Some(ip) = peer_ip {
+            if let Ok(hv) = HeaderValue::from_str(&ip.to_string()) {
+                sanitized.insert(HeaderName::from_static("x-real-ip"), hv.clone());
+                sanitized.insert(HeaderName::from_static("x-forwarded-for"), hv);
+            }
+        }
+    }
+    sanitized
+}
+
+fn canonical_forwarded_headers(
+    incoming_headers: &axum::http::HeaderMap,
+    raw_host: &str,
+    peer_ip: Option<IpAddr>,
+    trust_forwarded: bool,
+) -> Vec<(HeaderName, HeaderValue)> {
+    let mut out = Vec::new();
+    let xf_host = if trust_forwarded {
+        incoming_headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(raw_host)
+    } else {
+        raw_host
+    };
+    if !xf_host.is_empty() {
+        if let Ok(hv) = HeaderValue::from_str(xf_host) {
+            out.push((HeaderName::from_static("x-forwarded-host"), hv));
+        }
+    }
+
+    let xf_proto = if trust_forwarded {
+        incoming_headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .and_then(|p| {
+                if p.eq_ignore_ascii_case("https") {
+                    Some("https")
+                } else if p.eq_ignore_ascii_case("http") {
+                    Some("http")
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("http")
+    } else {
+        "http"
+    };
+    out.push((
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(xf_proto),
+    ));
+
+    if trust_forwarded {
+        let existing_xff = incoming_headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|raw| {
+                raw.split(',')
+                    .map(|hop| hop.trim().trim_matches(['[', ']']))
+                    .filter(|hop| hop.parse::<IpAddr>().is_ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut xff_parts = existing_xff.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        if let Some(ip) = peer_ip {
+            let ip_s = ip.to_string();
+            if xff_parts.last().map(|s| s.as_str()) != Some(ip_s.as_str()) {
+                xff_parts.push(ip_s);
+            }
+        }
+        if !xff_parts.is_empty() {
+            if let Ok(hv) = HeaderValue::from_str(&xff_parts.join(", ")) {
+                out.push((HeaderName::from_static("x-forwarded-for"), hv));
+            }
+        }
+        let real_ip = incoming_headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().trim_matches(['[', ']']))
+            .filter(|s| s.parse::<IpAddr>().is_ok())
+            .map(|s| s.to_string())
+            .or_else(|| xff_parts.first().cloned())
+            .or_else(|| peer_ip.map(|p| p.to_string()));
+        if let Some(ip_s) = real_ip {
+            if let Ok(hv) = HeaderValue::from_str(&ip_s) {
+                out.push((HeaderName::from_static("x-real-ip"), hv));
+            }
+        }
+    } else if let Some(ip) = peer_ip {
+        if let Ok(hv) = HeaderValue::from_str(&ip.to_string()) {
+            out.push((HeaderName::from_static("x-real-ip"), hv.clone()));
+            out.push((HeaderName::from_static("x-forwarded-for"), hv));
+        }
+    }
+    out
+}
+
 fn forward_proxy_http_headers(
     mut upstream_req: reqwest::RequestBuilder,
     incoming_headers: &axum::http::HeaderMap,
     raw_host: &str,
+    peer_ip: Option<IpAddr>,
+    trust_forwarded: bool,
 ) -> reqwest::RequestBuilder {
     for (k, v) in incoming_headers.iter() {
         let name_str = k.as_str();
         // Host is set once below; reqwest's header() appends values.
         if is_hop_by_hop_header(name_str)
+            || is_forwarded_header_name(name_str)
             || name_str.eq_ignore_ascii_case("host")
             || name_str.eq_ignore_ascii_case("x-aetherflow-user")
         {
@@ -253,12 +400,14 @@ fn forward_proxy_http_headers(
 
     if !raw_host.is_empty() {
         upstream_req = upstream_req.header("Host", raw_host);
-        if !incoming_headers.contains_key("X-Forwarded-Host") {
-            upstream_req = upstream_req.header("X-Forwarded-Host", raw_host);
-        }
     }
-    if !incoming_headers.contains_key("X-Forwarded-Proto") {
-        upstream_req = upstream_req.header("X-Forwarded-Proto", "http");
+    for (hn, hv) in canonical_forwarded_headers(incoming_headers, raw_host, peer_ip, trust_forwarded) {
+        if let (Ok(rk), Ok(rv)) = (
+            reqwest::header::HeaderName::from_bytes(hn.as_str().as_bytes()),
+            reqwest::header::HeaderValue::from_bytes(hv.as_bytes()),
+        ) {
+            upstream_req = upstream_req.header(rk, rv);
+        }
     }
     upstream_req
 }
@@ -334,6 +483,12 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         return next.run(req).await;
     }
 
+    let peer_ip_opt = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    let trust_forwarded = peer_ip_opt.is_some_and(is_trusted_proxy_ip);
+
     let raw_host = req
         .headers()
         .get(header::HOST)
@@ -346,36 +501,38 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     if clean_host == "aether.local" || clean_host.ends_with(".aether.local") {
         let mut allowed = true;
 
-        if let Some(ConnectInfo(peer_addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
-            if !is_private_or_loopback_ip(&peer_addr.ip().to_string()) {
+        if let Some(peer_ip) = peer_ip_opt {
+            if !is_private_or_loopback_ip(&peer_ip.to_string()) {
                 allowed = false;
             }
         }
 
-        if let Some(real_ip) = req
-            .headers()
-            .get("X-Real-IP")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            if !is_private_or_loopback_ip(real_ip) {
-                allowed = false;
-            }
-        }
-
-        if let Some(xff) = req
-            .headers()
-            .get("X-Forwarded-For")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            for hop in xff.split(',') {
-                let hop_ip = hop.trim().trim_matches(['[', ']']);
-                if hop_ip.is_empty() || !is_private_or_loopback_ip(hop_ip) {
+        if trust_forwarded {
+            if let Some(real_ip) = req
+                .headers()
+                .get("X-Real-IP")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if !is_private_or_loopback_ip(real_ip) {
                     allowed = false;
-                    break;
+                }
+            }
+
+            if let Some(xff) = req
+                .headers()
+                .get("X-Forwarded-For")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                for hop in xff.split(',') {
+                    let hop_ip = hop.trim().trim_matches(['[', ']']);
+                    if hop_ip.is_empty() || !is_private_or_loopback_ip(hop_ip) {
+                        allowed = false;
+                        break;
+                    }
                 }
             }
         }
@@ -392,7 +549,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     }
 
     let lookup_host = raw_host.clone();
-    let lookup_headers = req.headers().clone();
+    let lookup_headers = sanitize_headers_for_peer(req.headers(), peer_ip_opt, trust_forwarded);
     let lookup = crate::auth::blocking_auth_work(move || {
         let target = resolve_app_target_for_host(&lookup_host);
         let username = target
@@ -445,11 +602,14 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     let incoming_headers = req.headers().clone();
 
     if is_ws_upgrade {
-        let tcp_stream = match tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16))
-            .await
+        let tcp_stream = match tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16)),
+        )
+        .await
         {
-            Ok(stream) => stream,
-            Err(err) => {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
                 tracing::warn!(
                     app = %app_name,
                     host = %raw_host,
@@ -466,12 +626,33 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 )
                     .into_response();
             }
+            Err(_) => {
+                tracing::warn!(
+                    app = %app_name,
+                    host = %raw_host,
+                    port = target_port,
+                    "subdomain reverse proxy websocket upstream connect timeout"
+                );
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "gateway_timeout",
+                        "message": format!("Upstream service {} on port {} timed out connecting.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
         };
 
         let io = hyper_util::rt::TokioIo::new(tcp_stream);
-        let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
-            Ok(pair) => pair,
-            Err(err) => {
+        let (mut sender, conn) = match tokio::time::timeout(
+            Duration::from_secs(10),
+            hyper::client::conn::http1::handshake(io),
+        )
+        .await
+        {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => {
                 tracing::warn!(
                     app = %app_name,
                     host = %raw_host,
@@ -484,6 +665,16 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                     Json(serde_json::json!({
                         "error": "bad_gateway",
                         "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "gateway_timeout",
+                        "message": format!("Upstream service {} on port {} handshake timed out.", app_name, target_port),
                     })),
                 )
                     .into_response();
@@ -504,6 +695,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             for (k, v) in incoming_headers.iter() {
                 let name_str = k.as_str();
                 if is_hop_by_hop_header(name_str)
+                    || is_forwarded_header_name(name_str)
                     || name_str.eq_ignore_ascii_case("host")
                     || name_str.eq_ignore_ascii_case("x-aetherflow-user")
                 {
@@ -513,17 +705,16 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             }
             if !raw_host.is_empty() {
                 if let Ok(hv) = HeaderValue::from_str(&raw_host) {
-                    hdrs.insert(header::HOST, hv.clone());
-                    if !incoming_headers.contains_key("X-Forwarded-Host") {
-                        hdrs.insert(HeaderName::from_static("x-forwarded-host"), hv);
-                    }
+                    hdrs.insert(header::HOST, hv);
                 }
             }
-            if !incoming_headers.contains_key("X-Forwarded-Proto") {
-                hdrs.insert(
-                    HeaderName::from_static("x-forwarded-proto"),
-                    HeaderValue::from_static("http"),
-                );
+            for (hn, hv) in canonical_forwarded_headers(
+                &incoming_headers,
+                &raw_host,
+                peer_ip_opt,
+                trust_forwarded,
+            ) {
+                hdrs.insert(hn, hv);
             }
             if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
                 hdrs.insert(header::UPGRADE, up_hv);
@@ -564,9 +755,14 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 .into_response();
         };
 
-        let mut upstream_resp = match sender.send_request(upstream_ws_req).await {
-            Ok(resp) => resp,
-            Err(err) => {
+        let mut upstream_resp = match tokio::time::timeout(
+            Duration::from_secs(15),
+            sender.send_request(upstream_ws_req),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
                 tracing::warn!(
                     app = %app_name,
                     host = %raw_host,
@@ -579,6 +775,16 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                     Json(serde_json::json!({
                         "error": "bad_gateway",
                         "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "gateway_timeout",
+                        "message": format!("Upstream service {} on port {} upgrade timed out.", app_name, target_port),
                     })),
                 )
                     .into_response();
@@ -638,32 +844,60 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         }
     }
 
-    let Ok(body_bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "error": "bad_gateway",
-                "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
-            })),
-        )
-            .into_response();
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let mut is_too_large = false;
+            let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            while let Some(e) = cur {
+                if e.is::<http_body_util::LengthLimitError>() {
+                    is_too_large = true;
+                    break;
+                }
+                cur = e.source();
+            }
+            if is_too_large || err.to_string().to_ascii_lowercase().contains("length limit") {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({
+                        "error": "payload_too_large",
+                        "message": "Request body exceeds the 64 MiB proxy limit.",
+                    })),
+                )
+                    .into_response();
+            }
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "bad_gateway",
+                    "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                })),
+            )
+                .into_response();
+        }
     };
 
     let reqwest_method =
         reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut upstream_req = PROXY_HTTP_CLIENT.request(reqwest_method, &target_url);
 
-    upstream_req = forward_proxy_http_headers(upstream_req, &incoming_headers, &raw_host);
+    upstream_req = forward_proxy_http_headers(
+        upstream_req,
+        &incoming_headers,
+        &raw_host,
+        peer_ip_opt,
+        trust_forwarded,
+    );
     if let Some(user) = authenticated_user {
         upstream_req = upstream_req.header("X-Aetherflow-User", user);
     }
 
     if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes.to_vec());
+        upstream_req = upstream_req.body(body_bytes);
     }
 
-    match upstream_req.send().await {
-        Ok(upstream_resp) => {
+    match tokio::time::timeout(Duration::from_secs(30), upstream_req.send()).await {
+        Ok(Ok(upstream_resp)) => {
             let status = StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
             let upstream_headers = upstream_resp.headers().clone();
@@ -685,7 +919,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             }
             response
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             tracing::warn!(
                 app = %app_name,
                 host = %raw_host,
@@ -698,6 +932,22 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 Json(serde_json::json!({
                     "error": "bad_gateway",
                     "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                })),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            tracing::warn!(
+                app = %app_name,
+                host = %raw_host,
+                port = target_port,
+                "subdomain reverse proxy upstream timeout"
+            );
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(serde_json::json!({
+                    "error": "gateway_timeout",
+                    "message": format!("Upstream service {} on port {} timed out.", app_name, target_port),
                 })),
             )
                 .into_response()
@@ -734,13 +984,7 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
     }
 
     let base_domain = query_settings_base_domain();
-    if !base_domain.is_empty()
-        && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
-    {
-        return true;
-    }
-
-    false
+    !base_domain.is_empty() && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
 }
 
 pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
@@ -984,6 +1228,8 @@ mod proxy_header_tests {
             reqwest::Client::new().get("http://127.0.0.1:8096/health"),
             &headers,
             "jellyfin.example.com",
+            Some("127.0.0.1".parse().unwrap()),
+            true,
         )
         .build()
         .unwrap();
@@ -1267,10 +1513,67 @@ mod tests {
             resp_str
         );
 
+        let mut ws_buf = [0u8; 1024];
         ws_sock.write_all(b"ping-jellyfin").await.unwrap();
-        let n2 = ws_sock.read(&mut resp_buf).await.unwrap();
-        let tunnel_reply = String::from_utf8_lossy(&resp_buf[..n2]).to_string();
+        let n2 = ws_sock.read(&mut ws_buf).await.unwrap();
+        let tunnel_reply = String::from_utf8_lossy(&ws_buf[..n2]).to_string();
         assert_eq!(tunnel_reply, "ws-ack:jellyfin.example.test:ping-jellyfin");
+
+        // 4. Untrusted non-loopback peer cannot spoof X-Forwarded-* or X-Real-IP on HTTP or WS,
+        // and >64 MiB request bodies return 413 Payload Too Large rather than 502 Bad Gateway.
+        let untrusted_peer: SocketAddr = "198.51.100.77:54321".parse().unwrap();
+        let untrusted_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/System/Info")
+            .header("Host", "jellyfin.example.test")
+            .header("X-Forwarded-For", "10.0.0.5")
+            .header("X-Forwarded-Host", "evil.attacker.example")
+            .header("X-Forwarded-Proto", "https")
+            .header("X-Real-IP", "10.0.0.5")
+            .extension(ConnectInfo(untrusted_peer))
+            .body(Body::empty())
+            .unwrap();
+        let untrusted_app = Router::new()
+            .route("/*path", any(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+        let untrusted_resp = tower::ServiceExt::oneshot(untrusted_app.clone(), untrusted_req)
+            .await
+            .unwrap();
+        assert_eq!(untrusted_resp.status(), StatusCode::OK);
+        let untrusted_body = axum::body::to_bytes(untrusted_resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let untrusted_json: serde_json::Value = serde_json::from_slice(&untrusted_body).unwrap();
+        assert_eq!(
+            untrusted_json["headers"]["x-forwarded-for"][0],
+            "198.51.100.77"
+        );
+        assert_eq!(
+            untrusted_json["headers"]["x-real-ip"][0],
+            "198.51.100.77"
+        );
+        assert_eq!(
+            untrusted_json["headers"]["x-forwarded-host"][0],
+            "jellyfin.example.test"
+        );
+        assert_eq!(
+            untrusted_json["headers"]["x-forwarded-proto"][0],
+            "http"
+        );
+
+        let oversized_stream = futures::stream::iter((0..65).map(|_| {
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 1024 * 1024]))
+        }));
+        let oversized_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/Upload")
+            .header("Host", "jellyfin.example.test")
+            .body(Body::from_stream(oversized_stream))
+            .unwrap();
+        let oversized_resp = tower::ServiceExt::oneshot(untrusted_app, oversized_req)
+            .await
+            .unwrap();
+        assert_eq!(oversized_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

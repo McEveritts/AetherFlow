@@ -54,6 +54,7 @@ async fn teardown_data_path_failure_does_not_clear_marker_or_follow_symlink() {
 }
 
 #[derive(Clone, Default)]
+#[allow(clippy::type_complexity)]
 struct TeardownRunner {
     commands: Arc<StdMutex<Vec<(String, Vec<String>)>>>,
     fail_operation: String,

@@ -201,6 +201,7 @@ mod tests {
         corrupt_db_on_restart: Option<PathBuf>,
         fail_stop_services: bool,
         stale_identity: bool,
+        always_stale_identity: bool,
     }
 
     impl MockLifecycle {
@@ -211,7 +212,14 @@ mod tests {
 
     impl LifecycleController for MockLifecycle {
         fn verify_running_release(&self, _config: &ReleaseConfig) -> ReleaseResult<()> {
-            if self.stale_identity {
+            let restart_count = self
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| *c == "restart_units")
+                .count();
+            if self.always_stale_identity || (self.stale_identity && restart_count <= 1) {
                 return Err(ReleaseError::Systemd {
                     action: "verify runtime identity".to_string(),
                     reason: "old executable is still running".to_string(),
@@ -549,9 +557,20 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             resolved_tag: Ok("v4.0.0-new".to_string()), archive_source: archive, manifest_content: manifest,
         };
         let lifecycle = MockLifecycle { stale_identity: true, ..Default::default() };
-        let prober = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
-            http_status: 200, body: r#"{"status":"ready"}"#.to_string(),
-        })]);
+        let prober = MockHealthProber::new(vec![
+            Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            }),
+            Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            }),
+            Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            }),
+        ]);
         let engine = ReleaseEngine::new(config.clone(), provider, lifecycle, prober);
         let result = engine.execute(&ReleaseOptions {
             command: ReleaseCommand::Deploy, channel: ReleaseChannel::Nightly,
@@ -852,6 +871,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             corrupt_db_on_restart: Some(live_db.clone()),
             fail_stop_services: false,
             stale_identity: false,
+            always_stale_identity: false,
         };
         let failing_prober = MockHealthProber::new(vec![
             Ok(HealthCheckAttempt {
@@ -861,6 +881,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             Ok(HealthCheckAttempt {
                 http_status: 500,
                 body: r#"{"status":"degraded"}"#.to_string(),
+            }),
+            Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
             }),
         ]);
         let bad_engine =
@@ -1264,6 +1288,10 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         };
         let lifecycle = MockLifecycle::default();
         let prober = MockHealthProber::new(vec![
+            Ok(HealthCheckAttempt {
+                http_status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            }),
             Ok(HealthCheckAttempt {
                 http_status: 200,
                 body: r#"{"status":"ready"}"#.to_string(),
@@ -1692,5 +1720,53 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             .mode()
             & 0o777;
         assert_eq!(child_mode, 0o750);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rollback_probe_failure_marks_recovery_failed() {
+        let sandbox = TempSandbox::new("rollback-probe-fail");
+        let mut cfg = ReleaseConfig::for_root(sandbox.path());
+        cfg.health_retries = 1;
+        cfg.health_interval = Duration::ZERO;
+        seed_valid_sqlite_db(&cfg.data_dir.join("aetherflow.sqlite"), "rollback-probe");
+
+        let previous = cfg.releases_dir.join("1111111111");
+        let broken = cfg.releases_dir.join("2222222222");
+        fs::create_dir_all(&previous).unwrap();
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(previous.join("aetherflow-api"), b"old").unwrap();
+        fs::write(previous.join(".version"), b"v4.0.0-old\n").unwrap();
+        fs::write(broken.join("aetherflow-api"), b"broken").unwrap();
+        std::os::unix::fs::symlink(&broken, &cfg.current_link).unwrap();
+        write_previous_release(&cfg.releases_dir, &previous).unwrap();
+
+        let tar_path = sandbox.path().join("unused.tar.gz");
+        let (_, manifest) = build_synthetic_release_tarball(
+            &tar_path,
+            &cfg.artifact_name,
+            &[("aetherflow-api", b"unused", EntryType::Regular)],
+        );
+        let provider = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: tar_path,
+            manifest_content: manifest,
+        };
+        let lifecycle = MockLifecycle::default();
+        let failing_rollback_prober = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 500,
+            body: r#"{"status":"degraded"}"#.to_string(),
+        })]);
+
+        let engine = ReleaseEngine::new(cfg.clone(), provider, lifecycle, failing_rollback_prober);
+        let err = engine
+            .execute(&ReleaseOptions {
+                command: ReleaseCommand::Rollback,
+                ..ReleaseOptions::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("failed"));
+        let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+        assert_eq!(recovery.phase, ReleasePhase::Failed);
     }
 }

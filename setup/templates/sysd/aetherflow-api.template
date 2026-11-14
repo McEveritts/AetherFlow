@@ -20,8 +20,6 @@ StandardError=journal
 # Managed Directories
 StateDirectory=aetherflow
 StateDirectoryMode=0700
-LogsDirectory=aetherflow
-LogsDirectoryMode=0750
 
 Environment=GIN_MODE=release
 Environment=PORT=8080

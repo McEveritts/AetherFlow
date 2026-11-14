@@ -52,13 +52,13 @@ report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."
 TMP_TAR=$(mktemp /tmp/autobrr-XXXXXX.tar.gz)
 download_file "$AB_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
 TMP_DIR="$(mktemp -d /tmp/autobrr-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
 tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
 chmod 755 "$TMP_DIR/autobrr" "$TMP_DIR/autobrrctl"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autobrr autobrr /var/lib/autobrr "$PACKAGE_NAME" "." /usr/local/bin/autobrrctl "" binary
+TMP_DIR=""
 install_binary_atomic "$AF_ARCHIVE_BACKUP/release/prepared/autobrrctl" /usr/local/bin/autobrrctl
-rm -rf "$TMP_DIR"
-rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/autobrr /usr/local/bin/autobrrctl
 queue_app_version /var/lib/autobrr/.af-version "${AB_VERSION#v}"
 

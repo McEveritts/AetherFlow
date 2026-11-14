@@ -866,8 +866,10 @@ pub static PACKAGE_UPDATE_CACHE: Lazy<Mutex<HashMap<String, PackageUpdateRecord>
 
 static APP_UPDATE_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+#[allow(clippy::type_complexity)]
 static GITHUB_RELEASE_CACHE: Lazy<Mutex<HashMap<String, (String, String, Instant, String)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+#[allow(clippy::type_complexity)]
 static GIT_REMOTE_HEAD_CACHE: Lazy<Mutex<HashMap<String, (String, String, Instant, String)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static GITHUB_RATE_LIMIT_UNTIL: Lazy<Mutex<HashMap<String, Instant>>> =
@@ -1304,8 +1306,8 @@ pub fn sanitize_source_key_for_persistence(raw_key: &str) -> String {
                     return af_release::lifecycle::sanitize_persisted_lifecycle_text(&key);
                 }
             }
-            "git" | "git_tag" | "git_tags" | "git_commit" | "git_head" => {
-                if parts.len() >= 3 {
+            "git" | "git_tag" | "git_tags" | "git_commit" | "git_head"
+                if parts.len() >= 3 => {
                     let api_base = sanitize_api_base_for_source_key(parts[0]);
                     let norm_remote = normalize_git_remote_url_preserve_path_case(parts[1]);
                     let repo_slug = parts[2].trim();
@@ -1317,7 +1319,6 @@ pub fn sanitize_source_key_for_persistence(raw_key: &str) -> String {
                     let key = format!("{}:{}|{}|{}{}", src, api_base, norm_remote, repo_slug, channel_suffix);
                     return af_release::lifecycle::sanitize_persisted_lifecycle_text(&key);
                 }
-            }
             _ => {}
         }
     }
@@ -1575,10 +1576,9 @@ pub fn parse_component_manifest(token: &str) -> Option<HashMap<String, String>> 
         if trimmed.is_empty() {
             return None;
         }
-        let (k, _) = if let Some(idx) = trimmed.find(['=', ':']) {
+        let (k, _) = {
+            let idx = trimmed.find(['=', ':'])?;
             (&trimmed[..idx], &trimmed[idx + 1..])
-        } else {
-            return None;
         };
         let key = k.trim().to_lowercase();
         if key.is_empty() || !seen.insert(key) {
@@ -2181,7 +2181,7 @@ pub fn open_dir_nofollow_stepwise(dir_path: &Path) -> Result<std::os::fd::OwnedF
     }
     let root_fd = unsafe {
         libc::open(
-            b"/\0".as_ptr() as *const libc::c_char,
+            c"/".as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
     };
@@ -2409,7 +2409,7 @@ fn resolve_git_dir_for_probe(logical_path: &str) -> Option<PathBuf> {
     candidates.into_iter().flatten().find(|p| p.exists())
 }
 
-async fn probe_live_git_version(pkg: &Package, budget: Duration) -> Option<Result<String, anyhow::Error>> {
+async fn probe_live_git_version(pkg: &Package, _budget: Duration) -> Option<Result<String, anyhow::Error>> {
     if pkg.name == "piped" || pkg.update_repo.eq_ignore_ascii_case("TeamPiped/Piped") {
         let fe_dir = resolve_git_dir_for_probe("/opt/piped/frontend/.git")
             .or_else(|| resolve_git_dir_for_probe("/opt/piped/.git"));
@@ -2423,25 +2423,12 @@ async fn probe_live_git_version(pkg: &Package, budget: Duration) -> Option<Resul
                 return Some(Err(anyhow::anyhow!("Incomplete or failed live git probe for piped components")));
             };
 
-            let run_rev_parse = |git_dir: PathBuf| async move {
-                let mut cmd = Command::new("git");
-                cmd.args(["-c", "safe.directory=*", "--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
-                let out = update_probe_output(cmd, budget).await?;
-                if !out.status.success() {
-                    anyhow::bail!("git rev-parse HEAD failed in {}", git_dir.display());
-                }
-                let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if head.is_empty() {
-                    anyhow::bail!("empty git HEAD in {}", git_dir.display());
-                }
-                Ok(head)
-            };
-
-            let (fe_res, be_res, pr_res) = tokio::join!(
-                run_rev_parse(fe),
-                run_rev_parse(be),
-                run_rev_parse(pr),
-            );
+            let fe_res = af_runner::probe_metadata::resolve_git_head_commit_nofollow(&fe)
+                .map_err(|e| anyhow::anyhow!("piped frontend git probe failed: {}", e));
+            let be_res = af_runner::probe_metadata::resolve_git_head_commit_nofollow(&be)
+                .map_err(|e| anyhow::anyhow!("piped backend git probe failed: {}", e));
+            let pr_res = af_runner::probe_metadata::resolve_git_head_commit_nofollow(&pr)
+                .map_err(|e| anyhow::anyhow!("piped proxy git probe failed: {}", e));
 
             match (fe_res, be_res, pr_res) {
                 (Ok(fe_sha), Ok(be_sha), Ok(pr_sha)) => {
@@ -2458,32 +2445,9 @@ async fn probe_live_git_version(pkg: &Package, budget: Duration) -> Option<Resul
             None
         }
     } else if pkg.update_source.eq_ignore_ascii_case("git") {
-        if let Some(git_dir) = resolve_git_dir_for_probe(&format!("/opt/{}/source/.git", pkg.name))
-            .or_else(|| resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name)))
-        {
-            let mut cmd = Command::new("git");
-            cmd.args(["-c", "safe.directory=*", "--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
-            match update_probe_output(cmd, budget).await {
-                Ok(out) if out.status.success() => {
-                    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !head.is_empty() {
-                        Some(Ok(head.to_ascii_lowercase()))
-                    } else {
-                        Some(Err(anyhow::anyhow!("empty git HEAD in {}", git_dir.display())))
-                    }
-                }
-                Ok(out) => {
-                    Some(Err(anyhow::anyhow!(
-                        "git rev-parse HEAD failed with {}: {}",
-                        out.status,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    )))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        } else {
-            None
-        }
+        resolve_git_dir_for_probe(&format!("/opt/{}/source/.git", pkg.name))
+            .or_else(|| resolve_git_dir_for_probe(&format!("/opt/{}/.git", pkg.name))).map(|git_dir| af_runner::probe_metadata::resolve_git_head_commit_nofollow(&git_dir)
+                    .map_err(|e| anyhow::anyhow!("{}", e)))
     } else {
         None
     }
@@ -2655,11 +2619,10 @@ pub fn is_valid_systemd_service_unit(resolved_unit_path: &Path, pkg: &Package) -
         let key = raw_key.trim();
         let val = raw_val.trim();
 
-        if key == "ExecStart" || key == "WorkingDirectory" {
-            if current_section != "Service" {
+        if (key == "ExecStart" || key == "WorkingDirectory")
+            && current_section != "Service" {
                 return false;
             }
-        }
 
         if current_section != "Service" {
             continue;
@@ -3082,11 +3045,12 @@ fn build_package_update_record_for_source(
 
     let current_channel = if let Some((_, ch)) = resolved_expected_key.rsplit_once('|') {
         let ch_clean = ch.trim();
-        if (resolved_expected_key.starts_with("github:") || resolved_expected_key.starts_with("git"))
-            && resolved_expected_key.matches('|').count() < 2
+        if ((resolved_expected_key.starts_with("github:")
+            || resolved_expected_key.starts_with("git"))
+            && resolved_expected_key.matches('|').count() < 2)
+            || ch_clean.is_empty()
+            || ch_clean.contains('/')
         {
-            "stable"
-        } else if ch_clean.is_empty() || ch_clean.contains('/') {
             "stable"
         } else {
             ch_clean
@@ -3149,8 +3113,8 @@ fn build_package_update_record_for_source(
                                 }
                             }
                         }
-                        if prev_ver.is_empty() {
-                            if pkg.name == "threadfin" {
+                        if prev_ver.is_empty()
+                            && pkg.name == "threadfin" {
                                 let fallback = af_runner::resolve_threadfin_target_version();
                                 if !fallback.is_empty() {
                                     prev_ver = fallback.clone();
@@ -3159,7 +3123,6 @@ fn build_package_update_record_for_source(
                                     }
                                 }
                             }
-                        }
                     }
                 }
                 if prev_ver.is_empty() {
@@ -3281,24 +3244,99 @@ fn resolve_configured_fs_root() -> Option<PathBuf> {
     None
 }
 
+fn normalize_live_probe_output(
+    pkg: &Package,
+    update_source: &str,
+    combined: &str,
+    stdout_str: &str,
+) -> anyhow::Result<String> {
+    for line in combined.lines() {
+        let trimmed_line = line.trim();
+        if let Some(manifest) = parse_component_manifest(trimmed_line) {
+            return Ok(normalize_component_manifest(&manifest));
+        }
+    }
+
+    if update_source == "git" {
+        return parse_git_head(stdout_str);
+    }
+
+    let version = extract_version(combined, &pkg.version_regex);
+    if version.is_empty() {
+        anyhow::bail!("unable to parse version output");
+    }
+    Ok(version)
+}
+
+fn resolve_probe_program(raw_prog: &str, fs_root: Option<&Path>) -> PathBuf {
+    if raw_prog.starts_with('/') {
+        let resolved = resolve_fs_path(raw_prog);
+        if resolved.exists() {
+            return resolved;
+        }
+        if raw_prog == "/usr/local/bin/prometheus" {
+            let alt = resolve_fs_path("/usr/bin/prometheus");
+            if alt.exists() {
+                return alt;
+            }
+            return resolved;
+        }
+        return PathBuf::from(raw_prog);
+    }
+    if let Some(root) = fs_root {
+        for rel in [
+            "usr/local/sbin",
+            "usr/local/bin",
+            "usr/sbin",
+            "usr/bin",
+            "sbin",
+            "bin",
+        ] {
+            let candidate = root.join(rel).join(raw_prog);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(raw_prog)
+}
+
 pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow::Result<String> {
     if let Some(git_res) = probe_live_git_version(pkg, budget).await {
         return git_res;
     }
     let (update_source, apt_package) = effective_update_source_and_apt_package(pkg);
+    let fs_root = resolve_configured_fs_root();
     match update_source {
         "apt" => {
             if apt_package.is_empty() {
                 anyhow::bail!("no apt package configured for {}", pkg.name);
             }
-            let mut command = Command::new("dpkg-query");
-            if let Some(ref root) = resolve_configured_fs_root() {
+            let dpkg_prog = resolve_probe_program("dpkg-query", fs_root.as_deref());
+            let mut command = Command::new(&dpkg_prog);
+            let mut dpkg_args: Vec<String> = Vec::new();
+            if let Some(ref root) = fs_root {
                 let dpkg_dir = root.join("var/lib/dpkg");
                 if dpkg_dir.exists() {
-                    command.arg(format!("--admindir={}", dpkg_dir.display()));
+                    dpkg_args.push(format!("--admindir={}", dpkg_dir.display()));
                 }
             }
-            command.args(["-W", "-f=${Version}", apt_package]);
+            dpkg_args.push("-W".to_string());
+            dpkg_args.push("-f=${Version}".to_string());
+            dpkg_args.push(apt_package.to_string());
+            let sandbox_spec = af_runner::probe_metadata::ProbeSandboxSpec {
+                drop_to_path_owner: false,
+                fs_root: fs_root.clone(),
+                package_user: None,
+            };
+            af_runner::probe_metadata::configure_sandboxed_tokio_command(
+                &mut command,
+                &dpkg_prog,
+                &dpkg_args,
+                &sandbox_spec,
+            )
+            .map_err(|e| anyhow::anyhow!("probe sandbox validation failed: {}", e))?;
+            command.args(&dpkg_args);
             let out = update_probe_output(command, budget).await?;
 
             if !out.status.success() {
@@ -3324,6 +3362,26 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
             if pkg.version_command.is_empty() {
                 anyhow::bail!("no version command configured");
             }
+            if let Some(static_res) = af_runner::probe_metadata::extract_static_package_version(
+                &pkg.name,
+                &pkg.version_command,
+                &resolve_fs_path,
+            ) {
+                let raw = static_res.map_err(|e| anyhow::anyhow!("{}", e))?;
+                if update_source == "git" {
+                    return parse_git_head(&raw);
+                }
+                let extracted = extract_version(&raw, &pkg.version_regex);
+                if !extracted.is_empty() {
+                    return Ok(extracted);
+                }
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() && pkg.version_regex.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+                anyhow::bail!("unable to parse static version output");
+            }
+
             let mut version_command = pkg.version_command.clone();
             if version_command.len() == 3
                 && (version_command[0] == "bash" || version_command[0] == "sh")
@@ -3358,20 +3416,7 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                     version_command[2] = clean.to_string();
                 }
             }
-            let raw_prog = &version_command[0];
-            let resolved_prog = resolve_fs_path(raw_prog);
-            let prog: PathBuf = if resolved_prog.exists() {
-                resolved_prog
-            } else if raw_prog == "/usr/local/bin/prometheus" {
-                let alt = resolve_fs_path("/usr/bin/prometheus");
-                if alt.exists() {
-                    alt
-                } else {
-                    resolved_prog
-                }
-            } else {
-                PathBuf::from(raw_prog)
-            };
+            let prog = resolve_probe_program(&version_command[0], fs_root.as_deref());
             let args: Vec<String> = version_command[1..]
                 .iter()
                 .map(|arg| {
@@ -3385,8 +3430,22 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
                 })
                 .collect();
             let mut command = Command::new(&prog);
-            if let Some(ref root) = resolve_configured_fs_root() {
-                command.env("AETHERFLOW_FS_ROOT", root);
+            let sandbox_spec = af_runner::probe_metadata::ProbeSandboxSpec {
+                drop_to_path_owner: false,
+                fs_root: fs_root.clone(),
+                package_user: None,
+            };
+            if let Err(e) = af_runner::probe_metadata::configure_sandboxed_tokio_command(
+                &mut command,
+                &prog,
+                &args,
+                &sandbox_spec,
+            ) {
+                if fs_root.is_none() && af_runner::is_runner_available() {
+                    let raw = af_runner::probe_package_version_via_runner(&pkg.name).await?;
+                    return normalize_live_probe_output(pkg, update_source, &raw, &raw);
+                }
+                anyhow::bail!("probe sandbox validation failed: {}", e);
             }
             command.args(&args);
             let out = update_probe_output(command, budget).await?;
@@ -3401,28 +3460,8 @@ pub async fn run_live_version_command(pkg: &Package, budget: Duration) -> anyhow
 
             let stdout_str = String::from_utf8_lossy(&out.stdout);
             let stderr_str = String::from_utf8_lossy(&out.stderr);
-            let combined = format!(
-                "{}\n{}",
-                stdout_str,
-                stderr_str
-            );
-
-            for line in combined.lines() {
-                let trimmed_line = line.trim();
-                if let Some(manifest) = parse_component_manifest(trimmed_line) {
-                    return Ok(normalize_component_manifest(&manifest));
-                }
-            }
-
-            if update_source == "git" {
-                return parse_git_head(&stdout_str);
-            }
-
-            let version = extract_version(&combined, &pkg.version_regex);
-            if version.is_empty() {
-                anyhow::bail!("unable to parse version output");
-            }
-            Ok(version)
+            let combined = format!("{}\n{}", stdout_str, stderr_str);
+            normalize_live_probe_output(pkg, update_source, &combined, &stdout_str)
         }
     }
 }
@@ -3699,11 +3738,10 @@ pub async fn detect_latest_github_release_for_channel(
 
     if let Ok(cache) = GITHUB_RELEASE_CACHE.lock() {
         if let Some((ver, url, timestamp, observed_at)) = cache.get(&cache_key) {
-            if timestamp.elapsed() < Duration::from_secs(15 * 60) {
-                if tag_allowed_by_channel(ver, effective_channel) {
+            if timestamp.elapsed() < Duration::from_secs(15 * 60)
+                && tag_allowed_by_channel(ver, effective_channel) {
                     return Ok((ver.clone(), url.clone(), observed_at.clone()));
                 }
-            }
         }
     }
 
@@ -4510,7 +4548,7 @@ fn parse_semver(raw: &str) -> Option<SemverVersion> {
         return None;
     }
 
-    let (normal_str, prerelease_opt) = match rest.find(|c: char| c == '-' || c == '~') {
+    let (normal_str, prerelease_opt) = match rest.find(['-', '~']) {
         Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
         None => (rest, None),
     };
@@ -4749,11 +4787,10 @@ pub fn is_newer_version_scalar_for_source(local: &str, remote: &str, update_sour
     }
 
     // Untagged branch SHA installed on a release-tag-tracked package
-    if l_is_sha && !r_is_sha {
-        if parse_semver(r_trim).is_some() {
+    if l_is_sha && !r_is_sha
+        && parse_semver(r_trim).is_some() {
             return true;
         }
-    }
 
     compare_semver_versions(l_trim, r_trim) == std::cmp::Ordering::Less
 }
@@ -4778,11 +4815,10 @@ pub fn compare_versions_for_source(a: &str, b: &str, update_source: &str) -> std
     if af_release::lifecycle::commits_match_prefix(a_norm, b_norm, false) {
         return std::cmp::Ordering::Equal;
     }
-    if is_git_commit_sha(a_norm) && is_git_commit_sha(b_norm) {
-        if !(a_norm.bytes().all(|b| b.is_ascii_digit()) && b_norm.bytes().all(|b| b.is_ascii_digit())) {
+    if is_git_commit_sha(a_norm) && is_git_commit_sha(b_norm)
+        && !(a_norm.bytes().all(|b| b.is_ascii_digit()) && b_norm.bytes().all(|b| b.is_ascii_digit())) {
             return a_norm.to_ascii_lowercase().cmp(&b_norm.to_ascii_lowercase());
         }
-    }
 
     compare_semver_versions(a, b)
 }
@@ -5224,7 +5260,7 @@ mod tests {
         let catalog = root.join("packages.json");
         std::fs::write(
             &catalog,
-            &serde_json::to_string(&[af_models::Package {
+            serde_json::to_string(&[af_models::Package {
                 name: "fixture".into(),
                 service_name: "fixture".into(),
                 service_type: "systemd".into(),
@@ -5381,7 +5417,7 @@ mod tests {
     fn slow_update_helpers(fixture: &crate::inventory_regressions::Fixture) -> ProbeCleanup {
         for name in ["dpkg-query", "apt-cache", "git", "fixture-version"] {
             fixture.command(name, r#"exec /usr/bin/python3 -c 'import os,pathlib,signal,subprocess,sys
-root=pathlib.Path(os.environ["AF_UPDATE_PROBE_ROOT"])
+root=pathlib.Path(os.environ.get("AF_UPDATE_PROBE_ROOT") or os.environ["AETHERFLOW_FS_ROOT"])
 child=subprocess.Popen([sys.executable,"-c","import signal; signal.pause()"])
 (root/(str(os.getpid())+".pids")).write_text(str(os.getpid())+" "+str(child.pid))
 if os.environ.get("AF_UPDATE_PROBE_OVERFLOW"): sys.stdout.write("x"*(2*1024*1024)); sys.stdout.flush()
@@ -7189,17 +7225,14 @@ signal.pause()'
 
     #[test]
     fn test_exact_default_https_port_for_builtin_github_origins() {
-        assert_eq!(
-            should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com"),
-            false
+        assert!(
+            !should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com")
         );
-        assert_eq!(
-            should_attach_github_token("https://api.github.com:443/repos/a/b", "https://api.github.com"),
-            true
+        assert!(
+            should_attach_github_token("https://api.github.com:443/repos/a/b", "https://api.github.com")
         );
-        assert_eq!(
-            should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com:8443"),
-            true
+        assert!(
+            should_attach_github_token("https://api.github.com:8443/repos/a/b", "https://api.github.com:8443")
         );
     }
 

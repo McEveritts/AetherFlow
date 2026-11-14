@@ -554,13 +554,25 @@ fi
 # ── Logging ──────────────────────────────────────────────────────────────────
 mkdir -p "$(dirname "${LOG_FILE}")"
 
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "${s}"
+}
+
 log() {
     local level="$1"
     shift
     local msg="$*"
-    local ts
+    local ts esc_level esc_msg
     ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    local line="{\"ts\":\"${ts}\",\"level\":\"${level}\",\"msg\":\"${msg}\"}"
+    esc_level="$(json_escape "${level}")"
+    esc_msg="$(json_escape "${msg}")"
+    local line="{\"ts\":\"${ts}\",\"level\":\"${esc_level}\",\"msg\":\"${esc_msg}\"}"
     echo "${line}" | tee -a "${LOG_FILE}"
 }
 
@@ -1212,44 +1224,72 @@ simulate_offline_artifact() {
 
 release_scaffold() {
     log_info "=== STAGE 1: Release Scaffold (Channel: ${CHANNEL}) ==="
-    mkdir -p "${RELEASE_DIR}"
-
-    if [[ "${DRY_RUN}" == true && "${OFFLINE}" == true ]]; then
-        simulate_offline_artifact
-        return 0
-    fi
-
     if [[ "${OFFLINE}" == true && "${DRY_RUN}" == false ]]; then
         log_fatal "--offline is only valid with --dry-run. Refusing to deploy a placeholder binary."
     fi
 
-    if [[ "${FROM_SOURCE}" == false ]]; then
+    if [[ "${FROM_SOURCE}" == true && "${DRY_RUN}" == true ]]; then
+        log_error "[DRY-RUN] Refusing --from-source. Use a published artifact, or --offline for a placeholder."
+        exit 1
+    fi
+
+    mkdir -p "${RELEASES_DIR}"
+    if [[ -e "${RELEASE_DIR}" ]]; then
+        log_error "Release target already exists: ${RELEASE_DIR}"
+        exit 1
+    fi
+
+    local final_release_dir="${RELEASE_DIR}"
+    local stage_dir=""
+    stage_dir="$(mktemp -d "${RELEASES_DIR}/.staging.${EPOCH}.XXXXXX")" || log_fatal "Failed to create staging directory under ${RELEASES_DIR}"
+    chmod 0750 "${stage_dir}"
+    RELEASE_DIR="${stage_dir}"
+
+    if [[ "${DRY_RUN}" == true && "${OFFLINE}" == true ]]; then
+        if ! simulate_offline_artifact; then
+            rm -rf "${stage_dir}"
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
+        fi
+    elif [[ "${FROM_SOURCE}" == false ]]; then
         local target_tag=""
         target_tag="$(resolve_release_tag "${CHANNEL}" || true)"
         if [[ -z "${target_tag}" ]]; then
             log_error "Could not resolve a release tag for channel ${CHANNEL}. Refusing implicit source-build fallback."
-            rm -rf "${RELEASE_DIR}"
+            rm -rf "${stage_dir}"
+            RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
         log_info "Resolved release tag ${target_tag} for channel ${CHANNEL}."
-        if pull_prebuilt_artifact "${target_tag}"; then
-            log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
-            return 0
+        if ! pull_prebuilt_artifact "${target_tag}"; then
+            log_error "Pre-built artifact pull or verification failed for ${target_tag}. Refusing implicit source-build fallback."
+            rm -rf "${stage_dir}"
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
         fi
-        log_error "Pre-built artifact pull or verification failed for ${target_tag}. Refusing implicit source-build fallback."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
-    elif [[ "${DRY_RUN}" == true ]]; then
-        log_error "[DRY-RUN] Refusing --from-source. Use a published artifact, or --offline for a placeholder."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
+        if ! mv -T "${stage_dir}" "${final_release_dir}"; then
+            rm -rf "${stage_dir}"
+            RELEASE_DIR="${final_release_dir}"
+            log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
+        fi
+        RELEASE_DIR="${final_release_dir}"
+        log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
+        return 0
+    else
+        if ! build_from_source; then
+            log_error "Source build failed. Cleaning up ${stage_dir}."
+            rm -rf "${stage_dir}"
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
+        fi
     fi
 
-    if ! build_from_source; then
-        log_error "Source build failed. Cleaning up ${RELEASE_DIR}."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
+    if ! mv -T "${stage_dir}" "${final_release_dir}"; then
+        rm -rf "${stage_dir}"
+        RELEASE_DIR="${final_release_dir}"
+        log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
     fi
+    RELEASE_DIR="${final_release_dir}"
 
     log_info "=== STAGE 1 COMPLETE: Release ${EPOCH} scaffolded ==="
 }
@@ -1438,14 +1478,32 @@ symlink_swap() {
 ###############################################################################
 install_packaged_unit() {
     local src="$1"
-    local dest="${SYSTEMD_UNITS_DST}/$(basename "${src}")"
-    [[ -f "${src}" ]] || return 0
+    local unit_name dest tmp_unit=""
+    unit_name="$(basename "${src}")"
+    dest="${SYSTEMD_UNITS_DST}/${unit_name}"
+    if [[ -L "${src}" || -L "${SYSTEMD_UNITS_DST}" || -L "${dest}" ]]; then
+        log_fatal "Refusing symlinked systemd unit path: ${dest} (source ${src})."
+    fi
+    [[ -e "${src}" ]] || return 0
+    if [[ ! -f "${src}" ]]; then
+        log_fatal "Refusing non-regular packaged systemd unit source: ${src}."
+    fi
     mkdir -p "${SYSTEMD_UNITS_DST}"
+    if [[ -L "${SYSTEMD_UNITS_DST}" ]]; then
+        log_fatal "Refusing symlinked systemd unit directory: ${SYSTEMD_UNITS_DST}."
+    fi
     if [[ -e "${dest}" ]]; then
+        if [[ ! -f "${dest}" ]]; then
+            log_fatal "Refusing non-regular installed systemd unit destination: ${dest}."
+        fi
         log_info "Keeping installed systemd unit ${dest}; not replacing it with ${src}."
         return 0
     fi
-    cp -f "${src}" "${dest}"
+    tmp_unit="$(mktemp "${SYSTEMD_UNITS_DST}/.${unit_name}.tmp.XXXXXX")" || log_fatal "Failed to create temporary unit file in ${SYSTEMD_UNITS_DST}."
+    if ! cp -f "${src}" "${tmp_unit}" || ! chmod 0644 "${tmp_unit}" || ! mv -f "${tmp_unit}" "${dest}"; then
+        rm -f "${tmp_unit}"
+        log_fatal "Failed to atomically install systemd unit ${dest} from ${src}."
+    fi
     log_info "Installed systemd unit ${dest} from ${src}."
 }
 
@@ -1690,7 +1748,13 @@ rollback() {
     fi
 
     if [[ "${DRY_RUN}" == false ]]; then
-        restart_systemd_units
+        if [[ "${COMMAND}" == "rollback" ]]; then
+            if ! health_probe; then
+                log_fatal "Health probe failed after rollback to ${previous_target}."
+            fi
+        else
+            restart_systemd_units
+        fi
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
 }
@@ -1710,7 +1774,7 @@ cleanup_old_releases() {
     local releases=()
     while IFS= read -r dir; do
         releases+=("${dir}")
-    done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -n)
+    done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort -n)
 
     local count=${#releases[@]}
     [[ ${count} -le ${MAX_RELEASES} ]] && return 0
@@ -1743,7 +1807,6 @@ migrate_systemd() {
         pm2 unstartup >> "${LOG_FILE}" 2>&1 || true
         sleep 2
     fi
-    restart_systemd_units
     if ! health_probe; then
         log_fatal "Health probe failed after systemd migration."
     fi
@@ -1765,28 +1828,45 @@ if not header:
 if header != b"SQLite format 3\0":
     sys.exit(0 if command == "rollback" else "Cannot verify application lifecycle journal: invalid SQLite header")
 try:
-    connection = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
-    table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
-    if not table:
-        sys.exit(0)
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
-    if "owner_id" in columns:
-        for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
+        if not table:
+            sys.exit(0)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
+        stale = []
+        if "owner_id" in columns:
+            for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+                try:
+                    uuid.UUID(owner)
+                    lease_path = database.with_suffix(".lifecycle-owners") / owner
+                    descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
+                    with os.fdopen(descriptor, "rb") as lease:
+                        if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+                            continue
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        stale.append((package, job, owner))
+                except (OSError, ValueError):
+                    continue
+        if stale:
+            rw = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
             try:
-                uuid.UUID(owner)
-                lease_path = database.with_suffix(".lifecycle-owners") / owner
-                descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(descriptor, "rb") as lease:
-                    if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
-                        continue
-                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    connection.execute("UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
-                                       (datetime.datetime.now(datetime.timezone.utc).isoformat(), package, job, owner))
-            except (OSError, ValueError):
-                continue
-        connection.commit()
-    if connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone():
-        sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+                now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                for package, job, owner in stale:
+                    rw.execute(
+                        "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                        (now, package, job, owner),
+                    )
+                rw.commit()
+                active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+            finally:
+                rw.close()
+        else:
+            active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+        if active:
+            sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+    finally:
+        connection.close()
 except sqlite3.DatabaseError as error:
     code = getattr(error, "sqlite_errorcode", None)
     # Python 3.10 has neither sqlite_errorcode nor the SQLITE_* constants.
@@ -1842,7 +1922,7 @@ acquire_release_lock() {
             runtime_svc_gid="$(id -gn "${runtime_svc_user}" 2>/dev/null || echo "${runtime_svc_user}")"
             chown --no-dereference "root:${runtime_svc_gid}" "${shared_lock_dir}" 2>/dev/null || true
         fi
-        chmod 1770 "${shared_lock_dir}" 2>/dev/null || true
+        chmod 0750 "${shared_lock_dir}" 2>/dev/null || true
     fi
     if [[ -L "${shared_db_lock}" ]]; then
         log_fatal "Maintenance lockfile is a symbolic link: ${shared_db_lock}"

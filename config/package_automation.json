@@ -297,9 +297,10 @@
     "update_repo": "sct/overseerr",
     "update_repo_url": "https://github.com/sct/overseerr.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "node -p \"require('/opt/overseerr/package.json').version\" 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/overseerr/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -379,7 +380,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -c safe.directory=* -C /opt/Tautulli describe --tags --exact-match 2>/dev/null || git -c safe.directory=* -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -c safe.directory=* -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
+      "if [ -s /opt/Tautulli/.af-version ]; then cat /opt/Tautulli/.af-version; elif [ -r /opt/Tautulli/.git/HEAD ]; then head -c 64 /opt/Tautulli/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1091,9 +1092,10 @@
     "update_repo": "louislam/uptime-kuma",
     "update_repo_url": "https://github.com/louislam/uptime-kuma.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null || git -C /opt/uptime-kuma rev-parse --short HEAD 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/uptime-kuma/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1147,9 +1149,10 @@
     "require_download_sha256": true,
     "update_repo": "seerr-team/seerr",
     "version_command": [
-      "bash",
-      "-lc",
-      "node -p \"require('/opt/jellyseerr/package.json').version\" 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/jellyseerr/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1245,7 +1248,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1 || git -C /var/www/rutorrent rev-parse --short HEAD 2>/dev/null"
+      "grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1342,9 +1345,9 @@
     "update_repo": "l3uddz/cloudplow",
     "update_repo_url": "https://github.com/l3uddz/cloudplow.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py --version 2>/dev/null || git -C /opt/cloudplow rev-parse --short HEAD 2>/dev/null"
+      "/opt/cloudplow/.venv/bin/python",
+      "/opt/cloudplow/cloudplow.py",
+      "--version"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1543,7 +1546,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -c safe.directory=* -C /opt/calibre-web describe --tags --exact-match 2>/dev/null || git -c safe.directory=* -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
+      "sed -nE \"s/^[[:space:]]*STABLE_VERSION[[:space:]]*=[[:space:]]*['\\\"]([^'\\\"]+)['\\\"].*/\\1/p\" /opt/calibre-web/cps/constants.py 2>/dev/null | grep -m1 . || if [ -s /opt/calibre-web/.af-version ]; then cat /opt/calibre-web/.af-version; elif [ -r /opt/calibre-web/.git/HEAD ]; then head -c 64 /opt/calibre-web/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1785,7 +1788,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || git -C /var/www/organizr rev-parse --short HEAD 2>/dev/null"
+      "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1810,9 +1813,10 @@
     "require_download_sha256": true,
     "update_repo": "Dispatcharr/Dispatcharr",
     "version_command": [
-      "bash",
-      "-lc",
-      "python3 -c \"import pathlib,re; t=pathlib.Path('/opt/dispatcharr/version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\\x27\\\"]([^\\x27\\\"]+)', t).group(1))\" 2>/dev/null || git -c safe.directory=* -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -c safe.directory=* -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
+      "sed",
+      "-nE",
+      "s/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\\1/p",
+      "/opt/dispatcharr/version.py"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2113,7 +2117,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /opt/seedcross rev-parse HEAD 2>/dev/null"
+      "if [ -s /opt/seedcross/.af-version ]; then cat /opt/seedcross/.af-version; elif [ -r /opt/seedcross/.git/HEAD ]; then head -c 64 /opt/seedcross/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [

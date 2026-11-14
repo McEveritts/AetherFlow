@@ -1387,22 +1387,49 @@ pub async fn handle_log_websocket(
     })
 }
 
+fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    let trust_private = std::env::var("TRUST_PROXY_HEADERS")
+        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+        .unwrap_or(false);
+    if !trust_private {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
     if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
-        // The rightmost entry is the one appended by our trusted reverse proxy; entries to its
-        // left are client-controlled and must never be used for rate limiting or session binding.
-        if let Some(last) = xff
-            .rsplit(',')
-            .map(|hop| hop.trim().trim_matches(['[', ']']))
-            .find(|hop| hop.parse::<std::net::IpAddr>().is_ok())
-        {
-            return last.to_string();
+        // Walk right-to-left: skip trailing trusted proxy hops added locally, then pick the
+        // rightmost untrusted client hop rather than any client-spoofable leftmost value.
+        let mut rightmost_valid: Option<std::net::IpAddr> = None;
+        for hop in xff.rsplit(',') {
+            let trimmed = hop.trim().trim_matches(['[', ']']);
+            let Ok(ip) = trimmed.parse::<std::net::IpAddr>() else {
+                continue;
+            };
+            if rightmost_valid.is_none() {
+                rightmost_valid = Some(ip);
+            }
+            if !is_trusted_proxy_hop(&ip) {
+                return ip.to_string();
+            }
+        }
+        if let Some(fallback_ip) = rightmost_valid {
+            return fallback_ip.to_string();
         }
     }
     if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
-        let trimmed = real_ip.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
+        let trimmed = real_ip.trim().trim_matches(['[', ']']);
+        if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+            return ip.to_string();
         }
     }
     "127.0.0.1".to_string()
@@ -1449,3 +1476,34 @@ pub fn build_set_cookie(
 #[cfg(all(test, target_os = "linux"))]
 #[path = "log_authorization_regressions.rs"]
 mod log_authorization_regressions;
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::extract_client_ip;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn extract_client_ip_skips_trailing_trusted_proxies_and_validates_real_ip() {
+        let mut h1 = HeaderMap::new();
+        h1.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("10.0.0.1, 203.0.113.42, 127.0.0.1"),
+        );
+        assert_eq!(extract_client_ip(&h1), "203.0.113.42");
+
+        let mut h2 = HeaderMap::new();
+        h2.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("198.51.100.1, 203.0.113.9"),
+        );
+        assert_eq!(extract_client_ip(&h2), "203.0.113.9");
+
+        let mut h3 = HeaderMap::new();
+        h3.insert("X-Real-IP", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(extract_client_ip(&h3), "127.0.0.1");
+
+        let mut h4 = HeaderMap::new();
+        h4.insert("X-Real-IP", HeaderValue::from_static("[2001:db8::5]"));
+        assert_eq!(extract_client_ip(&h4), "2001:db8::5");
+    }
+}

@@ -222,6 +222,7 @@ func InitDB() {
 			user_id INTEGER NOT NULL,
 			redirect_uri TEXT NOT NULL,
 			scope TEXT DEFAULT 'openid profile email',
+			nonce TEXT DEFAULT '',
 			code_challenge TEXT DEFAULT '',
 			code_challenge_method TEXT DEFAULT '',
 			expires_at DATETIME NOT NULL,
@@ -231,6 +232,17 @@ func InitDB() {
 	if err != nil {
 		slog.Error("failed to create table", "table", "oidc_auth_codes", "error", err)
 	}
+
+	_, err = DB.Exec(`
+		CREATE TABLE IF NOT EXISTS revoked_tokens (
+			jti TEXT PRIMARY KEY,
+			expires_at DATETIME NOT NULL
+		)
+	`)
+	if err != nil {
+		slog.Error("failed to create table", "table", "revoked_tokens", "error", err)
+	}
+	_, _ = DB.Exec(`CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at)`)
 
 	_, err = DB.Exec(`
 		CREATE TABLE IF NOT EXISTS oidc_refresh_tokens (
@@ -674,6 +686,21 @@ func InitDB() {
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);")
 
+	// v20: Durable token revocation table and OIDC auth code nonce
+	var nonceColumnCount int
+	_ = DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('oidc_auth_codes') WHERE name = 'nonce'").Scan(&nonceColumnCount)
+	m20Stmts := []string{
+		`CREATE TABLE IF NOT EXISTS revoked_tokens (
+			jti TEXT PRIMARY KEY,
+			expires_at DATETIME NOT NULL
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);",
+	}
+	if nonceColumnCount == 0 {
+		m20Stmts = append(m20Stmts, "ALTER TABLE oidc_auth_codes ADD COLUMN nonce TEXT DEFAULT '';")
+	}
+	migrate(20, "Durable token revocation table and OIDC auth code nonce", m20Stmts...)
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 	DB.Exec(`UPDATE settings SET ai_model = 'gemini-4-argon' WHERE id = 1 AND ai_model IN ('gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')`)
@@ -740,6 +767,7 @@ func PruneExpiredData() {
 		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ? OR used = 1"},
 		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
 		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ? OR revoked = 1"},
+		{"revoked_tokens", "DELETE FROM revoked_tokens WHERE expires_at < datetime('now')"},
 		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
 		// Keep 90 days of metrics history
 		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},

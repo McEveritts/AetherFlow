@@ -629,6 +629,7 @@ struct CachedBackupVerification {
     verification: af_runner::af_host::ChecksumVerification,
     manifest: af_runner::af_host::BackupManifest,
 }
+#[allow(clippy::type_complexity)]
 static BACKUP_VERIFICATIONS: Lazy<
     Mutex<HashMap<(PathBuf, Option<u32>), CachedBackupVerification>>,
 > = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -2028,6 +2029,7 @@ static FILESHARE_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
 static FILESHARE_UPLOADS: Lazy<Mutex<HashMap<(i64, String), FileshareUpload>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[allow(clippy::too_many_arguments)]
 fn append_fileshare_chunk_with(
     sessions: &mut HashMap<(i64, String), FileshareUpload>,
     root: &StdPath,
@@ -2131,6 +2133,7 @@ fn append_fileshare_chunk_with(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn append_fileshare_chunk(
     sessions: &mut HashMap<(i64, String), FileshareUpload>,
     root: &StdPath,
@@ -2616,6 +2619,7 @@ struct DeploymentRegistration {
     sender: broadcast::Sender<String>,
 }
 
+#[allow(clippy::result_large_err)]
 fn register_deployment(app_name: &str) -> Result<DeploymentRegistration, Response> {
     let mut streams = DEPLOY_STREAMS.lock().map_err(|_| {
         api_error(
@@ -3678,6 +3682,7 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_admin(auth_user: &AuthUser) -> Result<(), Response> {
     if auth_user.role != "admin" {
         return Err(api_error(

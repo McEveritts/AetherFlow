@@ -216,19 +216,11 @@ mod tests {
                 (Some(_), Some(_)) => {
                     if self.inactive_after_start {
                         false
-                    } else if self.inactive_after_certification && current_count == 3 {
-                        false
-                    } else {
-                        true
-                    }
+                    } else { !(self.inactive_after_certification && current_count == 3) }
                 }
                 (Some(_), None) => false,
                 (None, Some(_)) => {
-                    if self.inactive_after_start {
-                        false
-                    } else {
-                        true
-                    }
+                    !self.inactive_after_start
                 }
                 (None, None) => {
                     if matches!(unit, "recyclarr" | "scrutiny-collector") {
@@ -1280,7 +1272,7 @@ impl LifecycleBackend for HostBackend {
                     if show_out.status.success() {
                         let text = String::from_utf8_lossy(&show_out.stdout);
                         let lines: Vec<&str> = text.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-                        if (lines.get(0) == Some(&"not-found") || text.contains("LoadState=not-found"))
+                        if (lines.first() == Some(&"not-found") || text.contains("LoadState=not-found"))
                             && (lines.get(1) == Some(&"inactive") || text.contains("ActiveState=inactive"))
                         {
                             return Ok(true);
@@ -1653,7 +1645,7 @@ fn quote_closes_outer_span(after: Option<u8>, include_colon: bool) -> bool {
     match after {
         None => true,
         Some(n) if n.is_ascii_whitespace() => true,
-        Some(n) if matches!(n, b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&') => true,
+        Some(b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&') => true,
         Some(b':') if include_colon => true,
         _ => false,
     }
@@ -1730,7 +1722,7 @@ fn consume_plain_quoted(bytes: &[u8], quote_idx: usize) -> usize {
             j += 1;
             continue;
         }
-        if c == q && bs % 2 == 0 {
+        if c == q && bs.is_multiple_of(2) {
             return j + 1;
         }
         bs = 0;
@@ -2158,7 +2150,7 @@ impl CoordinatedOperation {
         })
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units(
         backend: &impl LifecycleBackend,
         lifecycle_job_id: &str,
@@ -2189,6 +2181,7 @@ impl CoordinatedOperation {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units_with_runtime(
         backend: &impl LifecycleBackend,
         lifecycle_job_id: &str,
@@ -2737,11 +2730,7 @@ impl CoordinatedOperation {
                 msg.push_str(&format!("; receipt restoration error: {}", r_err));
             }
             Some(msg)
-        } else if let Some(ref r_err) = receipt_restore_error {
-            Some(format!("Receipt restoration error: {}", r_err))
-        } else {
-            None
-        };
+        } else { receipt_restore_error.as_ref().map(|r_err| format!("Receipt restoration error: {}", r_err)) };
         let sanitized_diag_summary = diag_summary.as_deref().map(sanitize_lifecycle_field);
         let sanitized_expected = self.request.expected_target_version.as_deref().map(sanitize_lifecycle_field);
         let sanitized_achieved = achieved_ver.as_deref().map(sanitize_lifecycle_field);
@@ -3124,10 +3113,7 @@ fn is_protected_root(path: &Path) -> bool {
         return true;
     }
     let comp_count = path.components().count();
-    if comp_count <= 1 {
-        return true;
-    }
-    false
+    comp_count <= 1
 }
 
 fn copy_range_sparse(
@@ -3347,11 +3333,10 @@ fn remove_untracked_receipt_files(dir: &Path, embedded: &[FileSnapshot]) {
             if let Ok(meta) = std::fs::symlink_metadata(&p) {
                 if meta.is_dir() {
                     walk(&p, embedded);
-                } else if meta.is_file() && is_receipt_file_name(&name_str) {
-                    if !embedded.iter().any(|snap| snap.path == p) {
+                } else if meta.is_file() && is_receipt_file_name(&name_str)
+                    && !embedded.iter().any(|snap| snap.path == p) {
                         let _ = std::fs::remove_file(&p);
                     }
-                }
             }
         }
     }
@@ -3361,7 +3346,7 @@ fn remove_untracked_receipt_files(dir: &Path, embedded: &[FileSnapshot]) {
 fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
-    root: &Path,
+    _root: &Path,
     mut embedded_receipts: Option<&mut Vec<FileSnapshot>>,
     _ignore_permission_denied: bool,
     fs_root: Option<&Path>,
@@ -3412,11 +3397,8 @@ fn copy_dir_recursive(
                     .map_err(|e| format!("Failed to create symlink {}: {}", child_dst.display(), e))?;
             }
         } else if ft.is_dir() {
-            let receipts_sub = match embedded_receipts {
-                Some(ref mut r) => Some(&mut **r),
-                None => None,
-            };
-            copy_dir_recursive(&child_src, &child_dst, root, receipts_sub, _ignore_permission_denied, fs_root)?;
+            let receipts_sub = embedded_receipts.as_deref_mut();
+            copy_dir_recursive(&child_src, &child_dst, _root, receipts_sub, _ignore_permission_denied, fs_root)?;
         } else if ft.is_file() {
             if let Some(ref mut receipts) = embedded_receipts {
                 if is_receipt_file_name(&name_str) {
@@ -4374,10 +4356,12 @@ impl PackageRuntimeSnapshot {
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 pub static TEST_ROLLBACK_HOOK: once_cell::sync::Lazy<std::sync::Mutex<Option<Box<dyn Fn(&[FileSnapshot]) + Send + Sync>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 pub static TEST_CERTIFY_FAIL_HOOK: once_cell::sync::Lazy<std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 
@@ -4760,15 +4744,14 @@ pub fn restore_candidate_receipts(
         let stat_rc = unsafe {
             libc::fstatat(dir_fd, file_cstr.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
         };
-        if stat_rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-            if prior_state.is_some() {
+        if stat_rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+            && prior_state.is_some() {
                 errors.push(format!(
                     "Refusing to overwrite directory at receipt path {}",
                     path.display()
                 ));
                 continue;
             }
-        }
 
         if let Some(entry) = prior_state {
             let tmp_name = format!(".af-receipt-tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
@@ -5283,7 +5266,7 @@ pub enum LiveRuntimeProbeOutcome {
 pub use LiveRuntimeProbeOutcome::Verified as Confirmed;
 
 pub fn has_prerelease_or_build(token: &str) -> bool {
-    if let Some(pos) = token.find(|c: char| c == '-' || c == '+') {
+    if let Some(pos) = token.find(['-', '+']) {
         token[pos + 1..].chars().any(|c| c.is_ascii_alphanumeric() || c == '-')
     } else {
         false
@@ -5381,29 +5364,17 @@ pub fn probe_live_runtime_version(
         let any_exists = fe_dir.is_some() || be_dir.is_some() || pr_dir.is_some();
         if any_exists {
             if let (Some(fe), Some(be), Some(pr)) = (fe_dir, be_dir, pr_dir) {
-                let rev_parse = |git_dir: &std::path::Path| -> Option<String> {
-                    let mut cmd = std::process::Command::new("git");
-                    cmd.args(["--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
-                    let out = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)).ok()?;
-                    if out.status.success() {
-                        let hash = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
-                        if !hash.is_empty() {
-                            return Some(hash);
-                        }
-                    }
-                    None
-                };
-                if let (Some(fe_hash), Some(be_hash), Some(pr_hash)) = (
-                    rev_parse(&fe),
-                    rev_parse(&be),
-                    rev_parse(&pr),
+                if let (Ok(fe_hash), Ok(be_hash), Ok(pr_hash)) = (
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&fe),
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&be),
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&pr),
                 ) {
                     return LiveRuntimeProbeOutcome::Verified(format!(
                         "frontend:{fe_hash},backend:{be_hash},proxy:{pr_hash}"
                     ));
                 } else {
                     return LiveRuntimeProbeOutcome::Failed(
-                        "Piped git rev-parse HEAD failed for one or more sub-repos".into(),
+                        "Piped pure-Rust .git/HEAD resolution failed for one or more sub-repos".into(),
                     );
                 }
             } else {
@@ -5435,6 +5406,25 @@ pub fn probe_live_runtime_version(
         && pkg.version_command[1].ends_with("/.af-version");
 
     if !pkg.version_command.is_empty() && !is_cat_receipt {
+        let rebase_static = |raw: &str| {
+            env_cfg
+                .resolve_path(raw)
+                .unwrap_or_else(|_| std::path::PathBuf::from(raw))
+        };
+        if let Some(static_res) = crate::probe_metadata::extract_static_package_version(
+            package_id,
+            &pkg.version_command,
+            &rebase_static,
+        ) {
+            return match static_res {
+                Ok(ver) if !ver.is_empty() => LiveRuntimeProbeOutcome::Verified(ver),
+                Ok(_) => LiveRuntimeProbeOutcome::Failed(
+                    "Static version probe returned empty version".into(),
+                ),
+                Err(e) => LiveRuntimeProbeOutcome::Failed(e),
+            };
+        }
+
         let prog = &pkg.version_command[0];
         let args = &pkg.version_command[1..];
         let prog_to_run = if let Ok(resolved_prog) = env_cfg.resolve_path(prog) {
@@ -5459,8 +5449,21 @@ pub fn probe_live_runtime_version(
 
         let mut cmd = std::process::Command::new(&prog_to_run);
         cmd.args(args);
-        if let Some(ref root) = env_cfg.fs_root {
-            cmd.env("AETHERFLOW_FS_ROOT", root);
+        let sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
+            drop_to_path_owner: true,
+            fs_root: env_cfg.fs_root.clone(),
+            package_user: Some(package_id.to_string()),
+        };
+        if let Err(err) = crate::probe_metadata::configure_sandboxed_std_command(
+            &mut cmd,
+            std::path::Path::new(&prog_to_run),
+            args,
+            &sandbox_spec,
+        ) {
+            return LiveRuntimeProbeOutcome::Failed(format!(
+                "Refused unsafe version probe command '{}': {}",
+                prog_to_run, err
+            ));
         }
 
         match run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
@@ -5487,7 +5490,7 @@ pub fn probe_live_runtime_version(
                         extract_version_token(combined.lines().next().unwrap_or("").trim())
                     };
                     if let Some(stripped) = extracted.strip_prefix('v').or_else(|| extracted.strip_prefix('V')) {
-                        if stripped.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                        if stripped.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                             extracted = stripped.to_string();
                         }
                     }
@@ -5535,25 +5538,16 @@ pub fn probe_live_runtime_version(
             }
         }
         if let Some(opt_dir) = candidates.into_iter().next() {
-            let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(&opt_dir).args(["rev-parse", "HEAD"]);
-            match run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
-                Ok(output) if output.status.success() => {
-                    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !hash.is_empty() {
-                        return LiveRuntimeProbeOutcome::Verified(hash);
-                    } else {
-                        return LiveRuntimeProbeOutcome::Failed("Git rev-parse returned empty hash".into());
-                    }
-                }
-                Ok(output) => {
-                    return LiveRuntimeProbeOutcome::Failed(format!(
-                        "Git rev-parse exited with status: {}",
-                        output.status
-                    ));
+            match crate::probe_metadata::resolve_git_head_commit_nofollow(&opt_dir.join(".git")) {
+                Ok(hash) if !hash.is_empty() => return LiveRuntimeProbeOutcome::Verified(hash),
+                Ok(_) => {
+                    return LiveRuntimeProbeOutcome::Failed("Git HEAD resolved to empty hash".into())
                 }
                 Err(e) => {
-                    return LiveRuntimeProbeOutcome::Failed(format!("Failed to run git rev-parse: {}", e));
+                    return LiveRuntimeProbeOutcome::Failed(format!(
+                        "Failed to resolve .git/HEAD cleanly: {}",
+                        e
+                    ))
                 }
             }
         } else if is_git_package {
@@ -5599,6 +5593,12 @@ pub fn probe_live_runtime_version(
     candidate_progs.push(package_id.to_string());
     candidate_progs.push(pkg.name.clone());
 
+    static VERSION_TOKEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:[0-9]+:)?[0-9]+\.[0-9]+(?:\.[0-9]+)*(?:~[0-9A-Za-z.+~_-]+)?(?:-[0-9A-Za-z.+~_-]+)?(?:\+[0-9A-Za-z.+~_-]+)?|\b[0-9a-f]{7,40}\b)"
+        )
+        .expect("valid version regex")
+    });
     for prog_cand in &candidate_progs {
         let bin_path = if let Some(root) = &env_cfg.fs_root {
             let mut found = None;
@@ -5632,10 +5632,7 @@ pub fn probe_live_runtime_version(
                         String::from_utf8_lossy(&output.stdout),
                         String::from_utf8_lossy(&output.stderr)
                     );
-                    let re = regex::Regex::new(
-                        r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:[0-9]+:)?[0-9]+\.[0-9]+(?:\.[0-9]+)*(?:~[0-9A-Za-z.+~_-]+)?(?:-[0-9A-Za-z.+~_-]+)?(?:\+[0-9A-Za-z.+~_-]+)?|\b[0-9a-f]{7,40}\b)"
-                    ).unwrap();
-                    if let Some(cap) = re.captures(&combined) {
+                    if let Some(cap) = VERSION_TOKEN_RE.captures(&combined) {
                         if let Some(m) = cap.get(1).or_else(|| cap.get(0)) {
                             let extracted = trim_version_token(m.as_str()).to_string();
                             if !extracted.is_empty() {
@@ -6192,6 +6189,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod version_verification_tests {
     use super::*;
     use std::sync::Arc;
@@ -7831,15 +7829,15 @@ mod version_verification_tests {
     #[test]
     fn test_parse_systemd_active_state_only_active_is_true() {
         // "active" must be confirmed active
-        assert_eq!(super::parse_systemd_active_state("active").unwrap(), true);
-        assert_eq!(super::parse_systemd_active_state("  active  \n").unwrap(), true);
+        assert!(super::parse_systemd_active_state("active").unwrap());
+        assert!(super::parse_systemd_active_state("  active  \n").unwrap());
 
         // Transitional and stopped states must return Ok(false)
-        assert_eq!(super::parse_systemd_active_state("activating").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("deactivating").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("reloading").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("inactive").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("failed").unwrap(), false);
+        assert!(!super::parse_systemd_active_state("activating").unwrap());
+        assert!(!super::parse_systemd_active_state("deactivating").unwrap());
+        assert!(!super::parse_systemd_active_state("reloading").unwrap());
+        assert!(!super::parse_systemd_active_state("inactive").unwrap());
+        assert!(!super::parse_systemd_active_state("failed").unwrap());
 
         // Unknown states must return Err
         assert!(super::parse_systemd_active_state("unknown").is_err());
@@ -7850,15 +7848,15 @@ mod version_verification_tests {
     #[test]
     fn test_parse_systemd_quiesced_state_inactive_and_failed_are_true() {
         // Genuinely quiescent states must return Ok(true)
-        assert_eq!(super::parse_systemd_quiesced_state("inactive").unwrap(), true);
-        assert_eq!(super::parse_systemd_quiesced_state("  inactive  \n").unwrap(), true);
-        assert_eq!(super::parse_systemd_quiesced_state("failed").unwrap(), true);
+        assert!(super::parse_systemd_quiesced_state("inactive").unwrap());
+        assert!(super::parse_systemd_quiesced_state("  inactive  \n").unwrap());
+        assert!(super::parse_systemd_quiesced_state("failed").unwrap());
 
         // Live and transitional states must return Ok(false)
-        assert_eq!(super::parse_systemd_quiesced_state("active").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("activating").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("deactivating").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("reloading").unwrap(), false);
+        assert!(!super::parse_systemd_quiesced_state("active").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("activating").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("deactivating").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("reloading").unwrap());
 
         // Unknown states must return Err
         assert!(super::parse_systemd_quiesced_state("unknown").is_err());
