@@ -10400,16 +10400,7 @@ pub fn package_requires_download_sha256(pkg_id: &str) -> bool {
         None
     }
     .or_else(|| {
-        for candidate in [
-            "/opt/AetherFlow/current/config/package_automation.json",
-            "/opt/AetherFlow/current/backend/config/package_automation.json",
-            "config/package_automation.json",
-            "../config/package_automation.json",
-            "/opt/AetherFlow/config/package_automation.json",
-            "backend/config/package_automation.json",
-            "../backend/config/package_automation.json",
-            "/opt/AetherFlow/backend/config/package_automation.json",
-        ] {
+        for candidate in crate::canonical_config_candidates("package_automation.json") {
             if let Ok(s) = fs::read_to_string(candidate) {
                 return Some(s);
             }
