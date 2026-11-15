@@ -57,6 +57,9 @@ id = "generic-api-key"
   ]
   regexes = ['''^0123456789abcdef0123456789abcdef$''']
 
+  # NOTE: The `commits`-pinned `backend/*` allowlists below apply strictly to immutable
+  # pre-Zero-Go git history commits scanned during full-history `gitleaks git .` runs.
+  # Zero `.go`, `go.mod`, or `go.sum` files exist in the working tree (`backend/` is retired).
   [[rules.allowlists]]
   description = "Historical synthetic AES_MASTER_KEY test fixture in retired Go config unit test"
   condition = "AND"

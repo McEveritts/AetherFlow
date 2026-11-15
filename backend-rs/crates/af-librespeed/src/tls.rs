@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_RESPONSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 32;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,10 +37,14 @@ const TLS_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_TLS_CONNECTIONS: usize = 512;
 
 #[derive(Debug, Clone, Copy)]
+pub struct ResponseDrainDeadline(pub Duration);
+
+#[derive(Debug, Clone, Copy)]
 pub struct ListenerLimits {
     pub max_connections: usize,
     pub header_read_timeout: Duration,
     pub idle_connection_timeout: Duration,
+    pub response_drain_timeout: Duration,
     pub http2_max_concurrent_streams: u32,
 }
 
@@ -49,6 +54,7 @@ impl Default for ListenerLimits {
             max_connections: MAX_CONCURRENT_TLS_CONNECTIONS,
             header_read_timeout: HTTP_HEADER_READ_TIMEOUT,
             idle_connection_timeout: HTTP_IDLE_CONNECTION_TIMEOUT,
+            response_drain_timeout: HTTP_RESPONSE_DRAIN_TIMEOUT,
             http2_max_concurrent_streams: HTTP2_MAX_CONCURRENT_STREAMS,
         }
     }
@@ -95,9 +101,48 @@ impl Drop for ConnStreamGuard {
     }
 }
 
+const MAX_GUARDED_FRAME_BYTES: usize = 8 * 1024;
+
 struct GuardedBody {
     inner: Body,
+    pending_data: Bytes,
     _guard: ConnStreamGuard,
+    drain_watchdog: Option<tokio::task::AbortHandle>,
+}
+
+impl GuardedBody {
+    fn new(
+        inner: Body,
+        guard: ConnStreamGuard,
+        conn_abort: Arc<Notify>,
+        drain_timeout: Duration,
+    ) -> Self {
+        let drain_watchdog = if hyper::body::Body::is_end_stream(&inner) {
+            None
+        } else {
+            Some(
+                tokio::spawn(async move {
+                    tokio::time::sleep(drain_timeout).await;
+                    conn_abort.notify_one();
+                })
+                .abort_handle(),
+            )
+        };
+        Self {
+            inner,
+            pending_data: Bytes::new(),
+            _guard: guard,
+            drain_watchdog,
+        }
+    }
+}
+
+impl Drop for GuardedBody {
+    fn drop(&mut self) {
+        if let Some(handle) = self.drain_watchdog.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl hyper::body::Body for GuardedBody {
@@ -105,18 +150,48 @@ impl hyper::body::Body for GuardedBody {
     type Error = axum::Error;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
+        let this = self.get_mut();
+        loop {
+            if !this.pending_data.is_empty() {
+                let chunk_len = this.pending_data.len().min(MAX_GUARDED_FRAME_BYTES);
+                let chunk = this.pending_data.split_to(chunk_len);
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(data) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        this.pending_data = data;
+                    }
+                    Err(non_data_frame) => return Poll::Ready(Some(Ok(non_data_frame))),
+                },
+            }
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.pending_data.is_empty() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+        let inner_hint = self.inner.size_hint();
+        let buffered = self.pending_data.len() as u64;
+        let mut hint = SizeHint::new();
+        hint.set_lower(inner_hint.lower().saturating_add(buffered));
+        if let Some(upper) = inner_hint.upper() {
+            if let Some(total) = upper.checked_add(buffered) {
+                hint.set_upper(total);
+            }
+        }
+        hint
     }
 }
 
@@ -152,6 +227,7 @@ fn configure_conn_builder(builder: &mut AutoConnBuilder<TokioExecutor>, limits: 
         .max_concurrent_streams(limits.http2_max_concurrent_streams)
         .max_header_list_size(16 * 1024)
         .max_frame_size(16 * 1024)
+        .max_send_buf_size(64 * 1024)
         .keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT);
 }
@@ -277,16 +353,20 @@ where
                         async move {
                             let (mut parts, body) = req.into_parts();
                             parts.extensions.insert(ConnectInfo(peer_addr));
-                            parts.extensions.insert(ConnectionAbortSignal(conn_abort));
+                            parts
+                                .extensions
+                                .insert(ConnectionAbortSignal(Arc::clone(&conn_abort)));
                             let axum_req = Request::from_parts(parts, Body::new(body));
                             let resp: Response = router.oneshot(axum_req).await?;
+                            let drain_timeout = resp
+                                .extensions()
+                                .get::<ResponseDrainDeadline>()
+                                .map(|d| d.0)
+                                .unwrap_or(limits.response_drain_timeout);
                             let (resp_parts, resp_body) = resp.into_parts();
                             Ok::<_, Infallible>(hyper::Response::from_parts(
                                 resp_parts,
-                                GuardedBody {
-                                    inner: resp_body,
-                                    _guard: guard,
-                                },
+                                GuardedBody::new(resp_body, guard, conn_abort, drain_timeout),
                             ))
                         }
                     });
@@ -402,16 +482,20 @@ where
                         async move {
                             let (mut parts, body) = req.into_parts();
                             parts.extensions.insert(ConnectInfo(peer_addr));
-                            parts.extensions.insert(ConnectionAbortSignal(conn_abort));
+                            parts
+                                .extensions
+                                .insert(ConnectionAbortSignal(Arc::clone(&conn_abort)));
                             let axum_req = Request::from_parts(parts, Body::new(body));
                             let resp: Response = router.oneshot(axum_req).await?;
+                            let drain_timeout = resp
+                                .extensions()
+                                .get::<ResponseDrainDeadline>()
+                                .map(|d| d.0)
+                                .unwrap_or(limits.response_drain_timeout);
                             let (resp_parts, resp_body) = resp.into_parts();
                             Ok::<_, Infallible>(hyper::Response::from_parts(
                                 resp_parts,
-                                GuardedBody {
-                                    inner: resp_body,
-                                    _guard: guard,
-                                },
+                                GuardedBody::new(resp_body, guard, conn_abort, drain_timeout),
                             ))
                         }
                     });

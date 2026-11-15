@@ -98,7 +98,7 @@ To provide security without the virtualization penalty of containers, AetherFlow
     *   `mergerfs.service` (requires `CAP_SYS_ADMIN` and `/dev/fuse`)
     *   `rclone-vfs.service` (requires `/dev/fuse` and mount permissions)
     *   `scrutiny-collector.service` (requires raw disk ioctl access for `smartctl`)
-*   **Multi-Unit Service Resolution:** In `backend/services/service_manager.go`, `ResolveServiceUnits()` and `MatchesUnitFilter()` resolve companion services dynamically. Operations on `paperless-ngx` manage `paperless-webserver`, `paperless-worker`, and `paperless-scheduler` in unison; `scrutiny` manages both the web dashboard and `scrutiny-collector`; `recyclarr` manages both unit and timer; and `rclone` manages both `rclone.service` and `rclone-vfs.service`.
+*   **Multi-Unit Service Resolution:** In `backend-rs/crates/af-services/src/lib.rs`, companion service units and unit filters are resolved dynamically. Operations on `paperless-ngx` manage `paperless-webserver`, `paperless-worker`, and `paperless-scheduler` in unison; `scrutiny` manages both the web dashboard and `scrutiny-collector`; `recyclarr` manages both unit and timer; and `rclone` manages both `rclone.service` and `rclone-vfs.service`.
 
 ---
 

@@ -171,6 +171,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 const TELEMETRY_WINDOW_SECS: i64 = 60;
 const MAX_TELEMETRY_PER_CLIENT_IP: usize = 30;
 const MAX_TELEMETRY_PER_PEER_IP: usize = 60;
+pub const MAX_TELEMETRY_PER_PROXY_PEER_IP: usize = 120;
 const MAX_TELEMETRY_GLOBAL_PER_WINDOW: usize = 300;
 const MAX_TRACKED_TELEMETRY_IPS: usize = 4096;
 
@@ -196,7 +197,7 @@ impl TelemetryRateLimiter {
         &self,
         peer_ip: &str,
         client_ip: &str,
-        enforce_peer_bucket: bool,
+        is_trusted_proxy: bool,
         now_unix: i64,
     ) -> bool {
         let Ok(mut state) = self.inner.lock() else {
@@ -213,11 +214,14 @@ impl TelemetryRateLimiter {
             return false;
         }
 
-        if enforce_peer_bucket {
-            let peer_used = current_bucket_count(&mut state.by_peer, peer_ip, now_unix);
-            if peer_used >= MAX_TELEMETRY_PER_PEER_IP {
-                return false;
-            }
+        let peer_limit = if is_trusted_proxy {
+            MAX_TELEMETRY_PER_PROXY_PEER_IP
+        } else {
+            MAX_TELEMETRY_PER_PEER_IP
+        };
+        let peer_used = current_bucket_count(&mut state.by_peer, peer_ip, now_unix);
+        if peer_used >= peer_limit {
+            return false;
         }
 
         if state.global_count >= MAX_TELEMETRY_GLOBAL_PER_WINDOW {
@@ -225,9 +229,7 @@ impl TelemetryRateLimiter {
         }
 
         bump_bucket(&mut state.by_client, client_ip, now_unix);
-        if enforce_peer_bucket {
-            bump_bucket(&mut state.by_peer, peer_ip, now_unix);
-        }
+        bump_bucket(&mut state.by_peer, peer_ip, now_unix);
         state.global_count = state.global_count.saturating_add(1);
         true
     }
@@ -330,6 +332,8 @@ pub struct AppState {
     pub empty_upload_timeout: Duration,
     pub stats_body_timeout: Duration,
     pub telemetry_limiter: TelemetryRateLimiter,
+    pub isp_cache: crate::routes::IspLookupCache,
+    pub http_client: reqwest::Client,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -372,11 +376,16 @@ fn close_h1_if_unread_body(
     version: Version,
     conn_abort: &Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
 ) -> Response {
-    if unread_body && version != Version::HTTP_2 {
-        resp.headers_mut()
-            .insert(CONNECTION, HeaderValue::from_static("close"));
-        if let Some(axum::Extension(sig)) = conn_abort {
-            sig.abort_after_flush();
+    if unread_body {
+        if version != Version::HTTP_2 {
+            resp.headers_mut()
+                .insert(CONNECTION, HeaderValue::from_static("close"));
+            if let Some(axum::Extension(sig)) = conn_abort {
+                sig.abort_after_flush();
+            }
+        } else {
+            resp.extensions_mut()
+                .insert(crate::tls::ResponseDrainDeadline(Duration::from_secs(5)));
         }
     }
     resp

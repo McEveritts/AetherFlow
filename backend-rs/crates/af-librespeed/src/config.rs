@@ -10,8 +10,9 @@ pub const VERSION_STRING: &str = concat!(
     env!("AF_LIBRESPEED_EFFECTIVE_VERSION")
 );
 pub const DEFAULT_MAX_TELEMETRY_ROWS: usize = 100_000;
+pub const DEFAULT_IPINFO_BASE_URL: &str = "https://ipinfo.io";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub bind_address: String,
     pub listen_port: u16,
@@ -27,6 +28,10 @@ pub struct Config {
     pub tls_key_file: PathBuf,
     pub trusted_proxies: Vec<IpAddr>,
     pub max_telemetry_rows: usize,
+    pub server_lat: f64,
+    pub server_lng: f64,
+    pub ipinfo_api_key: String,
+    pub ipinfo_base_url: String,
 }
 
 impl Default for Config {
@@ -46,6 +51,10 @@ impl Default for Config {
             tls_key_file: PathBuf::new(),
             trusted_proxies: Vec::new(),
             max_telemetry_rows: DEFAULT_MAX_TELEMETRY_ROWS,
+            server_lat: 0.0,
+            server_lng: 0.0,
+            ipinfo_api_key: String::new(),
+            ipinfo_base_url: DEFAULT_IPINFO_BASE_URL.to_string(),
         }
     }
 }
@@ -87,6 +96,12 @@ impl Config {
         }
         if self.max_telemetry_rows == 0 {
             bail!("max_telemetry_rows must be greater than 0");
+        }
+        if !self.server_lat.is_finite() || !(-90.0..=90.0).contains(&self.server_lat) {
+            bail!("server_lat must be a finite latitude between -90.0 and 90.0");
+        }
+        if !self.server_lng.is_finite() || !(-180.0..=180.0).contains(&self.server_lng) {
+            bail!("server_lng must be a finite longitude between -180.0 and 180.0");
         }
         Ok(())
     }
@@ -201,6 +216,15 @@ impl Config {
                 }
                 "max_telemetry_rows" => {
                     cfg.max_telemetry_rows = val.into_positive_usize("max_telemetry_rows")?;
+                }
+                "server_lat" => {
+                    cfg.server_lat = val.into_f64("server_lat")?;
+                }
+                "server_lng" => {
+                    cfg.server_lng = val.into_f64("server_lng")?;
+                }
+                "ipinfo_api_key" => {
+                    cfg.ipinfo_api_key = val.into_string("ipinfo_api_key")?.trim().to_string();
                 }
                 _ => {
                     // Ignore non-security user-tuning TOML keys gracefully.
@@ -331,6 +355,22 @@ impl TomlScalar {
         };
         if parsed == 0 {
             bail!("{key} must be greater than 0");
+        }
+        Ok(parsed)
+    }
+
+    fn into_f64(self, key: &str) -> Result<f64> {
+        let parsed = match self {
+            TomlScalar::Float(f) => f,
+            TomlScalar::Int(n) => n as f64,
+            TomlScalar::Str(s) => s
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| anyhow!("{key} invalid floating-point string: {s:?}"))?,
+            other => bail!("{key} must be a number, got {other:?}"),
+        };
+        if !parsed.is_finite() {
+            bail!("{key} must be a finite number");
         }
         Ok(parsed)
     }
@@ -571,6 +611,9 @@ custom_tuning = "keep-me"
         assert!(!cfg.enable_tls);
         assert!(cfg.trusted_proxies.is_empty());
         assert_eq!(cfg.max_telemetry_rows, DEFAULT_MAX_TELEMETRY_ROWS);
+        assert!((cfg.server_lat - 48.8566).abs() < 1e-6);
+        assert!((cfg.server_lng - 2.3522).abs() < 1e-6);
+        assert_eq!(cfg.ipinfo_api_key, "");
     }
 
     #[test]

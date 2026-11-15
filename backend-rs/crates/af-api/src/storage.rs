@@ -831,36 +831,53 @@ fn backup_download_chunk(q: &HashMap<String, String>) -> anyhow::Result<Option<(
 }
 
 struct BackupReauth {
-    attempts: HashMap<i64, Vec<Instant>>,
+    next_id: u64,
+    attempts: HashMap<i64, Vec<(u64, Instant)>>,
     verified: HashMap<(i64, String, [u8; 32]), Instant>,
 }
 static BACKUP_REAUTH: Lazy<Mutex<BackupReauth>> = Lazy::new(|| {
     Mutex::new(BackupReauth {
+        next_id: 1,
         attempts: HashMap::new(),
         verified: HashMap::new(),
     })
 });
 
-fn check_backup_reauth_quota(user_id: i64) -> bool {
+fn reserve_backup_reauth_attempt(user_id: i64) -> Option<u64> {
     let Ok(mut state) = BACKUP_REAUTH.lock() else {
-        return false;
+        return None;
     };
     let now = Instant::now();
     state.attempts.retain(|_, entries| {
-        entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+        entries.retain(|(_, time)| now.duration_since(*time) < StdDuration::from_secs(60));
         !entries.is_empty()
     });
-    state.attempts.entry(user_id).or_default().len() < 10
+    if state.attempts.get(&user_id).map_or(0, Vec::len) >= 10 {
+        return None;
+    }
+    if state.attempts.len() >= 4096 && !state.attempts.contains_key(&user_id) {
+        return None;
+    }
+    let attempt_id = state.next_id;
+    state.next_id = state.next_id.wrapping_add(1);
+    state
+        .attempts
+        .entry(user_id)
+        .or_default()
+        .push((attempt_id, now));
+    Some(attempt_id)
 }
 
-fn record_failed_backup_reauth(user_id: i64) {
+fn refund_backup_reauth_attempt(user_id: i64, attempt_id: u64) {
     if let Ok(mut state) = BACKUP_REAUTH.lock() {
-        let now = Instant::now();
-        state.attempts.retain(|_, entries| {
-            entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
-            !entries.is_empty()
-        });
-        state.attempts.entry(user_id).or_default().push(now);
+        let mut remove_user = false;
+        if let Some(entries) = state.attempts.get_mut(&user_id) {
+            entries.retain(|(id, _)| *id != attempt_id);
+            remove_user = entries.is_empty();
+        }
+        if remove_user {
+            state.attempts.remove(&user_id);
+        }
     }
 }
 
@@ -874,7 +891,7 @@ fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &st
         session.to_string(),
         <[u8; 32]>::from(digest.finalize()),
     );
-    {
+    let reserved_id = {
         let Ok(mut state) = BACKUP_REAUTH.lock() else {
             return false;
         };
@@ -886,23 +903,40 @@ fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &st
             return true;
         }
         state.attempts.retain(|_, entries| {
-            entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+            entries.retain(|(_, time)| now.duration_since(*time) < StdDuration::from_secs(60));
             !entries.is_empty()
         });
-        if state.attempts.entry(user_id).or_default().len() >= 10 {
+        if state.attempts.get(&user_id).map_or(0, Vec::len) >= 10 {
             return false;
         }
-    }
+        if state.attempts.len() >= 4096 && !state.attempts.contains_key(&user_id) {
+            return false;
+        }
+        let attempt_id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        state
+            .attempts
+            .entry(user_id)
+            .or_default()
+            .push((attempt_id, now));
+        attempt_id
+    };
     let valid = !hash.is_empty() && bcrypt::verify(password, hash).unwrap_or(false);
     if valid {
         if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            let mut remove_user = false;
+            if let Some(entries) = state.attempts.get_mut(&user_id) {
+                entries.retain(|(id, _)| *id != reserved_id);
+                remove_user = entries.is_empty();
+            }
+            if remove_user {
+                state.attempts.remove(&user_id);
+            }
             if state.verified.len() >= 1024 {
                 state.verified.clear();
             }
             state.verified.insert(key, Instant::now());
         }
-    } else {
-        record_failed_backup_reauth(user_id);
     }
     valid
 }
@@ -1009,37 +1043,34 @@ async fn authorize_backup_password(
             if !hash.is_empty() {
                 drop(conn);
                 if password.is_empty() {
+                    let _ = reserve_backup_reauth_attempt(uid);
                     return Ok(false);
                 }
                 return Ok(verify_backup_password(uid, &session, &password, &hash));
             }
-            // Passwordless OAuth-only admin step-up path:
-            if !check_backup_reauth_quota(uid) {
+            // Passwordless OAuth-only admin step-up path: atomically reserve an attempt slot first.
+            let Some(reserved_id) = reserve_backup_reauth_attempt(uid) else {
                 return Ok(false);
-            }
+            };
             if totp_enabled != 0 {
                 drop(conn);
                 if totp_code.is_empty() {
-                    record_failed_backup_reauth(uid);
                     return Ok(false);
                 }
                 let ok = crate::auth::verify_user_totp_stepup(uid, &totp_code);
-                if !ok {
-                    record_failed_backup_reauth(uid);
+                if ok {
+                    refund_backup_reauth_attempt(uid, reserved_id);
                 }
                 return Ok(ok);
             }
             if !oauth_confirm || session.trim().is_empty() {
-                record_failed_backup_reauth(uid);
                 return Ok(false);
             }
             let now = Utc::now().timestamp();
             let Some(auth_ts) = session_auth_time else {
-                record_failed_backup_reauth(uid);
                 return Ok(false);
             };
             if auth_ts <= 0 || now.saturating_sub(auth_ts) > 300 || auth_ts > now + 60 {
-                record_failed_backup_reauth(uid);
                 return Ok(false);
             }
             let fresh_session: bool = conn
@@ -1049,8 +1080,8 @@ async fn authorize_backup_password(
                     |row| row.get(0),
                 )
                 .unwrap_or(false);
-            if !fresh_session {
-                record_failed_backup_reauth(uid);
+            if fresh_session {
+                refund_backup_reauth_attempt(uid, reserved_id);
             }
             Ok(fresh_session)
         })
@@ -4569,5 +4600,68 @@ mod updater_tests {
             }
         }
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn backup_reauth_reserves_quota_atomically_under_concurrency() {
+        let user_id: i64 = 999_881;
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            state.attempts.remove(&user_id);
+        }
+        let hash = bcrypt::hash("correct-horse-battery-staple", 4).expect("hash");
+
+        // Launch 16 concurrent invalid password verifications; at most 10 may reserve a slot
+        // and execute bcrypt, while all 16 fail closed and leave exactly 10 active attempts.
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for idx in 0..16 {
+                let h = hash.clone();
+                handles.push(s.spawn(move || {
+                    verify_backup_password(user_id, &format!("sess-{idx}"), "wrong-pass", &h)
+                }));
+            }
+            for handle in handles {
+                assert!(!handle.join().expect("thread join"));
+            }
+        });
+
+        let active_after_burst = BACKUP_REAUTH
+            .lock()
+            .expect("lock")
+            .attempts
+            .get(&user_id)
+            .map_or(0, Vec::len);
+        assert_eq!(active_after_burst, 10);
+        // Even the valid password is now rate-limited while 10 failures are active in the window.
+        assert!(!verify_backup_password(
+            user_id,
+            "sess-valid",
+            "correct-horse-battery-staple",
+            &hash,
+        ));
+
+        // Clear one slot and verify a valid password check refunds its own temporary reservation.
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            if let Some(entries) = state.attempts.get_mut(&user_id) {
+                entries.pop();
+            }
+        }
+        assert!(verify_backup_password(
+            user_id,
+            "sess-valid-2",
+            "correct-horse-battery-staple",
+            &hash,
+        ));
+        let active_after_valid = BACKUP_REAUTH
+            .lock()
+            .expect("lock")
+            .attempts
+            .get(&user_id)
+            .map_or(0, Vec::len);
+        assert_eq!(active_after_valid, 9);
+
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            state.attempts.remove(&user_id);
+        }
     }
 }

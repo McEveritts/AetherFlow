@@ -11,6 +11,83 @@ use std::path::Path;
 #[folder = "../../../web/dist"]
 struct EmbeddedNeutralDist;
 
+const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+
+#[cfg(unix)]
+fn read_static_dir_file(root_dir: &Path, rel_path: &str) -> Option<Vec<u8>> {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{FromRawFd, OwnedFd};
+
+    let segments: Vec<&str> = rel_path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segments.is_empty()
+        || segments
+            .iter()
+            .any(|s| *s == ".." || s.as_bytes().contains(&0))
+    {
+        return None;
+    }
+
+    let root_cstr = CString::new(root_dir.as_os_str().as_bytes()).ok()?;
+    let root_fd_raw = unsafe {
+        libc::open(
+            root_cstr.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd_raw < 0 {
+        return None;
+    }
+    let mut cur_dir = unsafe { OwnedFd::from_raw_fd(root_fd_raw) };
+
+    for &dir_seg in &segments[..segments.len() - 1] {
+        use std::os::unix::io::AsRawFd;
+        let seg_cstr = CString::new(dir_seg.as_bytes()).ok()?;
+        let next_raw = unsafe {
+            libc::openat(
+                cur_dir.as_raw_fd(),
+                seg_cstr.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next_raw < 0 {
+            return None;
+        }
+        cur_dir = unsafe { OwnedFd::from_raw_fd(next_raw) };
+    }
+
+    use std::os::unix::io::AsRawFd;
+    let leaf_cstr = CString::new(segments[segments.len() - 1].as_bytes()).ok()?;
+    let file_raw = unsafe {
+        libc::openat(
+            cur_dir.as_raw_fd(),
+            leaf_cstr.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if file_raw < 0 {
+        return None;
+    }
+    let file = unsafe { fs::File::from_raw_fd(file_raw) };
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_STATIC_ASSET_BYTES {
+        return None;
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_STATIC_ASSET_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > MAX_STATIC_ASSET_BYTES {
+        return None;
+    }
+    Some(buf)
+}
+
+#[cfg(not(unix))]
 fn read_static_dir_file(root_dir: &Path, rel_path: &str) -> Option<Vec<u8>> {
     let canon_root = fs::canonicalize(root_dir).ok()?;
     let mut cursor = canon_root.clone();
@@ -25,30 +102,14 @@ fn read_static_dir_file(root_dir: &Path, rel_path: &str) -> Option<Vec<u8>> {
         }
     }
     let meta = fs::symlink_metadata(&cursor).ok()?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_STATIC_ASSET_BYTES {
         return None;
     }
     let canon_target = fs::canonicalize(&cursor).ok()?;
     if !canon_target.starts_with(&canon_root) {
         return None;
     }
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&canon_target)
-            .ok()?;
-        let mut buf = Vec::with_capacity(meta.len() as usize);
-        f.read_to_end(&mut buf).ok()?;
-        Some(buf)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::read(&canon_target).ok()
-    }
+    fs::read(&canon_target).ok()
 }
 
 fn read_asset(rel_path: &str) -> Option<Vec<u8>> {

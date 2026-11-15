@@ -30,6 +30,7 @@ mime_guess = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
@@ -46,4 +47,3 @@ urlencoding = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
-reqwest = { workspace = true }

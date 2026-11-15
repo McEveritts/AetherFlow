@@ -85,6 +85,7 @@ fn make_test_config(tmp: &TempDirGuard) -> (Config, TelemetryVault) {
         tls_key_file: PathBuf::new(),
         trusted_proxies: Vec::new(),
         max_telemetry_rows: 100_000,
+        ..Config::default()
     };
     (cfg, vault)
 }
@@ -1126,6 +1127,7 @@ async fn stalled_post_stats_body_times_out_and_releases_http_and_https_listener_
         max_connections: 4,
         header_read_timeout: Duration::from_secs(2),
         idle_connection_timeout: Duration::from_millis(400),
+        response_drain_timeout: Duration::from_secs(5),
         http2_max_concurrent_streams: 8,
     };
     let timeouts = RouteTimeouts {
@@ -1526,6 +1528,7 @@ async fn http2_zero_window_stalled_garbage_stream_reclaims_listener_slots() {
         max_connections: 2,
         header_read_timeout: Duration::from_secs(5),
         idle_connection_timeout: Duration::from_secs(30),
+        response_drain_timeout: Duration::from_secs(30),
         http2_max_concurrent_streams: 8,
     };
 
@@ -1588,4 +1591,405 @@ async fn http2_zero_window_stalled_garbage_stream_reclaims_listener_slots() {
     drop(held_h2);
     let _ = tx.send(());
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn http2_zero_window_stalled_static_asset_reclaims_listener_slots() {
+    use af_librespeed::tls::{serve_http_with_limits, ListenerLimits};
+    use http_body_util::Empty;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    let tmp = TempDirGuard::new("h2-zero-window-static");
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_type = "none".to_string();
+    let fonts_dir = cfg.assets_path.join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+    // 80 KiB > 65,535-byte default HTTP/2 initial stream window so GuardedBody stalls
+    // inside h2 flow control if the client withholds WINDOW_UPDATE while answering PINGs.
+    fs::write(fonts_dir.join("Inter-latin.woff2"), vec![0xABu8; 80_000]).unwrap();
+    let app = build_router(cfg, None);
+
+    let limits = ListenerLimits {
+        max_connections: 2,
+        header_read_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(30),
+        response_drain_timeout: Duration::from_millis(250),
+        http2_max_concurrent_streams: 8,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        serve_http_with_limits(
+            listener,
+            app,
+            async move {
+                let _ = rx.await;
+            },
+            limits,
+        )
+        .await
+        .unwrap();
+    });
+
+    // Case A: RFC 9113 default 65,535-byte window exhausted mid-transfer on an 80 KiB static font
+    let mut held_h2 = Vec::new();
+    for _ in 0..limits.max_connections {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .initial_stream_window_size(65_535)
+            .initial_connection_window_size(65_535)
+            .handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        let conn_task = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/fonts/Inter-latin.woff2")
+            .body(Empty::<axum::body::Bytes>::new())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        held_h2.push((sender, resp, conn_task));
+    }
+
+    tokio::time::sleep(Duration::from_millis(420)).await;
+    {
+        // Prove listener slots recovered WHILE held_h2 is still held open without WINDOW_UPDATE
+        let mut fresh_a = TcpStream::connect(addr).await.unwrap();
+        fresh_a
+            .write_all(b"GET /getIP HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf_a = Vec::new();
+        fresh_a.read_to_end(&mut buf_a).await.unwrap();
+        let resp_a = String::from_utf8_lossy(&buf_a);
+        assert!(
+            resp_a.starts_with("HTTP/1.1 200 OK"),
+            "expected Case A 80 KiB static font zero-window recovery, got: {resp_a}"
+        );
+    }
+
+    // Case B: Also verify zero initial stream window (SETTINGS_INITIAL_WINDOW_SIZE = 0) on tiny /getIP
+    drop(held_h2);
+    let mut held_zero = Vec::new();
+    for _ in 0..limits.max_connections {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .initial_stream_window_size(0)
+            .handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        let conn_task = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/getIP")
+            .body(Empty::<axum::body::Bytes>::new())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        held_zero.push((sender, resp, conn_task));
+    }
+
+    tokio::time::sleep(Duration::from_millis(420)).await;
+
+    let mut fresh = TcpStream::connect(addr).await.unwrap();
+    fresh
+        .write_all(b"GET /getIP HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut ok_buf = Vec::new();
+    fresh.read_to_end(&mut ok_buf).await.unwrap();
+    let ok_resp = String::from_utf8_lossy(&ok_buf);
+    assert!(
+        ok_resp.starts_with("HTTP/1.1 200 OK"),
+        "expected listener slot recovery after HTTP/2 static asset zero-window stall, got: {ok_resp}"
+    );
+
+    drop(held_zero);
+    let _ = tx.send(());
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn trusted_proxy_xff_rotation_enforces_outer_stream_and_telemetry_ceilings() {
+    use af_librespeed::routes::MAX_STREAMS_PER_PROXY_PEER;
+    use af_librespeed::stats::MAX_TELEMETRY_PER_PROXY_PEER_IP;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let tmp = TempDirGuard::new("proxy-peer-ceilings");
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
+    let app = build_router(cfg, Some(vault));
+    let proxy_peer: SocketAddr = "127.0.0.1:45000".parse().unwrap();
+
+    // 1. /garbage outer proxy-peer stream ceiling (48 < global 64) stops local XFF rotation
+    //    without starving unproxied direct peers.
+    let mut held_streams = Vec::new();
+    for idx in 0..MAX_STREAMS_PER_PROXY_PEER {
+        let mut req = Request::builder()
+            .uri("/garbage?ckSize=2")
+            .header("x-forwarded-for", format!("198.51.100.{}", idx + 1))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        held_streams.push(res);
+    }
+
+    {
+        let mut over_req = Request::builder()
+            .uri("/garbage?ckSize=2")
+            .header("x-forwarded-for", "198.51.100.200")
+            .body(Body::empty())
+            .unwrap();
+        over_req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let over_res = app.clone().oneshot(over_req).await.unwrap();
+        assert_eq!(over_res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    {
+        let direct_res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .uri("/garbage?ckSize=1")
+                    .body(Body::empty())
+                    .unwrap(),
+                "203.0.113.99:51000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(direct_res.status(), StatusCode::OK);
+    }
+    drop(held_streams);
+
+    // 2. POST /empty outer proxy-peer upload ceiling (48 < global 64) also enforces proxy cap
+    let mut held_uploads = Vec::new();
+    for idx in 0..MAX_STREAMS_PER_PROXY_PEER {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/empty")
+            .header("x-forwarded-for", format!("198.51.100.{}", idx + 1))
+            .body(Body::from_stream(stream))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let app_clone = app.clone();
+        held_uploads.push((
+            _tx,
+            tokio::spawn(async move { app_clone.oneshot(req).await }),
+        ));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    {
+        let mut over_up = Request::builder()
+            .method(Method::POST)
+            .uri("/empty")
+            .header("x-forwarded-for", "198.51.100.201")
+            .body(Body::from("ping"))
+            .unwrap();
+        over_up.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let over_up_res = app.clone().oneshot(over_up).await.unwrap();
+        assert_eq!(over_up_res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+    for (tx_hold, handle) in held_uploads {
+        drop(tx_hold);
+        let _ = handle.await;
+    }
+
+    // 3. POST /results/telemetry outer proxy-peer ceiling (120/min < global 300/min)
+    for idx in 0..MAX_TELEMETRY_PER_PROXY_PEER_IP {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/results/telemetry")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", format!("192.0.2.{}", (idx % 250) + 1))
+            .body(Body::from("dl=100.0&ul=50.0&ping=10.0&jitter=1.0"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "idx={idx}");
+    }
+
+    {
+        let mut capped_tel = Request::builder()
+            .method(Method::POST)
+            .uri("/results/telemetry")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "192.0.2.253")
+            .body(Body::from("dl=100.0&ul=50.0&ping=10.0&jitter=1.0"))
+            .unwrap();
+        capped_tel.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let capped_res = app.clone().oneshot(capped_tel).await.unwrap();
+        assert_eq!(capped_res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    {
+        let direct_tel = app
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/results/telemetry")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("dl=100.0&ul=50.0&ping=10.0&jitter=1.0"))
+                    .unwrap(),
+                "203.0.113.88:52000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(direct_tel.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn getip_isp_lookup_haversine_distance_cache_and_redaction() {
+    use axum::routing::get as axum_get;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let last_auth = Arc::new(Mutex::new(String::new()));
+    let hits_srv = Arc::clone(&hits);
+    let auth_srv = Arc::clone(&last_auth);
+
+    let mock_app = axum::Router::new().route(
+        "/8.8.8.8/json",
+        axum_get(move |headers: axum::http::HeaderMap| {
+            let hits_srv = Arc::clone(&hits_srv);
+            let auth_srv = Arc::clone(&auth_srv);
+            async move {
+                hits_srv.fetch_add(1, Ordering::SeqCst);
+                if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                    *auth_srv.lock().unwrap() = auth.to_string();
+                }
+                (
+                    [(CONTENT_TYPE, "application/json")],
+                    r#"{"ip":"8.8.8.8","hostname":"dns.google","city":"Mountain View","region":"California","country":"US","loc":"37.3860,-122.0838","org":"AS15169 Google LLC","readme":"https://ipinfo.io/missingauth"}"#,
+                )
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let mock_task = tokio::spawn(async move {
+        axum::serve(listener, mock_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 1. Unredacted lookup: ASN stripping + Haversine km/mi + IspLookupCache reuse
+    let tmp = TempDirGuard::new("getip-isp");
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.redact_ip_addresses = false;
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
+    cfg.server_lat = 37.7749;
+    cfg.server_lng = -122.4194;
+    cfg.ipinfo_base_url = format!("http://127.0.0.1:{}", mock_addr.port());
+    let app = build_router(cfg.clone(), Some(vault.clone()));
+
+    let res_km = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP?isp=true&distance=km")
+                .header("x-forwarded-for", "8.8.8.8")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:50000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res_km.status(), StatusCode::OK);
+    let json_km: Value = serde_json::from_slice(&body_bytes(res_km).await).unwrap();
+    assert_eq!(
+        json_km["processedString"],
+        "8.8.8.8 - Google LLC, US (52 km)"
+    );
+    assert!(json_km["rawIspInfo"].is_object());
+    assert_eq!(json_km["rawIspInfo"]["org"], "AS15169 Google LLC");
+    assert!(json_km["rawIspInfo"].get("readme").is_none());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let res_mi = app
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP?isp=true&distance=mi")
+                .header("x-forwarded-for", "8.8.8.8")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:50000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res_mi.status(), StatusCode::OK);
+    let json_mi: Value = serde_json::from_slice(&body_bytes(res_mi).await).unwrap();
+    assert_eq!(
+        json_mi["processedString"],
+        "8.8.8.8 - Google LLC, US (33 mi)"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "second lookup for same IP must hit IspLookupCache"
+    );
+
+    // 2. Redacted lookup with explicit ipinfo_api_key sends Bearer token and sanitizes IP/hostname
+    cfg.redact_ip_addresses = true;
+    cfg.ipinfo_api_key = "test-ipinfo-token".to_string();
+    let redacted_app = build_router(cfg, Some(vault));
+    let res_red = redacted_app
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP?isp=true&distance=km")
+                .header("x-forwarded-for", "8.8.8.8")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:50000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res_red.status(), StatusCode::OK);
+    let raw_red_bytes = body_bytes(res_red).await;
+    let raw_red_str = String::from_utf8_lossy(&raw_red_bytes);
+    assert!(!raw_red_str.contains("8.8.8.8"), "leaked IP: {raw_red_str}");
+    assert!(
+        !raw_red_str.contains("dns.google"),
+        "leaked hostname: {raw_red_str}"
+    );
+    let json_red: Value = serde_json::from_slice(&raw_red_bytes).unwrap();
+    assert_eq!(
+        json_red["processedString"],
+        "0.0.0.0 - Google LLC, US (52 km)"
+    );
+    assert_eq!(json_red["rawIspInfo"]["ip"], "0.0.0.0");
+    assert_eq!(json_red["rawIspInfo"]["hostname"], "REDACTED");
+    assert_eq!(
+        last_auth.lock().unwrap().as_str(),
+        "Bearer test-ipinfo-token"
+    );
+
+    let _ = tx.send(());
+    mock_task.await.unwrap();
 }

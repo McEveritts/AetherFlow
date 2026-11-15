@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -590,7 +591,49 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertEqual(len(pre_migrate_baks), 1)
             self.assertEqual(pre_migrate_baks[0].read_bytes(), b"SQLite format 3\x00stale-local-payload")
             self.assertTrue(ext_db.exists(), "Original external DB must remain intact as backup")
-            self.assertNotIn("trusted_proxies=", migrated_cfg)
+            self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', migrated_cfg)
+
+            # 4a-ii. Explicit operator trusted_proxies=[] is preserved on upgrade, and custom in-dir
+            #        database_file subdirectories plus timestamped .bolt.bak.<ts> artifacts are 0600-hardened
+            sub_db_dir = root / "opt/librespeed/sub"
+            sub_db_dir.mkdir(parents=True, exist_ok=True)
+            sub_db = sub_db_dir / "telemetry.db"
+            sub_db_wal = sub_db_dir / "telemetry.db-wal"
+            bolt_ts_bak = root / "opt/librespeed/speedtest.db.bolt.bak.1700000000"
+            sub_db.write_bytes(b"SQLite format 3\x00subdir-db")
+            sub_db_wal.write_bytes(b"subdir-wal")
+            bolt_ts_bak.write_bytes(b"\x00" * 16 + b"\xed\xda\x0c\xed" + b"\x00" * 12)
+            os.chmod(sub_db, 0o644)
+            os.chmod(sub_db_wal, 0o644)
+            os.chmod(bolt_ts_bak, 0o644)
+
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'trusted_proxies=[]\n'
+                'statistics_password="custom-stats-password"\n'
+                'redact_ip_addresses=false\n'
+                'database_type="sqlite"\n'
+                f'database_file="{sub_db}"\n'
+                'enable_tls=false\n',
+                encoding="utf-8",
+            )
+            explicit_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(explicit_res.returncode, 0, explicit_res.stdout + explicit_res.stderr)
+            explicit_cfg = settings_path.read_text(encoding="utf-8")
+            self.assertIn("trusted_proxies=[]", explicit_cfg)
+            self.assertNotIn('trusted_proxies=["127.0.0.1"', explicit_cfg)
+            for hardened_artifact in (sub_db, sub_db_wal, bolt_ts_bak):
+                self.assertEqual(
+                    stat.S_IMODE(hardened_artifact.lstat().st_mode),
+                    0o600,
+                    f"Expected 0600 on {hardened_artifact}",
+                )
 
             # 4b. Missing external database_file (e.g. unmounted volume) fails closed without rewriting settings.toml
             missing_ext = ext_db_dir / "unmounted-volume.db"
@@ -823,7 +866,8 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         installer = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
         self.assertNotIn("chown -hRP librespeed:librespeed /opt/librespeed", installer)
         self.assertIn("os.fchmod(fd, mode)", installer)
-        self.assertIn("dir_fd=dir_fd", installer)
+        self.assertIn("dir_fd=parent_fd", installer)
+        self.assertIn("dir_fd=cur_fd", installer)
 
         # Verify readiness target snippet preserves non-loopback IPv4/IPv6 bind_address
         m_ready = re.search(

@@ -423,15 +423,9 @@ if db_type != "none" and db_file_m:
                 flags=re.MULTILINE,
             )
 
-redact_m = re.search(
-    r'^[ \t]*redact_ip_addresses\s*=\s*(?:"?(true|false)"?)\b',
-    text,
-    flags=re.MULTILINE | re.IGNORECASE,
-)
-redact_on = (redact_m.group(1).lower() == "true") if redact_m else True
 bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
 bind_val = bind_m.group(2).strip() if bind_m else None
-if redact_on and not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
+if not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
     if bind_val is None or bind_val in ("127.0.0.1", "::1", "[::1]", "localhost"):
         text = text.rstrip("\n") + '\ntrusted_proxies=["127.0.0.1", "::1"]\n'
 safe_write_text(cfg_path, text)
@@ -484,9 +478,9 @@ chmod 1770 /opt/librespeed
 chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
 chmod 755 /opt/librespeed/speedtest-backend
 python3 - /opt/librespeed <<'PYEOF'
-import grp, os, pwd, stat, subprocess, sys
+import grp, os, pwd, re, stat, subprocess, sys
 
-state_dir = sys.argv[1]
+state_dir = os.path.normpath(sys.argv[1])
 o_nofollow = getattr(os, "O_NOFOLLOW", 0)
 o_cloexec = getattr(os, "O_CLOEXEC", 0)
 o_directory = getattr(os, "O_DIRECTORY", 0)
@@ -502,39 +496,104 @@ try:
     if not stat.S_ISDIR(dst.st_mode):
         raise SystemExit(f"Refusing non-directory LibreSpeed state root: {state_dir}")
 
-    def harden_entry(entry_name: str, owner_user: str, uid: int, gid: int, mode: int, required: bool) -> None:
+    def harden_entry_in_dir(
+        parent_fd: int,
+        parent_label: str,
+        entry_name: str,
+        owner_user: str,
+        uid: int,
+        gid: int,
+        mode: int,
+        required: bool,
+    ) -> bytes:
+        full_label = os.path.join(parent_label, entry_name)
         try:
-            fd = os.open(entry_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dir_fd)
+            fd = os.open(entry_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=parent_fd)
         except FileNotFoundError:
             if required:
-                raise SystemExit(f"Missing required LibreSpeed artifact: {os.path.join(state_dir, entry_name)}")
-            return
+                raise SystemExit(f"Missing required LibreSpeed artifact: {full_label}")
+            return b""
         except OSError as exc:
-            raise SystemExit(
-                f"Refusing symlinked or unsafe LibreSpeed artifact {os.path.join(state_dir, entry_name)}: {exc}"
-            )
+            raise SystemExit(f"Refusing symlinked or unsafe LibreSpeed artifact {full_label}: {exc}")
         try:
             fst = os.fstat(fd)
             if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
-                raise SystemExit(
-                    f"Refusing non-regular or hardlinked LibreSpeed artifact: {os.path.join(state_dir, entry_name)}"
-                )
+                raise SystemExit(f"Refusing non-regular or hardlinked LibreSpeed artifact: {full_label}")
             os.fchmod(fd, mode)
             if is_root:
                 os.fchown(fd, uid, gid)
             else:
                 subprocess.run(
-                    ["chown", "-h", f"{owner_user}:librespeed", os.path.join(state_dir, entry_name)],
+                    ["chown", "-h", f"{owner_user}:librespeed", full_label],
                     check=True,
                 )
+            if entry_name == "settings.toml" and parent_fd == dir_fd:
+                return os.pread(fd, 65536, 0)
+            return b""
         finally:
             os.close(fd)
 
-    harden_entry("settings.toml", "root", root_uid, ls_gid, 0o640, required=True)
-    db_exact = {"speedtest.db", "speedtest.db-wal", "speedtest.db-shm", "speedtest.db.bolt.bak"}
-    for name in sorted(os.listdir(dir_fd)):
-        if name in db_exact or name.startswith("speedtest.db.pre-migrate."):
-            harden_entry(name, "librespeed", ls_uid, ls_gid, 0o600, required=False)
+    def harden_db_family(target_dir_fd: int, target_label: str, base_leaf: str) -> None:
+        exact = {
+            base_leaf,
+            f"{base_leaf}-wal",
+            f"{base_leaf}-shm",
+            f"{base_leaf}.bolt.bak",
+        }
+        prefixes = (f"{base_leaf}.bolt.bak.", f"{base_leaf}.pre-migrate.")
+        for name in sorted(os.listdir(target_dir_fd)):
+            if name in exact or name.startswith(prefixes):
+                harden_entry_in_dir(
+                    target_dir_fd, target_label, name, "librespeed", ls_uid, ls_gid, 0o600, required=False
+                )
+
+    cfg_bytes = harden_entry_in_dir(
+        dir_fd, state_dir, "settings.toml", "root", root_uid, ls_gid, 0o640, required=True
+    )
+    harden_db_family(dir_fd, state_dir, "speedtest.db")
+
+    cfg_text = cfg_bytes.decode("utf-8", errors="replace")
+    db_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', cfg_text, flags=re.MULTILINE)
+    raw_db = db_m.group(2).strip() if db_m else ""
+    if raw_db:
+        resolved_db = os.path.normpath(raw_db if os.path.isabs(raw_db) else os.path.join(state_dir, raw_db))
+        prefix = state_dir.rstrip("/") + "/"
+        if resolved_db.startswith(prefix):
+            rel_parts = [p for p in resolved_db[len(prefix):].split("/") if p and p != "."]
+            if rel_parts and ".." not in rel_parts:
+                if len(rel_parts) == 1 and rel_parts[0] != "speedtest.db":
+                    harden_db_family(dir_fd, state_dir, rel_parts[0])
+                elif len(rel_parts) > 1:
+                    opened_fds = []
+                    cur_fd = dir_fd
+                    cur_label = state_dir
+                    try:
+                        for seg in rel_parts[:-1]:
+                            cur_label = os.path.join(cur_label, seg)
+                            try:
+                                next_fd = os.open(
+                                    seg, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=cur_fd
+                                )
+                            except FileNotFoundError:
+                                cur_fd = -1
+                                break
+                            except OSError as exc:
+                                raise SystemExit(f"Refusing symlinked LibreSpeed DB directory {cur_label}: {exc}")
+                            opened_fds.append(next_fd)
+                            sub_st = os.fstat(next_fd)
+                            if not stat.S_ISDIR(sub_st.st_mode):
+                                raise SystemExit(f"Refusing non-directory LibreSpeed DB parent: {cur_label}")
+                            os.fchmod(next_fd, 0o770)
+                            if is_root:
+                                os.fchown(next_fd, ls_uid, ls_gid)
+                            else:
+                                subprocess.run(["chown", "-h", "librespeed:librespeed", cur_label], check=True)
+                            cur_fd = next_fd
+                        if cur_fd != -1:
+                            harden_db_family(cur_fd, cur_label, rel_parts[-1])
+                    finally:
+                        for sub_fd in reversed(opened_fds):
+                            os.close(sub_fd)
 finally:
     os.close(dir_fd)
 PYEOF
