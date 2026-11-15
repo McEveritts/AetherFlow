@@ -2636,6 +2636,11 @@ pub(crate) fn consume_totp_code(
     ), Ok(1))
 }
 
+const RECOVERY_BCRYPT_COST: u32 = if cfg!(test) { 6 } else { bcrypt::DEFAULT_COST };
+const RECOVERY_CODE_GROUPS: usize = 4;
+const RECOVERY_CODE_GROUP_LEN: usize = 7;
+const RECOVERY_CODE_TOTAL_CHARS: usize = RECOVERY_CODE_GROUPS * RECOVERY_CODE_GROUP_LEN; // 28 chars * 5 bits = 140 bits entropy
+
 fn recovery_hash(salt: &[u8], compact: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"aetherflow-recovery-v1\0");
@@ -2649,24 +2654,24 @@ pub(crate) fn generate_recovery_codes() -> Vec<String> {
     const UNBIASED_CEILING: usize = 256 - (256 % CHARSET.len());
     let mut codes = Vec::with_capacity(8);
     for _ in 0..8 {
-        let mut chars = Vec::with_capacity(8);
-        while chars.len() < 8 {
-            let mut raw = [0u8; 16];
+        let mut chars = Vec::with_capacity(RECOVERY_CODE_TOTAL_CHARS);
+        while chars.len() < RECOVERY_CODE_TOTAL_CHARS {
+            let mut raw = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut raw);
             for &b in &raw {
                 if (b as usize) < UNBIASED_CEILING {
                     chars.push(CHARSET[(b as usize) % CHARSET.len()] as char);
-                    if chars.len() == 8 {
+                    if chars.len() == RECOVERY_CODE_TOTAL_CHARS {
                         break;
                     }
                 }
             }
         }
-        let code = format!(
-            "{}-{}",
-            chars[0..4].iter().collect::<String>(),
-            chars[4..8].iter().collect::<String>()
-        );
+        let code = chars
+            .chunks(RECOVERY_CODE_GROUP_LEN)
+            .map(|grp| grp.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("-");
         codes.push(code);
     }
     codes
@@ -2682,14 +2687,14 @@ pub(crate) fn store_recovery_codes(
         params![user_id],
     )?;
     for code in codes {
-        let compact = code.replace('-', "");
-        let mut salt = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        let hash = format!(
-            "sha256:v1:{}:{}",
-            hex::encode(salt),
-            recovery_hash(&salt, &compact)
-        );
+        let compact: String = code
+            .trim()
+            .to_uppercase()
+            .chars()
+            .filter(|c| *c != '-')
+            .collect();
+        let hash = bcrypt::hash(&compact, RECOVERY_BCRYPT_COST)
+            .map_err(|e| anyhow::anyhow!("failed hashing recovery code with bcrypt: {e}"))?;
         transaction.execute(
             "INSERT INTO recovery_codes (user_id, code_hash, used) VALUES (?1, ?2, 0)",
             params![user_id, hash],
@@ -3702,6 +3707,14 @@ mod tests {
         let conn = recovery_database();
         let codes = generate_recovery_codes();
         assert_eq!(codes.len(), 8);
+        for code in &codes {
+            let compact: String = code.chars().filter(|c| *c != '-').collect();
+            assert_eq!(
+                compact.len(),
+                28,
+                "recovery codes must carry 140 bits of entropy"
+            );
+        }
         let transaction = conn.unchecked_transaction().unwrap();
         store_recovery_codes(&transaction, 1, &codes).unwrap();
         transaction.commit().unwrap();
@@ -3718,7 +3731,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert!(hash.starts_with("sha256:v1:"));
+        assert!(
+            hash.starts_with("$2b$") || hash.starts_with("$2a$"),
+            "stored recovery code hash must use bcrypt KDF, got {hash}"
+        );
         assert!(!codes.contains(&hash));
         assert!(!validate_recovery_code(&conn, 2, &codes[0]));
         assert!(validate_recovery_code(

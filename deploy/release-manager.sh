@@ -1497,7 +1497,7 @@ build_from_source() {
     local source_sha
     source_sha="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
 
-    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
+    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='backend-rs/target' --exclude='data-snapshot' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
         log_error "rsync source tree into ${RELEASE_DIR} failed."
         return 1
@@ -1572,13 +1572,14 @@ build_from_source() {
         AF_BUILD_VERSION="${af_src_ver}" AETHERFLOW_VERSION="${af_src_ver}" \
             cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1
     ) || return 1
-    cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
+    local cargo_target_dir="${CARGO_TARGET_DIR:-${RELEASE_DIR}/backend-rs/target}"
+    cp -f "${cargo_target_dir}/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api" || return 1
     local built_bin
     for built_bin in af speedtest-backend; do
-        if [[ -f "target/release/${built_bin}" ]]; then
-            cp -f "target/release/${built_bin}" "${RELEASE_DIR}/${built_bin}"
+        if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
+            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/${built_bin}"
             mkdir -p "${RELEASE_DIR}/bin"
-            cp -f "target/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
             chmod +x "${RELEASE_DIR}/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
         fi
     done

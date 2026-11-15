@@ -636,13 +636,14 @@ _build_modern_stack_from_source() {
             fi
             AF_BUILD_VERSION="${af_build_ver}" AETHERFLOW_VERSION="${af_build_ver}" \
                 cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
-            cp -f "${af_root}/backend-rs/target/release/aetherflow-api" "${release_dir}/aetherflow-api"
+            local cargo_target_dir="${CARGO_TARGET_DIR:-${af_root}/backend-rs/target}"
+            cp -f "${cargo_target_dir}/release/aetherflow-api" "${release_dir}/aetherflow-api"
             local built_bin
             for built_bin in af speedtest-backend; do
-                if [[ -f "${af_root}/backend-rs/target/release/${built_bin}" ]]; then
-                    cp -f "${af_root}/backend-rs/target/release/${built_bin}" "${release_dir}/${built_bin}"
+                if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
+                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/${built_bin}"
                     mkdir -p "${release_dir}/bin"
-                    cp -f "${af_root}/backend-rs/target/release/${built_bin}" "${release_dir}/bin/${built_bin}"
+                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/bin/${built_bin}"
                 fi
             done
         ) || {

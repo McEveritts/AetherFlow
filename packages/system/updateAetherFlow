@@ -130,9 +130,37 @@ RM_SCRIPT="$(resolve_release_manager || true)"
 AF_GLOBAL_ARGS=()
 RM_GLOBAL_ARGS=()
 if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
-    AF_GLOBAL_ARGS+=(--root "${AF_ROOT}")
-    export AETHERFLOW_RELEASE_ROOT="${AF_ROOT}"
-    RM_GLOBAL_ARGS+=(--root "${AF_ROOT}")
+    if [[ "${AF_ROOT_REAL}" == "/opt/AetherFlow" ]]; then
+        # Explicit live-host default application directory: clear any external sysroot override
+        # so neither `af` nor `release-manager.sh` doubles `/opt/AetherFlow/opt/AetherFlow`.
+        unset AETHERFLOW_RELEASE_ROOT
+    elif [[ -d "${AF_ROOT_REAL}/opt/AetherFlow" ]]; then
+        # Filesystem sysroot layout (`<sysroot>/opt/AetherFlow/...`).
+        AF_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_ROOT_REAL}"
+        RM_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+    elif [[ "${AF_ROOT_REAL}" == */opt/AetherFlow ]] && {
+        AF_SYSROOT_CAND="${AF_ROOT_REAL%/opt/AetherFlow}"
+        [[ -n "${AF_SYSROOT_CAND}" && -d "${AF_SYSROOT_CAND}" ]] && (( (0$(stat -c '%a' "${AF_SYSROOT_CAND}" 2>/dev/null || echo 2) & 0002) == 0 ))
+    }; then
+        # Application directory inside a non-world-writable filesystem sysroot (`<sysroot>/opt/AetherFlow`).
+        AF_SYSROOT="${AF_ROOT_REAL%/opt/AetherFlow}"
+        AF_GLOBAL_ARGS+=(--root "${AF_SYSROOT}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_SYSROOT}"
+        RM_GLOBAL_ARGS+=(--root "${AF_SYSROOT}")
+    else
+        # Standalone custom application directory (`<app_root>/{current,releases,deploy}`):
+        # keep isolated-root confinement active at `<app_root>` while binding release paths directly
+        # to `<app_root>` so `af` and `release-manager.sh` do not append a redundant `opt/AetherFlow`.
+        AF_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_ROOT_REAL}"
+        RM_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export RELEASES_DIR="${AF_ROOT_REAL}/releases"
+        export CURRENT_LINK="${AF_ROOT_REAL}/current"
+        export REPO_DIR="${AF_ROOT_REAL}"
+        export LEGACY_OPT_ROOT="${AF_ROOT_REAL}"
+        export SYSTEMD_UNITS_SRC="${AF_ROOT_REAL}/deploy/systemd"
+    fi
 fi
 
 read_confined_version_file() {

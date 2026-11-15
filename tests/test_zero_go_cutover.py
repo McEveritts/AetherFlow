@@ -1362,6 +1362,56 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertNotEqual(check_sym.returncode, 0, "Symlinked .version must fail closed")
             self.assertNotIn("TOP_SECRET_HOST_LINE", check_sym.stdout + check_sym.stderr)
 
+            # Verify `<sysroot>/opt/AetherFlow` vs `<sysroot>` vs standalone `<app_root>` against real compiled `af` binary (Carbon P2-1 regression)
+            real_af_candidates = [
+                ROOT / "backend-rs/target/release/af",
+                ROOT / "backend-rs/target/debug/af",
+            ]
+            real_af = next((p for p in real_af_candidates if p.is_file() and os.access(p, os.X_OK)), None)
+            if real_af is not None:
+                # Case A: AF_INSTALL_ROOT points to `<sysroot>/opt/AetherFlow` (must normalize `--root` to `<sysroot>`, not `<sysroot>/opt/AetherFlow/opt/AetherFlow`)
+                sysroot_case = Path(tmp) / "sysroot-layout"
+                app_in_sysroot = sysroot_case / "opt" / "AetherFlow"
+                rel_slot = app_in_sysroot / "releases" / "v4.0.0"
+                (rel_slot / "bin").mkdir(parents=True)
+                shutil.copy2(real_af, rel_slot / "bin" / "af")
+                (rel_slot / ".version").write_text("v4.0.0\n", encoding="utf-8")
+                (app_in_sysroot / "current").symlink_to(rel_slot)
+
+                for install_root_arg in (app_in_sysroot, sysroot_case):
+                    chk = subprocess.run(
+                        ["bash", str(update_shim), "--check"],
+                        env={
+                            **os.environ,
+                            "AF_INSTALL_ROOT": str(install_root_arg),
+                            "PATH": f"{fake_path_bin}:/usr/bin:/bin",
+                        },
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(chk.returncode, 0, chk.stdout + chk.stderr)
+                    self.assertIn("v4.0.0", chk.stdout, f"Expected active release v4.0.0 for AF_INSTALL_ROOT={install_root_arg}: {chk.stdout}")
+
+                # Case B: Standalone custom `<app_root>` (`<app_root>/{current,releases}`) without `opt/AetherFlow` nesting
+                standalone_app = Path(tmp) / "standalone-app-root"
+                sa_slot = standalone_app / "releases" / "v4.0.1"
+                (sa_slot / "bin").mkdir(parents=True)
+                shutil.copy2(real_af, sa_slot / "bin" / "af")
+                (sa_slot / ".version").write_text("v4.0.1\n", encoding="utf-8")
+                (standalone_app / "current").symlink_to(sa_slot)
+                chk_sa = subprocess.run(
+                    ["bash", str(update_shim), "--check"],
+                    env={
+                        **os.environ,
+                        "AF_INSTALL_ROOT": str(standalone_app),
+                        "PATH": f"{fake_path_bin}:/usr/bin:/bin",
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(chk_sa.returncode, 0, chk_sa.stdout + chk_sa.stderr)
+                self.assertIn("v4.0.1", chk_sa.stdout, f"Expected active release v4.0.1 for standalone AF_INSTALL_ROOT: {chk_sa.stdout}")
+
         ls_install = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
         ls_remove = (ROOT / "packages/package/remove/removepackage-librespeed").read_text(encoding="utf-8")
         self.assertIn("/etc/systemd/system/librespeed.socket", ls_install)

@@ -1919,6 +1919,8 @@ struct EnricherState {
     processed: usize,
     results: Vec<serde_json::Value>,
     last_err: String,
+    truncated: bool,
+    next_cursor: Option<String>,
 }
 
 static ENRICHER_STATE: Lazy<Mutex<EnricherState>> =
@@ -2052,8 +2054,32 @@ pub(crate) async fn call_configured_ai(
     }
 }
 
-const MAX_SCAN_DEPTH: usize = 16;
+const MAX_SCAN_DEPTH: usize = 32;
 const MAX_SCAN_FILES: usize = 10_000;
+
+#[derive(Debug, Default, Clone)]
+struct PagedScanOutcome {
+    files: Vec<PathBuf>,
+    truncated: bool,
+    truncated_by_limit: bool,
+    truncated_by_depth: bool,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MediaflowScanTelemetry {
+    last_directory: String,
+    last_batch_count: usize,
+    truncated: bool,
+    next_cursor: Option<String>,
+}
+
+static METADATA_SCAN_CURSORS: Lazy<Mutex<HashMap<PathBuf, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static MEDIAFLOW_SCAN_CURSORS: Lazy<Mutex<HashMap<PathBuf, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static MEDIAFLOW_LAST_SCAN: Lazy<Mutex<MediaflowScanTelemetry>> =
+    Lazy::new(|| Mutex::new(MediaflowScanTelemetry::default()));
 
 static MEDIAFLOW_SCANNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -2078,14 +2104,23 @@ impl Drop for EnricherScanGuard {
     }
 }
 
-fn collect_files_recursive(
+#[allow(clippy::too_many_arguments)]
+fn collect_matching_files_paged_inner<F>(
     dir: &StdPath,
     root: &StdPath,
-    allowed_exts: &[&str],
+    cursor_parts: Option<&[&str]>,
     depth: usize,
-    out: &mut Vec<PathBuf>,
-) {
-    if depth > MAX_SCAN_DEPTH || out.len() >= MAX_SCAN_FILES {
+    max_depth: usize,
+    max_files: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: &F,
+    rel_parts: &mut Vec<String>,
+    last_rel_key: &mut Option<String>,
+    out: &mut PagedScanOutcome,
+) where
+    F: Fn(&str) -> bool,
+{
+    if out.truncated_by_limit {
         return;
     }
     let Ok(meta) = std::fs::symlink_metadata(dir) else {
@@ -2100,15 +2135,17 @@ fn collect_files_recursive(
     if !resolved_dir.starts_with(root) {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(&resolved_dir) else {
+    let Ok(read_dir) = std::fs::read_dir(&resolved_dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        if out.len() >= MAX_SCAN_FILES {
-            break;
-        }
-        let file_name = entry.file_name().to_string_lossy().to_string();
+
+    let mut entries: Vec<(String, std::fs::FileType, PathBuf)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
         if file_name.starts_with('.') {
+            continue;
+        }
+        if skip_mediaflow_trash && file_name == ".mediaflow_trash" {
             continue;
         }
         let Ok(ft) = entry.file_type() else {
@@ -2117,24 +2154,206 @@ fn collect_files_recursive(
         if ft.is_symlink() {
             continue;
         }
-        let path = entry.path();
+        entries.push((file_name, ft, entry.path()));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (file_name, ft, path) in entries {
+        if out.truncated_by_limit {
+            break;
+        }
+        rel_parts.push(file_name);
         if ft.is_dir() {
-            collect_files_recursive(&path, root, allowed_exts, depth + 1, out);
-        } else if ft.is_file() {
-            let Ok(canonical_file) = path.canonicalize() else {
-                continue;
-            };
-            if !canonical_file.starts_with(root) {
-                continue;
+            let mut next_cursor_slice = cursor_parts;
+            let mut skip_dir = false;
+            if let Some(c_parts) = cursor_parts {
+                let common_len = c_parts.len().min(rel_parts.len());
+                let rel_prefix = &rel_parts[..common_len];
+                let cur_prefix = &c_parts[..common_len];
+                let ord = rel_prefix
+                    .iter()
+                    .map(String::as_str)
+                    .cmp(cur_prefix.iter().copied());
+                match ord {
+                    std::cmp::Ordering::Less => {
+                        skip_dir = true;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        next_cursor_slice = None;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if c_parts.len() == rel_parts.len() {
+                            next_cursor_slice = None;
+                        }
+                    }
+                }
             }
-            if let Some(ext) = canonical_file.extension().and_then(|e| e.to_str()) {
-                let dot_ext = format!(".{}", ext.to_lowercase());
-                if allowed_exts.iter().any(|&a| a == dot_ext) {
-                    out.push(canonical_file);
+            if !skip_dir {
+                if depth >= max_depth {
+                    out.truncated = true;
+                    out.truncated_by_depth = true;
+                } else {
+                    collect_matching_files_paged_inner(
+                        &path,
+                        root,
+                        next_cursor_slice,
+                        depth + 1,
+                        max_depth,
+                        max_files,
+                        skip_mediaflow_trash,
+                        ext_matches,
+                        rel_parts,
+                        last_rel_key,
+                        out,
+                    );
+                }
+            }
+        } else if ft.is_file() {
+            let after_cursor = match cursor_parts {
+                None => true,
+                Some(c_parts) => rel_parts
+                    .iter()
+                    .map(String::as_str)
+                    .gt(c_parts.iter().copied()),
+            };
+            if after_cursor {
+                if let Ok(canonical_file) = path.canonicalize() {
+                    if canonical_file.starts_with(root)
+                        && canonical_file
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(ext_matches)
+                    {
+                        if out.files.len() >= max_files {
+                            out.truncated = true;
+                            out.truncated_by_limit = true;
+                            out.next_cursor = last_rel_key.clone();
+                            rel_parts.pop();
+                            return;
+                        }
+                        *last_rel_key = Some(rel_parts.join("/"));
+                        out.files.push(canonical_file);
+                    }
                 }
             }
         }
+        rel_parts.pop();
     }
+}
+
+fn collect_matching_files_paged<F>(
+    root: &StdPath,
+    after_cursor: Option<&str>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PagedScanOutcome
+where
+    F: Fn(&str) -> bool,
+{
+    let Ok(canonical_root) = root.canonicalize() else {
+        return PagedScanOutcome::default();
+    };
+    let cursor_vec: Option<Vec<&str>> = after_cursor
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split('/').filter(|seg| !seg.is_empty()).collect())
+        .filter(|v: &Vec<&str>| !v.is_empty());
+    let mut outcome = PagedScanOutcome::default();
+    let mut rel_parts = Vec::new();
+    let mut last_rel_key = None;
+    collect_matching_files_paged_inner(
+        &canonical_root,
+        &canonical_root,
+        cursor_vec.as_deref(),
+        0,
+        max_depth,
+        max_files,
+        skip_mediaflow_trash,
+        &ext_matches,
+        &mut rel_parts,
+        &mut last_rel_key,
+        &mut outcome,
+    );
+    if outcome.truncated && outcome.next_cursor.is_none() {
+        outcome.next_cursor = last_rel_key;
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_auto_continuing_scan<F>(
+    root: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PagedScanOutcome
+where
+    F: Fn(&str) -> bool,
+{
+    let Ok(canonical_root) = root.canonicalize() else {
+        return PagedScanOutcome::default();
+    };
+    let (effective_cursor, used_stored_cursor) = if reset_cursor {
+        if let Ok(mut map) = cursor_store.lock() {
+            map.remove(&canonical_root);
+        }
+        (None, false)
+    } else if let Some(exp) = explicit_cursor {
+        let trimmed = exp.trim();
+        if trimmed.is_empty() {
+            if let Ok(mut map) = cursor_store.lock() {
+                map.remove(&canonical_root);
+            }
+            (None, false)
+        } else {
+            (Some(trimmed.to_string()), false)
+        }
+    } else {
+        let stored = cursor_store
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&canonical_root).cloned());
+        let has_stored = stored.is_some();
+        (stored, has_stored)
+    };
+
+    let mut outcome = collect_matching_files_paged(
+        &canonical_root,
+        effective_cursor.as_deref(),
+        max_files,
+        max_depth,
+        skip_mediaflow_trash,
+        &ext_matches,
+    );
+
+    // If an auto-stored cursor hit EOF with 0 remaining files (e.g., tail files were removed),
+    // wrap around immediately so repeated root scans never return an empty pass on a non-empty tree.
+    if used_stored_cursor && outcome.files.is_empty() && !outcome.truncated {
+        outcome = collect_matching_files_paged(
+            &canonical_root,
+            None,
+            max_files,
+            max_depth,
+            skip_mediaflow_trash,
+            &ext_matches,
+        );
+    }
+
+    if let Ok(mut map) = cursor_store.lock() {
+        if let (true, Some(next_cur)) = (outcome.truncated_by_limit, outcome.next_cursor.as_ref()) {
+            map.insert(canonical_root, next_cur.clone());
+        } else {
+            map.remove(&canonical_root);
+        }
+    }
+
+    outcome
 }
 
 fn parse_filename_metadata(filename: &str) -> (String, String, String, String, Vec<String>) {
@@ -2345,6 +2564,8 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
         st.processed = 0;
         st.results.clear();
         st.last_err.clear();
+        st.truncated = false;
+        st.next_cursor = None;
     }
     let mut scan_guard = EnricherScanGuard {
         keep_scanning: false,
@@ -2352,68 +2573,89 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
 
     let ps = resolve_provider_settings();
     let has_gemini_key = !ps.gemini_api_key.is_empty();
+    let explicit_cursor = req
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let reset_cursor = req.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let scan_root = clean_path.clone();
-    let initial_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<PathBuf>, Vec<serde_json::Value>)> {
-        let mut media_files = Vec::new();
-        collect_files_recursive(&scan_root, &scan_root, MEDIA_EXTENSIONS, 0, &mut media_files);
-        let total_files = media_files.len();
-        if let Ok(mut st) = ENRICHER_STATE.lock() {
-            st.total = total_files;
-        }
-
-        let mut enriched_items = Vec::with_capacity(total_files);
-        if total_files > 0 {
-            let mut conn = af_db::get_conn()?;
-            let tx = conn.transaction()?;
-            let now_str = Utc::now().to_rfc3339();
-            for path in &media_files {
-                let file_path_str = path.to_string_lossy().to_string();
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
-                let subs_json = serde_json::to_string(&subs).unwrap_or_else(|_| "[]".to_string());
-                let updated = tx
-                    .execute(
-                        "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
-                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
-                    )
-                    .unwrap_or(0);
-                if updated == 0 {
-                    let _ = tx.execute(
-                        "INSERT INTO media_metadata (file_path, filename, title, year, language, quality, subtitles_json, enriched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
-                    );
-                }
-                let id = tx
-                    .query_row(
-                        "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
-                        params![file_path_str],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .unwrap_or(0);
-                enriched_items.push(serde_json::json!({
-                    "id": id,
-                    "file_path": file_path_str,
-                    "filename": filename,
-                    "title": title,
-                    "year": year,
-                    "language": language,
-                    "quality": quality,
-                    "subtitles_json": subs_json,
-                    "enriched_at": now_str,
-                }));
+    let initial_result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<(PagedScanOutcome, Vec<serde_json::Value>)> {
+            let scan_outcome = run_auto_continuing_scan(
+                &scan_root,
+                explicit_cursor.as_deref(),
+                reset_cursor,
+                &METADATA_SCAN_CURSORS,
+                MAX_SCAN_FILES,
+                MAX_SCAN_DEPTH,
+                false,
+                |ext| {
+                    let dot_ext = format!(".{}", ext.to_ascii_lowercase());
+                    MEDIA_EXTENSIONS.contains(&dot_ext.as_str())
+                },
+            );
+            let total_files = scan_outcome.files.len();
+            if let Ok(mut st) = ENRICHER_STATE.lock() {
+                st.total = total_files;
+                st.truncated = scan_outcome.truncated;
+                st.next_cursor = scan_outcome.next_cursor.clone();
             }
-            tx.commit()?;
-        }
-        Ok((media_files, enriched_items))
-    })
+
+            let mut enriched_items = Vec::with_capacity(total_files);
+            if total_files > 0 {
+                let mut conn = af_db::get_conn()?;
+                let tx = conn.transaction()?;
+                let now_str = Utc::now().to_rfc3339();
+                for path in &scan_outcome.files {
+                    let file_path_str = path.to_string_lossy().to_string();
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
+                    let subs_json =
+                        serde_json::to_string(&subs).unwrap_or_else(|_| "[]".to_string());
+                    let updated = tx
+                        .execute(
+                            "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
+                            params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                        )
+                        .unwrap_or(0);
+                    if updated == 0 {
+                        let _ = tx.execute(
+                            "INSERT INTO media_metadata (file_path, filename, title, year, language, quality, subtitles_json, enriched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                        );
+                    }
+                    let id = tx
+                        .query_row(
+                            "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
+                            params![file_path_str],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0);
+                    enriched_items.push(serde_json::json!({
+                        "id": id,
+                        "file_path": file_path_str,
+                        "filename": filename,
+                        "title": title,
+                        "year": year,
+                        "language": language,
+                        "quality": quality,
+                        "subtitles_json": subs_json,
+                        "enriched_at": now_str,
+                    }));
+                }
+                tx.commit()?;
+            }
+            Ok((scan_outcome, enriched_items))
+        },
+    )
     .await;
 
-    let (media_files, enriched_items) = match initial_result {
+    let (scan_outcome, enriched_items) = match initial_result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             return api_error(
@@ -2430,6 +2672,9 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
             );
         }
     };
+    let media_files = scan_outcome.files;
+    let scan_truncated = scan_outcome.truncated;
+    let scan_next_cursor = scan_outcome.next_cursor;
     let total_files = media_files.len();
 
     if let Ok(mut st) = ENRICHER_STATE.lock() {
@@ -2437,6 +2682,8 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
         st.processed = total_files;
         st.results = enriched_items;
         st.progress = 100.0;
+        st.truncated = scan_truncated;
+        st.next_cursor = scan_next_cursor.clone();
     }
 
     if has_gemini_key && !media_files.is_empty() {
@@ -2527,18 +2774,44 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
         });
     }
 
+    let scan_status = if scan_truncated {
+        "partial"
+    } else {
+        "completed"
+    };
     Json(serde_json::json!({
-        "message": "Metadata enrichment scan started",
+        "message": if scan_truncated {
+            "Metadata enrichment partial batch scanned; invoke again or pass next_cursor to continue"
+        } else {
+            "Metadata enrichment scan started"
+        },
         "path": raw_path,
         "total": total_files,
+        "status": scan_status,
+        "partial": scan_truncated,
+        "truncated": scan_truncated,
+        "next_cursor": scan_next_cursor,
     }))
     .into_response()
 }
 
 pub async fn metadata_status() -> Response {
     let st = ENRICHER_STATE.lock().unwrap();
+    let status = if st.scanning {
+        "scanning"
+    } else if !st.last_err.is_empty() {
+        "error"
+    } else if st.truncated {
+        "partial"
+    } else {
+        "completed"
+    };
     Json(serde_json::json!({
         "scanning": st.scanning,
+        "status": status,
+        "partial": st.truncated,
+        "truncated": st.truncated,
+        "next_cursor": st.next_cursor,
         "progress": st.progress,
         "total": st.total,
         "done": st.done,
@@ -3421,71 +3694,68 @@ fn validate_mediaflow_directory(
     Ok(resolved)
 }
 
+fn is_mediaflow_extension(ext: &str) -> bool {
+    MEDIAFLOW_VIDEO_EXTS
+        .iter()
+        .any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
+}
+
+#[cfg(test)]
 fn collect_mediaflow_files(
     directory: &StdPath,
     root: &StdPath,
     depth: usize,
     out: &mut Vec<PathBuf>,
 ) {
-    if depth > MAX_SCAN_DEPTH || out.len() >= MAX_SCAN_FILES {
-        return;
-    }
-    let Ok(metadata) = std::fs::symlink_metadata(directory) else {
-        return;
+    let remaining = MAX_SCAN_FILES.saturating_sub(out.len());
+    let max_depth = MAX_SCAN_DEPTH.saturating_sub(depth);
+    let outcome = if directory == root && depth == 0 && out.is_empty() {
+        run_auto_continuing_scan(
+            root,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            remaining,
+            max_depth,
+            true,
+            is_mediaflow_extension,
+        )
+    } else {
+        collect_matching_files_paged(
+            directory,
+            None,
+            remaining,
+            max_depth,
+            true,
+            is_mediaflow_extension,
+        )
     };
-    if metadata.file_type().is_symlink() {
-        return;
-    }
-    let Ok(resolved) = directory.canonicalize() else {
-        return;
-    };
-    if !resolved.starts_with(root) {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(&resolved) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if out.len() >= MAX_SCAN_FILES {
-            break;
-        }
-        if entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if file_type.is_dir() {
-            collect_mediaflow_files(&path, root, depth + 1, out);
-        } else if file_type.is_file() {
-            let Ok(path) = path.canonicalize() else {
-                continue;
-            };
-            if path.starts_with(root)
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| {
-                        MEDIAFLOW_VIDEO_EXTS
-                            .iter()
-                            .any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
-                    })
-            {
-                out.push(path);
-            }
-        }
-    }
+    out.extend(outcome.files);
 }
 
-fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
-    let mut video_files = Vec::new();
-    collect_mediaflow_files(root_dir, root_dir, 0, &mut video_files);
+fn scan_directory_for_mediaflow(
+    root_dir: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+) -> anyhow::Result<PagedScanOutcome> {
+    let outcome = run_auto_continuing_scan(
+        root_dir,
+        explicit_cursor,
+        reset_cursor,
+        &MEDIAFLOW_SCAN_CURSORS,
+        MAX_SCAN_FILES,
+        MAX_SCAN_DEPTH,
+        true,
+        is_mediaflow_extension,
+    );
+    if let Ok(mut st) = MEDIAFLOW_LAST_SCAN.lock() {
+        st.last_directory = root_dir.to_string_lossy().into_owned();
+        st.last_batch_count = outcome.files.len();
+        st.truncated = outcome.truncated;
+        st.next_cursor = outcome.next_cursor.clone();
+    }
 
-    for path in video_files {
+    for path in &outcome.files {
         let path_str = path.to_string_lossy().to_string();
         if path_str.contains(".mediaflow_trash") {
             continue;
@@ -3502,11 +3772,11 @@ fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
             continue;
         }
 
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.file_type().is_file() || !path.canonicalize()?.starts_with(root_dir) {
             continue;
         }
-        let (codec, size) = probe_video_codec_and_size(&path);
+        let (codec, size) = probe_video_codec_and_size(path);
         if codec != "hevc" && codec != "av1" {
             let conn = af_db::get_conn()?;
             conn.execute(
@@ -3515,7 +3785,7 @@ fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
             )?;
         }
     }
-    Ok(())
+    Ok(outcome)
 }
 
 pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Response {
@@ -3531,6 +3801,11 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         )
             .into_response();
     }
+    let explicit_cursor = req
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let reset_cursor = req.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
     let directory = PathBuf::from(dir);
     let dir_buf = match tokio::task::spawn_blocking(move || {
         validate_mediaflow_directory(&directory, &mediaflow_library_roots())
@@ -3563,10 +3838,30 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         );
     }
     let response_directory = dir_buf.to_string_lossy().into_owned();
+    let pending_cursor = MEDIAFLOW_SCAN_CURSORS
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&dir_buf).cloned());
+    let explicit_cursor_for_task = explicit_cursor.clone();
     tokio::task::spawn_blocking(move || {
         let _guard = MediaflowScanGuard;
-        if let Err(error) = scan_directory_for_mediaflow(&dir_buf) {
-            tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
+        match scan_directory_for_mediaflow(
+            &dir_buf,
+            explicit_cursor_for_task.as_deref(),
+            reset_cursor,
+        ) {
+            Ok(outcome) if outcome.truncated => {
+                tracing::info!(
+                    directory = %dir_buf.display(),
+                    batch_count = outcome.files.len(),
+                    next_cursor = ?outcome.next_cursor,
+                    "MediaFlow partial scan batch completed; cursor stored for continuation"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
+            }
         }
     });
 
@@ -3575,6 +3870,7 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         Json(serde_json::json!({
             "message": "Scan initiated in background",
             "directory": response_directory,
+            "resuming_from_cursor": explicit_cursor.or(pending_cursor),
         })),
     )
         .into_response()
@@ -4117,7 +4413,7 @@ pub async fn enroll_worker() -> Response {
     Json(serde_json::json!({
         "enrollment_token": token,
         "instructions": format!(
-            "Run on the worker node: aetherflow-api --cluster-mode=worker --master-addr=<this-server>:50051 --psk={}",
+            "Configure /etc/aetherflow/aetherflow.env on the worker node with mTLS certificates:\nCLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:50051\nCLUSTER_CA_CERT=/etc/aetherflow/certs/ca.crt\nCLUSTER_CLIENT_CERT=/etc/aetherflow/certs/worker.crt\nCLUSTER_CLIENT_KEY=/etc/aetherflow/certs/worker.key\nCLUSTER_PSK={}\nThen restart aetherflow-api.service.",
             token
         ),
     }))
@@ -4259,5 +4555,65 @@ mod tests {
         let error_only = filter_log_entries(raw, "homeassistant.service", "ERROR", "core", 0, 50);
         assert_eq!(error_only.len(), 1);
         assert_eq!(error_only[0]["service"], "hass");
+    }
+
+    #[test]
+    fn test_media_scan_10001_files_reports_partial_cursor_and_resumes_to_completion() {
+        let tmp = std::env::temp_dir().join(format!("af-scan-10001-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("Season_01")).unwrap();
+        std::fs::create_dir_all(tmp.join("Season_02")).unwrap();
+
+        for idx in 0..5_000usize {
+            std::fs::write(
+                tmp.join("Season_01").join(format!("ep_{:05}.mkv", idx)),
+                b"",
+            )
+            .unwrap();
+        }
+        for idx in 5_000..10_001usize {
+            std::fs::write(
+                tmp.join("Season_02").join(format!("ep_{:05}.mkv", idx)),
+                b"",
+            )
+            .unwrap();
+        }
+
+        // First scan hits MAX_SCAN_FILES (10,000), surfaces explicit truncation + next_cursor
+        let page1 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            MAX_SCAN_FILES,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page1.files.len(), 10_000);
+        assert!(page1.truncated);
+        assert!(page1.truncated_by_limit);
+        let cursor = page1
+            .next_cursor
+            .clone()
+            .expect("truncated 10,001-file scan must surface next_cursor");
+        assert_eq!(cursor, "Season_02/ep_09999.mkv");
+
+        // Second scan on the same root automatically resumes from cursor and reaches file #10,001
+        let page2 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            MAX_SCAN_FILES,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page2.files.len(), 1);
+        assert!(!page2.truncated);
+        assert!(page2.next_cursor.is_none());
+        assert!(page2.files[0].ends_with("Season_02/ep_10000.mkv"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
