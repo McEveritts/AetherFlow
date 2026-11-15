@@ -1,7 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::env;
-use std::fs;
+use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/opt/librespeed/settings.toml";
@@ -11,8 +14,62 @@ pub const VERSION_STRING: &str = concat!(
 );
 pub const DEFAULT_MAX_TELEMETRY_ROWS: usize = 100_000;
 pub const DEFAULT_IPINFO_BASE_URL: &str = "https://ipinfo.io";
+pub const MAX_CONFIG_AND_PEM_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq)]
+/// Opens `path` with `O_NOFOLLOW | O_CLOEXEC`, verifies via `fstat` that the
+/// descriptor is a regular non-world-writable file, and reads at most `max_bytes`.
+pub fn read_regular_file_nofollow(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+            bail!("refusing symlinked {label}: {}", path.display());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "{label} does not exist or cannot be read: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    let meta = file
+        .metadata()
+        .with_context(|| format!("failed to fstat {label}: {}", path.display()))?;
+    if !meta.is_file() {
+        bail!("{label} is not a regular file: {}", path.display());
+    }
+    let mode = meta.permissions().mode();
+    if (mode & 0o002) != 0 {
+        bail!(
+            "refusing world-writable {label} (mode {:04o}): {}",
+            mode & 0o7777,
+            path.display()
+        );
+    }
+
+    let cap = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut buf = Vec::with_capacity(usize::try_from(meta.len().min(4096)).unwrap_or(1024));
+    file.take(cap)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("failed reading {label}: {}", path.display()))?;
+    if buf.len() > max_bytes {
+        bail!(
+            "{label} exceeds maximum allowed size of {max_bytes} bytes: {}",
+            path.display()
+        );
+    }
+    Ok(buf)
+}
+
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub bind_address: String,
     pub listen_port: u16,
@@ -27,11 +84,59 @@ pub struct Config {
     pub tls_cert_file: PathBuf,
     pub tls_key_file: PathBuf,
     pub trusted_proxies: Vec<IpAddr>,
+    pub trusted_proxy_secret: String,
     pub max_telemetry_rows: usize,
     pub server_lat: f64,
     pub server_lng: f64,
     pub ipinfo_api_key: String,
     pub ipinfo_base_url: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("bind_address", &self.bind_address)
+            .field("listen_port", &self.listen_port)
+            .field("url_base", &self.url_base)
+            .field("assets_path", &self.assets_path)
+            .field(
+                "statistics_password",
+                &if self.stats_locked() {
+                    "[LOCKED]"
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .field("redact_ip_addresses", &self.redact_ip_addresses)
+            .field("database_type", &self.database_type)
+            .field("database_file", &self.database_file)
+            .field("enable_id_obfuscation", &self.enable_id_obfuscation)
+            .field("enable_tls", &self.enable_tls)
+            .field("tls_cert_file", &self.tls_cert_file)
+            .field("tls_key_file", &self.tls_key_file)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field(
+                "trusted_proxy_secret",
+                &if self.trusted_proxy_secret.is_empty() {
+                    ""
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .field("max_telemetry_rows", &self.max_telemetry_rows)
+            .field("server_lat", &self.server_lat)
+            .field("server_lng", &self.server_lng)
+            .field(
+                "ipinfo_api_key",
+                &if self.ipinfo_api_key.is_empty() {
+                    ""
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .field("ipinfo_base_url", &self.ipinfo_base_url)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -50,6 +155,7 @@ impl Default for Config {
             tls_cert_file: PathBuf::new(),
             tls_key_file: PathBuf::new(),
             trusted_proxies: Vec::new(),
+            trusted_proxy_secret: String::new(),
             max_telemetry_rows: DEFAULT_MAX_TELEMETRY_ROWS,
             server_lat: 0.0,
             server_lng: 0.0,
@@ -124,22 +230,28 @@ impl Config {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read settings.toml at {}", path.display()))?;
+        let bytes = read_regular_file_nofollow(path, MAX_CONFIG_AND_PEM_BYTES, "settings.toml")?;
+        let content = String::from_utf8(bytes)
+            .with_context(|| format!("settings.toml is not valid UTF-8 at {}", path.display()))?;
         Self::parse_toml_str(&content)
             .with_context(|| format!("failed to parse settings.toml at {}", path.display()))
     }
 
     pub fn parse_toml_str(input: &str) -> Result<Self> {
         let mut cfg = Self::default();
+        let mut in_root_table = true;
 
-        for (idx, raw_line) in input.lines().enumerate() {
-            let line_num = idx + 1;
-            let trimmed = raw_line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+        for (line_num, stmt) in iter_toml_statements(input)? {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            if trimmed.starts_with('[') && strip_unquoted_comment(trimmed).ends_with(']') {
+            if trimmed.starts_with('[') && split_key_value(trimmed).is_none() {
+                let header = trimmed;
+                if !(header.ends_with(']') && header.len() >= 3) {
+                    bail!("line {line_num}: invalid TOML table header {header:?}");
+                }
+                in_root_table = false;
                 continue;
             }
 
@@ -151,6 +263,10 @@ impl Config {
                 parse_key(raw_key).with_context(|| format!("line {line_num}: invalid key"))?;
             let val = parse_value(raw_val.trim())
                 .with_context(|| format!("line {line_num}: invalid value for key '{key}'"))?;
+
+            if !in_root_table {
+                continue;
+            }
 
             match key.as_str() {
                 "bind_address" => {
@@ -213,6 +329,10 @@ impl Config {
                     cfg.trusted_proxies = val
                         .into_ip_list("trusted_proxies")
                         .with_context(|| format!("line {line_num}: invalid trusted_proxies"))?;
+                }
+                "trusted_proxy_secret" => {
+                    cfg.trusted_proxy_secret =
+                        val.into_string("trusted_proxy_secret")?.trim().to_string();
                 }
                 "max_telemetry_rows" => {
                     cfg.max_telemetry_rows = val.into_positive_usize("max_telemetry_rows")?;
@@ -299,7 +419,8 @@ pub fn parse_env_cli() -> Result<CliAction> {
 #[derive(Debug, Clone, PartialEq)]
 enum TomlScalar {
     Str(String),
-    StrList(Vec<String>),
+    Array(Vec<TomlScalar>),
+    InlineTable,
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -383,11 +504,23 @@ impl TomlScalar {
                 .filter(|tok| !tok.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
-            TomlScalar::StrList(items) => items
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            TomlScalar::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        TomlScalar::Str(s) => {
+                            let t = s.trim();
+                            if !t.is_empty() {
+                                out.push(t.to_string());
+                            }
+                        }
+                        other => {
+                            bail!("expected string element in {key}, got {other:?}")
+                        }
+                    }
+                }
+                out
+            }
             other => {
                 bail!("{key} must be a comma-separated IP string or string array, got {other:?}")
             }
@@ -405,10 +538,198 @@ impl TomlScalar {
     }
 }
 
+/// Scans `input` into logical TOML statements `(start_line_number, cleaned_statement)`,
+/// stripping unquoted `#` comments and joining multiline `[ ... ]`, `{ ... }`,
+/// `""" ... """`, and `''' ... '''` literals cleanly.
+fn iter_toml_statements(input: &str) -> Result<Vec<(usize, String)>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QuoteState {
+        None,
+        Single,
+        Double,
+        TripleSingle,
+        TripleDouble,
+    }
+
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_start_line: usize = 1;
+    let mut line_num: usize = 1;
+    let mut quote = QuoteState::None;
+    let mut bracket_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+
+    let bytes = input.as_bytes();
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let ch = input[i..].chars().next().expect("valid utf8 slice");
+        let ch_len = ch.len_utf8();
+
+        if cur.trim().is_empty() && ch != '\n' && ch != '\r' {
+            cur_start_line = line_num;
+        }
+
+        match quote {
+            QuoteState::None => {
+                if ch == '#' {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::TripleDouble;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::TripleSingle;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                match ch {
+                    '"' => {
+                        quote = QuoteState::Double;
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        quote = QuoteState::Single;
+                        cur.push(ch);
+                    }
+                    '[' => {
+                        bracket_depth += 1;
+                        cur.push(ch);
+                    }
+                    ']' => {
+                        if bracket_depth == 0 {
+                            bail!("line {line_num}: unmatched closing ']'");
+                        }
+                        bracket_depth -= 1;
+                        cur.push(ch);
+                    }
+                    '{' => {
+                        brace_depth += 1;
+                        cur.push(ch);
+                    }
+                    '}' => {
+                        if brace_depth == 0 {
+                            bail!("line {line_num}: unmatched closing '}}'");
+                        }
+                        brace_depth -= 1;
+                        cur.push(ch);
+                    }
+                    '\n' => {
+                        line_num += 1;
+                        if bracket_depth == 0 && brace_depth == 0 {
+                            let trimmed = cur.trim();
+                            if !trimmed.is_empty() {
+                                out.push((cur_start_line, trimmed.to_string()));
+                            }
+                            cur.clear();
+                        } else {
+                            cur.push(' ');
+                        }
+                    }
+                    '\r' => {}
+                    _ => cur.push(ch),
+                }
+            }
+            QuoteState::Double => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next().expect("valid utf8");
+                        if next_ch == '\n' {
+                            line_num += 1;
+                        }
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\n' {
+                    bail!("line {line_num}: unterminated double-quoted string");
+                }
+                if ch == '"' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::Single => {
+                if ch == '\n' {
+                    bail!("line {line_num}: unterminated single-quoted string");
+                }
+                if ch == '\'' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleDouble => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next().expect("valid utf8");
+                        if next_ch == '\n' {
+                            line_num += 1;
+                        }
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::None;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                if ch == '\n' {
+                    line_num += 1;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleSingle => {
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::None;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                if ch == '\n' {
+                    line_num += 1;
+                }
+                cur.push(ch);
+            }
+        }
+
+        i += ch_len;
+    }
+
+    if quote != QuoteState::None {
+        bail!("line {cur_start_line}: unterminated string literal");
+    }
+    if bracket_depth > 0 {
+        bail!("line {cur_start_line}: unterminated array value");
+    }
+    if brace_depth > 0 {
+        bail!("line {cur_start_line}: unterminated inline table");
+    }
+    let trimmed = cur.trim();
+    if !trimmed.is_empty() {
+        out.push((cur_start_line, trimmed.to_string()));
+    }
+    Ok(out)
+}
+
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
     let mut in_double = false;
     let mut in_single = false;
     let mut escaped = false;
+    let mut bracket_depth = 0usize;
 
     for (idx, ch) in line.char_indices() {
         if in_double {
@@ -430,8 +751,10 @@ fn split_key_value(line: &str) -> Option<(&str, &str)> {
         match ch {
             '"' => in_double = true,
             '\'' => in_single = true,
-            '#' => return None,
-            '=' => return Some((&line[..idx], &line[idx + 1..])),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '#' if bracket_depth == 0 => return None,
+            '=' if bracket_depth == 0 => return Some((&line[..idx], &line[idx + 1..])),
             _ => {}
         }
     }
@@ -451,19 +774,23 @@ fn parse_key(raw: &str) -> Result<String> {
     }
     if trimmed
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
     {
         return Ok(trimmed.to_string());
     }
     bail!("unexpected characters in key {trimmed:?}");
 }
 
-fn strip_unquoted_comment(line: &str) -> &str {
+fn split_top_level_commas(inner: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
     let mut in_double = false;
     let mut in_single = false;
     let mut escaped = false;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
 
-    for (idx, ch) in line.char_indices() {
+    for (idx, ch) in inner.char_indices() {
         if in_double {
             if escaped {
                 escaped = false;
@@ -483,39 +810,86 @@ fn strip_unquoted_comment(line: &str) -> &str {
         match ch {
             '"' => in_double = true,
             '\'' => in_single = true,
-            '#' => return line[..idx].trim_end(),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if bracket_depth == 0 && brace_depth == 0 => {
+                parts.push(&inner[start..idx]);
+                start = idx + 1;
+            }
             _ => {}
         }
     }
-    line.trim_end()
+    parts.push(&inner[start..]);
+    parts
 }
 
 fn parse_value(raw: &str) -> Result<TomlScalar> {
+    let raw = raw.trim();
     if raw.is_empty() {
         bail!("empty value");
     }
+    if raw.starts_with('{') {
+        if !raw.ends_with('}') {
+            bail!("unterminated inline table");
+        }
+        return Ok(TomlScalar::InlineTable);
+    }
     if raw.starts_with('[') {
-        let stripped = strip_unquoted_comment(raw).trim();
-        let inner = stripped
+        let inner = raw
             .strip_prefix('[')
             .and_then(|s| s.strip_suffix(']'))
             .ok_or_else(|| anyhow!("unterminated array value"))?
             .trim();
         if inner.is_empty() {
-            return Ok(TomlScalar::StrList(Vec::new()));
+            return Ok(TomlScalar::Array(Vec::new()));
         }
         let mut items = Vec::new();
-        for part in inner.split(',') {
+        for part in split_top_level_commas(inner) {
             let trimmed_part = part.trim();
             if trimmed_part.is_empty() {
                 continue;
             }
-            match parse_value(trimmed_part)? {
-                TomlScalar::Str(s) => items.push(s),
-                other => bail!("expected string element in array, got {other:?}"),
-            }
+            items.push(parse_value(trimmed_part)?);
         }
-        return Ok(TomlScalar::StrList(items));
+        return Ok(TomlScalar::Array(items));
+    }
+    if let Some(after_triple) = raw.strip_prefix("\"\"\"") {
+        let end = after_triple
+            .rfind("\"\"\"")
+            .ok_or_else(|| anyhow!("unterminated multiline double-quoted string"))?;
+        let trailing = after_triple[end + 3..].trim();
+        if !trailing.is_empty() {
+            bail!("unexpected trailing characters after multiline string: {trailing:?}");
+        }
+        let body = after_triple[..end]
+            .strip_prefix('\n')
+            .or_else(|| after_triple[..end].strip_prefix("\r\n"))
+            .unwrap_or(&after_triple[..end]);
+        let escaped_json = format!(
+            "\"{}\"",
+            body.replace('\r', "\\r")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t")
+        );
+        let decoded =
+            serde_json::from_str::<String>(&escaped_json).unwrap_or_else(|_| body.to_string());
+        return Ok(TomlScalar::Str(decoded));
+    }
+    if let Some(after_triple) = raw.strip_prefix("'''") {
+        let end = after_triple
+            .rfind("'''")
+            .ok_or_else(|| anyhow!("unterminated multiline literal string"))?;
+        let trailing = after_triple[end + 3..].trim();
+        if !trailing.is_empty() {
+            bail!("unexpected trailing characters after multiline literal string: {trailing:?}");
+        }
+        let body = after_triple[..end]
+            .strip_prefix('\n')
+            .or_else(|| after_triple[..end].strip_prefix("\r\n"))
+            .unwrap_or(&after_triple[..end]);
+        return Ok(TomlScalar::Str(body.to_string()));
     }
     if raw.starts_with('"') {
         let mut escaped = false;
@@ -533,7 +907,7 @@ fn parse_value(raw: &str) -> Result<TomlScalar> {
         let end = end_idx.ok_or_else(|| anyhow!("unterminated double-quoted string"))?;
         let token = &raw[..=end];
         let trailing = raw[end + 1..].trim();
-        if !trailing.is_empty() && !trailing.starts_with('#') {
+        if !trailing.is_empty() {
             bail!("unexpected trailing characters after string: {trailing:?}");
         }
         let decoded = serde_json::from_str::<String>(token)
@@ -547,13 +921,13 @@ fn parse_value(raw: &str) -> Result<TomlScalar> {
             .ok_or_else(|| anyhow!("unterminated single-quoted string"))?;
         let token = &after_quote[..end];
         let trailing = after_quote[end + 1..].trim();
-        if !trailing.is_empty() && !trailing.starts_with('#') {
+        if !trailing.is_empty() {
             bail!("unexpected trailing characters after literal string: {trailing:?}");
         }
         return Ok(TomlScalar::Str(token.to_string()));
     }
 
-    let bare = strip_unquoted_comment(raw).trim();
+    let bare = raw.trim();
     if bare == "true" {
         return Ok(TomlScalar::Bool(true));
     }
@@ -705,5 +1079,98 @@ listen_port = 18_988
         );
         assert!(parse_cli_args(["speedtest-backend", "-c"]).is_err());
         assert!(parse_cli_args(["speedtest-backend", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_multiline_toml_arrays_comments_and_ignores_unknown_tables() {
+        let sample = r#"
+bind_address = "127.0.0.1"
+listen_port = 8988
+trusted_proxies = [
+    # Loopback reverse proxy peers
+    "127.0.0.1", # IPv4 loopback
+    "::1",       # IPv6 loopback
+]
+trusted_proxy_secret = "deadbeefcafebabe"
+unknown_ports = [
+    8080,
+    8443,
+]
+unknown_objects = [
+    { name = "edge-1", weight = 10 },
+    { name = "edge-2", weight = 20 },
+]
+
+[tuning]
+listen_port = 9999
+extra_flags = [
+    "fast",
+    "zero-copy",
+]
+"#;
+        let cfg = Config::parse_toml_str(sample).expect("multiline TOML must parse cleanly");
+        assert_eq!(
+            cfg.listen_port, 8988,
+            "subtable keys must not override root"
+        );
+        assert_eq!(
+            cfg.trusted_proxies,
+            vec![
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        assert_eq!(cfg.trusted_proxy_secret, "deadbeefcafebabe");
+        assert!(
+            !format!("{cfg:?}").contains("deadbeefcafebabe"),
+            "Debug impl must redact trusted_proxy_secret"
+        );
+
+        assert!(
+            Config::parse_toml_str("trusted_proxies = [\n  \"127.0.0.1\",\n").is_err(),
+            "unterminated multiline array must fail closed"
+        );
+    }
+
+    #[test]
+    fn load_from_path_rejects_symlinks_and_world_writable_files() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let dir = std::env::temp_dir().join(format!(
+            "af-librespeed-cfg-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let real_cfg = dir.join("real.toml");
+        fs::write(&real_cfg, "listen_port = 8988\n").unwrap();
+        fs::set_permissions(&real_cfg, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let loaded = Config::load_from_path(&real_cfg).expect("regular 0640 config must load");
+        assert_eq!(loaded.listen_port, 8988);
+
+        let sym_cfg = dir.join("sym.toml");
+        symlink(&real_cfg, &sym_cfg).unwrap();
+        let sym_err = Config::load_from_path(&sym_cfg)
+            .expect_err("symlinked settings.toml must fail closed")
+            .to_string();
+        assert!(sym_err.contains("symlink"), "unexpected error: {sym_err}");
+
+        fs::set_permissions(&real_cfg, fs::Permissions::from_mode(0o666)).unwrap();
+        let ww_err = Config::load_from_path(&real_cfg)
+            .expect_err("world-writable settings.toml must fail closed")
+            .to_string();
+        assert!(
+            ww_err.contains("world-writable"),
+            "unexpected error: {ww_err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

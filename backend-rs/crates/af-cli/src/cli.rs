@@ -269,6 +269,8 @@ pub enum ReleaseCliCommand {
     /// Deploy a release via `/v1/self-update` or `af_release::ReleaseEngine` (`ReleaseCommand::Deploy`).
     Deploy {
         channel: ReleaseChannel,
+        #[serde(default)]
+        channel_explicit: bool,
         mode: ReleaseDispatchMode,
         offline: bool,
         from_source: bool,
@@ -282,6 +284,8 @@ pub enum ReleaseCliCommand {
     /// Roll back to the previous verified release via `/v1/self-update` or `af_release::ReleaseEngine`.
     Rollback {
         channel: ReleaseChannel,
+        #[serde(default)]
+        channel_explicit: bool,
         mode: ReleaseDispatchMode,
         config_path: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1420,6 +1424,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
     let tail = &args[1..];
 
     let mut channel = ReleaseChannel::Stable;
+    let mut channel_explicit = false;
     let mut mode = ReleaseDispatchMode::RunnerSocket;
     let mut offline = false;
     let mut from_source = false;
@@ -1436,10 +1441,12 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
                     CliError::Usage("--channel requires stable or nightly".to_string())
                 })?;
                 channel = ReleaseChannel::from_str(val)?;
+                channel_explicit = true;
                 i += 2;
             }
             s if s.starts_with("--channel=") => {
                 channel = ReleaseChannel::from_str(s.trim_start_matches("--channel="))?;
+                channel_explicit = true;
                 i += 1;
             }
             "--local" | "--direct-engine" => {
@@ -1543,6 +1550,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
             let _ = build_self_update_runner_request("deploy", channel)?;
             Ok(ReleaseCliCommand::Deploy {
                 channel,
+                channel_explicit,
                 mode,
                 offline,
                 from_source,
@@ -1556,6 +1564,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
             let _ = build_self_update_runner_request("rollback", channel)?;
             Ok(ReleaseCliCommand::Rollback {
                 channel,
+                channel_explicit,
                 mode,
                 config_path,
                 job_status_file,

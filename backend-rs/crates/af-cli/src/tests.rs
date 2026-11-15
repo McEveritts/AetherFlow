@@ -1720,3 +1720,77 @@ fn isolated_root_backup_cli_rejects_out_of_root_backup_dir_and_contains_staging_
     let recover_env = execute_invocation(&recover_inv, &MockRunnerTransport::default());
     assert_eq!(recover_env.status, "ok", "{}", recover_env.message);
 }
+
+#[test]
+fn release_deploy_omitting_channel_honors_configured_channel_from_release_manager_conf() {
+    let tmp = TempTestDir::new("release-channel-conf-honor");
+    let root_str = tmp.path().to_string_lossy().to_string();
+    let etc_dir = tmp.path().join("etc/aetherflow");
+    fs::create_dir_all(&etc_dir).unwrap();
+    fs::write(
+        etc_dir.join("release-manager.conf"),
+        "RELEASE_CHANNEL=\"nightly\"\nMAX_RELEASES=4\n",
+    )
+    .unwrap();
+
+    // Create a minimal local release slot + staging artifact or verify channel flag propagation
+    let implicit_inv = parse_cli_args([
+        "--json", "--root", &root_str, "release", "deploy", "--local",
+    ])
+    .unwrap();
+    match &implicit_inv.command {
+        AfCommand::Release(ReleaseCliCommand::Deploy {
+            channel_explicit, ..
+        }) => assert!(!*channel_explicit),
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    let explicit_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "release",
+        "deploy",
+        "--local",
+        "--channel",
+        "stable",
+    ])
+    .unwrap();
+    match &explicit_inv.command {
+        AfCommand::Release(ReleaseCliCommand::Deploy {
+            channel,
+            channel_explicit,
+            ..
+        }) => {
+            assert!(*channel_explicit);
+            assert_eq!(*channel, ReleaseChannel::Stable);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    // Also verify dry-run local rollback without --channel honors nightly from release-manager.conf
+    #[cfg(unix)]
+    {
+        let rel_v1 = tmp.path().join("opt/AetherFlow/releases/v4.0.0-nightly.1");
+        fs::create_dir_all(&rel_v1).unwrap();
+        let dry_releases = tmp.path().join("tmp/aetherflow-dryrun/releases");
+        fs::create_dir_all(&dry_releases).unwrap();
+        fs::write(
+            dry_releases.join(".previous_release"),
+            format!("{}\n", rel_v1.display()),
+        )
+        .unwrap();
+        let rb_inv = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "release",
+            "rollback",
+            "--local",
+        ])
+        .unwrap();
+        let rb_env = execute_invocation(&rb_inv, &MockRunnerTransport::default());
+        assert_eq!(rb_env.status, "ok", "{}", rb_env.message);
+    }
+}

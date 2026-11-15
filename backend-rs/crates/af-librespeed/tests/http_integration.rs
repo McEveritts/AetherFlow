@@ -1993,3 +1993,203 @@ async fn getip_isp_lookup_haversine_distance_cache_and_redaction() {
     let _ = tx.send(());
     mock_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn stats_login_concurrent_burst_enforces_strict_atomic_10_attempt_budget() {
+    let tmp = TempDirGuard::new("concurrent-login-burst");
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.statistics_password = "StrongAdminPassword!42".to_string();
+    let app = build_router(cfg, Some(vault));
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(25));
+    let mut handles = Vec::new();
+    for _ in 0..25 {
+        let app_clone = app.clone();
+        let b = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            let res = app_clone
+                .oneshot(with_peer(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/stats")
+                        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(Body::from("op=login&password=wrong"))
+                        .unwrap(),
+                    "203.0.113.150:49152",
+                ))
+                .await
+                .unwrap();
+            res.status()
+        }));
+    }
+
+    let mut unauth = 0usize;
+    let mut throttled = 0usize;
+    for h in handles {
+        match h.await.unwrap() {
+            StatusCode::UNAUTHORIZED => unauth += 1,
+            StatusCode::TOO_MANY_REQUESTS => throttled += 1,
+            other => panic!("unexpected login burst status: {other}"),
+        }
+    }
+    assert_eq!(
+        unauth, 10,
+        "concurrent login burst must atomically admit at most 10 password checks"
+    );
+    assert_eq!(throttled, 15);
+}
+
+#[tokio::test]
+async fn trusted_proxy_secret_blocks_local_loopback_xff_spoofing_and_url_tls_nofollow_hardening() {
+    use af_librespeed::redact::PROXY_TOKEN_HEADER;
+    use af_librespeed::routes::build_safe_ipinfo_lookup_url;
+    use af_librespeed::tls::build_tls_acceptor;
+    use std::os::unix::fs::symlink;
+
+    // 1. Strict URL parser rejects userinfo/authority confusion and non-empty paths
+    let dns_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+    assert!(build_safe_ipinfo_lookup_url("http://127.0.0.1:80@evil.com", dns_ip).is_none());
+    assert!(build_safe_ipinfo_lookup_url("https://ipinfo.io@evil.com", dns_ip).is_none());
+    assert!(build_safe_ipinfo_lookup_url("https://ipinfo.io/custom", dns_ip).is_none());
+    assert!(build_safe_ipinfo_lookup_url("http://192.0.2.1:8080", dns_ip).is_none());
+    let valid_url = build_safe_ipinfo_lookup_url("https://ipinfo.io", dns_ip).unwrap();
+    assert_eq!(valid_url.as_str(), "https://ipinfo.io/8.8.8.8/json");
+
+    // 2. TLS cert/key loader rejects symlinks via O_NOFOLLOW
+    let tmp = TempDirGuard::new("proxy-secret-and-tls-nofollow");
+    let real_cert = tmp.0.join("real.crt");
+    let real_key = tmp.0.join("real.key");
+    fs::write(&real_cert, b"not-a-pem").unwrap();
+    fs::write(&real_key, b"not-a-key").unwrap();
+    let sym_cert = tmp.0.join("sym.crt");
+    symlink(&real_cert, &sym_cert).unwrap();
+    let (mut tls_cfg, _) = make_test_config(&tmp);
+    tls_cfg.enable_tls = true;
+    tls_cfg.tls_cert_file = sym_cert;
+    tls_cfg.tls_key_file = real_key;
+    let Err(tls_err_raw) = build_tls_acceptor(&tls_cfg) else {
+        panic!("expected O_NOFOLLOW error for symlinked TLS cert");
+    };
+    let tls_err = format!("{tls_err_raw:#}");
+    assert!(
+        tls_err.contains("refusing symlinked")
+            || tls_err.contains("refusing to open")
+            || tls_err.contains("Too many levels of symbolic links"),
+        "expected O_NOFOLLOW rejection for symlinked TLS cert, got: {tls_err}"
+    );
+
+    // 3. Trusted loopback proxy secret blocks unauthenticated local processes from spoofing XFF / X-Forwarded-Proto
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.redact_ip_addresses = false;
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
+    cfg.trusted_proxy_secret = String::from_utf8(vec![b'x'; 32]).unwrap();
+    cfg.statistics_password = "StrongAdminPassword!42".to_string();
+    let app = build_router(cfg.clone(), Some(vault));
+
+    // Loopback WITHOUT token: spoofed XFF is ignored, resolves to 127.0.0.1
+    let no_tok = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP")
+                .header("x-forwarded-for", "198.51.100.88")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:41000",
+        ))
+        .await
+        .unwrap();
+    let no_tok_text = String::from_utf8(body_bytes(no_tok).await).unwrap();
+    assert!(
+        no_tok_text.starts_with("127.0.0.1"),
+        "expected loopback IP without token, got: {no_tok_text}"
+    );
+
+    // Loopback WITH duplicate smuggling headers (wrong + valid): rejected, resolves to 127.0.0.1
+    let dup_tok = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP")
+                .header("x-forwarded-for", "198.51.100.88")
+                .header(PROXY_TOKEN_HEADER, "wrong-secret")
+                .header(PROXY_TOKEN_HEADER, &cfg.trusted_proxy_secret)
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:41000",
+        ))
+        .await
+        .unwrap();
+    let dup_tok_text = String::from_utf8(body_bytes(dup_tok).await).unwrap();
+    assert!(
+        dup_tok_text.starts_with("127.0.0.1"),
+        "expected loopback IP on duplicate token headers, got: {dup_tok_text}"
+    );
+
+    // Loopback WITH valid single token: XFF honored -> 198.51.100.88
+    let ok_tok = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/getIP")
+                .header("x-forwarded-for", "198.51.100.88")
+                .header(PROXY_TOKEN_HEADER, &cfg.trusted_proxy_secret)
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1:41000",
+        ))
+        .await
+        .unwrap();
+    let ok_tok_text = String::from_utf8(body_bytes(ok_tok).await).unwrap();
+    assert!(
+        ok_tok_text.starts_with("198.51.100.88"),
+        "expected forwarded IP with valid token, got: {ok_tok_text}"
+    );
+
+    // Loopback login WITHOUT token ignores spoofed X-Forwarded-Proto: https (no Secure cookie flag),
+    // whereas WITH valid token sets Secure cookie flag
+    let unauth_proto_login = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/stats")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("x-forwarded-proto", "https")
+                .body(Body::from("op=login&password=StrongAdminPassword%2142"))
+                .unwrap(),
+            "127.0.0.1:41001",
+        ))
+        .await
+        .unwrap();
+    let cookie_without_tok = unauth_proto_login
+        .headers()
+        .get(SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(!cookie_without_tok.contains("Secure"));
+
+    let auth_proto_login = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/stats")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("x-forwarded-proto", "https")
+                .header(PROXY_TOKEN_HEADER, &cfg.trusted_proxy_secret)
+                .body(Body::from("op=login&password=StrongAdminPassword%2142"))
+                .unwrap(),
+            "127.0.0.1:41002",
+        ))
+        .await
+        .unwrap();
+    let cookie_with_tok = auth_proto_login
+        .headers()
+        .get(SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(cookie_with_tok.contains("Secure"));
+}

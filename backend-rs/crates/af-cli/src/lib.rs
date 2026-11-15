@@ -1239,8 +1239,20 @@ fn execute_local_release_with_status_receipt(
 
     let result: CliResult<CliResponseEnvelope> = (|| {
         let cfg = load_release_config(global, config_path, keep_releases)?;
-        let opts = build_release_engine_options(cmd, global.dry_run)
+        let mut opts = build_release_engine_options(cmd, global.dry_run)
             .expect("deploy/rollback always yields ReleaseOptions");
+        let is_channel_explicit = match cmd {
+            ReleaseCliCommand::Deploy {
+                channel_explicit, ..
+            }
+            | ReleaseCliCommand::Rollback {
+                channel_explicit, ..
+            } => *channel_explicit,
+            _ => true,
+        };
+        if !is_channel_explicit {
+            opts.channel = cfg.release_channel;
+        }
         let engine = ReleaseEngine::new_production(cfg);
         let outcome = engine.execute(&opts)?;
         format_release_outcome(action_str, outcome)
@@ -1366,6 +1378,7 @@ fn execute_release_command(
         }
         ReleaseCliCommand::Deploy {
             channel,
+            channel_explicit,
             mode,
             config_path,
             keep_releases,
@@ -1384,7 +1397,14 @@ fn execute_release_command(
                         job_unit.as_deref(),
                         "af release deploy",
                     )?;
-                    let req = build_self_update_runner_request(action_str, *channel)?;
+                    let effective_channel = if *channel_explicit {
+                        *channel
+                    } else {
+                        load_release_config(global, None, None)
+                            .map(|c| c.release_channel)
+                            .unwrap_or(*channel)
+                    };
+                    let req = build_self_update_runner_request(action_str, effective_channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
                             "release",
@@ -1424,6 +1444,7 @@ fn execute_release_command(
         }
         ReleaseCliCommand::Rollback {
             channel,
+            channel_explicit,
             mode,
             config_path,
             job_status_file,
@@ -1440,7 +1461,14 @@ fn execute_release_command(
                         job_unit.as_deref(),
                         "af release rollback",
                     )?;
-                    let req = build_self_update_runner_request(action_str, *channel)?;
+                    let effective_channel = if *channel_explicit {
+                        *channel
+                    } else {
+                        load_release_config(global, None, None)
+                            .map(|c| c.release_channel)
+                            .unwrap_or(*channel)
+                    };
+                    let req = build_self_update_runner_request(action_str, effective_channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
                             "release",

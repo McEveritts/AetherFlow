@@ -11309,8 +11309,22 @@ fn apply_runner_blueprint_app_config_changes(
                 candidate_vhosts.push(dir.join(format!("{}.conf", clean_app)));
             }
         }
-        let preserved_blocks =
+        let mut preserved_blocks =
             extract_runner_apache_custom_blocks(&candidate_vhosts, fs_root, &sites_en)?;
+        if clean_app == "librespeed"
+            && !preserved_blocks
+                .iter()
+                .any(|b| b.contains("/etc/aetherflow/librespeed-proxy-token.conf"))
+        {
+            preserved_blocks.push(
+                "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string(),
+            );
+        }
+        let proxy_token_directive = if clean_app == "librespeed" {
+            "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n"
+        } else {
+            ""
+        };
         let existing_ingress = load_ingress(canonical)?;
 
         let mut modified_any = false;
@@ -11318,7 +11332,7 @@ fn apply_runner_blueprint_app_config_changes(
         if sites_avail_exists {
             let int_dom = format!("{}.aether.local", clean_app);
             let default_vhost = format!(
-                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n</VirtualHost>\n"
+                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
             );
             let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
             let prev_int = read_runner_apache_vhost(&conf_file, fs_root, false)?;
@@ -11346,7 +11360,7 @@ fn apply_runner_blueprint_app_config_changes(
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
             if ing.external_access_enabled && valid_dom && sites_avail_exists {
                 let default_ext_vhost = format!(
-                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n</VirtualHost>\n"
+                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
                 );
                 let ext_vhost = render_or_update_runner_apache_vhost(
                     prev_ext.as_deref(),

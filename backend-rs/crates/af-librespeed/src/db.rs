@@ -1,7 +1,9 @@
+use crate::ulid::canonicalize_ulid;
 use anyhow::{bail, Context, Result};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -14,6 +16,21 @@ use tokio::task;
 use tracing::{info, warn};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+const BBOLT_MAGIC: u32 = 0xED0C_DAED;
+const BBOLT_VERSION: u32 = 2;
+const BBOLT_PAGE_HEADER_BYTES: usize = 16;
+const BBOLT_BRANCH_FLAG: u16 = 0x01;
+const BBOLT_LEAF_FLAG: u16 = 0x02;
+const BBOLT_META_FLAG: u16 = 0x04;
+const BBOLT_BUCKET_LEAF_FLAG: u32 = 0x01;
+const MAX_BOLTDB_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BOLTDB_TREE_DEPTH: usize = 16;
+const MAX_BOLTDB_VISITED_PAGES: usize = 65_536;
+const SQLITE_SIDECAR_SUFFIXES: [(&str, &str); 3] = [
+    ("-wal", "SQLite WAL sidecar"),
+    ("-shm", "SQLite SHM sidecar"),
+    ("-journal", "SQLite rollback journal sidecar"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelemetryRecord {
@@ -72,7 +89,7 @@ impl TelemetryVault {
         verify_no_symlinks_on_db_path(db_path)?;
         ensure_parent_dirs(db_path)?;
         verify_parent_dir_not_world_writable(db_path)?;
-        guard_and_backup_legacy_boltdb(db_path)?;
+        let legacy_backup = guard_and_backup_legacy_boltdb(db_path)?;
         verify_and_harden_sidecars(db_path)?;
 
         // Create/verify leaf file with O_NOFOLLOW and enforce 0600 permissions on the opened fd
@@ -99,7 +116,7 @@ impl TelemetryVault {
             })?;
         drop(leaf);
 
-        let conn = Connection::open_with_flags(
+        let mut conn = Connection::open_with_flags(
             db_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -137,6 +154,10 @@ impl TelemetryVault {
         .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
 
         verify_and_harden_sidecars(db_path)?;
+
+        if let Some(ref backup_path) = legacy_backup {
+            import_legacy_boltdb_if_valid(backup_path, &mut conn, max_rows);
+        }
 
         let mut candidate_key = [0u8; 32];
         OsRng.fill_bytes(&mut candidate_key);
@@ -336,22 +357,12 @@ fn verify_no_symlinks_on_db_path(db_path: &Path) -> Result<()> {
 }
 
 fn verify_sidecar_symlinks(db_path: &Path) -> Result<()> {
-    let wal_path = sidecar_path(db_path, "-wal");
-    let shm_path = sidecar_path(db_path, "-shm");
-    if let Some(meta) = check_not_symlink(&wal_path, "SQLite WAL sidecar")? {
-        if !meta.is_file() {
-            bail!(
-                "SQLite WAL sidecar is not a regular file: {}",
-                wal_path.display()
-            );
-        }
-    }
-    if let Some(meta) = check_not_symlink(&shm_path, "SQLite SHM sidecar")? {
-        if !meta.is_file() {
-            bail!(
-                "SQLite SHM sidecar is not a regular file: {}",
-                shm_path.display()
-            );
+    for (suffix, label) in SQLITE_SIDECAR_SUFFIXES {
+        let sc_path = sidecar_path(db_path, suffix);
+        if let Some(meta) = check_not_symlink(&sc_path, label)? {
+            if !meta.is_file() {
+                bail!("{label} is not a regular file: {}", sc_path.display());
+            }
         }
     }
     Ok(())
@@ -359,7 +370,7 @@ fn verify_sidecar_symlinks(db_path: &Path) -> Result<()> {
 
 fn verify_and_harden_sidecars(db_path: &Path) -> Result<()> {
     verify_sidecar_symlinks(db_path)?;
-    for suffix in ["-wal", "-shm"] {
+    for (suffix, _label) in SQLITE_SIDECAR_SUFFIXES {
         let sc_path = sidecar_path(db_path, suffix);
         match OpenOptions::new()
             .read(true)
@@ -418,9 +429,9 @@ fn verify_parent_dir_not_world_writable(db_path: &Path) -> Result<()> {
         );
     }
     let mode = meta.permissions().mode();
-    if (mode & 0o002) != 0 && (mode & 0o1000) == 0 {
+    if (mode & 0o002) != 0 {
         bail!(
-            "refusing world-writable non-sticky parent directory (mode {:04o}) for telemetry database: {}",
+            "refusing world-writable parent directory (mode {:04o}) for telemetry database: {}",
             mode & 0o7777,
             parent.display()
         );
@@ -500,15 +511,15 @@ fn move_file_noreplace(src: &Path, dst: &Path) -> Result<bool> {
     }
 }
 
-fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
+fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<Option<PathBuf>> {
     let Some(meta) = check_not_symlink(db_path, "database_file")? else {
-        return Ok(());
+        return Ok(None);
     };
     if !meta.is_file() {
         bail!("database_file is not a regular file: {}", db_path.display());
     }
     if meta.len() == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut file = OpenOptions::new()
@@ -522,7 +533,7 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
     drop(file);
 
     if n == 16 && &header == SQLITE_MAGIC {
-        return Ok(());
+        return Ok(None);
     }
 
     let ts = SystemTime::now()
@@ -575,7 +586,448 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
         "Detected non-SQLite/legacy BoltDB database file; moved aside (0600) before initializing SQLite WAL telemetry"
     );
     info!("SQLite telemetry initialized cleanly after legacy backup");
-    Ok(())
+    Ok(Some(backup_path))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoltMeta {
+    page_size: usize,
+    root_pgid: u64,
+    txid: u64,
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+fn parse_bbolt_meta(page: &[u8]) -> Option<BoltMeta> {
+    if page.len() < 80 {
+        return None;
+    }
+    let flags = u16::from_le_bytes(page[8..10].try_into().ok()?);
+    if flags != BBOLT_META_FLAG {
+        return None;
+    }
+    let magic = u32::from_le_bytes(page[16..20].try_into().ok()?);
+    let version = u32::from_le_bytes(page[20..24].try_into().ok()?);
+    if magic != BBOLT_MAGIC || version != BBOLT_VERSION {
+        return None;
+    }
+    let page_size = u32::from_le_bytes(page[24..28].try_into().ok()?) as usize;
+    if !page_size.is_power_of_two() || !(1024..=65_536).contains(&page_size) {
+        return None;
+    }
+    let root_pgid = u64::from_le_bytes(page[32..40].try_into().ok()?);
+    let txid = u64::from_le_bytes(page[64..72].try_into().ok()?);
+    let checksum = u64::from_le_bytes(page[72..80].try_into().ok()?);
+    if fnv1a_64(&page[16..72]) != checksum {
+        return None;
+    }
+    Some(BoltMeta {
+        page_size,
+        root_pgid,
+        txid,
+    })
+}
+
+fn select_best_bbolt_meta(data: &[u8]) -> Option<BoltMeta> {
+    let meta0 = parse_bbolt_meta(data);
+    let mut meta1: Option<BoltMeta> = None;
+    if let Some(m0) = meta0 {
+        if data.len() >= m0.page_size.saturating_add(80) {
+            meta1 = parse_bbolt_meta(&data[m0.page_size..]);
+        }
+    } else {
+        for cand_ps in [4096usize, 8192, 16_384, 32_768, 65_536, 1024, 2048] {
+            if data.len() >= cand_ps.saturating_add(80) {
+                if let Some(m1) = parse_bbolt_meta(&data[cand_ps..]) {
+                    if m1.page_size == cand_ps {
+                        meta1 = Some(m1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    match (meta0, meta1) {
+        (Some(m0), Some(m1)) => {
+            if m1.txid > m0.txid {
+                Some(m1)
+            } else {
+                Some(m0)
+            }
+        }
+        (Some(m0), None) => Some(m0),
+        (None, Some(m1)) => Some(m1),
+        (None, None) => None,
+    }
+}
+
+fn clamp_imported_utf8(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    input[..end].to_string()
+}
+
+fn extract_json_field_ci(
+    map: &serde_json::Map<String, serde_json::Value>,
+    aliases: &[&str],
+) -> String {
+    for &alias in aliases {
+        if let Some(v) = map.get(alias) {
+            match v {
+                serde_json::Value::String(s) => return s.clone(),
+                serde_json::Value::Number(n) => return n.to_string(),
+                _ => {}
+            }
+        }
+    }
+    for (k, v) in map {
+        if aliases.iter().any(|a| k.eq_ignore_ascii_case(a)) {
+            match v {
+                serde_json::Value::String(s) => return s.clone(),
+                serde_json::Value::Number(n) => return n.to_string(),
+                _ => {}
+            }
+        }
+    }
+    String::new()
+}
+
+fn decode_bolt_telemetry_leaf(key_bytes: &[u8], val_bytes: &[u8]) -> Option<NewTelemetryRecord> {
+    let serde_json::Value::Object(map) = serde_json::from_slice(val_bytes).ok()? else {
+        return None;
+    };
+    let mut raw_uuid = extract_json_field_ci(&map, &["uuid", "id"]);
+    if raw_uuid.trim().is_empty() {
+        if let Ok(key_str) = std::str::from_utf8(key_bytes) {
+            raw_uuid = key_str.trim().to_string();
+        }
+    }
+    let uuid = canonicalize_ulid(&raw_uuid)?;
+
+    let dl = clamp_imported_utf8(extract_json_field_ci(&map, &["dl", "download"]).trim(), 24);
+    let ul = clamp_imported_utf8(extract_json_field_ci(&map, &["ul", "upload"]).trim(), 24);
+    let ping = clamp_imported_utf8(extract_json_field_ci(&map, &["ping"]).trim(), 24);
+    let jitter = clamp_imported_utf8(extract_json_field_ci(&map, &["jitter"]).trim(), 24);
+    if dl.is_empty() && ul.is_empty() && ping.is_empty() && jitter.is_empty() {
+        return None;
+    }
+
+    let raw_ts = extract_json_field_ci(&map, &["timestamp", "created_at"]);
+    let timestamp = if raw_ts.trim().is_empty() {
+        "1970-01-01T00:00:00.000Z".to_string()
+    } else {
+        clamp_imported_utf8(raw_ts.trim(), 64)
+    };
+
+    Some(NewTelemetryRecord {
+        uuid,
+        timestamp,
+        ip: clamp_imported_utf8(
+            extract_json_field_ci(&map, &["ip", "ip_address", "ipaddress"]).trim(),
+            128,
+        ),
+        ispinfo: clamp_imported_utf8(&extract_json_field_ci(&map, &["ispinfo", "isp_info"]), 8192),
+        extra: clamp_imported_utf8(&extract_json_field_ci(&map, &["extra"]), 8192),
+        ua: clamp_imported_utf8(
+            &extract_json_field_ci(&map, &["ua", "user_agent", "useragent"]),
+            512,
+        ),
+        lang: clamp_imported_utf8(&extract_json_field_ci(&map, &["lang", "language"]), 64),
+        dl,
+        ul,
+        ping,
+        jitter,
+        log: clamp_imported_utf8(&extract_json_field_ci(&map, &["log", "logs"]), 65_536),
+    })
+}
+
+fn walk_bbolt_page_id(
+    data: &[u8],
+    page_size: usize,
+    pgid: u64,
+    depth: usize,
+    visited: &mut HashSet<u64>,
+    out: &mut Vec<NewTelemetryRecord>,
+) -> Result<()> {
+    if depth > MAX_BOLTDB_TREE_DEPTH || pgid < 2 || visited.len() >= MAX_BOLTDB_VISITED_PAGES {
+        bail!("bbolt tree depth or page bound exceeded at pgid={pgid}");
+    }
+    if !visited.insert(pgid) {
+        bail!("cyclic bbolt page reference detected at pgid={pgid}");
+    }
+    let start = usize::try_from(pgid)
+        .ok()
+        .and_then(|p| p.checked_mul(page_size))
+        .context("bbolt page start overflow")?;
+    if start.saturating_add(BBOLT_PAGE_HEADER_BYTES) > data.len() {
+        bail!("bbolt page {pgid} header out of file bounds");
+    }
+    let overflow = u32::from_le_bytes(
+        data[start + 12..start + 16]
+            .try_into()
+            .expect("4-byte overflow slice"),
+    ) as usize;
+    let span_pages = 1usize
+        .checked_add(overflow)
+        .context("bbolt page overflow count")?;
+    let span_bytes = span_pages
+        .checked_mul(page_size)
+        .context("bbolt page span byte overflow")?;
+    let end = start
+        .checked_add(span_bytes)
+        .context("bbolt page end overflow")?;
+    if end > data.len() {
+        bail!("bbolt page {pgid} span exceeds file length");
+    }
+    walk_bbolt_page_slice(data, page_size, &data[start..end], depth, visited, out)
+}
+
+fn walk_bbolt_page_slice(
+    data: &[u8],
+    page_size: usize,
+    page_span: &[u8],
+    depth: usize,
+    visited: &mut HashSet<u64>,
+    out: &mut Vec<NewTelemetryRecord>,
+) -> Result<()> {
+    if depth > MAX_BOLTDB_TREE_DEPTH || page_span.len() < BBOLT_PAGE_HEADER_BYTES {
+        bail!("invalid bbolt page slice");
+    }
+    let flags = u16::from_le_bytes(page_span[8..10].try_into().expect("2-byte flags"));
+    let count = u16::from_le_bytes(page_span[10..12].try_into().expect("2-byte count")) as usize;
+    let elems_end = count
+        .checked_mul(16)
+        .and_then(|n| BBOLT_PAGE_HEADER_BYTES.checked_add(n))
+        .context("bbolt element table overflow")?;
+    if elems_end > page_span.len() {
+        bail!("bbolt element headers exceed page span");
+    }
+
+    if flags == BBOLT_BRANCH_FLAG {
+        for idx in 0..count {
+            let elem_off = BBOLT_PAGE_HEADER_BYTES + idx * 16;
+            let child_pgid = u64::from_le_bytes(
+                page_span[elem_off + 8..elem_off + 16]
+                    .try_into()
+                    .expect("8-byte child pgid"),
+            );
+            walk_bbolt_page_id(data, page_size, child_pgid, depth + 1, visited, out)?;
+        }
+        Ok(())
+    } else if flags == BBOLT_LEAF_FLAG {
+        for idx in 0..count {
+            let elem_off = BBOLT_PAGE_HEADER_BYTES + idx * 16;
+            let eflags = u32::from_le_bytes(
+                page_span[elem_off..elem_off + 4]
+                    .try_into()
+                    .expect("eflags"),
+            );
+            let pos = u32::from_le_bytes(
+                page_span[elem_off + 4..elem_off + 8]
+                    .try_into()
+                    .expect("pos"),
+            ) as usize;
+            let ksize = u32::from_le_bytes(
+                page_span[elem_off + 8..elem_off + 12]
+                    .try_into()
+                    .expect("ksize"),
+            ) as usize;
+            let vsize = u32::from_le_bytes(
+                page_span[elem_off + 12..elem_off + 16]
+                    .try_into()
+                    .expect("vsize"),
+            ) as usize;
+            let k_start = elem_off
+                .checked_add(pos)
+                .context("bbolt leaf key start overflow")?;
+            let v_start = k_start
+                .checked_add(ksize)
+                .context("bbolt leaf val start overflow")?;
+            let v_end = v_start
+                .checked_add(vsize)
+                .context("bbolt leaf val end overflow")?;
+            if v_end > page_span.len() {
+                bail!("bbolt leaf key/value exceeds page span");
+            }
+            let key_bytes = &page_span[k_start..v_start];
+            let val_bytes = &page_span[v_start..v_end];
+            if (eflags & BBOLT_BUCKET_LEAF_FLAG) != 0 {
+                if val_bytes.len() < 16 {
+                    bail!("truncated bbolt sub-bucket header");
+                }
+                let sub_root =
+                    u64::from_le_bytes(val_bytes[0..8].try_into().expect("8-byte sub_root"));
+                if sub_root == 0 {
+                    if val_bytes.len() > 16 {
+                        walk_bbolt_page_slice(
+                            data,
+                            page_size,
+                            &val_bytes[16..],
+                            depth + 1,
+                            visited,
+                            out,
+                        )?;
+                    }
+                } else {
+                    walk_bbolt_page_id(data, page_size, sub_root, depth + 1, visited, out)?;
+                }
+            } else if let Some(record) = decode_bolt_telemetry_leaf(key_bytes, val_bytes) {
+                out.push(record);
+            }
+        }
+        Ok(())
+    } else {
+        bail!("unsupported bbolt tree page flags 0x{flags:04x}");
+    }
+}
+
+pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecord>> {
+    let Some(meta) = select_best_bbolt_meta(data) else {
+        bail!("no valid bbolt v2 meta page with matching FNV-1a checksum");
+    };
+    if meta.root_pgid < 2 {
+        return Ok(Vec::new());
+    }
+    let mut visited = HashSet::new();
+    let mut records = Vec::new();
+    walk_bbolt_page_id(
+        data,
+        meta.page_size,
+        meta.root_pgid,
+        0,
+        &mut visited,
+        &mut records,
+    )?;
+    records.sort_by(|a, b| {
+        a.timestamp
+            .cmp(&b.timestamp)
+            .then_with(|| a.uuid.cmp(&b.uuid))
+    });
+    records.dedup_by(|a, b| a.uuid == b.uuid);
+    Ok(records)
+}
+
+fn import_legacy_boltdb_if_valid(backup_path: &Path, conn: &mut Connection, max_rows: usize) {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(backup_path)
+    {
+        Ok(f) => f,
+        Err(err) => {
+            warn!(
+                backup = %backup_path.display(),
+                error = %err,
+                "Skipping legacy BoltDB telemetry import: failed opening backup"
+            );
+            return;
+        }
+    };
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    if !meta.is_file() || meta.len() > MAX_BOLTDB_IMPORT_BYTES {
+        warn!(
+            backup = %backup_path.display(),
+            size_bytes = meta.len(),
+            "Skipping legacy BoltDB telemetry import: non-regular or exceeds 64 MiB bound"
+        );
+        return;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    if let Err(err) = file
+        .take(MAX_BOLTDB_IMPORT_BYTES + 1)
+        .read_to_end(&mut bytes)
+    {
+        warn!(
+            backup = %backup_path.display(),
+            error = %err,
+            "Skipping legacy BoltDB telemetry import: read error"
+        );
+        return;
+    }
+    if bytes.len() as u64 > MAX_BOLTDB_IMPORT_BYTES {
+        return;
+    }
+
+    let mut records = match parse_boltdb_telemetry_bytes(&bytes) {
+        Ok(r) => r,
+        Err(err) => {
+            warn!(
+                backup = %backup_path.display(),
+                reason = %err,
+                "Legacy non-SQLite backup is not an importable BoltDB v2 archive; starting fresh SQLite vault"
+            );
+            return;
+        }
+    };
+    if records.is_empty() {
+        return;
+    }
+    if records.len() > max_rows {
+        let drop_count = records.len() - max_rows;
+        records.drain(0..drop_count);
+    }
+
+    let imported = (|| -> Result<usize> {
+        let tx = conn.transaction()?;
+        let mut inserted = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO speedtest_users
+                 (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )?;
+            for rec in &records {
+                inserted += stmt.execute(params![
+                    rec.uuid,
+                    rec.timestamp,
+                    rec.ip,
+                    rec.ispinfo,
+                    rec.extra,
+                    rec.ua,
+                    rec.lang,
+                    rec.dl,
+                    rec.ul,
+                    rec.ping,
+                    rec.jitter,
+                    rec.log,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    })();
+
+    match imported {
+        Ok(n) => {
+            info!(
+                backup_path = %backup_path.display(),
+                imported_rows = n,
+                "Migrated legacy BoltDB speedtest history into SQLite WAL telemetry vault"
+            );
+        }
+        Err(err) => {
+            warn!(
+                backup_path = %backup_path.display(),
+                error = %err,
+                "Failed inserting migrated BoltDB rows into SQLite vault"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -697,14 +1149,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_world_writable_non_sticky_parent_dir() {
+    fn rejects_world_writable_parent_dir_including_sticky() {
         let tmp = TempDirGuard::new("world-writable");
-        let insecure_dir = tmp.0.join("insecure");
-        fs::create_dir_all(&insecure_dir).unwrap();
-        fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(0o777)).unwrap();
-        let res = TelemetryVault::open(&insecure_dir.join("speedtest.db"));
-        fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(res.is_err());
+        for mode in [0o777, 0o1777] {
+            let insecure_dir = tmp.0.join(format!("insecure-{mode:o}"));
+            fs::create_dir_all(&insecure_dir).unwrap();
+            fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(mode)).unwrap();
+            let res = TelemetryVault::open(&insecure_dir.join("speedtest.db"));
+            fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                res.is_err(),
+                "expected world-writable mode {mode:o} to fail"
+            );
+        }
     }
 
     #[test]
@@ -722,10 +1179,159 @@ mod tests {
         symlink(&target, &wal_link).unwrap();
         assert!(TelemetryVault::open(&normal_db).is_err());
 
+        let journal_db = tmp.0.join("journal.db");
+        let journal_link = tmp.0.join("journal.db-journal");
+        symlink(&target, &journal_link).unwrap();
+        assert!(TelemetryVault::open(&journal_db).is_err());
+
         let real_dir = tmp.0.join("real_dir");
         fs::create_dir_all(&real_dir).unwrap();
         let sym_dir = tmp.0.join("sym_dir");
         symlink(&real_dir, &sym_dir).unwrap();
         assert!(TelemetryVault::open(&sym_dir.join("sub.db")).is_err());
+    }
+
+    fn write_test_bbolt_meta_page(
+        buf: &mut [u8],
+        pgid: u64,
+        page_size: u32,
+        root_pgid: u64,
+        txid: u64,
+    ) {
+        buf.fill(0);
+        buf[0..8].copy_from_slice(&pgid.to_le_bytes());
+        buf[8..10].copy_from_slice(&BBOLT_META_FLAG.to_le_bytes());
+        buf[16..20].copy_from_slice(&BBOLT_MAGIC.to_le_bytes());
+        buf[20..24].copy_from_slice(&BBOLT_VERSION.to_le_bytes());
+        buf[24..28].copy_from_slice(&page_size.to_le_bytes());
+        buf[32..40].copy_from_slice(&root_pgid.to_le_bytes());
+        buf[56..64].copy_from_slice(&(pgid + 5).to_le_bytes());
+        buf[64..72].copy_from_slice(&txid.to_le_bytes());
+        let checksum = fnv1a_64(&buf[16..72]);
+        buf[72..80].copy_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn build_leaf_page_bytes(pgid: u64, page_len: usize, items: &[(u32, &[u8], &[u8])]) -> Vec<u8> {
+        let mut page = vec![0u8; page_len];
+        page[0..8].copy_from_slice(&pgid.to_le_bytes());
+        page[8..10].copy_from_slice(&BBOLT_LEAF_FLAG.to_le_bytes());
+        page[10..12].copy_from_slice(&(items.len() as u16).to_le_bytes());
+        let mut data_cursor = BBOLT_PAGE_HEADER_BYTES + items.len() * 16;
+        for (idx, (eflags, k, v)) in items.iter().enumerate() {
+            let elem_off = BBOLT_PAGE_HEADER_BYTES + idx * 16;
+            let pos = (data_cursor - elem_off) as u32;
+            page[elem_off..elem_off + 4].copy_from_slice(&eflags.to_le_bytes());
+            page[elem_off + 4..elem_off + 8].copy_from_slice(&pos.to_le_bytes());
+            page[elem_off + 8..elem_off + 12].copy_from_slice(&(k.len() as u32).to_le_bytes());
+            page[elem_off + 12..elem_off + 16].copy_from_slice(&(v.len() as u32).to_le_bytes());
+            page[data_cursor..data_cursor + k.len()].copy_from_slice(k);
+            data_cursor += k.len();
+            page[data_cursor..data_cursor + v.len()].copy_from_slice(v);
+            data_cursor += v.len();
+        }
+        page
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_bbolt_v2_records_both_paged_and_inline_buckets_and_preserves_backup() {
+        let page_size = 4096usize;
+        let mut archive = vec![0u8; page_size * 5];
+
+        // Page 0: older meta (txid=1, bogus root 99); Page 1: newer committed meta (txid=2, root=2)
+        write_test_bbolt_meta_page(&mut archive[0..page_size], 0, page_size as u32, 99, 1);
+        write_test_bbolt_meta_page(
+            &mut archive[page_size..page_size * 2],
+            1,
+            page_size as u32,
+            2,
+            2,
+        );
+
+        // Inline sub-bucket value (16-byte bucket header with root=0 + embedded leaf page)
+        let inline_json = br#"{"uuid":"01JABCDEFGHJKMNPQRSTVWXYZ2","timestamp":"2026-11-15T10:02:00.000Z","ip":"198.51.100.8","dl":"888.88","ul":"444.44","ping":"2.50","jitter":"0.25","extra":"inline-bucket"}"#;
+        let inline_leaf = build_leaf_page_bytes(
+            0,
+            320,
+            &[(0, b"01JABCDEFGHJKMNPQRSTVWXYZ2", inline_json.as_slice())],
+        );
+        let mut inline_bucket_val = vec![0u8; 16 + inline_leaf.len()];
+        inline_bucket_val[16..].copy_from_slice(&inline_leaf);
+
+        // Normal sub-bucket value pointing to branch page 3
+        let mut paged_bucket_val = [0u8; 16];
+        paged_bucket_val[0..8].copy_from_slice(&3u64.to_le_bytes());
+
+        // Page 2: root leaf page containing both buckets
+        let root_page = build_leaf_page_bytes(
+            2,
+            page_size,
+            &[
+                (
+                    BBOLT_BUCKET_LEAF_FLAG,
+                    b"inline_speedtest",
+                    &inline_bucket_val,
+                ),
+                (BBOLT_BUCKET_LEAF_FLAG, b"speedtest", &paged_bucket_val),
+            ],
+        );
+        archive[page_size * 2..page_size * 3].copy_from_slice(&root_page);
+
+        // Page 3: branch page pointing to leaf page 4
+        {
+            let branch = &mut archive[page_size * 3..page_size * 4];
+            branch[0..8].copy_from_slice(&3u64.to_le_bytes());
+            branch[8..10].copy_from_slice(&BBOLT_BRANCH_FLAG.to_le_bytes());
+            branch[10..12].copy_from_slice(&1u16.to_le_bytes());
+            let elem_off = BBOLT_PAGE_HEADER_BYTES;
+            let key = b"01JABCDEFGHJKMNPQRSTVWXYZ1";
+            branch[elem_off..elem_off + 4].copy_from_slice(&16u32.to_le_bytes());
+            branch[elem_off + 4..elem_off + 8].copy_from_slice(&(key.len() as u32).to_le_bytes());
+            branch[elem_off + 8..elem_off + 16].copy_from_slice(&4u64.to_le_bytes());
+            branch[elem_off + 16..elem_off + 16 + key.len()].copy_from_slice(key);
+        }
+
+        // Page 4: leaf page with Go speedtest-go PascalCase TelemetryData record
+        let go_json = br#"{"UUID":"01JABCDEFGHJKMNPQRSTVWXYZ1","Timestamp":"2026-11-15T10:01:00.000Z","IPAddress":"198.51.100.7","ISPInfo":"{\"processedString\":\"198.51.100.7 - ExampleISP\"}","Extra":"paged-bucket","UserAgent":"GoSpeedtest/1.1","Language":"en-US","Download":"777.77","Upload":"333.33","Ping":"3.10","Jitter":"0.40","Log":"ok"}"#;
+        let leaf_page = build_leaf_page_bytes(
+            4,
+            page_size,
+            &[(0, b"01JABCDEFGHJKMNPQRSTVWXYZ1", go_json.as_slice())],
+        );
+        archive[page_size * 4..page_size * 5].copy_from_slice(&leaf_page);
+
+        let tmp = TempDirGuard::new("bolt-v2-import");
+        let db_path = tmp.0.join("speedtest.db");
+        fs::write(&db_path, &archive).unwrap();
+
+        let vault = TelemetryVault::open(&db_path).expect("open & migrate bbolt v2");
+        let bak_path = tmp.0.join("speedtest.db.bolt.bak");
+        assert_eq!(fs::read(&bak_path).unwrap(), archive);
+        assert_eq!(
+            fs::metadata(&bak_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let recent = vault.list_recent(10).await.unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].uuid, "01JABCDEFGHJKMNPQRSTVWXYZ2");
+        assert_eq!(recent[0].dl, "888.88");
+        assert_eq!(recent[0].extra, "inline-bucket");
+        assert_eq!(recent[1].uuid, "01JABCDEFGHJKMNPQRSTVWXYZ1");
+        assert_eq!(recent[1].dl, "777.77");
+        assert_eq!(recent[1].extra, "paged-bucket");
+
+        let by_id = vault
+            .get_by_uuid("01JABCDEFGHJKMNPQRSTVWXYZ1".to_string())
+            .await
+            .unwrap()
+            .expect("migrated record retrievable by ULID");
+        assert_eq!(by_id.ul, "333.33");
+        assert_eq!(by_id.ip, "198.51.100.7");
+
+        // Cyclic branch page self-reference must be rejected cleanly
+        let mut cyclic = archive.clone();
+        let self_off = page_size * 3 + BBOLT_PAGE_HEADER_BYTES + 8;
+        cyclic[self_off..self_off + 8].copy_from_slice(&3u64.to_le_bytes());
+        assert!(parse_boltdb_telemetry_bytes(&cyclic).is_err());
     }
 }

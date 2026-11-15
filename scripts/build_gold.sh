@@ -128,6 +128,8 @@ build_target() {
   local raw_arch="$1"
   local arch
   arch="$(normalize_arch_label "${raw_arch}")"
+  local host_arch
+  host_arch="$(normalize_arch_label "$(uname -m)")"
   local rust_target
   rust_target="$(rust_target_for_arch "${arch}")"
   if [[ -n "${CARGO_BUILD_TARGET:-}" && "${CARGO_BUILD_TARGET}" != "${rust_target}" ]]; then
@@ -152,7 +154,22 @@ build_target() {
     export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
-    if ! command -v mold >/dev/null 2>&1; then
+    if [[ "${arch}" != "${host_arch}" ]]; then
+      case "${rust_target}" in
+        aarch64-unknown-linux-gnu)
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-aarch64-linux-gnu-gcc}"
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+          ;;
+        armv7-unknown-linux-gnueabihf)
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER:-arm-linux-gnueabihf-gcc}"
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="${CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+          ;;
+        x86_64-unknown-linux-gnu)
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-x86_64-linux-gnu-gcc}"
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+          ;;
+      esac
+    elif ! command -v mold >/dev/null 2>&1; then
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
     fi

@@ -1,7 +1,17 @@
 use axum::http::HeaderMap;
+use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use sha2::Sha256;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Shared header injected by the local reverse proxy (`RequestHeader set`) to authenticate
+/// loopback `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` headers when
+/// `trusted_proxy_secret` is configured in `settings.toml`.
+pub const PROXY_TOKEN_HEADER: &str = "x-aetherflow-proxy-token";
+const PROXY_TOKEN_HMAC_DOMAIN: &[u8] = b"aetherflow-librespeed-proxy-token-v1";
 
 static IPV4_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)")
@@ -83,8 +93,43 @@ pub fn is_trusted_proxy_peer(peer_addr: Option<SocketAddr>, trusted_proxies: &[I
         .any(|trusted| canonicalize_ip_addr(*trusted) == peer_ip)
 }
 
+/// Verifies `X-AetherFlow-Proxy-Token` in constant time using HMAC-SHA256 when
+/// `expected_secret` is non-empty. Rejects missing or duplicate token headers.
+pub fn verify_proxy_secret(headers: &HeaderMap, expected_secret: &str) -> bool {
+    let expected = expected_secret.trim();
+    if expected.is_empty() {
+        return true;
+    }
+    let mut iter = headers.get_all(PROXY_TOKEN_HEADER).iter();
+    let Some(first) = iter.next() else {
+        return false;
+    };
+    if iter.next().is_some() {
+        return false;
+    }
+    let candidate = first.as_bytes().trim_ascii();
+    let expected_tag = hmac_sha256_tag(expected.as_bytes());
+    let candidate_tag = hmac_sha256_tag(candidate);
+    let mut diff = 0u8;
+    for (&a, &b) in expected_tag.iter().zip(candidate_tag.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn hmac_sha256_tag(input: &[u8]) -> [u8; 32] {
+    let mut mac =
+        HmacSha256::new_from_slice(PROXY_TOKEN_HMAC_DOMAIN).expect("HMAC accepts any key length");
+    mac.update(input);
+    let digest = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 /// Extracts the canonical forwarded client IP ONLY when `peer_addr` is an
-/// explicitly configured `trusted_proxies` peer.
+/// explicitly configured `trusted_proxies` peer (and `X-AetherFlow-Proxy-Token`
+/// matches `proxy_secret` when configured).
 ///
 /// Security invariants:
 /// 1. `X-Forwarded-For` is walked right-to-left on raw header bytes (`b','`) so
@@ -97,12 +142,15 @@ pub fn is_trusted_proxy_peer(peer_addr: Option<SocketAddr>, trusted_proxies: &[I
 ///    unprivileged user connecting via loopback Apache cannot spoof arbitrary
 ///    leftward `X-Forwarded-For` addresses.
 /// 3. `X-Real-IP` is consulted ONLY when `X-Forwarded-For` is completely absent.
-pub fn extract_trusted_forwarded_ip(
+pub fn extract_trusted_forwarded_ip_with_secret(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
     trusted_proxies: &[IpAddr],
+    proxy_secret: &str,
 ) -> Option<IpAddr> {
-    if !is_trusted_proxy_peer(peer_addr, trusted_proxies) {
+    if !is_trusted_proxy_peer(peer_addr, trusted_proxies)
+        || !verify_proxy_secret(headers, proxy_secret)
+    {
         return None;
     }
     if headers.contains_key("x-forwarded-for") {
@@ -142,21 +190,41 @@ pub fn extract_trusted_forwarded_ip(
     first_xri.to_str().ok().and_then(parse_ip_token)
 }
 
-/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (strictly the
-/// single rightmost hop appended by the trusted reverse proxy) and `X-Real-IP`
-/// ONLY when the direct TCP peer IP is explicitly configured in `trusted_proxies`.
-pub fn resolve_client_ip(
+pub fn extract_trusted_forwarded_ip(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
     trusted_proxies: &[IpAddr],
+) -> Option<IpAddr> {
+    extract_trusted_forwarded_ip_with_secret(peer_addr, headers, trusted_proxies, "")
+}
+
+/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (strictly the
+/// single rightmost hop appended by the trusted reverse proxy) and `X-Real-IP`
+/// ONLY when the direct TCP peer IP is explicitly configured in `trusted_proxies`
+/// and `proxy_secret` (when non-empty) matches `X-AetherFlow-Proxy-Token`.
+pub fn resolve_client_ip_with_secret(
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+    proxy_secret: &str,
 ) -> String {
-    if let Some(forwarded) = extract_trusted_forwarded_ip(peer_addr, headers, trusted_proxies) {
+    if let Some(forwarded) =
+        extract_trusted_forwarded_ip_with_secret(peer_addr, headers, trusted_proxies, proxy_secret)
+    {
         return forwarded.to_string();
     }
 
     peer_addr
         .map(|s| canonicalize_ip_addr(s.ip()).to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+pub fn resolve_client_ip(
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> String {
+    resolve_client_ip_with_secret(peer_addr, headers, trusted_proxies, "")
 }
 
 pub fn classify_ip_note(ip: IpAddr) -> Option<&'static str> {
@@ -360,6 +428,31 @@ mod tests {
         assert_eq!(
             resolve_client_ip(loopback, &obs_rightmost, &trusted),
             "127.0.0.1"
+        );
+
+        // Shared proxy token secret rejects direct loopback XFF spoofing unless exact header matches
+        assert_eq!(
+            resolve_client_ip_with_secret(loopback, &headers, &trusted, "64hexsecret"),
+            "127.0.0.1"
+        );
+        let mut wrong_tok = headers.clone();
+        wrong_tok.insert(PROXY_TOKEN_HEADER, HeaderValue::from_static("forged"));
+        assert_eq!(
+            resolve_client_ip_with_secret(loopback, &wrong_tok, &trusted, "64hexsecret"),
+            "127.0.0.1"
+        );
+        let mut dup_tok = headers.clone();
+        dup_tok.append(PROXY_TOKEN_HEADER, HeaderValue::from_static("64hexsecret"));
+        dup_tok.append(PROXY_TOKEN_HEADER, HeaderValue::from_static("64hexsecret"));
+        assert_eq!(
+            resolve_client_ip_with_secret(loopback, &dup_tok, &trusted, "64hexsecret"),
+            "127.0.0.1"
+        );
+        let mut valid_tok = headers.clone();
+        valid_tok.insert(PROXY_TOKEN_HEADER, HeaderValue::from_static("64hexsecret"));
+        assert_eq!(
+            resolve_client_ip_with_secret(loopback, &valid_tok, &trusted, "64hexsecret"),
+            "198.51.100.77"
         );
     }
 

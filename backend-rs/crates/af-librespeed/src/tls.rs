@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{read_regular_file_nofollow, Config, MAX_CONFIG_AND_PEM_BYTES};
 use anyhow::{bail, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request};
@@ -11,9 +11,7 @@ use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::convert::Infallible;
-use std::fs;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -240,16 +238,18 @@ pub fn build_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
         bail!("enable_tls=true requires a non-empty tls_key_file path in settings.toml");
     }
 
-    ensure_regular_readable_file(&config.tls_cert_file, "tls_cert_file")?;
-    ensure_regular_readable_file(&config.tls_key_file, "tls_key_file")?;
+    let cert_bytes = read_regular_file_nofollow(
+        &config.tls_cert_file,
+        MAX_CONFIG_AND_PEM_BYTES,
+        "tls_cert_file",
+    )?;
+    let key_bytes = read_regular_file_nofollow(
+        &config.tls_key_file,
+        MAX_CONFIG_AND_PEM_BYTES,
+        "tls_key_file",
+    )?;
 
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&config.tls_cert_file)
-        .with_context(|| {
-            format!(
-                "failed to open TLS certificate chain {}",
-                config.tls_cert_file.display()
-            )
-        })?
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<std::result::Result<Vec<_>, _>>()
         .with_context(|| {
             format!(
@@ -265,7 +265,7 @@ pub fn build_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
         );
     }
 
-    let key = PrivateKeyDer::from_pem_file(&config.tls_key_file).with_context(|| {
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes).with_context(|| {
         format!(
             "failed to load PEM private key from {}",
             config.tls_key_file.display()
@@ -282,19 +282,6 @@ pub fn build_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
 
     server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(TlsAcceptor::from(Arc::new(server_cfg)))
-}
-
-fn ensure_regular_readable_file(path: &Path, field: &str) -> Result<()> {
-    let meta = fs::metadata(path).with_context(|| {
-        format!(
-            "{field} does not exist or cannot be read: {}",
-            path.display()
-        )
-    })?;
-    if !meta.is_file() {
-        bail!("{field} is not a regular file: {}", path.display());
-    }
-    Ok(())
 }
 
 pub async fn serve_http<F>(listener: TcpListener, app: Router, shutdown: F) -> Result<()>

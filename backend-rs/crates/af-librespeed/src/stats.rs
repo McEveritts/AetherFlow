@@ -1,6 +1,9 @@
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
-use crate::redact::{extract_trusted_forwarded_ip, is_trusted_proxy_peer, peer_ip_key};
+use crate::redact::{
+    extract_trusted_forwarded_ip_with_secret, is_trusted_proxy_peer, peer_ip_key,
+    verify_proxy_secret,
+};
 use crate::ulid::{canonicalize_ulid, obfuscate_ulid, resolve_id};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, OriginalUri, Query, Request, State};
@@ -84,37 +87,65 @@ impl StatsAuth {
         let Ok(mut map) = self.login_attempts.lock() else {
             return false;
         };
-        if let Some(&(count, window_start)) = map.get(key) {
-            if now_unix.saturating_sub(window_start) < LOGIN_WINDOW_SECS {
-                return count < max_failures;
+        active_login_count(&mut map, key, now_unix) < max_failures
+    }
+
+    /// Atomically checks both the per-client (`10/60s`) and optional outer per-proxy-peer
+    /// (`50/60s`) login failure budgets and reserves one slot under a single mutex acquisition
+    /// before `verify_password` runs, eliminating concurrent burst bypass races.
+    pub fn try_reserve_login_attempt(
+        &self,
+        rate_key: &str,
+        outer_proxy_key: Option<&str>,
+        now_unix: i64,
+    ) -> bool {
+        let Ok(mut map) = self.login_attempts.lock() else {
+            return false;
+        };
+        if active_login_count(&mut map, rate_key, now_unix) >= MAX_FAILED_LOGINS_PER_WINDOW {
+            return false;
+        }
+        if let Some(pk) = outer_proxy_key {
+            if pk != rate_key
+                && active_login_count(&mut map, pk, now_unix) >= MAX_FAILED_LOGINS_PER_PROXY_PEER
+            {
+                return false;
             }
-            map.remove(key);
+        }
+        increment_login_bucket(&mut map, rate_key, now_unix);
+        if let Some(pk) = outer_proxy_key {
+            if pk != rate_key {
+                increment_login_bucket(&mut map, pk, now_unix);
+            }
         }
         true
+    }
+
+    /// Refunds a reserved login attempt upon successful authentication: clears `rate_key`
+    /// and decrements `outer_proxy_key` by 1 without erasing unrelated failures on the proxy peer.
+    pub fn complete_login_success(&self, rate_key: &str, outer_proxy_key: Option<&str>) {
+        let Ok(mut map) = self.login_attempts.lock() else {
+            return;
+        };
+        map.remove(rate_key);
+        if let Some(pk) = outer_proxy_key {
+            if pk != rate_key {
+                if let Some((count, _)) = map.get_mut(pk) {
+                    if *count <= 1 {
+                        map.remove(pk);
+                    } else {
+                        *count -= 1;
+                    }
+                }
+            }
+        }
     }
 
     pub fn record_login_failure(&self, ip: &str, now_unix: i64) {
         let Ok(mut map) = self.login_attempts.lock() else {
             return;
         };
-        if map.len() >= MAX_TRACKED_LOGIN_IPS && !map.contains_key(ip) {
-            map.retain(|_, (_, ws)| now_unix.saturating_sub(*ws) < LOGIN_WINDOW_SECS);
-            if map.len() >= MAX_TRACKED_LOGIN_IPS {
-                if let Some(oldest_ip) = map
-                    .iter()
-                    .min_by_key(|(_, (_, ws))| *ws)
-                    .map(|(k, _)| k.clone())
-                {
-                    map.remove(&oldest_ip);
-                }
-            }
-        }
-        let entry = map.entry(ip.to_string()).or_insert((0, now_unix));
-        if now_unix.saturating_sub(entry.1) >= LOGIN_WINDOW_SECS {
-            *entry = (1, now_unix);
-        } else {
-            entry.0 = entry.0.saturating_add(1);
-        }
+        increment_login_bucket(&mut map, ip, now_unix);
     }
 
     pub fn clear_login_failures(&self, ip: &str) {
@@ -145,6 +176,37 @@ impl StatsAuth {
         };
         let expected_sig = compute_hmac(&self.session_key, exp_str.as_bytes());
         constant_time_eq(&sig_bytes, &expected_sig)
+    }
+}
+
+fn active_login_count(map: &mut HashMap<String, (usize, i64)>, key: &str, now_unix: i64) -> usize {
+    if let Some(&(count, window_start)) = map.get(key) {
+        if now_unix.saturating_sub(window_start) < LOGIN_WINDOW_SECS {
+            return count;
+        }
+        map.remove(key);
+    }
+    0
+}
+
+fn increment_login_bucket(map: &mut HashMap<String, (usize, i64)>, key: &str, now_unix: i64) {
+    if map.len() >= MAX_TRACKED_LOGIN_IPS && !map.contains_key(key) {
+        map.retain(|_, (_, ws)| now_unix.saturating_sub(*ws) < LOGIN_WINDOW_SECS);
+        if map.len() >= MAX_TRACKED_LOGIN_IPS {
+            if let Some(oldest_ip) = map
+                .iter()
+                .min_by_key(|(_, (_, ws))| *ws)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest_ip);
+            }
+        }
+    }
+    let entry = map.entry(key.to_string()).or_insert((0, now_unix));
+    if now_unix.saturating_sub(entry.1) >= LOGIN_WINDOW_SECS {
+        *entry = (1, now_unix);
+    } else {
+        entry.0 = entry.0.saturating_add(1);
     }
 }
 
@@ -333,7 +395,7 @@ pub struct AppState {
     pub stats_body_timeout: Duration,
     pub telemetry_limiter: TelemetryRateLimiter,
     pub isp_cache: crate::routes::IspLookupCache,
-    pub http_client: reqwest::Client,
+    pub http_client: Option<reqwest::Client>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -395,8 +457,11 @@ fn is_https_via_trusted_proxy(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
     trusted_proxies: &[IpAddr],
+    proxy_secret: &str,
 ) -> bool {
-    if !is_trusted_proxy_peer(peer_addr, trusted_proxies) {
+    if !is_trusted_proxy_peer(peer_addr, trusted_proxies)
+        || !verify_proxy_secret(headers, proxy_secret)
+    {
         return false;
     }
     headers
@@ -428,8 +493,12 @@ pub async fn handle_stats(
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let cookie_path = resolve_stats_cookie_path(&state.config.url_base, orig_uri.path());
     let secure_attr = if state.config.enable_tls
-        || is_https_via_trusted_proxy(peer_addr, &headers, &state.config.trusted_proxies)
-    {
+        || is_https_via_trusted_proxy(
+            peer_addr,
+            &headers,
+            &state.config.trusted_proxies,
+            &state.config.trusted_proxy_secret,
+        ) {
         "; Secure"
     } else {
         ""
@@ -561,10 +630,11 @@ pub async fn handle_stats(
         // loopback user rotating X-Forwarded-For directly against the listener cannot brute-force a
         // custom statistics password.
         let peer_raw = peer_ip_key(peer_addr);
-        let (rate_key, outer_proxy_key) = match extract_trusted_forwarded_ip(
+        let (rate_key, outer_proxy_key) = match extract_trusted_forwarded_ip_with_secret(
             peer_addr,
             &headers,
             &state.config.trusted_proxies,
+            &state.config.trusted_proxy_secret,
         ) {
             Some(forwarded_ip) => (
                 format!("client:{forwarded_ip}"),
@@ -572,14 +642,11 @@ pub async fn handle_stats(
             ),
             None => (format!("peer:{peer_raw}"), None),
         };
-        let outer_allowed = outer_proxy_key.as_ref().is_none_or(|pk| {
-            state.stats_auth.check_login_allowed_with_limit(
-                pk,
-                MAX_FAILED_LOGINS_PER_PROXY_PEER,
-                now_unix,
-            )
-        });
-        if !state.stats_auth.check_login_allowed(&rate_key, now_unix) || !outer_allowed {
+        if !state.stats_auth.try_reserve_login_attempt(
+            &rate_key,
+            outer_proxy_key.as_deref(),
+            now_unix,
+        ) {
             let mut resp = stats_html_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 render_login_page(
@@ -597,16 +664,14 @@ pub async fn handle_stats(
             .stats_auth
             .verify_password(&state.config.statistics_password, candidate)
         {
-            state.stats_auth.clear_login_failures(&rate_key);
+            state
+                .stats_auth
+                .complete_login_success(&rate_key, outer_proxy_key.as_deref());
             let token = state.stats_auth.issue_cookie_token(now_unix);
             let set_cookie = format!(
                 "{COOKIE_NAME}={token}; Path={cookie_path}; Max-Age={SESSION_TTL_SECS}; HttpOnly; SameSite=Strict{secure_attr}"
             );
             return redirect_with_cookie(&cookie_path, &set_cookie);
-        }
-        state.stats_auth.record_login_failure(&rate_key, now_unix);
-        if let Some(ref pk) = outer_proxy_key {
-            state.stats_auth.record_login_failure(pk, now_unix);
         }
         return stats_html_response(
             StatusCode::UNAUTHORIZED,

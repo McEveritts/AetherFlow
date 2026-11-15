@@ -502,6 +502,15 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertIn("redact_ip_addresses=true", settings_text)
             self.assertIn("enable_id_obfuscation=true", settings_text)
             self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', settings_text)
+            sec_m = re.search(r'^trusted_proxy_secret="([0-9a-f]{64})"$', settings_text, re.MULTILINE)
+            self.assertIsNotNone(sec_m, f"Missing 64-hex trusted_proxy_secret in {settings_text}")
+            proxy_snippet_path = root / "etc/aetherflow/librespeed-proxy-token.conf"
+            self.assertTrue(proxy_snippet_path.is_file())
+            self.assertEqual(proxy_snippet_path.stat().st_mode & 0o777, 0o600)
+            self.assertIn(
+                f'RequestHeader set X-AetherFlow-Proxy-Token "{sec_m.group(1)}"',  # type: ignore[union-attr]
+                proxy_snippet_path.read_text(encoding="utf-8"),
+            )
 
             unit_text = (root / "etc/systemd/system/librespeed.service").read_text(encoding="utf-8")
             for directive in (
@@ -715,6 +724,33 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertEqual(dry_res.returncode, 0, dry_res.stderr)
             self.assertIn(str(fake_af), dry_res.stdout)
             self.assertIn("release deploy --local --channel nightly", dry_res.stdout)
+
+            # --offline without --dry-run must fail closed
+            live_offline = subprocess.run(
+                ["bash", str(ROOT / "packages/system/updateAetherFlow"), "--offline"],
+                env={**os.environ, "AF_INSTALL_ROOT": str(root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(live_offline.returncode, 0)
+
+            # --dry-run --offline executes af --dry-run --root <root> release deploy --local --offline
+            dry_offline = subprocess.run(
+                ["bash", str(ROOT / "packages/system/updateAetherFlow"), "--dry-run", "--offline"],
+                env={**os.environ, "AF_INSTALL_ROOT": str(root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(dry_offline.returncode, 0, dry_offline.stderr)
+            invoked_argv = json.loads(af_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                invoked_argv,
+                ["--dry-run", "--root", str(root), "release", "deploy", "--local", "--offline"],
+            )
+
+        wsl_script = (ROOT / "scripts/setup_wsl_dev.sh").read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"curl\b[^\n]*\|\s*(?:sudo\s+(?:-E\s+)?)?(?:ba)?sh\b", wsl_script))
+        self.assertIn("sha256sum -c -", wsl_script)
 
         common_text = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
         self.assertIn("https://127.0.0.1:*", common_text)

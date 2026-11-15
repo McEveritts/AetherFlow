@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::process;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -49,6 +49,13 @@ async fn run() -> Result<()> {
 
     let config = Config::load_from_path(&config_path)?;
     config.validate_listener_security()?;
+    if config.trusted_proxies.iter().any(|ip| ip.is_loopback())
+        && config.trusted_proxy_secret.trim().is_empty()
+    {
+        warn!(
+            "Loopback address configured in trusted_proxies without trusted_proxy_secret; set trusted_proxy_secret in settings.toml to prevent local X-Forwarded-For spoofing"
+        );
+    }
     let tls_acceptor = if config.enable_tls {
         Some(build_tls_acceptor(&config)?)
     } else {

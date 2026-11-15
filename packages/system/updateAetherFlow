@@ -29,6 +29,11 @@ if [[ -n "${CHANNEL}" && "${CHANNEL}" != "stable" && "${CHANNEL}" != "nightly" ]
     exit 1
 fi
 
+if [[ "${OFFLINE}" == "true" && "${DRY_RUN}" != "true" ]]; then
+    echo "[ERROR] --offline requires --dry-run (live offline self-update is unsupported)" >&2
+    exit 1
+fi
+
 if [[ "${DRY_RUN}" != "true" && "${EUID}" -ne 0 ]]; then
     echo "[ERROR] updateAetherFlow must run as root (re-run with sudo, or pass --help / --dry-run)." >&2
     exit 1
@@ -62,10 +67,12 @@ resolve_release_manager() {
 
 AF_BIN="$(resolve_af_bin || true)"
 RM_SCRIPT="$(resolve_release_manager || true)"
+AF_GLOBAL_ARGS=()
+[[ -n "${AF_INSTALL_ROOT:-}" ]] && AF_GLOBAL_ARGS+=(--root "${AF_ROOT}")
 
 if [[ "${CHECK_ONLY}" == "true" ]]; then
     [[ "${DRY_RUN}" == "true" ]] && { echo "[DRY-RUN] Would check release status under ${AF_ROOT}"; exit 0; }
-    [[ -n "${AF_BIN}" ]] && exec "${AF_BIN}" release status
+    [[ -n "${AF_BIN}" ]] && exec "${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release status
     if [[ -f "${AF_ROOT}/current/.version" ]]; then
         printf 'current_version=%s\n' "$(head -n 1 "${AF_ROOT}/current/.version")"; exit 0
     fi
@@ -78,8 +85,14 @@ CMD_ARGS=()
 [[ "${OFFLINE}" == "true" ]] && CMD_ARGS+=(--offline)
 
 if [[ -n "${AF_BIN}" ]]; then
-    CMD=("${AF_BIN}" release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
+    if [[ "${DRY_RUN}" == "true" && "${OFFLINE}" == "true" ]]; then
+        exec "${AF_BIN}" --dry-run ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
+    fi
+    CMD=("${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
 elif [[ -n "${RM_SCRIPT}" ]]; then
+    if [[ "${DRY_RUN}" == "true" && "${OFFLINE}" == "true" ]]; then
+        exec bash "${RM_SCRIPT}" deploy --dry-run ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
+    fi
     CMD=(bash "${RM_SCRIPT}" deploy ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
 else
     echo "[ERROR] Neither native af CLI nor release-manager.sh found under ${AF_ROOT}" >&2

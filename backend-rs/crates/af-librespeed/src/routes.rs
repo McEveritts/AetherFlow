@@ -3,8 +3,9 @@ use crate::config::Config;
 use crate::db::{NewTelemetryRecord, TelemetryVault};
 use crate::png_card::render_badge_png;
 use crate::redact::{
-    classify_ip_note, extract_trusted_forwarded_ip, format_getip_display, parse_ip_token,
-    peer_ip_key, redact_freeform_text, redact_single_ip, resolve_client_ip,
+    classify_ip_note, extract_trusted_forwarded_ip_with_secret, format_getip_display,
+    parse_ip_token, peer_ip_key, redact_freeform_text, redact_single_ip,
+    resolve_client_ip_with_secret,
 };
 use crate::stats::{
     handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, GarbageStreamGuard, StatsAuth,
@@ -109,12 +110,21 @@ pub fn build_router_with_timeouts(
             ephemeral
         });
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let http_client = reqwest::Client::builder()
+    let http_client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(2))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    {
+        Ok(client) => Some(client),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "Failed building hardened reqwest HTTP client; external ipinfo lookups disabled"
+            );
+            None
+        }
+    };
     let state = AppState {
         config: Arc::new(config),
         vault,
@@ -294,26 +304,34 @@ fn acquire_stream_guards(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
     trusted_proxies: &[std::net::IpAddr],
+    proxy_secret: &str,
     max_per_client: usize,
 ) -> Result<(Option<GarbageStreamGuard>, Option<GarbageStreamGuard>), ()> {
     let Some(addr) = peer_addr else {
         return Ok((None, None));
     };
-    let client_ip = resolve_client_ip(Some(addr), headers, trusted_proxies);
+    let client_ip =
+        resolve_client_ip_with_secret(Some(addr), headers, trusted_proxies, proxy_secret);
     let client_key = format!("client:{client_ip}");
     let Some(client_guard) = tracker.try_acquire(&client_key, max_per_client) else {
         return Err(());
     };
-    let proxy_guard =
-        if extract_trusted_forwarded_ip(Some(addr), headers, trusted_proxies).is_some() {
-            let proxy_key = format!("proxy_peer:{}", peer_ip_key(Some(addr)));
-            let Some(pg) = tracker.try_acquire(&proxy_key, MAX_STREAMS_PER_PROXY_PEER) else {
-                return Err(());
-            };
-            Some(pg)
-        } else {
-            None
+    let proxy_guard = if extract_trusted_forwarded_ip_with_secret(
+        Some(addr),
+        headers,
+        trusted_proxies,
+        proxy_secret,
+    )
+    .is_some()
+    {
+        let proxy_key = format!("proxy_peer:{}", peer_ip_key(Some(addr)));
+        let Some(pg) = tracker.try_acquire(&proxy_key, MAX_STREAMS_PER_PROXY_PEER) else {
+            return Err(());
         };
+        Some(pg)
+    } else {
+        None
+    };
     Ok((Some(client_guard), proxy_guard))
 }
 
@@ -336,6 +354,7 @@ async fn handle_empty(
             peer_addr,
             &req_headers,
             &state.config.trusted_proxies,
+            &state.config.trusted_proxy_secret,
             MAX_UPLOAD_STREAMS_PER_IP,
         ) else {
             return abort_stalled_h1_response(
@@ -459,23 +478,32 @@ async fn handle_garbage(
         peer_addr,
         &headers,
         &state.config.trusted_proxies,
+        &state.config.trusted_proxy_secret,
         MAX_GARBAGE_STREAMS_PER_IP,
     ) else {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(RETRY_AFTER, HeaderValue::from_static("5"))],
-            "Too many concurrent download streams from this client IP",
-        )
-            .into_response();
+        return abort_stalled_h1_response(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, HeaderValue::from_static("5"))],
+                "Too many concurrent download streams from this client IP",
+            )
+                .into_response(),
+            version,
+            &conn_abort,
+        );
     };
 
     let Ok(permit) = state.garbage_semaphore.clone().try_acquire_owned() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(RETRY_AFTER, HeaderValue::from_static("5"))],
-            "Too many concurrent download streams",
-        )
-            .into_response();
+        return abort_stalled_h1_response(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(RETRY_AFTER, HeaderValue::from_static("5"))],
+                "Too many concurrent download streams",
+            )
+                .into_response(),
+            version,
+            &conn_abort,
+        );
     };
 
     let chunks = q
@@ -710,12 +738,40 @@ impl IspLookupCache {
     }
 }
 
-fn is_safe_ipinfo_base_url(base: &str) -> bool {
-    let trimmed = base.trim();
-    trimmed == "https://ipinfo.io"
-        || trimmed == "https://ipinfo.io/"
-        || trimmed.starts_with("http://127.0.0.1:")
-        || trimmed.starts_with("http://[::1]:")
+pub fn build_safe_ipinfo_lookup_url(base: &str, ip: std::net::IpAddr) -> Option<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base.trim()).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    if !matches!(url.path(), "" | "/") {
+        return None;
+    }
+    match url.scheme() {
+        "https" => {
+            if url.host_str() != Some("ipinfo.io") || url.port().is_some() {
+                return None;
+            }
+        }
+        "http" => {
+            url.port()?;
+            let host = url.host_str()?;
+            let unbracketed = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            let host_ip: std::net::IpAddr = unbracketed.parse().ok()?;
+            if !host_ip.is_loopback() {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    url.set_path(&format!("/{ip}/json"));
+    Some(url)
 }
 
 fn strip_asn_prefix(org: &str) -> &str {
@@ -760,21 +816,12 @@ async fn fetch_ipinfo_object(
     if let Some(cached) = state.isp_cache.get(ip, now_unix) {
         return Some(cached);
     }
-    if !is_safe_ipinfo_base_url(&state.config.ipinfo_base_url) {
-        return None;
-    }
+    let client = state.http_client.as_ref()?;
+    let url = build_safe_ipinfo_lookup_url(&state.config.ipinfo_base_url, ip)?;
     if !state.isp_cache.allow_uncached_fetch(ip, now_unix) {
         return None;
     }
-    let url = format!(
-        "{}/{}/json",
-        state.config.ipinfo_base_url.trim().trim_end_matches('/'),
-        ip
-    );
-    let mut req = state
-        .http_client
-        .get(&url)
-        .header("Accept", "application/json");
+    let mut req = client.get(url).header("Accept", "application/json");
     if !state.config.ipinfo_api_key.is_empty() {
         req = req.bearer_auth(&state.config.ipinfo_api_key);
     }
@@ -793,6 +840,35 @@ async fn fetch_ipinfo_object(
     map.remove("readme");
     state.isp_cache.insert(ip, map.clone(), now_unix);
     Some(map)
+}
+
+fn redact_json_value_in_place(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::String(s) => {
+            *s = redact_freeform_text(s);
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                redact_json_value_in_place(item);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (k, v) in obj.iter_mut() {
+                if k.eq_ignore_ascii_case("hostname") {
+                    *v = serde_json::Value::String("REDACTED".to_string());
+                } else if k.eq_ignore_ascii_case("ip") {
+                    let scrubbed = v
+                        .as_str()
+                        .map(redact_single_ip)
+                        .unwrap_or_else(|| "0.0.0.0".to_string());
+                    *v = serde_json::Value::String(scrubbed);
+                } else {
+                    redact_json_value_in_place(v);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -818,7 +894,12 @@ async fn handle_get_ip(
     Query(q): Query<GetIpQuery>,
 ) -> Response {
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
-    let client_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
+    let client_ip = resolve_client_ip_with_secret(
+        peer_addr,
+        &headers,
+        &state.config.trusted_proxies,
+        &state.config.trusted_proxy_secret,
+    );
     let display = format_getip_display(&client_ip, state.config.redact_ip_addresses);
 
     let want_isp = q
@@ -842,7 +923,7 @@ async fn handle_get_ip(
                 && (!state.config.ipinfo_api_key.is_empty() || !state.config.redact_ip_addresses);
             if allow_external_lookup {
                 let now_unix = Utc::now().timestamp();
-                if let Some(mut map) = fetch_ipinfo_object(&state, ip, now_unix).await {
+                if let Some(map) = fetch_ipinfo_object(&state, ip, now_unix).await {
                     let isp_name = map
                         .get("org")
                         .and_then(|v| v.as_str())
@@ -899,32 +980,11 @@ async fn handle_get_ip(
                         processed_string = format!("{processed_string} - {isp_label}{dist_suffix}");
                     }
 
+                    let mut obj_val = serde_json::Value::Object(map);
                     if state.config.redact_ip_addresses {
-                        if map.contains_key("ip") {
-                            map.insert(
-                                "ip".to_string(),
-                                serde_json::Value::String(redact_single_ip(&client_ip)),
-                            );
-                        }
-                        if map.contains_key("hostname") {
-                            map.insert(
-                                "hostname".to_string(),
-                                serde_json::Value::String("REDACTED".to_string()),
-                            );
-                        }
-                        if let Ok(serialized) = serde_json::to_string(&map) {
-                            let clean = redact_freeform_text(&serialized);
-                            if let Ok(redacted_val) = serde_json::from_str(&clean) {
-                                raw_isp_info = redacted_val;
-                            } else {
-                                raw_isp_info = serde_json::Value::Object(map);
-                            }
-                        } else {
-                            raw_isp_info = serde_json::Value::Object(map);
-                        }
-                    } else {
-                        raw_isp_info = serde_json::Value::Object(map);
+                        redact_json_value_in_place(&mut obj_val);
                     }
+                    raw_isp_info = obj_val;
                 }
             }
         }
@@ -1016,10 +1076,20 @@ async fn handle_telemetry(
         .map(axum::Extension);
 
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
-    let raw_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
+    let raw_ip = resolve_client_ip_with_secret(
+        peer_addr,
+        &headers,
+        &state.config.trusted_proxies,
+        &state.config.trusted_proxy_secret,
+    );
     let peer_ip = peer_ip_key(peer_addr);
-    let is_trusted_proxy =
-        extract_trusted_forwarded_ip(peer_addr, &headers, &state.config.trusted_proxies).is_some();
+    let is_trusted_proxy = extract_trusted_forwarded_ip_with_secret(
+        peer_addr,
+        &headers,
+        &state.config.trusted_proxies,
+        &state.config.trusted_proxy_secret,
+    )
+    .is_some();
     let now_unix = Utc::now().timestamp();
     if state.config.telemetry_enabled()
         && state.vault.is_some()
