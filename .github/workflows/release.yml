@@ -149,8 +149,13 @@ jobs:
       - name: Prepare Embedded Frontend Staging Directories
         working-directory: .
         run: |
-          mkdir -p web/dist backend/web/dist
-          touch web/dist/.keep backend/web/dist/.keep
+          mkdir -p web/dist
+          touch web/dist/.keep
+
+      - name: Verify Zero-Go Repository Hygiene
+        working-directory: .
+        run: |
+          test -z "$(git ls-files '*.go' '*go.mod' '*go.sum')"
 
       - name: Verify Workspace Lockfile & Advisory Policy Presence
         run: |
@@ -174,7 +179,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
 
       - name: Rust Security Unit & Contract Tests (--locked)
         env:
@@ -185,33 +190,6 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --workspace --locked -- --test-threads=1
-
-      - name: Setup Go for Legacy Compatibility Gate
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
-      - name: Legacy Go Backend Build & Security Regression Gate
-        working-directory: backend
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          TMPDIR: /tmp
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          go mod verify
-          govulncheck ./...
-          go vet ./...
-          staticcheck ./...
-          gosec -severity high -confidence high ./...
-          gosec -include=G201,G202 ./...
-          go test -race ./... -count=1
-          AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
-          CGO_ENABLED=0 go build ./...
 
   release-build:
     name: Build & Verify Release Tarball (Rust Control Plane)
@@ -276,12 +254,11 @@ jobs:
           npm run test:ci
           npm run build
 
-      - name: Stage Embedded Frontend Assets (Neutral + Legacy)
+      - name: Stage Embedded Frontend Assets (Neutral Staging)
         run: |
-          rm -rf web/dist backend/web/dist
-          mkdir -p web/dist backend/web/dist
+          rm -rf web/dist
+          mkdir -p web/dist
           cp -R frontend/out/. web/dist/
-          cp -R frontend/out/. backend/web/dist/
 
       - name: Run Rust Workspace Unit & Contract Tests (--locked)
         working-directory: backend-rs
@@ -294,7 +271,7 @@ jobs:
         run: |
           test -f Cargo.lock
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
           cargo test --workspace --locked -- --test-threads=1
 
       - name: Verify Updater Survives Its Caller Restart
@@ -310,23 +287,21 @@ jobs:
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
           cd backend-rs
-          cargo build --release --locked --bin aetherflow-api --bin af
+          cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
           cp target/release/aetherflow-api "${STAGE_DIR}/aetherflow-api"
           cp target/release/af "${STAGE_DIR}/af"
+          cp target/release/speedtest-backend "${STAGE_DIR}/speedtest-backend"
           mkdir -p "${STAGE_DIR}/bin"
           cp target/release/af "${STAGE_DIR}/bin/af"
+          cp target/release/speedtest-backend "${STAGE_DIR}/bin/speedtest-backend"
           cd ..
 
-          if [[ -d config ]]; then
-            cp -R config "${STAGE_DIR}/config"
-          else
-            cp -R backend/config "${STAGE_DIR}/config"
-          fi
+          cp -R config "${STAGE_DIR}/config"
           cp -R packages "${STAGE_DIR}/packages"
           cp -R deploy "${STAGE_DIR}/deploy"
           rm -rf "${STAGE_DIR}/deploy/__pycache__"
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py" "${STAGE_DIR}/deploy/log-retention.py"
+          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/speedtest-backend" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/bin/speedtest-backend" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py" "${STAGE_DIR}/deploy/log-retention.py"
 
           mkdir -p release-dist
           tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .

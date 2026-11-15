@@ -13,7 +13,7 @@ from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 class TestF32StaticExportBeforeBackendCompile(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_01", "F32", 1, "modern_stack.sh builds Next.js static export before compiling Go backend")
+        super().__init__("T1_F32_01", "F32", 1, "modern_stack.sh builds Next.js static export before compiling Rust backend")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
@@ -21,27 +21,27 @@ class TestF32StaticExportBeforeBackendCompile(TestCase):
 
 class TestF32DistEmbedDirectoryPopulated(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_02", "F32", 1, "modern_stack.sh copies frontend build artifacts into backend/web/dist/")
+        super().__init__("T1_F32_02", "F32", 1, "modern_stack.sh copies frontend build artifacts into web/dist/")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
-        self.assert_true(bool(stack and ("backend/web/dist" in stack or "dist" in stack)), "F32: modern_stack.sh must copy frontend export into backend/web/dist/")
+        self.assert_true(bool(stack and ("web/dist" in stack or "dist" in stack)), "F32: modern_stack.sh must copy frontend export into web/dist/")
 
 class TestF32SingleBinaryOutput(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_03", "F32", 1, "Go backend compiles to single executable 'aetherflow-api'")
+        super().__init__("T1_F32_03", "F32", 1, "Rust backend compiles to single executable 'aetherflow-api'")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
-        self.assert_true(bool(stack and "go build -o aetherflow-api" in stack), "F32: modern_stack.sh must compile aetherflow-api")
+        self.assert_true(bool(stack and "cargo build --release" in stack and "aetherflow-api" in stack), "F32: modern_stack.sh must compile aetherflow-api via cargo build")
 
 class TestF32EmbeddedSpaServing(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_04", "F32", 1, "backend/web/embed.go embeds dist/ directory with go:embed")
+        super().__init__("T1_F32_04", "F32", 1, "backend-rs/crates/af-api/src/embed.rs embeds web/dist directory via RustEmbed")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        embed_code = inspector.read_file("backend/web/embed.go")
-        self.assert_true(bool(embed_code and "go:embed all:dist" in embed_code), "F32: embed.go must declare //go:embed all:dist")
+        embed_code = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
+        self.assert_true(bool(embed_code and "RustEmbed" in embed_code and "web/dist" in embed_code), "F32: embed.rs must declare #[derive(RustEmbed)] pointing to web/dist")
 
 class TestF32OnboardingUrlUsesPort8080(TestCase):
     def __init__(self):
@@ -128,7 +128,7 @@ class TestF34PrincipleOfLeastPrivilegeEnforced(TestCase):
         super().__init__("T1_F34_04", "F34", 1, "API server relies solely on runner socket without setuid or sudo")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        runner_service = inspector.read_file("backend/services/privileged_runner.go")
+        runner_service = inspector.read_file("backend-rs/crates/af-runner/src/lib.rs")
         self.assert_true(bool(runner_service and "runner.sock" in runner_service), "F34: System must enforce runner socket as sole escalation boundary")
 
 class TestF34CleanDaemonManagementViaSystemd(TestCase):

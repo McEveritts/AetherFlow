@@ -132,11 +132,11 @@ class TestF21DeploymentStreamUsesAuthPrefix(TestCase):
 
 class TestF21DeployApiStreamTargetIncludesAuth(TestCase):
     def __init__(self):
-        super().__init__("T1_F21_05", "F21", 1, "backend/api/deploy_api.go returns streamTarget with /api/v1/auth/deploy/stream")
+        super().__init__("T1_F21_05", "F21", 1, "backend-rs/crates/af-api/src/storage.rs returns streamTarget with /api/v1/auth/deploy/stream")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        deploy_api = inspector.read_file("backend/api/deploy_api.go")
-        self.assert_true(bool(deploy_api and "/api/v1/auth/deploy/stream" in deploy_api), "F21: deploy_api.go must return /api/v1/auth/deploy/stream in streamTarget")
+        deploy_api = inspector.read_file("backend-rs/crates/af-api/src/storage.rs")
+        self.assert_true(bool(deploy_api and "/api/v1/auth/deploy/stream" in deploy_api), "F21: af-api storage.rs must return /api/v1/auth/deploy/stream in streamTarget")
 
 class TestF22PasswordChangeModalWired(TestCase):
     def __init__(self):

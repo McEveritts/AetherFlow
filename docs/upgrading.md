@@ -33,7 +33,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Upgrading from v3.2.x to v4.0.0
 
-v4.0.0 replaces the legacy Go control plane with the 11-crate **Rust (`Axum` + `Tokio`)** `aetherflow-api` binary and adds the unified `af` (`af-cli`) binary. The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
+v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 12-crate **Rust (`Axum` + `Tokio`)** workspace compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`). The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
 
 ### Live SQLite Database Path Resolution
 Both `af-release` and `deploy/release-manager.sh` resolve the live SQLite database in this exact 4-tier order:
@@ -66,7 +66,7 @@ If the post-swap `/health/ready` readiness probe fails, `current` automatically 
 To compile and package the v4.0.0 single-binary Rust release bundle locally:
 
 ```bash
-# Build Next.js 16 static export, run 11-crate Rust tests, and package aetherflow-api + af
+# Build Next.js 16 static export, run Zero-Go Rust workspace tests, and package aetherflow-api + af + speedtest-backend
 bash scripts/build_gold.sh
 ```
 
@@ -76,12 +76,12 @@ Or step-by-step:
 # 1. Build Frontend Static Export
 npm ci
 cd frontend && NEXT_STATIC_EXPORT=1 npm run build && cd ..
-rm -rf backend/web/dist && mkdir -p backend/web/dist
-cp -R frontend/out/. backend/web/dist/
+rm -rf web/dist && mkdir -p web/dist
+cp -R frontend/out/. web/dist/
 
-# 2. Build Rust Control Plane & Admin CLI
+# 2. Build Pure-Rust Control Plane, Admin CLI & Native LibreSpeed Backend
 cd backend-rs
-cargo build --release --bin aetherflow-api --bin af
+cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
 ```
 
 ---

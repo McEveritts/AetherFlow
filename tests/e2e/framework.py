@@ -111,13 +111,16 @@ class CodebaseInspector:
         return b"\r\n" in content
 
     def check_route_registered(self, method: str, path_pattern: str) -> bool:
-        routes_content = self.read_file("backend/api/routes.go")
+        routes_content = self.read_file("backend-rs/crates/af-api/src/routes.rs")
         if not routes_content:
             return False
-        pattern = re.compile(rf'\.{method}\s*\(\s*"{re.escape(path_pattern)}"', re.IGNORECASE)
+        pattern = re.compile(
+            rf'\.route\(\s*"{re.escape(path_pattern)}"\s*,(?:[^;()]*|\([^()]*\))*?\b{method.lower()}\s*\(',
+            re.IGNORECASE,
+        )
         return bool(pattern.search(routes_content))
 
-    def check_go_symbol(self, rel_path: str, symbol_pattern: str) -> bool:
+    def check_rust_symbol(self, rel_path: str, symbol_pattern: str) -> bool:
         content = self.read_file(rel_path)
         if not content:
             return False

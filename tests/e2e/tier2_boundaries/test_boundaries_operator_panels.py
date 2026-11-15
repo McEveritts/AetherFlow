@@ -49,8 +49,8 @@ class TestB24NonAdminNetworkAccessForbidden(TestCase):
         super().__init__("T2_B24_05", "F24", 2, "Non-admin user cannot access Network & VPN management tab")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file("backend/api/routes.go")
-        self.assert_true(bool(routes and "adminGroup" in routes and "network" in routes), "B24: Backend network APIs must be restricted to admin role")
+        routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
+        self.assert_true(bool(routes and "admin_routes" in routes and "/network/status" in routes), "B24: Backend network APIs must be restricted to admin role")
 
 # ============================================================================
 # B25: Notifications & Alerting Panel Boundaries
@@ -134,8 +134,8 @@ class TestB26NonAdminQuotasForbidden(TestCase):
         super().__init__("T2_B26_05", "F26", 2, "Quotas management APIs strictly reject non-admin sessions")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file("backend/api/routes.go")
-        self.assert_true(bool(routes and "adminGroup" in routes and "quotas" in routes), "B26: Quota routes must be protected under adminGroup")
+        routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
+        self.assert_true(bool(routes and "admin_routes" in routes and "/quotas" in routes), "B26: Quota routes must be protected under admin_routes")
 
 # ============================================================================
 # B27: Cluster Nodes Panel Boundaries

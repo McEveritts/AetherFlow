@@ -1,6 +1,6 @@
 # Testing AetherFlow
 
-AetherFlow v4.0.0 verification spans four layers: the **11-crate Rust control plane (`backend-rs`)**, the **Next.js 16 (Obsidian V2) frontend (`frontend`)**, the **Python release/marketplace/hygiene regression suites (`tests`)**, and **Playwright E2E browser tests**.
+AetherFlow v4.0.0 verification spans four layers: the **12-crate pure-Rust control plane (`backend-rs`)**, the **Next.js 16 (Obsidian V2) frontend (`frontend`)**, the **Python release/marketplace/Zero-Go hygiene regression suites (`tests`)**, and **Playwright E2E browser tests**.
 
 ---
 
@@ -15,13 +15,19 @@ Ensure your development machine has:
 
 ## 1. Rust Control Plane Workspace Tests (`backend-rs`)
 
-The 11-crate Rust workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-streaming-tests`) contains comprehensive unit, security, and contract tests.
+The 12-crate pure-Rust workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-librespeed`, `af-streaming-tests`) contains comprehensive unit, security, and contract tests.
 
 ```bash
-# Ensure the embedded SPA directory exists if frontend has not been built yet
-mkdir -p backend/web/dist
+# Ensure the neutral embedded SPA directory exists if frontend has not been built yet
+mkdir -p web/dist
+touch web/dist/.keep
 
-# Run all tests across the 11-crate Rust workspace
+cd backend-rs
+cargo test --workspace --locked
+cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
+```
+
+# Run all tests across the 12-crate pure-Rust workspace
 cd backend-rs
 JWT_SECRET="ci-test-secret-exactly-32bytes!!" \
 AES_MASTER_KEY="ci-test-aes-key-exactly-32bytes!" \
@@ -76,7 +82,8 @@ NEXT_STATIC_EXPORT=1 npm run build
 # Verify shell syntax and hygiene across all 260+ installer and lifecycle scripts
 python3 tests/check_shell_hygiene.py
 
-# Run release workflow, release manager, and Rust build tool regression tests
+# Run release workflow, Zero-Go cutover, release manager, and Rust build tool regression tests
+python3 -m unittest discover -s tests -p 'test_zero_go_cutover.py' -v
 python3 -m unittest discover -s tests -p 'test_release*.py' -v
 python3 -m unittest discover -s tests -p 'test_rust_build_tools.py' -v
 
@@ -95,7 +102,7 @@ python3 tests/run_e2e.py --mode contract
 
 ## 4. Full Production Single-Binary Build (`scripts/build_gold.sh`)
 
-To execute the complete end-to-end production pipeline locally (Next.js static export $\to$ `backend/web/dist` staging $\to$ Rust workspace tests $\to$ `aetherflow-api` + `af` release compilation $\to$ `.tar.gz` + `SHA256SUMS`):
+To execute the complete end-to-end production pipeline locally (Next.js static export $\to$ neutral `web/dist` staging $\to$ Zero-Go hygiene check $\to$ Rust workspace tests $\to$ `aetherflow-api` + `af` + `speedtest-backend` release compilation $\to$ `.tar.gz` + `SHA256SUMS`):
 
 ```bash
 bash scripts/build_gold.sh
