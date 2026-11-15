@@ -157,35 +157,12 @@ pub fn authorize_service_control_target(
 }
 
 fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        !metadata.file_type().is_symlink() && metadata.is_file(),
-        "catalog is not a regular non-symlink file: {}",
-        path.display()
-    );
-    fs::read_to_string(path)
+    af_runner::open_and_read_regular_config(path)
         .map_err(|error| anyhow::anyhow!("cannot read catalog {}: {error}", path.display()))
 }
 
 fn config_search_candidates(filename: &str) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("../../config").join(filename),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("config").join(filename));
-        }
-    }
-    candidates.extend([
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        // Legacy v3 host upgrade fallback only
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ]);
-    candidates
+    af_runner::canonical_config_candidates(filename)
 }
 
 fn load_config_file_or_embedded(
@@ -199,13 +176,15 @@ fn load_config_file_or_embedded(
         }
     }
     for c in config_search_candidates(filename) {
-        match fs::symlink_metadata(&c) {
-            Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {
-                return read_catalog_file(&c);
+        match af_runner::open_and_read_regular_config(&c) {
+            Ok(contents) => return Ok(contents),
+            Err(error) if af_runner::is_missing_config_candidate(&error) => continue,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot read catalog {}: {error}",
+                    c.display()
+                ))
             }
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
         }
     }
     Ok(embedded.to_string())
@@ -3417,5 +3396,24 @@ mod tests {
         assert!(opt_canonical_idx < opt_root_idx);
         assert!(opt_root_idx < legacy_curr_idx);
         assert!(legacy_curr_idx < legacy_root_idx);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_reader_rejects_leaf_symlinks_and_directories() {
+        let dir = std::env::temp_dir().join(format!("af-cat-sym-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_file = dir.join("real.json");
+        std::fs::write(&real_file, "[]").unwrap();
+        let sym_file = dir.join("sym.json");
+        std::os::unix::fs::symlink(&real_file, &sym_file).unwrap();
+
+        assert_eq!(read_catalog_file(&real_file).unwrap(), "[]");
+        assert!(read_catalog_file(&sym_file).is_err());
+        assert!(read_catalog_file(&dir).is_err());
+        assert!(af_runner::open_and_read_regular_config(&sym_file).is_err());
+        assert!(af_runner::open_and_read_regular_config(&dir).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

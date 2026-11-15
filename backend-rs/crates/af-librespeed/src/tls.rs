@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
@@ -24,6 +24,9 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const TLS_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_TLS_CONNECTIONS: usize = 512;
+
+#[derive(Clone)]
+pub struct ConnectionAbortSignal(pub Arc<Notify>);
 
 pub fn build_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
     if config.tls_cert_file.as_os_str().is_empty() {
@@ -90,6 +93,81 @@ fn ensure_regular_readable_file(path: &Path, field: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn serve_http<F>(listener: TcpListener, app: Router, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TLS_CONNECTIONS));
+    let mut tasks = JoinSet::new();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                break;
+            }
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            accepted = listener.accept() => {
+                let (tcp_stream, peer_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        warn!(error = %err, "TCP accept error on HTTP listener");
+                        continue;
+                    }
+                };
+                let Ok(permit) = conn_semaphore.clone().try_acquire_owned() else {
+                    debug!(peer = %peer_addr, "Dropping HTTP connection above concurrency cap");
+                    continue;
+                };
+                let router = app.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let _ = tcp_stream.set_nodelay(true);
+                    let abort_notify = Arc::new(Notify::new());
+                    let req_abort = Arc::clone(&abort_notify);
+                    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                        let router = router.clone();
+                        let conn_abort = Arc::clone(&req_abort);
+                        async move {
+                            let (mut parts, body) = req.into_parts();
+                            parts.extensions.insert(ConnectInfo(peer_addr));
+                            parts.extensions.insert(ConnectionAbortSignal(conn_abort));
+                            let axum_req = Request::from_parts(parts, axum::body::Body::new(body));
+                            router.oneshot(axum_req).await
+                        }
+                    });
+
+                    let io = TokioIo::new(tcp_stream);
+                    let mut builder = AutoConnBuilder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(HTTP_HEADER_READ_TIMEOUT);
+                    tokio::select! {
+                        res = builder.serve_connection_with_upgrades(io, service) => {
+                            if let Err(err) = res {
+                                debug!(peer = %peer_addr, error = %err, "HTTP connection closed with error");
+                            }
+                        }
+                        _ = abort_notify.notified() => {
+                            debug!(peer = %peer_addr, "Aborted stalled HTTP connection after stream deadline");
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    drop(listener);
+    let _ = tokio::time::timeout(TLS_SHUTDOWN_DRAIN_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    tasks.abort_all();
+
+    Ok(())
+}
+
 pub async fn serve_tls<F>(
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -143,11 +221,15 @@ where
                         }
                     };
 
+                    let abort_notify = Arc::new(Notify::new());
+                    let req_abort = Arc::clone(&abort_notify);
                     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                         let router = router.clone();
+                        let conn_abort = Arc::clone(&req_abort);
                         async move {
                             let (mut parts, body) = req.into_parts();
                             parts.extensions.insert(ConnectInfo(peer_addr));
+                            parts.extensions.insert(ConnectionAbortSignal(conn_abort));
                             let axum_req = Request::from_parts(parts, axum::body::Body::new(body));
                             router.oneshot(axum_req).await
                         }
@@ -159,8 +241,15 @@ where
                         .http1()
                         .timer(TokioTimer::new())
                         .header_read_timeout(HTTP_HEADER_READ_TIMEOUT);
-                    if let Err(err) = builder.serve_connection_with_upgrades(io, service).await {
-                        debug!(peer = %peer_addr, error = %err, "TLS HTTP connection closed with error");
+                    tokio::select! {
+                        res = builder.serve_connection_with_upgrades(io, service) => {
+                            if let Err(err) = res {
+                                debug!(peer = %peer_addr, error = %err, "TLS HTTP connection closed with error");
+                            }
+                        }
+                        _ = abort_notify.notified() => {
+                            debug!(peer = %peer_addr, "Aborted stalled TLS connection after stream deadline");
+                        }
                     }
                 });
             }

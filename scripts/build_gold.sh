@@ -17,6 +17,7 @@ BUILD_CLI="${BUILD_CLI:-1}"
 SPEEDTEST_BINARY_NAME="${SPEEDTEST_BINARY_NAME:-speedtest-backend}"
 CARGO_SPEEDTEST_BIN_NAME="${CARGO_SPEEDTEST_BIN_NAME:-speedtest-backend}"
 BUILD_SPEEDTEST="${BUILD_SPEEDTEST:-1}"
+PACKAGE_SPEEDTEST_STANDALONE="${PACKAGE_SPEEDTEST_STANDALONE:-0}"
 CARGO_LOCKED="${CARGO_LOCKED:-1}"
 CARGO_ALLOW_UNLOCKED_DEV="${CARGO_ALLOW_UNLOCKED_DEV:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist/gold/${VERSION}}"
@@ -81,8 +82,11 @@ rust_target_for_arch() {
     arm64|aarch64)
       printf 'aarch64-unknown-linux-gnu'
       ;;
+    armv7|armv7l|armhf)
+      printf 'armv7-unknown-linux-gnueabihf'
+      ;;
     *)
-      echo "error: unsupported target architecture '${arch}' (expected amd64 or arm64)" >&2
+      echo "error: unsupported target architecture '${arch}' (expected amd64, arm64, or armv7)" >&2
       exit 1
       ;;
   esac
@@ -96,6 +100,9 @@ normalize_arch_label() {
       ;;
     arm64|aarch64)
       printf 'arm64'
+      ;;
+    armv7|armv7l|armhf)
+      printf 'armv7'
       ;;
     *)
       printf '%s' "${arch}"
@@ -191,6 +198,15 @@ build_target() {
       || tar -C "${target_dir}" -czf "${archive}" .
     if command -v sha256sum >/dev/null 2>&1; then
       (cd "${OUTPUT_DIR}" && sha256sum "aetherflow-linux-${arch}.tar.gz" >> SHA256SUMS)
+    fi
+    if [[ "${PACKAGE_SPEEDTEST_STANDALONE}" == "1" && -n "${compiled_speedtest}" && -f "${target_dir}/${SPEEDTEST_BINARY_NAME}" ]]; then
+      local clean_ver="${VERSION#v}"
+      local speedtest_archive_name="speedtest-backend_${clean_ver}_linux_${arch}.tar.gz"
+      tar --owner=0 --group=0 --numeric-owner -C "${target_dir}" -czf "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}" 2>/dev/null \
+        || tar -C "${target_dir}" -czf "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}"
+      if command -v sha256sum >/dev/null 2>&1; then
+        (cd "${OUTPUT_DIR}" && sha256sum "${speedtest_archive_name}" >> SHA256SUMS)
+      fi
     fi
   fi
 }

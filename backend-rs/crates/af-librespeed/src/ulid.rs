@@ -13,6 +13,12 @@ const FEISTEL_DOMAIN: &[u8] = b"AetherFlow-LibreSpeed-ULID-Obfuscation-v1";
 /// 48-bit big-endian Unix millisecond timestamp + 80-bit `OsRng` entropy.
 pub fn generate_ulid() -> String {
     let ms = Utc::now().timestamp_millis().max(0) as u64;
+    generate_ulid_at_ms(ms)
+}
+
+/// Generates a canonical 26-character Crockford Base32 ULID at a specific
+/// Unix millisecond timestamp with 80 bits of `OsRng` entropy.
+pub fn generate_ulid_at_ms(ms: u64) -> String {
     let mut rand_bytes = [0u8; 10];
     OsRng.fill_bytes(&mut rand_bytes);
 
@@ -174,8 +180,8 @@ mod tests {
     fn obfuscation_round_trips_hides_timestamp_and_requires_secret_key() {
         let key_a = [0x42u8; 32];
         let key_b = [0x99u8; 32];
-        let u1 = generate_ulid();
-        let u2 = generate_ulid();
+        let u1 = generate_ulid_at_ms(1_700_000_000_000);
+        let u2 = generate_ulid_at_ms(1_700_000_000_000);
         assert_eq!(&u1[..6], &u2[..6]);
 
         let ob1 = obfuscate_ulid(&u1, &key_a);

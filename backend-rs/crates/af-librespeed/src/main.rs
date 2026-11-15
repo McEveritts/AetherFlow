@@ -1,9 +1,8 @@
 use af_librespeed::config::{parse_env_cli, CliAction, Config, VERSION_STRING};
 use af_librespeed::db::TelemetryVault;
 use af_librespeed::routes::build_router;
-use af_librespeed::tls::{build_tls_acceptor, serve_tls};
+use af_librespeed::tls::{build_tls_acceptor, serve_http, serve_tls};
 use anyhow::{Context, Result};
-use std::net::SocketAddr;
 use std::process;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -94,13 +93,9 @@ async fn run() -> Result<()> {
             assets = %config.assets_path.display(),
             "Starting native Rust LibreSpeed HTTP backend"
         );
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("HTTP server terminated unexpectedly")?;
+        serve_http(listener, app, shutdown_signal())
+            .await
+            .context("HTTP server terminated unexpectedly")?;
     }
 
     Ok(())

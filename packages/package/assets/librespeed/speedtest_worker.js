@@ -344,6 +344,7 @@ function dlTest(done) {
 							x.abort();
 						} catch (e) {}
 					} // just in case this XHR is still running after the download test
+					if (xhr[i] && xhr[i].status >= 400) return;
 					// progress event, add number of new loaded bytes to totLoaded
 					const loadDiff = event.loaded <= 0 ? 0 : event.loaded - prevLoaded;
 					if (isNaN(loadDiff) || !isFinite(loadDiff) || loadDiff < 0) return; // just in case
@@ -351,11 +352,20 @@ function dlTest(done) {
 					prevLoaded = event.loaded;
 				}.bind(this);
 				xhr[i].onload = function() {
-					// the large file has been loaded entirely, start again
-					tverb("dl stream finished " + i);
+					// the large file has been loaded entirely, start again (or back off on HTTP 429/5xx)
+					const status = xhr[i] ? xhr[i].status : 0;
+					tverb("dl stream finished " + i + " status=" + status);
 					try {
 						xhr[i].abort();
 					} catch (e) {} // reset the stream data to empty ram
+					if (status >= 400) {
+						if (settings.xhr_ignoreErrors === 0) {
+							failed = true;
+							return;
+						}
+						testStream(i, status === 429 || status === 503 ? 250 : 100);
+						return;
+					}
 					testStream(i, 0);
 				}.bind(this);
 				xhr[i].onerror = function() {

@@ -544,6 +544,73 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 f"Expected HTTPS readiness probe with -k in commands: {logged_cmds}",
             )
 
+            # 4. Retained external database_file is safely migrated into confined /opt/librespeed/speedtest.db,
+            #    and redact_ip_addresses=false does not auto-inject trusted_proxies
+            ext_db_dir = root / "var/lib/librespeed"
+            ext_db_dir.mkdir(parents=True, exist_ok=True)
+            ext_db = ext_db_dir / "speedtest.db"
+            ext_db.write_bytes(b"SQLite format 3\x00external-telemetry-payload")
+            (ext_db_dir / "speedtest.db-wal").write_bytes(b"external-wal-frames")
+            for stale_name in ("speedtest.db", "speedtest.db-wal", "speedtest.db-shm"):
+                (root / "opt/librespeed" / stale_name).unlink(missing_ok=True)
+
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'statistics_password="custom-stats-password"\n'
+                'redact_ip_addresses=false\n'
+                'database_type="sqlite"\n'
+                f'database_file="{ext_db}"\n'
+                'enable_tls=false\n',
+                encoding="utf-8",
+            )
+            ext_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ext_res.returncode, 0, ext_res.stdout + ext_res.stderr)
+            migrated_cfg = settings_path.read_text(encoding="utf-8")
+            confined_db = root / "opt/librespeed/speedtest.db"
+            self.assertIn(f'database_file="{confined_db}"', migrated_cfg)
+            self.assertEqual(confined_db.read_bytes(), b"SQLite format 3\x00external-telemetry-payload")
+            self.assertEqual((root / "opt/librespeed/speedtest.db-wal").read_bytes(), b"external-wal-frames")
+            self.assertTrue(ext_db.exists(), "Original external DB must remain intact as backup")
+            self.assertNotIn("trusted_proxies=", migrated_cfg)
+
+    def test_update_aetherflow_executes_real_af_binary_and_common_https_readiness_guard(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="af-shim-bin-") as tmp:
+            root = Path(tmp)
+            bin_dir = root / "current/bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            # Simulate compiled Rust `af` binary containing the static ownership literal `packages/system/updateAetherFlow`
+            # by compiling a tiny C/Python ELF-or-non-shim executable (python3 binary header via compiled helper or python script without shim marker)
+            af_log = root / "af_invoked.json"
+            fake_af = bin_dir / "af"
+            fake_af.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                "# Embedded ownership literal: packages/system/updateAetherFlow\n"
+                f"pathlib.Path({str(af_log)!r}).write_text(json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            fake_af.chmod(0o755)
+
+            dry_res = subprocess.run(
+                ["bash", str(ROOT / "packages/system/updateAetherFlow"), "--dry-run", "--channel", "nightly"],
+                env={**os.environ, "AF_INSTALL_ROOT": str(root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(dry_res.returncode, 0, dry_res.stderr)
+            self.assertIn(str(fake_af), dry_res.stdout)
+            self.assertIn("release deploy --local --channel nightly", dry_res.stdout)
+
+        common_text = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+        self.assertIn("https://127.0.0.1:*", common_text)
+        self.assertIn("https://\\[::1\\]:*", common_text)
+
     def test_af_certbot_sync_v4_sqlite_and_hosts_reconcile(self) -> None:
         import sqlite3
 

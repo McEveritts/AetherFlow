@@ -10387,30 +10387,21 @@ fn resolve_package_lock_name(pkg_id: &str) -> &str {
 }
 
 /// Returns whether `config/package_automation.json` configures `require_download_sha256: true`
-/// for `pkg_id`.
+/// for `pkg_id`. Fails closed (`true`) if a config candidate is a symlink or unreadable.
 pub fn package_requires_download_sha256(pkg_id: &str) -> bool {
-    let raw = if let Ok(explicit) = env::var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG") {
-        let trimmed = explicit.trim();
-        if !trimmed.is_empty() {
-            fs::read_to_string(trimmed).ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-    .or_else(|| {
-        for candidate in crate::canonical_config_candidates("package_automation.json") {
-            if let Ok(s) = fs::read_to_string(candidate) {
-                return Some(s);
-            }
-        }
-        None
-    })
-    .unwrap_or_else(|| EMBEDDED_AUTOMATION_FOR_EXECUTOR.to_string());
+    let raw = match crate::try_load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "package_automation.json",
+        EMBEDDED_AUTOMATION_FOR_EXECUTOR,
+    ) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
 
-    let map: HashMap<String, af_models::PackageAutomation> =
-        serde_json::from_str(&raw).unwrap_or_default();
+    let Ok(map) = serde_json::from_str::<HashMap<String, af_models::PackageAutomation>>(&raw)
+    else {
+        return true;
+    };
     let clean = resolve_package_lock_name(pkg_id);
     map.get(clean)
         .or_else(|| map.get(pkg_id.trim()))

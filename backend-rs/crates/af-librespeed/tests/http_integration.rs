@@ -958,3 +958,111 @@ async fn static_assets_dual_mount_and_confinement() {
         assert_eq!(res.status(), StatusCode::FORBIDDEN, "bad path {bad_path}");
     }
 }
+
+#[tokio::test]
+async fn bundled_multistream_parity_and_stalled_non_reading_client_deadline_recovery() {
+    use af_librespeed::routes::{
+        build_router_with_stream_timeout, MAX_CONCURRENT_GARBAGE_STREAMS,
+        MAX_GARBAGE_STREAMS_PER_IP,
+    };
+    use af_librespeed::tls::serve_http;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    // 1. Verify bundled settings.json xhr_dlMultistream fits comfortably within server per-IP cap
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let settings_json_path =
+        manifest_dir.join("../../../packages/package/assets/librespeed/settings.json");
+    let raw_settings = fs::read_to_string(&settings_json_path).expect("read bundled settings.json");
+    let parsed_settings: Value =
+        serde_json::from_str(&raw_settings).expect("parse bundled settings.json");
+    let dl_multistream = parsed_settings["xhr_dlMultistream"]
+        .as_u64()
+        .expect("xhr_dlMultistream integer") as usize;
+    assert!(
+        MAX_GARBAGE_STREAMS_PER_IP >= dl_multistream,
+        "server per-IP stream cap ({MAX_GARBAGE_STREAMS_PER_IP}) must accommodate bundled xhr_dlMultistream ({dl_multistream})"
+    );
+    const { assert!(MAX_CONCURRENT_GARBAGE_STREAMS >= MAX_GARBAGE_STREAMS_PER_IP * 4) };
+
+    // 2. Start real TCP HTTP server with 300ms stream deadline and hold non-reading sockets open
+    let tmp = TempDirGuard::new("stalled-dl");
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_type = "none".to_string();
+    let app = build_router_with_stream_timeout(cfg, None, Duration::from_millis(300));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        serve_http(listener, app, async move {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut stalled_sockets = Vec::new();
+    for _ in 0..MAX_GARBAGE_STREAMS_PER_IP {
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        sock.write_all(b"GET /garbage?ckSize=512 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        // Read only the status line ("HTTP/1.1 200 OK") so the handler has acquired its permit,
+        // then stop reading completely to induce transport backpressure.
+        let mut head_buf = [0u8; 15];
+        sock.read_exact(&mut head_buf).await.unwrap();
+        assert_eq!(&head_buf, b"HTTP/1.1 200 OK");
+        stalled_sockets.push(sock);
+    }
+
+    // Before deadline: 17th stream from same IP gets 429
+    {
+        let mut extra = TcpStream::connect(addr).await.unwrap();
+        extra
+            .write_all(
+                b"GET /garbage?ckSize=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        extra.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.starts_with("HTTP/1.1 429"),
+            "expected 429, got: {text}"
+        );
+    }
+
+    // Wait past the 300ms transport deadline while keeping stalled_sockets un-read in memory
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert_eq!(stalled_sockets.len(), MAX_GARBAGE_STREAMS_PER_IP);
+
+    // Permits and IP slots must now be reclaimed even though stalled_sockets never read again
+    {
+        let mut recovered = TcpStream::connect(addr).await.unwrap();
+        recovered
+            .write_all(
+                b"GET /garbage?ckSize=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        recovered.read_to_end(&mut buf).await.unwrap();
+        let header_end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("HTTP header terminator")
+            + 4;
+        let head = String::from_utf8_lossy(&buf[..header_end]);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "got: {head}");
+        assert_eq!(buf.len() - header_end, 1_048_576);
+    }
+
+    drop(stalled_sockets);
+    let _ = tx.send(());
+    server_task.await.unwrap();
+}

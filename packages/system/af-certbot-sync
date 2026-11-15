@@ -19,7 +19,7 @@ done
 
 if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
     mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
-    TMP_HOSTS="$(mktemp)"
+    TMP_HOSTS="$(mktemp /etc/.hosts.aetherflow.XXXXXX 2>/dev/null || mktemp)"
     awk '
         /^# --- AETHERFLOW INTERNAL DNS ---$/ { skip=1; next }
         /^# --- END AETHERFLOW INTERNAL DNS ---$/ { skip=0; next }
@@ -32,8 +32,11 @@ if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
         done
         echo "# --- END AETHERFLOW INTERNAL DNS ---"
     } >> "$TMP_HOSTS"
-    cat "$TMP_HOSTS" > /etc/hosts
-    rm -f "$TMP_HOSTS"
+    chmod 0644 "$TMP_HOSTS"
+    if ! mv -f "$TMP_HOSTS" /etc/hosts 2>/dev/null; then
+        cat "$TMP_HOSTS" > /etc/hosts
+        rm -f "$TMP_HOSTS"
+    fi
 fi
 
 if ! command -v certbot >/dev/null 2>&1; then
@@ -54,7 +57,7 @@ done
 
 BASE_DOMAIN=""
 if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-    BASE_DOMAIN="$(sqlite3 "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+    BASE_DOMAIN="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
 fi
 if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
     BASE_DOMAIN="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
@@ -108,7 +111,7 @@ if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
         if [[ "$dom" =~ $DOMAIN_REGEX ]] && public_dns_resolves "$dom"; then
             DOMAINS+=("$dom")
         fi
-    done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
+    done < <(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
 fi
 
 for lock in /install/.*.lock; do
@@ -120,7 +123,7 @@ for lock in /install/.*.lock; do
     [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]] || continue
     ext_disabled=""
     if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        ext_disabled="$(sqlite3 "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
+        ext_disabled="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
     fi
     [[ -n "$ext_disabled" ]] && continue
     cand="${app}.${BASE_DOMAIN}"

@@ -477,11 +477,13 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
         return true;
     }
 
-    let raw_pkgs = load_runner_config_or_embedded(
+    let Ok(raw_pkgs) = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
-    );
+    ) else {
+        return false;
+    };
     if let Ok(pkgs) = serde_json::from_str::<Vec<Package>>(&raw_pkgs) {
         for p in &pkgs {
             if strip_suffixes(&p.name) == lower
@@ -495,11 +497,13 @@ pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
         }
     }
 
-    let raw_auto = load_runner_config_or_embedded(
+    let Ok(raw_auto) = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
-    );
+    ) else {
+        return false;
+    };
     if let Ok(auto_map) = serde_json::from_str::<HashMap<String, PackageAutomation>>(&raw_auto) {
         for (pkg_id, auto) in &auto_map {
             if strip_suffixes(pkg_id) == lower
@@ -2977,12 +2981,64 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
-pub(crate) fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("../../config").join(filename),
-    ];
+pub fn open_and_read_regular_config(path: &Path) -> std::io::Result<String> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = {
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("config file is a symlink: {}", path.display()),
+            ));
+        }
+        fs::File::open(path)?
+    };
+
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config file is not a regular file: {}", path.display()),
+        ));
+    }
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    Ok(contents)
+}
+
+pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    #[cfg(unix)]
+    if err.raw_os_error() == Some(libc::ENOTDIR) {
+        return true;
+    }
+    false
+}
+
+pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let running_as_root = unsafe { libc::geteuid() == 0 };
+    #[cfg(not(unix))]
+    let running_as_root = false;
+
+    let mut candidates = Vec::new();
+    if !running_as_root {
+        candidates.extend([
+            PathBuf::from("config").join(filename),
+            PathBuf::from("../config").join(filename),
+            PathBuf::from("../../config").join(filename),
+        ]);
+    }
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("config").join(filename));
@@ -2998,34 +3054,47 @@ pub(crate) fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
     candidates
 }
 
-fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str) -> String {
+pub(crate) fn try_load_runner_config_or_embedded(
+    env_var: &str,
+    filename: &str,
+    embedded: &str,
+) -> anyhow::Result<String> {
     if let Ok(explicit) = env::var(env_var) {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
-            if let Ok(s) = fs::read_to_string(trimmed) {
-                return s;
-            }
+            let p = Path::new(trimmed);
+            return open_and_read_regular_config(p)
+                .map_err(|e| anyhow::anyhow!("cannot read config {}: {e}", p.display()));
         }
     }
     for c in canonical_config_candidates(filename) {
-        if let Ok(s) = fs::read_to_string(&c) {
-            return s;
+        match open_and_read_regular_config(&c) {
+            Ok(s) => return Ok(s),
+            Err(err) if is_missing_config_candidate(&err) => continue,
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing unsafe or unreadable config candidate {}: {err}",
+                    c.display()
+                ))
+            }
         }
     }
-    embedded.to_string()
+    Ok(embedded.to_string())
 }
 
 pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
-    let raw_pkgs = load_runner_config_or_embedded(
+    let raw_pkgs = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
-    );
-    let raw_auto = load_runner_config_or_embedded(
+    )
+    .ok()?;
+    let raw_auto = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
-    );
+    )
+    .ok()?;
 
     let mut pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
     let auto_map: HashMap<String, PackageAutomation> =
@@ -9291,11 +9360,12 @@ mod tests {
         env::set_current_dir(&scratch).unwrap();
 
         // Relative backend/config/ must be ignored in favor of embedded fallback when canonical config/ is absent.
-        let without_canonical = load_runner_config_or_embedded(
+        let without_canonical = try_load_runner_config_or_embedded(
             "AETHERFLOW_TEST_CFG_PATH",
             "test_only_cfg.json",
             r#"{"source":"embedded"}"#,
-        );
+        )
+        .unwrap();
         assert_eq!(without_canonical, r#"{"source":"embedded"}"#);
 
         // Once canonical config/ exists, it wins immediately.
@@ -9305,12 +9375,36 @@ mod tests {
             r#"{"source":"canonical"}"#,
         )
         .unwrap();
-        let with_canonical = load_runner_config_or_embedded(
+        let with_canonical = try_load_runner_config_or_embedded(
             "AETHERFLOW_TEST_CFG_PATH",
             "test_only_cfg.json",
             r#"{"source":"embedded"}"#,
-        );
+        )
+        .unwrap();
         assert_eq!(with_canonical, r#"{"source":"canonical"}"#);
+
+        // Symlinked config candidate must fail closed instead of silently falling back to embedded.
+        #[cfg(unix)]
+        {
+            let link_path = scratch.join("symlink_cfg.json");
+            std::os::unix::fs::symlink(scratch.join("config/test_only_cfg.json"), &link_path)
+                .unwrap();
+            env::set_var("AETHERFLOW_TEST_CFG_PATH", &link_path);
+            let err = try_load_runner_config_or_embedded(
+                "AETHERFLOW_TEST_CFG_PATH",
+                "test_only_cfg.json",
+                r#"{"source":"embedded"}"#,
+            )
+            .expect_err("symlinked config override must fail closed");
+            let err_msg = format!("{err:#}");
+            assert!(
+                err_msg.contains("Failed to open config")
+                    || err_msg.contains("ELOOP")
+                    || err_msg.contains("Too many levels"),
+                "unexpected symlink error: {err_msg}"
+            );
+            env::remove_var("AETHERFLOW_TEST_CFG_PATH");
+        }
 
         if let Some(val) = prev_env {
             env::set_var("AETHERFLOW_TEST_CFG_PATH", val);

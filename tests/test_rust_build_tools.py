@@ -86,6 +86,17 @@ for binary in bins:
             self.assertTrue((self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).exists())
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
 
+    def test_standalone_speedtest_archive_and_armv7_target_support(self):
+        self.environment["TARGETS"] = "armv7"
+        self.environment["PACKAGE_SPEEDTEST_STANDALONE"] = "1"
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "output/aetherflow-linux-armv7.tar.gz").exists())
+        self.assertTrue((self.root / "output/speedtest-backend_4.0.0_linux_armv7.tar.gz").exists())
+        sums = (self.root / "output/SHA256SUMS").read_text()
+        self.assertIn("aetherflow-linux-armv7.tar.gz", sums)
+        self.assertIn("speedtest-backend_4.0.0_linux_armv7.tar.gz", sums)
+
     def test_test_failure_is_not_retried_or_packaged(self):
         self.environment["TEST_CARGO_FAILURE"] = "17"
         result = self.run_build()

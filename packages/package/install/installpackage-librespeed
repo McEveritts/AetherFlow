@@ -115,9 +115,17 @@ for candidate in \
     "${AF_SPEEDTEST_BACKEND_BIN:-}" \
     "/opt/AetherFlow/current/bin/speedtest-backend" \
     "/opt/AetherFlow/current/speedtest-backend" \
-    "/opt/AetherFlow/bin/speedtest-backend" \
-    "/opt/AetherFlow/backend-rs/target/release/speedtest-backend"; do
-    if [[ -n "$candidate" && -x "$candidate" ]]; then
+    "/usr/local/lib/aetherflow/speedtest-backend"; do
+    if [[ -n "$candidate" && ! -L "$candidate" && -f "$candidate" && -x "$candidate" ]]; then
+        if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+            cand_dir="$(dirname "$candidate")"
+            read -r f_uid f_perm < <(stat -c '%u %a' "$candidate" 2>/dev/null || printf '65534 777')
+            read -r d_uid d_perm < <(stat -c '%u %a' "$cand_dir" 2>/dev/null || printf '65534 777')
+            if [[ "$f_uid" != "0" || "$d_uid" != "0" ]] || (( (8#$f_perm & 022) != 0 )) || (( (8#$d_perm & 022) != 0 )); then
+                log_warn "Skipping untrusted local speedtest-backend candidate (must be root-owned and non-group/world-writable): $candidate"
+                continue
+            fi
+        fi
         if [[ -n "$TARGET_VER_CLEAN" ]]; then
             CANDIDATE_VER="$("$candidate" --version 2>/dev/null | sed -n 's/^speedtest-backend[[:space:]]\{1,\}\([0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n1 || true)"
             CANDIDATE_VER="${CANDIDATE_VER#v}"
@@ -135,7 +143,7 @@ TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
 if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
     report_progress 35 "Staging local native LibreSpeed binary..."
     TMP_STAGE_DIR=$(mktemp -d /tmp/librespeed-stage-XXXXXX)
-    cp -fL "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
+    cp --no-dereference "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
     chmod 755 "${TMP_STAGE_DIR}/speedtest-backend"
     report_progress 60 "Packaging staged LibreSpeed binary..."
     tar -czf "$TMP_TAR" -C "$TMP_STAGE_DIR" speedtest-backend
@@ -145,6 +153,15 @@ else
     if [[ -n "$TARGET_VER_CLEAN" ]]; then
         LS_VERSION="v${TARGET_VER_CLEAN}"
         LS_VER_CLEAN="$TARGET_VER_CLEAN"
+    elif [[ -f /opt/AetherFlow/current/.version ]]; then
+        SLOT_VER="$(sed -n '1s/^[[:space:]]*v\?\([0-9][0-9A-Za-z._-]*\)[[:space:]]*$/\1/p' /opt/AetherFlow/current/.version || true)"
+        if [[ -n "$SLOT_VER" ]]; then
+            LS_VERSION="v${SLOT_VER}"
+            LS_VER_CLEAN="$SLOT_VER"
+        else
+            LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
+            LS_VER_CLEAN="${LS_VERSION#v}"
+        fi
     else
         LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
         LS_VER_CLEAN="${LS_VERSION#v}"
@@ -192,17 +209,14 @@ else
         rm -f -- "$TMP_BUNDLE"
     fi
 fi
-stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"
+stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend" "" "${PACKAGE_NAME}" "." "" "preserve"
 rm -f -- "$TMP_TAR"
 
-if [[ -f /opt/librespeed/speedtest-backend ]]; then
+if [[ -f /opt/librespeed/speedtest-backend && ! -L /opt/librespeed/speedtest-backend ]]; then
     chmod 755 /opt/librespeed/speedtest-backend
     ln -sfn /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go
-elif [[ -f /opt/librespeed/speedtest-go ]]; then
-    chmod 755 /opt/librespeed/speedtest-go
-    ln -sfn /opt/librespeed/speedtest-go /opt/librespeed/speedtest-backend
 else
-    print_error "LibreSpeed binary not found after extracting archive"
+    print_error "Native Rust speedtest-backend binary not found after extracting archive"
     exit 1
 fi
 
@@ -232,8 +246,10 @@ fi
 
 if [[ -f /opt/librespeed/settings.toml ]]; then
     safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
-import re, sys
+import errno, os, re, shutil, stat, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
+state_dir = os.path.dirname(os.path.abspath(cfg_path))
+confined_db = os.path.join(state_dir, "speedtest.db")
 text = safe_read_text(cfg_path)
 if re.search(r"^[ \t]*listen_port\s*=", text, re.MULTILINE):
     text = re.sub(r"^[ \t]*listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
@@ -249,9 +265,68 @@ if not re.search(r"^[ \t]*redact_ip_addresses\s*=", text, re.MULTILINE):
     text = text.rstrip("\n") + "\nredact_ip_addresses=true\n"
 if not re.search(r"^[ \t]*enable_id_obfuscation\s*=", text, re.MULTILINE):
     text = text.rstrip("\n") + "\nenable_id_obfuscation=true\n"
+
+db_type_m = re.search(r'^[ \t]*database_type\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
+db_type = db_type_m.group(2).strip().lower() if db_type_m else "sqlite"
+db_file_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
+if db_type not in ("", "none") and db_file_m:
+    raw_db_file = db_file_m.group(2).strip()
+    if raw_db_file:
+        resolved_db = raw_db_file if os.path.isabs(raw_db_file) else os.path.normpath(os.path.join(state_dir, raw_db_file))
+        norm_state = os.path.normpath(state_dir)
+        in_state_dir = (resolved_db != norm_state) and resolved_db.startswith(norm_state + os.sep)
+        if not in_state_dir:
+            cur = os.path.dirname(os.path.normpath(resolved_db))
+            while cur and cur != os.sep:
+                if os.path.islink(cur):
+                    raise SystemExit(f"Refusing symlinked parent directory for retained database_file: {cur}")
+                cur = os.path.dirname(cur)
+            if os.path.lexists(resolved_db):
+                st = os.lstat(resolved_db)
+                if not stat.S_ISREG(st.st_mode):
+                    raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
+                if not os.path.lexists(confined_db):
+                    for suffix in ("", "-wal", "-shm"):
+                        src_p = resolved_db + suffix
+                        dst_p = confined_db + suffix
+                        if not os.path.lexists(src_p):
+                            continue
+                        src_st = os.lstat(src_p)
+                        if not stat.S_ISREG(src_st.st_mode):
+                            raise SystemExit(f"Refusing non-regular or symlinked SQLite sidecar: {src_p}")
+                        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                        fd_in = os.open(src_p, flags)
+                        tmp_dst = dst_p + ".migrated.tmp"
+                        try:
+                            with os.fdopen(fd_in, "rb") as f_in:
+                                fd_out = os.open(tmp_dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                                with os.fdopen(fd_out, "wb") as f_out:
+                                    shutil.copyfileobj(f_in, f_out)
+                                    f_out.flush()
+                                    os.fsync(f_out.fileno())
+                            os.replace(tmp_dst, dst_p)
+                        except Exception:
+                            try:
+                                os.unlink(tmp_dst)
+                            except OSError:
+                                pass
+                            raise
+            text = re.sub(
+                r'^[ \t]*database_file\s*=.*',
+                f'database_file="{confined_db}"',
+                text,
+                flags=re.MULTILINE,
+            )
+
+redact_m = re.search(
+    r'^[ \t]*redact_ip_addresses\s*=\s*(?:"?(true|false)"?)\b',
+    text,
+    flags=re.MULTILINE | re.IGNORECASE,
+)
+redact_on = (redact_m.group(1).lower() == "true") if redact_m else True
 bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
 bind_val = bind_m.group(2).strip() if bind_m else None
-if not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
+if redact_on and not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
     if bind_val is None or bind_val in ("127.0.0.1", "::1", "[::1]", "localhost"):
         text = text.rstrip("\n") + '\ntrusted_proxies=["127.0.0.1", "::1"]\n'
 safe_write_text(cfg_path, text)
@@ -331,6 +406,8 @@ ProtectKernelTunables=yes
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -346,15 +423,25 @@ af_logged systemctl enable --now librespeed
 systemctl is-active --quiet librespeed
 
 LS_READINESS_TARGET="/"
-if [[ -f /opt/librespeed/settings.toml ]] && python3 - /opt/librespeed/settings.toml <<'PYEOF'
+if [[ -f /opt/librespeed/settings.toml ]]; then
+    LS_READINESS_TARGET="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
 import re, sys
-with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fh:
+cfg_path, port = sys.argv[1], sys.argv[2]
+with open(cfg_path, "r", encoding="utf-8", errors="replace") as fh:
     txt = fh.read()
-m = re.search(r"^[ \t]*enable_tls\s*=\s*(true|false)\b", txt, flags=re.MULTILINE | re.IGNORECASE)
-sys.exit(0 if (m and m.group(1).lower() == "true") else 1)
+tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt, flags=re.MULTILINE | re.IGNORECASE)
+tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
+bind_val = bind_m.group(2).strip() if bind_m else "127.0.0.1"
+host = "[::1]" if bind_val in ("::1", "[::1]") else "127.0.0.1"
+if tls_on:
+    print(f"https://{host}:{port}/")
+elif host == "[::1]":
+    print(f"http://{host}:{port}/")
+else:
+    print("/")
 PYEOF
-then
-    LS_READINESS_TARGET="https://127.0.0.1:${APP_PORT}/"
+)"
 fi
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$LS_READINESS_TARGET"
 

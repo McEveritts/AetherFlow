@@ -111,6 +111,8 @@ pub const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub enum ClientError {
     #[error("invalid endpoint path '{0}': must start with '/'")]
     InvalidPath(String),
+    #[error("invalid or insecure AetherFlow base URL '{0}': authenticated requests require https:// or loopback http://")]
+    InsecureBaseUrl(String),
     #[error("missing AETHERFLOW_PLUGIN_TOKEN for authenticated route '{0}'")]
     MissingAuthToken(String),
     #[error("invalid authorization header value")]
@@ -183,22 +185,49 @@ impl AetherFlowClient {
         Ok(format!("{}{}", self.base_url, trimmed))
     }
 
-    /// Builds request headers, attaching `Authorization: Bearer <token>` when present.
+    fn validate_base_url_for_auth(&self) -> Result<(), ClientError> {
+        let parsed = reqwest::Url::parse(&self.base_url)
+            .map_err(|_| ClientError::InsecureBaseUrl(self.base_url.clone()))?;
+        match parsed.scheme() {
+            "https" => Ok(()),
+            "http" => {
+                if env::var("AETHERFLOW_ALLOW_INSECURE_API_URL").as_deref() == Ok("1") {
+                    return Ok(());
+                }
+                let is_loopback = parsed.host_str().is_some_and(|h| {
+                    h.eq_ignore_ascii_case("localhost")
+                        || h.trim_matches(|c| c == '[' || c == ']')
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                });
+                if is_loopback {
+                    Ok(())
+                } else {
+                    Err(ClientError::InsecureBaseUrl(self.base_url.clone()))
+                }
+            }
+            _ => Err(ClientError::InsecureBaseUrl(self.base_url.clone())),
+        }
+    }
+
+    /// Builds request headers, attaching `Authorization: Bearer <token>` only on authenticated routes.
     pub fn build_headers(&self, require_auth: bool, path: &str) -> Result<HeaderMap, ClientError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-        match &self.bearer_token {
-            Some(token) => {
-                let raw = format!("Bearer {}", token);
-                let header_val =
-                    HeaderValue::from_str(&raw).map_err(|_| ClientError::InvalidAuthHeader)?;
-                headers.insert(AUTHORIZATION, header_val);
+        if require_auth {
+            self.validate_base_url_for_auth()?;
+            match &self.bearer_token {
+                Some(token) => {
+                    let raw = format!("Bearer {}", token);
+                    let header_val =
+                        HeaderValue::from_str(&raw).map_err(|_| ClientError::InvalidAuthHeader)?;
+                    headers.insert(AUTHORIZATION, header_val);
+                }
+                None => {
+                    return Err(ClientError::MissingAuthToken(path.to_string()));
+                }
             }
-            None if require_auth => {
-                return Err(ClientError::MissingAuthToken(path.to_string()));
-            }
-            None => {}
         }
 
         Ok(headers)
@@ -438,5 +467,30 @@ mod tests {
             auth_headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer eyJhbGciOiJIUzI1NiJ9.operator.jwt"
         );
+
+        // Public route omits Authorization even when token is configured
+        let pub_with_token = auth_client
+            .build_headers(false, PATH_PUBLIC_MARKETPLACE)
+            .unwrap();
+        assert!(pub_with_token.get(AUTHORIZATION).is_none());
+
+        // Non-loopback cleartext http:// refuses to transmit bearer token, while https:// succeeds
+        let remote_http = AetherFlowClient::new(
+            "http://192.0.2.10:8080",
+            Some("eyJhbGciOiJIUzI1NiJ9.operator.jwt".to_string()),
+        );
+        assert!(matches!(
+            remote_http
+                .build_headers(true, PATH_AUTH_SYSTEM_METRICS)
+                .unwrap_err(),
+            ClientError::InsecureBaseUrl(_)
+        ));
+        let remote_https = AetherFlowClient::new(
+            "https://flow.example.com",
+            Some("eyJhbGciOiJIUzI1NiJ9.operator.jwt".to_string()),
+        );
+        assert!(remote_https
+            .build_headers(true, PATH_AUTH_SYSTEM_METRICS)
+            .is_ok());
     }
 }

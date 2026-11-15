@@ -35,11 +35,17 @@ if [[ "${DRY_RUN}" != "true" && "${EUID}" -ne 0 ]]; then
 fi
 
 resolve_af_bin() {
-    local path_af cand
+    local path_af cand self_real cand_real magic
+    self_real="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
     path_af="$(command -v af 2>/dev/null || true)"
     for cand in "${AF_ROOT}/current/bin/af" "${AF_ROOT}/current/af" "/usr/local/bin/af" "${path_af}"; do
         [[ -n "${cand}" && -x "${cand}" && ! -d "${cand}" ]] || continue
-        grep -qIF 'updateAetherFlow' "${cand}" 2>/dev/null && continue
+        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || printf '%s' "${cand}")"
+        [[ "${cand_real}" == "${self_real}" ]] && continue
+        magic="$(LC_ALL=C head -c 2 -- "${cand}" 2>/dev/null || true)"
+        if [[ "${magic}" == "#!" ]] && grep -qF 'AetherFlow v4 update compatibility shim' "${cand}" 2>/dev/null; then
+            continue
+        fi
         printf '%s\n' "${cand}"; return 0
     done
     return 1

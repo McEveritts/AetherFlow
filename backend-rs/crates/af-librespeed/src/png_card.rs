@@ -153,8 +153,12 @@ pub fn format_timestamp_badge(raw: &str) -> String {
     if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
         return dt.naive_utc().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     }
-    if trimmed.len() >= 19 {
-        return trimmed[..19].replace('T', " ");
+    if trimmed.chars().count() >= 19 {
+        return trimmed
+            .chars()
+            .take(19)
+            .collect::<String>()
+            .replace('T', " ");
     }
     if trimmed.is_empty() {
         "Unknown".to_string()
@@ -438,5 +442,9 @@ mod tests {
         let decoded = image::load_from_memory(&png).expect("decode generated png");
         assert_eq!(decoded.width(), 500);
         assert_eq!(decoded.height(), 286);
+
+        let multibyte_ts = "2026年11月15日T12:34:56extra";
+        let badge_ts = format_timestamp_badge(multibyte_ts);
+        assert_eq!(badge_ts, "2026年11月15日 12:34:5");
     }
 }

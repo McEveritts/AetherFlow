@@ -52,14 +52,17 @@ fn catalog_source(variable: &str, filename: &str, embedded: &str) -> Result<Stri
         }
     }
     for path in env_paths {
-        if !path.trim().is_empty() {
-            return Ok(std::fs::read_to_string(path.trim())?);
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(crate::open_and_read_regular_config(std::path::Path::new(
+                trimmed,
+            ))?);
         }
     }
     for path in crate::canonical_config_candidates(filename) {
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => return Ok(std::fs::read_to_string(path)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        match crate::open_and_read_regular_config(&path) {
+            Ok(s) => return Ok(s),
+            Err(error) if crate::is_missing_config_candidate(&error) => {}
             Err(error) => return Err(error.into()),
         }
     }

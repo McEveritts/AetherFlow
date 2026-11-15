@@ -300,6 +300,7 @@ pub struct AppState {
     pub obfuscation_key: [u8; 32],
     pub garbage_semaphore: Arc<Semaphore>,
     pub garbage_ip_tracker: GarbageIpTracker,
+    pub garbage_stream_timeout: std::time::Duration,
     pub telemetry_limiter: TelemetryRateLimiter,
 }
 

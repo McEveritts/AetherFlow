@@ -4560,7 +4560,11 @@ wait_for_service_ready() {
     local -a curl_tls_args=()
     case "$readiness_path" in
         http://*) ready_url="$readiness_path" ;;
-        https://*) ready_url="$readiness_path"; curl_tls_args=(-k) ;;
+        https://127.0.0.1:*|https://127.0.0.1/*|https://\[::1\]:*|https://\[::1\]/*|https://localhost:*|https://localhost/*)
+            ready_url="$readiness_path"
+            curl_tls_args=(-k)
+            ;;
+        https://*) ready_url="$readiness_path" ;;
         /*) ready_url="http://127.0.0.1:${port}${readiness_path}" ;;
         *) return 1 ;;
     esac

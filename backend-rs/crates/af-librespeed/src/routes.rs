@@ -6,7 +6,8 @@ use crate::redact::{
     format_getip_display, peer_ip_key, redact_freeform_text, redact_single_ip, resolve_client_ip,
 };
 use crate::stats::{
-    handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, StatsAuth, TelemetryRateLimiter,
+    handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, GarbageStreamGuard, StatsAuth,
+    TelemetryRateLimiter,
 };
 use crate::ulid::{generate_ulid, obfuscate_ulid, resolve_id};
 use axum::body::{Body, Bytes};
@@ -28,18 +29,20 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_EMPTY_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TELEMETRY_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_STATS_BODY_BYTES: usize = 64 * 1024;
-pub const MAX_CONCURRENT_GARBAGE_STREAMS: usize = 32;
-pub const MAX_GARBAGE_STREAMS_PER_IP: usize = 8;
+pub const MAX_CONCURRENT_GARBAGE_STREAMS: usize = 64;
+pub const MAX_GARBAGE_STREAMS_PER_IP: usize = 16;
 const MAX_GARBAGE_STREAM_DURATION: Duration = Duration::from_secs(60);
+const MAX_EMPTY_UPLOAD_DURATION: Duration = Duration::from_secs(60);
+const MAX_TELEMETRY_READ_DURATION: Duration = Duration::from_secs(30);
 const GARBAGE_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const MIN_GARBAGE_CHUNKS: usize = 1;
 const MAX_GARBAGE_CHUNKS: usize = 1024;
@@ -52,6 +55,14 @@ static RANDOM_CHUNK_1MIB: Lazy<Bytes> = Lazy::new(|| {
 });
 
 pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
+    build_router_with_stream_timeout(config, vault, MAX_GARBAGE_STREAM_DURATION)
+}
+
+pub fn build_router_with_stream_timeout(
+    config: Config,
+    vault: Option<TelemetryVault>,
+    garbage_stream_timeout: Duration,
+) -> Router {
     let obfuscation_key = vault
         .as_ref()
         .map(|v| *v.obfuscation_key())
@@ -67,6 +78,7 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
         obfuscation_key,
         garbage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_GARBAGE_STREAMS)),
         garbage_ip_tracker: GarbageIpTracker::new(),
+        garbage_stream_timeout,
         telemetry_limiter: TelemetryRateLimiter::new(),
     };
 
@@ -181,18 +193,27 @@ fn query_flag_truthy(query: Option<&str>, key: &str) -> bool {
 async fn handle_empty(body: Body) -> Response {
     let mut stream = body.into_data_stream();
     let mut total: usize = 0;
-    while let Some(next_chunk) = stream.next().await {
-        let Ok(chunk) = next_chunk else {
-            return (StatusCode::BAD_REQUEST, "failed reading upload stream").into_response();
-        };
-        total = total.saturating_add(chunk.len());
-        if total > MAX_EMPTY_BODY_BYTES {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload body exceeds 64 MiB limit",
-            )
-                .into_response();
+    let read_outcome = tokio::time::timeout(MAX_EMPTY_UPLOAD_DURATION, async {
+        while let Some(next_chunk) = stream.next().await {
+            let Ok(chunk) = next_chunk else {
+                return Err((StatusCode::BAD_REQUEST, "failed reading upload stream"));
+            };
+            total = total.saturating_add(chunk.len());
+            if total > MAX_EMPTY_BODY_BYTES {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "upload body exceeds 64 MiB limit",
+                ));
+            }
         }
+        Ok(())
+    })
+    .await;
+
+    match read_outcome {
+        Err(_) => return (StatusCode::REQUEST_TIMEOUT, "upload stream timed out").into_response(),
+        Ok(Err(err_resp)) => return err_resp.into_response(),
+        Ok(Ok(())) => {}
     }
 
     let mut headers = HeaderMap::new();
@@ -207,6 +228,25 @@ async fn handle_empty(body: Body) -> Response {
     (StatusCode::OK, headers, "").into_response()
 }
 
+struct SharedGarbageLease {
+    guards: Mutex<Option<(OwnedSemaphorePermit, Option<GarbageStreamGuard>)>>,
+    expired: AtomicBool,
+    done_notify: Notify,
+}
+
+struct GarbageStreamDropGuard {
+    lease: Arc<SharedGarbageLease>,
+}
+
+impl Drop for GarbageStreamDropGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.lease.guards.lock() {
+            let _ = slot.take();
+        }
+        self.lease.done_notify.notify_waiters();
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct GarbageQuery {
     #[serde(rename = "ckSize", default)]
@@ -216,6 +256,7 @@ struct GarbageQuery {
 async fn handle_garbage(
     State(state): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
+    conn_abort: Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
     headers: HeaderMap,
     method: Method,
     Query(q): Query<GarbageQuery>,
@@ -290,18 +331,49 @@ async fn handle_garbage(
         return (StatusCode::OK, resp_headers, Body::empty()).into_response();
     }
 
-    let started = Instant::now();
-    let stream = futures::stream::unfold(
-        (0usize, chunks, started, permit, ip_guard),
-        |(idx, max, started, permit, ip_guard)| async move {
-            if idx >= max || started.elapsed() >= MAX_GARBAGE_STREAM_DURATION {
-                None
-            } else {
-                Some((
-                    Ok::<Bytes, Infallible>(RANDOM_CHUNK_1MIB.clone()),
-                    (idx + 1, max, started, permit, ip_guard),
-                ))
+    let lease = Arc::new(SharedGarbageLease {
+        guards: Mutex::new(Some((permit, ip_guard))),
+        expired: AtomicBool::new(false),
+        done_notify: Notify::new(),
+    });
+    let watchdog_lease = Arc::clone(&lease);
+    let stream_timeout = state.garbage_stream_timeout;
+    let abort_signal = conn_abort.map(|axum::Extension(sig)| sig.0);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = watchdog_lease.done_notify.notified() => {}
+            _ = tokio::time::sleep(stream_timeout) => {
+                watchdog_lease.expired.store(true, Ordering::SeqCst);
+                if let Ok(mut slot) = watchdog_lease.guards.lock() {
+                    let _ = slot.take();
+                }
+                if let Some(abort) = abort_signal {
+                    abort.notify_waiters();
+                }
             }
+        }
+    });
+
+    let drop_guard = GarbageStreamDropGuard { lease };
+    let stream = futures::stream::unfold(
+        (0usize, chunks, drop_guard, false),
+        |(idx, max, guard, terminated)| async move {
+            if terminated || idx >= max {
+                return None;
+            }
+            if guard.lease.expired.load(Ordering::SeqCst) {
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "download stream deadline exceeded",
+                    )),
+                    (idx, max, guard, true),
+                ));
+            }
+            Some((
+                Ok::<Bytes, std::io::Error>(RANDOM_CHUNK_1MIB.clone()),
+                (idx + 1, max, guard, false),
+            ))
         },
     );
 
@@ -442,18 +514,29 @@ async fn handle_telemetry(
 
     let mut stream = body.into_data_stream();
     let mut raw_bytes = Vec::with_capacity(4096);
-    while let Some(next_chunk) = stream.next().await {
-        let Ok(chunk) = next_chunk else {
-            return (StatusCode::BAD_REQUEST, "failed reading telemetry body").into_response();
-        };
-        if raw_bytes.len().saturating_add(chunk.len()) > MAX_TELEMETRY_BODY_BYTES {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "telemetry body exceeds 256 KiB limit",
-            )
-                .into_response();
+    let telemetry_read = tokio::time::timeout(MAX_TELEMETRY_READ_DURATION, async {
+        while let Some(next_chunk) = stream.next().await {
+            let Ok(chunk) = next_chunk else {
+                return Err((StatusCode::BAD_REQUEST, "failed reading telemetry body"));
+            };
+            if raw_bytes.len().saturating_add(chunk.len()) > MAX_TELEMETRY_BODY_BYTES {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "telemetry body exceeds 256 KiB limit",
+                ));
+            }
+            raw_bytes.extend_from_slice(&chunk);
         }
-        raw_bytes.extend_from_slice(&chunk);
+        Ok(())
+    })
+    .await;
+
+    match telemetry_read {
+        Err(_) => {
+            return (StatusCode::REQUEST_TIMEOUT, "telemetry body read timed out").into_response()
+        }
+        Ok(Err(err_resp)) => return err_resp.into_response(),
+        Ok(Ok(())) => {}
     }
 
     let fields = match parse_telemetry_fields(&parts.headers, raw_bytes, &state).await {
