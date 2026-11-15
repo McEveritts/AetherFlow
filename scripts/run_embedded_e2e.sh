@@ -204,10 +204,9 @@ if [[ -d "${ROOT_DIR}/config" ]]; then
     cp -R "${ROOT_DIR}/config/." "${FS_ROOT}/opt/AetherFlow/config/"
     mkdir -p "${WORK_DIR}/config"
     cp -R "${ROOT_DIR}/config/." "${WORK_DIR}/config/"
-elif [[ -d "${ROOT_DIR}/backend/config" ]]; then
-    cp -R "${ROOT_DIR}/backend/config/." "${FS_ROOT}/opt/AetherFlow/config/"
-    mkdir -p "${WORK_DIR}/config"
-    cp -R "${ROOT_DIR}/backend/config/." "${WORK_DIR}/config/"
+else
+    echo "error: canonical config directory '${ROOT_DIR}/config' not found" >&2
+    exit 1
 fi
 
 PLUGINS_DIR="${WORK_DIR}/plugins"

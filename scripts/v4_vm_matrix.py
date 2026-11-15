@@ -1038,7 +1038,7 @@ def render_baseline_guest_build_script(*, jobs: int = 2) -> str:
     Renders the in-guest build script for `build-baseline-artifact` inside Ubuntu 22.04 (GLIBC 2.35).
     Enforces:
       1. Real Next.js static export build (`NEXT_STATIC_EXPORT=1 npm run build --workspace frontend`)
-         even when placeholder `web/dist` or `backend/web/dist` directories already exist in the repo.
+         even when placeholder `web/dist` directories already exist in the repo.
       2. Verifies `web/dist/index.html` and `web/dist/_next` exist and are non-empty before Rust compile.
       3. Requires `backend-rs/Cargo.lock` to exist and runs `cargo fetch --locked` first, followed by
          offline (`CARGO_NET_OFFLINE=true`), locked (`CARGO_LOCKED=1` / `--locked`) compilation.
@@ -1068,18 +1068,15 @@ if [[ ! -d frontend ]]; then
     echo "ERROR: frontend directory missing from source snapshot" >&2
     exit 1
 fi
-rm -rf web/dist backend/web/dist frontend/out
+rm -rf web/dist frontend/out
 nice -n 10 ionice -c 2 -n 7 npm ci --no-fund --no-audit
 NEXT_STATIC_EXPORT=1 nice -n 10 ionice -c 2 -n 7 npm run build --workspace frontend
 test -s frontend/out/index.html
 test -d frontend/out/_next
-mkdir -p web/dist backend/web/dist
+mkdir -p web/dist
 cp -R frontend/out/. web/dist/
-cp -R frontend/out/. backend/web/dist/
 test -s web/dist/index.html
 test -d web/dist/_next
-test -s backend/web/dist/index.html
-test -d backend/web/dist/_next
 
 # 2. Require final committed Cargo.lock, prefetch crates explicitly, then compile offline with --locked and 2 jobs
 test -s backend-rs/Cargo.lock

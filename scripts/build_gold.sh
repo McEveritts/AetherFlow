@@ -2,12 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BACKEND_DIR="${BACKEND_DIR:-${ROOT_DIR}/backend}"
 BACKEND_RS_DIR="${BACKEND_RS_DIR:-${ROOT_DIR}/backend-rs}"
 FRONTEND_DIR="${FRONTEND_DIR:-${ROOT_DIR}/frontend}"
 CONFIG_DIR="${CONFIG_DIR:-${ROOT_DIR}/config}"
 EMBED_DIST_DIR="${EMBED_DIST_DIR:-${ROOT_DIR}/web/dist}"
-LEGACY_EMBED_DIST_DIR="${LEGACY_EMBED_DIST_DIR:-${BACKEND_DIR}/web/dist}"
 VERSION_FILE="${VERSION_FILE:-${ROOT_DIR}/.version}"
 VERSION="${VERSION:-$(tr -d '\r\n' < "${VERSION_FILE}")}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-Gold}"
@@ -16,6 +14,9 @@ CARGO_BIN_NAME="${CARGO_BIN_NAME:-aetherflow-api}"
 CLI_BINARY_NAME="${CLI_BINARY_NAME:-af}"
 CARGO_CLI_BIN_NAME="${CARGO_CLI_BIN_NAME:-af}"
 BUILD_CLI="${BUILD_CLI:-1}"
+SPEEDTEST_BINARY_NAME="${SPEEDTEST_BINARY_NAME:-speedtest-backend}"
+CARGO_SPEEDTEST_BIN_NAME="${CARGO_SPEEDTEST_BIN_NAME:-speedtest-backend}"
+BUILD_SPEEDTEST="${BUILD_SPEEDTEST:-1}"
 CARGO_LOCKED="${CARGO_LOCKED:-1}"
 CARGO_ALLOW_UNLOCKED_DEV="${CARGO_ALLOW_UNLOCKED_DEV:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist/gold/${VERSION}}"
@@ -65,10 +66,8 @@ resolve_cargo_locked_args() {
 resolve_config_source_dir() {
   if [[ -d "${CONFIG_DIR}" ]]; then
     printf '%s' "${CONFIG_DIR}"
-  elif [[ -d "${BACKEND_DIR}/config" ]]; then
-    printf '%s' "${BACKEND_DIR}/config"
   else
-    echo "error: neither '${CONFIG_DIR}' nor '${BACKEND_DIR}/config' exists" >&2
+    echo "error: config directory '${CONFIG_DIR}' does not exist" >&2
     exit 1
   fi
 }
@@ -104,6 +103,20 @@ normalize_arch_label() {
   esac
 }
 
+stage_companion_binary() {
+  local compiled_path="$1"
+  local target_dir="$2"
+  local dest_name="$3"
+  if [[ ! -f "${compiled_path}" ]]; then
+    echo "error: expected compiled binary '${compiled_path}' not found" >&2
+    exit 1
+  fi
+  cp "${compiled_path}" "${target_dir}/${dest_name}"
+  mkdir -p "${target_dir}/bin"
+  cp "${compiled_path}" "${target_dir}/bin/${dest_name}"
+  chmod 0755 "${target_dir}/${dest_name}" "${target_dir}/bin/${dest_name}"
+}
+
 build_target() {
   local raw_arch="$1"
   local arch
@@ -116,10 +129,9 @@ build_target() {
   fi
   local target_dir="${OUTPUT_DIR}/linux-${arch}"
   local artifact="${target_dir}/${BINARY_NAME}"
-  local cli_artifact="${target_dir}/${CLI_BINARY_NAME}"
   local archive="${OUTPUT_DIR}/aetherflow-linux-${arch}.tar.gz"
   local compiled_bin=""
-  local compiled_cli=""
+  local compiled_speedtest=""
   local cfg_src=""
   cfg_src="$(resolve_config_source_dir)"
 
@@ -136,6 +148,9 @@ build_target() {
     if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
       cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_CLI_BIN_NAME}"
     fi
+    if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
+      cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_SPEEDTEST_BIN_NAME}"
+    fi
   )
 
   local cargo_target_dir="${CARGO_TARGET_DIR:-${BACKEND_RS_DIR}/target}"
@@ -143,7 +158,6 @@ build_target() {
     cargo_target_dir="${BACKEND_RS_DIR}/${cargo_target_dir}"
   fi
   compiled_bin="${cargo_target_dir}/${rust_target}/release/${CARGO_BIN_NAME}"
-  local compiled_cli="${cargo_target_dir}/${rust_target}/release/af"
   if [[ ! -f "${compiled_bin}" ]]; then
     echo "error: expected compiled binary '${compiled_bin}' not found" >&2
     exit 1
@@ -153,15 +167,12 @@ build_target() {
   chmod 0755 "${artifact}"
 
   if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
-    compiled_cli="${cargo_target_dir}/${rust_target}/release/${CARGO_CLI_BIN_NAME}"
-    if [[ ! -f "${compiled_cli}" ]]; then
-      echo "error: expected compiled CLI binary '${compiled_cli}' not found" >&2
-      exit 1
-    fi
-    cp "${compiled_cli}" "${cli_artifact}"
-    mkdir -p "${target_dir}/bin"
-    cp "${compiled_cli}" "${target_dir}/bin/${CLI_BINARY_NAME}"
-    chmod 0755 "${cli_artifact}" "${target_dir}/bin/${CLI_BINARY_NAME}"
+    stage_companion_binary "${cargo_target_dir}/${rust_target}/release/${CARGO_CLI_BIN_NAME}" "${target_dir}" "${CLI_BINARY_NAME}"
+  fi
+
+  if [[ "${BUILD_SPEEDTEST}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-librespeed/Cargo.toml" ]]; then
+    compiled_speedtest="${cargo_target_dir}/${rust_target}/release/${CARGO_SPEEDTEST_BIN_NAME}"
+    stage_companion_binary "${compiled_speedtest}" "${target_dir}" "${SPEEDTEST_BINARY_NAME}"
   fi
 
   cp -R "${cfg_src}" "${target_dir}/config"
@@ -198,13 +209,12 @@ if [[ "${BUILD_FRONTEND}" == "1" ]]; then
     cd "${FRONTEND_DIR}"
     env NEXT_STATIC_EXPORT=1 npm run build
   )
-  rm -rf "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
-  mkdir -p "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
+  rm -rf "${EMBED_DIST_DIR}"
+  mkdir -p "${EMBED_DIST_DIR}"
   cp -R "${FRONTEND_DIR}/out/." "${EMBED_DIST_DIR}/"
-  cp -R "${FRONTEND_DIR}/out/." "${LEGACY_EMBED_DIST_DIR}/"
 else
-  # Ensure web/dist and backend/web/dist exist so rust-embed in af-api compiles cleanly when BUILD_FRONTEND=0
-  mkdir -p "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
+  # Ensure web/dist exists so rust-embed in af-api compiles cleanly when BUILD_FRONTEND=0
+  mkdir -p "${EMBED_DIST_DIR}"
 fi
 
 if [[ "${RUN_TESTS}" == "1" ]]; then

@@ -69,8 +69,6 @@ build_release_tarball() {
     cp -f "${ROOT_DIR}/deploy/systemd/aetherflow-runner.service" "${stage}/deploy/systemd/aetherflow-runner.service"
     if [[ -d "${ROOT_DIR}/config" ]]; then
         cp -R "${ROOT_DIR}/config/." "${stage}/config/"
-    elif [[ -d "${ROOT_DIR}/backend/config" ]]; then
-        cp -R "${ROOT_DIR}/backend/config/." "${stage}/config/"
     fi
 
     cat > "${stage}/aetherflow-api" <<EOF
@@ -209,7 +207,6 @@ AETHERFLOW_PREBUILT_SHA256="0000000000000000000000000000000000000000000000000000
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_go
     _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null 2>&1 || BAD_SHA_RC=$?
@@ -235,7 +232,6 @@ AETHERFLOW_RELEASE_TAG="v4.0.0" \
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_go
     _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null 2>&1 || UNATTESTED_PREBUILT_RC=$?
@@ -259,7 +255,6 @@ AETHERFLOW_RELEASE_TAG="v4.0.0" \
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_go
     _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null
@@ -319,7 +314,6 @@ ARTIFACT_NAME="aetherflow-linux-amd64.tar.gz"
 CHECKSUM_NAME="SHA256SUMS"
 GIT_REMOTE="origin"
 GIT_BRANCH="main"
-GO_BIN="/usr/local/go/bin/go"
 NODE_HEAP_MB=1024
 HEALTH_ENDPOINT="http://127.0.0.1:8080/health/ready"
 HEALTH_RETRIES=2

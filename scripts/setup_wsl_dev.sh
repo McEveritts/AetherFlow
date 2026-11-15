@@ -8,36 +8,30 @@ echo "==> Updating APT repositories..."
 sudo apt-get update
 
 echo "==> Installing build dependencies..."
-sudo apt-get install -y build-essential curl wget git bash jq sqlite3
+sudo apt-get install -y build-essential curl git bash jq pkg-config libssl-dev sqlite3
 
-echo "==> Installing Go 1.22.4..."
-# We use Go 1.22.4 as a stable reliable version for build.
-if ! command -v go >/dev/null 2>&1 || ! go version | grep -q '1.22'; then
-    echo "Downloading Go 1.22.4..."
-    wget -qO- https://go.dev/dl/go1.22.4.linux-amd64.tar.gz | sudo tar -C /usr/local -xzf -
-    
-    if [ ! -L /usr/local/bin/go ]; then
-      sudo ln -s /usr/local/go/bin/go /usr/local/bin/go
-    fi
-    if [ ! -L /usr/local/bin/gofmt ]; then
-      sudo ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
-    fi
+echo "==> Installing Rust toolchain (rustup / cargo)..."
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "Installing rustup..."
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    export PATH="${HOME}/.cargo/bin:${PATH}"
 fi
 
-echo "==> Installing Node.js v20..."
-if ! command -v node >/dev/null 2>&1 || ! node -v | grep -q '^v20'; then
+echo "==> Installing Node.js v24..."
+if ! command -v node >/dev/null 2>&1 || ! node -v | grep -q '^v24'; then
     echo "Downloading Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
     sudo apt-get install -y nodejs
 fi
 
 echo "==> Environment Provisioned Successfully!"
-echo "Go version: $(go version)"
+echo "Rustc version: $(rustc --version)"
+echo "Cargo version: $(cargo --version)"
 echo "Node version: $(node -v)"
 echo "NPM version: $(npm -v)"
 echo ""
 echo "To build the project, run:"
 echo "  ./scripts/build_gold.sh"
 echo "Or build manually:"
-echo "  cd backend && go build -o aetherflow-api"
-echo "  cd frontend && npm install && npm run build"
+echo "  npm ci && NEXT_STATIC_EXPORT=1 npm run build --workspace frontend && rm -rf web/dist && mkdir -p web/dist && cp -R frontend/out/. web/dist/"
+echo "  cd backend-rs && cargo build --release --locked --bin aetherflow-api --bin af"
