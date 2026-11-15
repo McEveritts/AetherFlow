@@ -84,8 +84,19 @@ pub fn is_trusted_proxy_peer(peer_addr: Option<SocketAddr>, trusted_proxies: &[I
 }
 
 /// Extracts the canonical forwarded client IP ONLY when `peer_addr` is an
-/// explicitly configured `trusted_proxies` peer and a valid rightmost
-/// `X-Forwarded-For` hop or `X-Real-IP` header is present.
+/// explicitly configured `trusted_proxies` peer.
+///
+/// Security invariants:
+/// 1. `X-Forwarded-For` is walked right-to-left on raw header bytes (`b','`) so
+///    non-ASCII (`obs-text`) bytes injected into untrusted leftward hops can never
+///    invalidate the trusted proxy's appended rightmost hop or trigger a fallback
+///    to a client-spoofed `X-Real-IP`.
+/// 2. Explicit non-loopback `trusted_proxies` hops are peeled right-to-left to
+///    support multi-tier ingress chains (e.g. `CDN/Edge -> Apache -> speedtest-backend`),
+///    while loopback hops (`127.0.0.1` / `::1`) terminate peeling so a local
+///    unprivileged user connecting via loopback Apache cannot spoof arbitrary
+///    leftward `X-Forwarded-For` addresses.
+/// 3. `X-Real-IP` is consulted ONLY when `X-Forwarded-For` is completely absent.
 pub fn extract_trusted_forwarded_ip(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
@@ -94,29 +105,41 @@ pub fn extract_trusted_forwarded_ip(
     if !is_trusted_proxy_peer(peer_addr, trusted_proxies) {
         return None;
     }
-    if let Some(xff) = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .next_back()
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(rightmost) = xff.rsplit(',').next() {
-            if let Some(ip) = parse_ip_token(rightmost) {
+    if headers.contains_key("x-forwarded-for") {
+        let mut saw_any_hop = false;
+        let mut fallback_trusted_hop: Option<IpAddr> = None;
+        let xff_values: Vec<&axum::http::HeaderValue> =
+            headers.get_all("x-forwarded-for").iter().collect();
+        for hv in xff_values.into_iter().rev() {
+            for raw_hop in hv.as_bytes().rsplit(|&b| b == b',') {
+                let trimmed = raw_hop.trim_ascii();
+                let hop_str = std::str::from_utf8(trimmed).ok()?;
+                let ip = parse_ip_token(hop_str)?;
+                saw_any_hop = true;
+                let is_trusted_non_loopback = !ip.is_loopback()
+                    && trusted_proxies
+                        .iter()
+                        .any(|trusted| canonicalize_ip_addr(*trusted) == ip);
+                if is_trusted_non_loopback {
+                    fallback_trusted_hop = Some(ip);
+                    continue;
+                }
                 return Some(ip);
             }
         }
+        return if saw_any_hop {
+            fallback_trusted_hop
+        } else {
+            None
+        };
     }
-    if let Some(xri) = headers
-        .get_all("x-real-ip")
-        .iter()
-        .next_back()
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(ip) = parse_ip_token(xri) {
-            return Some(ip);
-        }
+
+    let mut xri_iter = headers.get_all("x-real-ip").iter();
+    let first_xri = xri_iter.next()?;
+    if xri_iter.next().is_some() {
+        return None;
     }
-    None
+    first_xri.to_str().ok().and_then(parse_ip_token)
 }
 
 /// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (strictly the
@@ -292,6 +315,51 @@ mod tests {
         assert_eq!(
             resolve_client_ip(external, &headers, &trusted),
             "192.0.2.50"
+        );
+
+        // Multi-tier non-loopback ingress chain: Edge (10.10.0.2) -> Apache (127.0.0.1)
+        let multi_tier_trusted = vec![
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "::1".parse::<IpAddr>().unwrap(),
+            "10.10.0.2".parse::<IpAddr>().unwrap(),
+        ];
+        let mut chain_headers = HeaderMap::new();
+        chain_headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.1.1.1, 203.0.113.44, 10.10.0.2"),
+        );
+        assert_eq!(
+            resolve_client_ip(loopback, &chain_headers, &multi_tier_trusted),
+            "203.0.113.44"
+        );
+
+        // obs-text (non-UTF8 bytes) injected into client XFF prefix must NOT fall through
+        // to a client-spoofed X-Real-IP; rightmost proxy hop still resolves cleanly, and a
+        // malformed rightmost XFF hop fails closed to peer_addr rather than X-Real-IP.
+        let mut obs_prefix = HeaderMap::new();
+        obs_prefix.insert(
+            "x-forwarded-for",
+            HeaderValue::from_bytes(b"\xffspoof, 198.51.100.88").unwrap(),
+        );
+        obs_prefix.insert("x-real-ip", HeaderValue::from_static("203.0.113.250"));
+        assert_eq!(
+            resolve_client_ip(loopback, &obs_prefix, &trusted),
+            "198.51.100.88"
+        );
+
+        let mut obs_rightmost = HeaderMap::new();
+        obs_rightmost.insert(
+            "x-forwarded-for",
+            HeaderValue::from_bytes(b"\xffbad").unwrap(),
+        );
+        obs_rightmost.insert("x-real-ip", HeaderValue::from_static("203.0.113.250"));
+        assert_eq!(
+            extract_trusted_forwarded_ip(loopback, &obs_rightmost, &trusted),
+            None
+        );
+        assert_eq!(
+            resolve_client_ip(loopback, &obs_rightmost, &trusted),
+            "127.0.0.1"
         );
     }
 

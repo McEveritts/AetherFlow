@@ -1451,4 +1451,141 @@ async fn trusted_proxy_stats_login_lockout_isolates_forwarded_clients() {
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
     }
+
+    // Attacker injecting obs-text into XFF + forged X-Real-IP still maps to 203.0.113.77 and stays 429-locked!
+    {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                "x-forwarded-for",
+                axum::http::HeaderValue::from_bytes(b"\xffbypass, 203.0.113.77").unwrap(),
+            )
+            .header("x-real-ip", "198.51.100.250")
+            .body(Body::from("op=login&password=VaultSecretPassword!9"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // Rotating XFF from the same loopback proxy peer hits the outer per-peer cap (50 failures total;
+    // 10 already recorded above, so 40 more rotating failures reach 50 and lock out attempt 51).
+    for i in 0..40u8 {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", format!("192.0.2.{}", i + 1))
+            .body(Body::from("op=login&password=wrong"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "192.0.2.254")
+            .body(Body::from("op=login&password=VaultSecretPassword!9"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+#[tokio::test]
+async fn http2_zero_window_stalled_garbage_stream_reclaims_listener_slots() {
+    use af_librespeed::routes::{build_router_with_timeouts, RouteTimeouts};
+    use af_librespeed::tls::{serve_http_with_limits, ListenerLimits};
+    use http_body_util::Empty;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    let tmp = TempDirGuard::new("h2-zero-window");
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_type = "none".to_string();
+    let app = build_router_with_timeouts(
+        cfg,
+        None,
+        RouteTimeouts {
+            garbage_stream: Duration::from_millis(200),
+            empty_upload: Duration::from_millis(200),
+            stats_body: Duration::from_millis(200),
+        },
+    );
+
+    let limits = ListenerLimits {
+        max_connections: 2,
+        header_read_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(30),
+        http2_max_concurrent_streams: 8,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        serve_http_with_limits(
+            listener,
+            app,
+            async move {
+                let _ = rx.await;
+            },
+            limits,
+        )
+        .await
+        .unwrap();
+    });
+
+    // Saturate all 2 listener connection slots with HTTP/2 clients that request 4 MiB (/garbage?ckSize=4)
+    // and never read the response body (exhausting the 65,535-byte HTTP/2 stream window while the
+    // spawned hyper h2 Connection driver continues answering SETTINGS/PING frames).
+    let mut held_h2 = Vec::new();
+    for _ in 0..limits.max_connections {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (mut sender, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+                .await
+                .unwrap();
+        let conn_task = tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("http://127.0.0.1/garbage?ckSize=4")
+            .body(Empty::<axum::body::Bytes>::new())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        held_h2.push((sender, resp, conn_task));
+    }
+
+    // Wait past 200ms garbage_stream deadline + 100ms HTTP/2 RST grace window.
+    tokio::time::sleep(Duration::from_millis(480)).await;
+
+    // A fresh client connection must succeed because wedged zero-window HTTP/2 connections were aborted.
+    let mut fresh = TcpStream::connect(addr).await.unwrap();
+    fresh
+        .write_all(b"GET /getIP HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut ok_buf = Vec::new();
+    fresh.read_to_end(&mut ok_buf).await.unwrap();
+    let ok_resp = String::from_utf8_lossy(&ok_buf);
+    assert!(
+        ok_resp.starts_with("HTTP/1.1 200 OK"),
+        "expected listener slot recovery after HTTP/2 zero-window stall, got: {ok_resp}"
+    );
+
+    drop(held_h2);
+    let _ = tx.send(());
+    server_task.await.unwrap();
 }

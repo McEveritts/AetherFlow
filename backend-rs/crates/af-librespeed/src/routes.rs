@@ -378,6 +378,7 @@ async fn handle_empty(
 struct SharedGarbageLease {
     guards: Mutex<Option<(OwnedSemaphorePermit, Option<GarbageStreamGuard>)>>,
     expired: AtomicBool,
+    finished: AtomicBool,
     done_notify: Notify,
 }
 
@@ -390,7 +391,8 @@ impl Drop for GarbageStreamDropGuard {
         if let Ok(mut slot) = self.lease.guards.lock() {
             let _ = slot.take();
         }
-        self.lease.done_notify.notify_waiters();
+        self.lease.finished.store(true, Ordering::SeqCst);
+        self.lease.done_notify.notify_one();
     }
 }
 
@@ -482,25 +484,47 @@ async fn handle_garbage(
     let lease = Arc::new(SharedGarbageLease {
         guards: Mutex::new(Some((permit, ip_guard))),
         expired: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
         done_notify: Notify::new(),
     });
     let watchdog_lease = Arc::clone(&lease);
     let stream_timeout = state.garbage_stream_timeout;
-    let abort_signal = if version != Version::HTTP_2 {
-        conn_abort.map(|axum::Extension(sig)| sig)
-    } else {
-        None
-    };
+    let abort_signal = conn_abort.map(|axum::Extension(sig)| sig);
+    let is_http2 = version == Version::HTTP_2;
     tokio::spawn(async move {
+        let done = watchdog_lease.done_notify.notified();
+        tokio::pin!(done);
+        done.as_mut().enable();
+        if watchdog_lease.finished.load(Ordering::SeqCst) {
+            return;
+        }
         tokio::select! {
-            _ = watchdog_lease.done_notify.notified() => {}
+            _ = &mut done => {}
             _ = tokio::time::sleep(stream_timeout) => {
                 watchdog_lease.expired.store(true, Ordering::SeqCst);
                 if let Ok(mut slot) = watchdog_lease.guards.lock() {
                     let _ = slot.take();
                 }
                 if let Some(abort) = abort_signal {
-                    abort.abort();
+                    if is_http2 {
+                        // Allow h2 a short window to poll the expired body, emit stream-scoped
+                        // RST_STREAM, and drop GarbageStreamDropGuard while preserving sibling
+                        // HTTP/2 streams. If the peer exhausted its HTTP/2 stream window (0 bytes)
+                        // and withholds WINDOW_UPDATE so h2 never polls Body, abort the wedged
+                        // connection to reclaim its listener concurrency slot.
+                        if !watchdog_lease.finished.load(Ordering::SeqCst) {
+                            tokio::select! {
+                                _ = &mut done => {}
+                                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                                    if !watchdog_lease.finished.load(Ordering::SeqCst) {
+                                        abort.abort();
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        abort.abort();
+                    }
                 }
             }
         }

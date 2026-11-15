@@ -1584,18 +1584,7 @@
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
-      "/opt/librespeed",
-      "{{SERVICE_HOME}}",
-      "-/home/hdd",
-      "-/home/ramdisk",
-      "-/home/{{MASTER_USER}}/Google",
-      "-/home/{{MASTER_USER}}/.google_root",
-      "-/home/{{MASTER_USER}}/Google/Media/Movies",
-      "-/home/{{MASTER_USER}}/Google/Media/TV",
-      "-/home/{{MASTER_USER}}/Google/Media/Music",
-      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
-      "-/home/{{MASTER_USER}}/Google/Media/UFC",
-      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
+      "/opt/librespeed"
     ],
     "sandbox_service_units": [
       "librespeed.service"

@@ -808,6 +808,61 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 re.search(r"\bgo\s+build\b", content),
                 f"{label} must not invoke standalone 'go build'",
             )
+        self.assertNotIn("https://sh.rustup.rs", modern_stack)
+        self.assertIn("static.rust-lang.org/rustup/archive/", modern_stack)
+        self.assertIn("sha256sum -c -", modern_stack)
+
+    def test_librespeed_sandbox_installer_and_canonical_db_parity(self) -> None:
+        pkg_auto = json.loads((ROOT / "config/package_automation.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            pkg_auto["librespeed"]["sandbox_rw_paths"],
+            ["/opt/librespeed"],
+            "librespeed post-install sandbox drop-in must confine RW access strictly to /opt/librespeed",
+        )
+
+        installer = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
+        self.assertNotIn("chown -hRP librespeed:librespeed /opt/librespeed", installer)
+        self.assertIn("os.fchmod(fd, mode)", installer)
+        self.assertIn("dir_fd=dir_fd", installer)
+
+        # Verify readiness target snippet preserves non-loopback IPv4/IPv6 bind_address
+        m_ready = re.search(
+            r'LS_READINESS_TARGET="\$\(python3 - /opt/librespeed/settings\.toml "\$APP_PORT" <<\'PYEOF\'\n(.*?)\nPYEOF',
+            installer,
+            re.S,
+        )
+        self.assertIsNotNone(m_ready)
+        snippet = m_ready.group(1)  # type: ignore[union-attr]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "settings.toml"
+            for raw_cfg, expected in (
+                ('bind_address="127.0.0.1"\nenable_tls=false\n', "/"),
+                ('bind_address="0.0.0.0"\nenable_tls=false\n', "/"),
+                ('bind_address="::1"\nenable_tls=false\n', "http://[::1]:8988/"),
+                ('bind_address="192.168.1.50"\nenable_tls=false\n', "http://192.168.1.50:8988/"),
+                ('bind_address="fd00::55"\nenable_tls=false\n', "http://[fd00::55]:8988/"),
+                ('bind_address="192.168.1.50"\nenable_tls=true\n', "https://192.168.1.50:8988/"),
+            ):
+                cfg.write_text(raw_cfg, encoding="utf-8")
+                out = subprocess.check_output(
+                    [sys.executable, "-c", snippet, str(cfg), "8988"],
+                    text=True,
+                ).strip()
+                self.assertEqual(out, expected, f"Failed readiness URL for {raw_cfg!r}")
+
+        for rel in ("packages/system/af-certbot-sync", "packages/common.sh"):
+            txt = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=", txt)
+            self.assertIn("/opt/AetherFlow/current/data/aetherflow.sqlite", txt)
+
+        sec_yml = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "cargo deny --manifest-path ../plugins/sdk-template-rust/backend/Cargo.toml --config deny.toml --locked",
+            sec_yml,
+        )
+
+        flowai_doc = (ROOT / "docs/flowai.md").read_text(encoding="utf-8")
+        self.assertNotIn("backend/providers/", flowai_doc)
 
 
 if __name__ == "__main__":

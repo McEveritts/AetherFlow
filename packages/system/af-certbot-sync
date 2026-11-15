@@ -44,11 +44,23 @@ if ! command -v certbot >/dev/null 2>&1; then
 fi
 
 ENV_DB=""
+ENV_DATA_DIR=""
 if [[ -f /etc/aetherflow/aetherflow.env ]]; then
-    ENV_DB="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+    ENV_DB="$(grep -E '^(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+    ENV_DATA_DIR="$(grep -E '^DATA_DIR=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
 fi
 DB=""
-for cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$ENV_DB" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+for cand in \
+    "${AF_DB_PATH:-}" \
+    "${DB_PATH:-}" \
+    "${AETHERFLOW_DB_PATH:-}" \
+    "$ENV_DB" \
+    "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}" \
+    "${ENV_DATA_DIR:+${ENV_DATA_DIR%/}/aetherflow.sqlite}" \
+    /var/lib/aetherflow/aetherflow.sqlite \
+    /opt/AetherFlow/current/data/aetherflow.sqlite \
+    /opt/AetherFlow/data/aetherflow.sqlite \
+    /opt/AetherFlow/backend/data/aetherflow.sqlite; do
     if [[ -n "$cand" && -f "$cand" ]]; then
         DB="$cand"
         break

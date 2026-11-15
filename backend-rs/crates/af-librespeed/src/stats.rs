@@ -30,6 +30,7 @@ const COOKIE_NAME: &str = "logged";
 const SESSION_TTL_SECS: i64 = 3600;
 const LOGIN_WINDOW_SECS: i64 = 60;
 const MAX_FAILED_LOGINS_PER_WINDOW: usize = 10;
+pub const MAX_FAILED_LOGINS_PER_PROXY_PEER: usize = 50;
 const MAX_TRACKED_LOGIN_IPS: usize = 4096;
 const MAX_STATS_FORM_BYTES: usize = 64 * 1024;
 const STATS_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
@@ -71,14 +72,23 @@ impl StatsAuth {
     }
 
     pub fn check_login_allowed(&self, ip: &str, now_unix: i64) -> bool {
+        self.check_login_allowed_with_limit(ip, MAX_FAILED_LOGINS_PER_WINDOW, now_unix)
+    }
+
+    pub fn check_login_allowed_with_limit(
+        &self,
+        key: &str,
+        max_failures: usize,
+        now_unix: i64,
+    ) -> bool {
         let Ok(mut map) = self.login_attempts.lock() else {
             return false;
         };
-        if let Some(&(count, window_start)) = map.get(ip) {
+        if let Some(&(count, window_start)) = map.get(key) {
             if now_unix.saturating_sub(window_start) < LOGIN_WINDOW_SECS {
-                return count < MAX_FAILED_LOGINS_PER_WINDOW;
+                return count < max_failures;
             }
-            map.remove(ip);
+            map.remove(key);
         }
         true
     }
@@ -536,17 +546,31 @@ pub async fn handle_stats(
 
     if method == Method::POST && op == "login" {
         // When accessed via an explicitly configured trusted reverse proxy (e.g. loopback Apache)
-        // that supplies a valid forwarded client IP, key login throttling strictly on that client IP
-        // so one remote attacker cannot lock out all users sharing the proxy's loopback peer IP.
-        let rate_key = match extract_trusted_forwarded_ip(
+        // that supplies a valid forwarded client IP, key login throttling primarily on that client IP
+        // (10 failures / 60s) so one remote attacker cannot easily lock out normal users sharing the
+        // proxy, while ALSO enforcing an outer per-proxy-peer ceiling (50 failures / 60s) so a local
+        // loopback user rotating X-Forwarded-For directly against the listener cannot brute-force a
+        // custom statistics password.
+        let peer_raw = peer_ip_key(peer_addr);
+        let (rate_key, outer_proxy_key) = match extract_trusted_forwarded_ip(
             peer_addr,
             &headers,
             &state.config.trusted_proxies,
         ) {
-            Some(forwarded_ip) => format!("client:{forwarded_ip}"),
-            None => format!("peer:{}", peer_ip_key(peer_addr)),
+            Some(forwarded_ip) => (
+                format!("client:{forwarded_ip}"),
+                Some(format!("proxy_peer:{peer_raw}")),
+            ),
+            None => (format!("peer:{peer_raw}"), None),
         };
-        if !state.stats_auth.check_login_allowed(&rate_key, now_unix) {
+        let outer_allowed = outer_proxy_key.as_ref().is_none_or(|pk| {
+            state.stats_auth.check_login_allowed_with_limit(
+                pk,
+                MAX_FAILED_LOGINS_PER_PROXY_PEER,
+                now_unix,
+            )
+        });
+        if !state.stats_auth.check_login_allowed(&rate_key, now_unix) || !outer_allowed {
             let mut resp = stats_html_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 render_login_page(
@@ -572,6 +596,9 @@ pub async fn handle_stats(
             return redirect_with_cookie(&cookie_path, &set_cookie);
         }
         state.stats_auth.record_login_failure(&rate_key, now_unix);
+        if let Some(ref pk) = outer_proxy_key {
+            state.stats_auth.record_login_failure(pk, now_unix);
+        }
         return stats_html_response(
             StatusCode::UNAUTHORIZED,
             render_login_page(&cookie_path, Some("Invalid statistics password.")),

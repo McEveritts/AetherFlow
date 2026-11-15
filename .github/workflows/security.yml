@@ -96,6 +96,7 @@ jobs:
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
           cargo deny --locked check advisories bans licenses sources
+          cargo deny --manifest-path ../plugins/sdk-template-rust/backend/Cargo.toml --config deny.toml --locked check advisories bans licenses sources
 
       - name: RustSec Vulnerability Scan (cargo-audit)
         run: |

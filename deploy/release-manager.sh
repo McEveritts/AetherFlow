@@ -1548,7 +1548,12 @@ build_from_source() {
     if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
         cargo_bin_args+=(--bin speedtest-backend)
     fi
-    cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1 || return 1
+    local af_src_ver="source-${source_sha}"
+    if [[ -s "${RELEASE_DIR}/.version" ]]; then
+        af_src_ver="$(tr -d '\r\n' < "${RELEASE_DIR}/.version")"
+    fi
+    AF_BUILD_VERSION="${af_src_ver}" AETHERFLOW_VERSION="${af_src_ver}" \
+        cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1 || return 1
     cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
     local built_bin
     for built_bin in af speedtest-backend; do

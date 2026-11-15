@@ -3217,13 +3217,19 @@ pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[Stri
         "yes"
     };
 
+    let protect_home = if norm_unit == "librespeed.service" {
+        "yes"
+    } else {
+        "read-only"
+    };
+
     let mut lines = vec![
         "[Service]".to_string(),
         "NoNewPrivileges=yes".to_string(),
         "PrivateTmp=yes".to_string(),
         format!("PrivateDevices={}", private_devices),
         "ProtectSystem=strict".to_string(),
-        "ProtectHome=read-only".to_string(),
+        format!("ProtectHome={}", protect_home),
         "ProtectClock=yes".to_string(),
         "ProtectControlGroups=yes".to_string(),
         "ProtectKernelLogs=yes".to_string(),
@@ -9411,5 +9417,30 @@ mod tests {
         }
         drop(_cwd_guard);
         let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn test_librespeed_sandbox_dropin_preserves_protect_home_yes_and_minimal_rw_paths() {
+        let rendered = render_systemd_sandbox_dropin(
+            "native",
+            "librespeed.service",
+            &["/opt/librespeed".to_string()],
+        );
+        assert!(
+            rendered.contains("\nProtectHome=yes\n"),
+            "librespeed drop-in must preserve ProtectHome=yes, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ProtectHome=read-only"),
+            "librespeed drop-in must not downgrade ProtectHome to read-only"
+        );
+        assert!(
+            rendered.contains("\nReadWritePaths=/opt/librespeed"),
+            "expected confined /opt/librespeed ReadWritePaths, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("/home/"),
+            "librespeed drop-in must not expose /home paths, got:\n{rendered}"
+        );
     }
 }

@@ -13,7 +13,7 @@ FlowAI is AetherFlow's integrated AI operations layer, designed to help operator
 
 ## Architecture Overview
 
-FlowAI uses a provider-agnostic routing layer in the Rust control plane (`backend-rs/crates/af-api/src/intelligence.rs`, with parity in `backend/providers/`) to decouple all AI logic from any specific vendor SDK.
+FlowAI uses a provider-agnostic routing layer in the Rust control plane (`backend-rs/crates/af-api/src/intelligence.rs`) to decouple all AI logic from any specific vendor SDK.
 
 ```
 ┌─────────────────────────────────────────────────────┐

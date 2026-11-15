@@ -4560,7 +4560,7 @@ wait_for_service_ready() {
     local -a curl_tls_args=()
     case "$readiness_path" in
         http://*) ready_url="$readiness_path" ;;
-        https://127.0.0.1:*|https://127.0.0.1/*|https://\[::1\]:*|https://\[::1\]/*|https://localhost:*|https://localhost/*)
+        https://127.0.0.1:*|https://127.0.0.1/*|https://\[::1\]:*|https://\[::1\]/*|https://localhost:*|https://localhost/*|https://[0-9]*.[0-9]*.[0-9]*.[0-9]*:*|https://\[*\]:*)
             ready_url="$readiness_path"
             curl_tls_args=(-k)
             ;;
@@ -4819,11 +4819,22 @@ PYEOF
         u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
     fi
     if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        local db_cand="" env_db=""
+        local db_cand="" env_db="" env_data_dir=""
         if [[ -f /etc/aetherflow/aetherflow.env ]]; then
-            env_db="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+            env_db="$(grep -E '^(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+            env_data_dir="$(grep -E '^DATA_DIR=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
         fi
-        for db_cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$env_db" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+        for db_cand in \
+            "${AF_DB_PATH:-}" \
+            "${DB_PATH:-}" \
+            "${AETHERFLOW_DB_PATH:-}" \
+            "$env_db" \
+            "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}" \
+            "${env_data_dir:+${env_data_dir%/}/aetherflow.sqlite}" \
+            /var/lib/aetherflow/aetherflow.sqlite \
+            /opt/AetherFlow/current/data/aetherflow.sqlite \
+            /opt/AetherFlow/data/aetherflow.sqlite \
+            /opt/AetherFlow/backend/data/aetherflow.sqlite; do
             if [[ -n "$db_cand" && -f "$db_cand" ]]; then
                 u="$(sqlite3 "$db_cand" "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
                 [[ -n "$u" ]] && break

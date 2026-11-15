@@ -360,10 +360,17 @@ if db_type != "none" and db_file_m:
                     if not os.path.lexists(existing_p):
                         continue
                     ex_st = os.lstat(existing_p)
-                    if not stat.S_ISREG(ex_st.st_mode):
-                        raise SystemExit(f"Refusing non-regular or symlinked local database artifact: {existing_p}")
+                    if not stat.S_ISREG(ex_st.st_mode) or ex_st.st_nlink != 1:
+                        raise SystemExit(f"Refusing non-regular, symlinked, or hardlinked local database artifact: {existing_p}")
+                    fd_ex = os.open(existing_p, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
+                    try:
+                        ex_fst = os.fstat(fd_ex)
+                        if not stat.S_ISREG(ex_fst.st_mode) or ex_fst.st_nlink != 1 or (ex_fst.st_dev, ex_fst.st_ino) != (ex_st.st_dev, ex_st.st_ino):
+                            raise SystemExit(f"Local database artifact changed inode or type before backup: {existing_p}")
+                        os.fchmod(fd_ex, 0o600)
+                    finally:
+                        os.close(fd_ex)
                     os.rename(existing_p, bak_base + suffix)
-                    os.chmod(bak_base + suffix, 0o600)
 
             for suffix in ("", "-wal", "-shm"):
                 src_p = resolved_db + suffix
@@ -373,16 +380,26 @@ if db_type != "none" and db_file_m:
                 src_st = os.lstat(src_p)
                 if not stat.S_ISREG(src_st.st_mode):
                     raise SystemExit(f"Refusing non-regular or symlinked SQLite sidecar: {src_p}")
-                fd_in = os.open(src_p, os.O_RDONLY | o_nofollow)
+                fd_in = os.open(src_p, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
                 tmp_dst = dst_p + ".migrated.tmp"
                 try:
+                    if os.path.lexists(tmp_dst):
+                        tmp_st = os.lstat(tmp_dst)
+                        if stat.S_ISDIR(tmp_st.st_mode):
+                            raise SystemExit(f"Refusing directory at temporary migration path: {tmp_dst}")
+                        os.unlink(tmp_dst)
                     with os.fdopen(fd_in, "rb") as f_in:
                         if suffix == "":
                             f_fst = os.fstat(f_in.fileno())
                             if (f_fst.st_dev, f_fst.st_ino) != (fst.st_dev, fst.st_ino):
                                 raise SystemExit("External database_file changed inode during migration")
-                        fd_out = os.open(tmp_dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | o_nofollow, 0o600)
+                        fd_out = os.open(
+                            tmp_dst,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | getattr(os, "O_CLOEXEC", 0),
+                            0o600,
+                        )
                         with os.fdopen(fd_out, "wb") as f_out:
+                            os.fchmod(f_out.fileno(), 0o600)
                             shutil.copyfileobj(f_in, f_out)
                             f_out.flush()
                             os.fsync(f_out.fileno())
@@ -462,19 +479,65 @@ tls_key_file=""
 EOF
 fi
 
-chown -hRP librespeed:librespeed /opt/librespeed
 chown -h root:librespeed /opt/librespeed
 chmod 1770 /opt/librespeed
 chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
 chmod 755 /opt/librespeed/speedtest-backend
-chown root:librespeed /opt/librespeed/settings.toml
-chmod 640 /opt/librespeed/settings.toml
-for db_item in /opt/librespeed/speedtest.db /opt/librespeed/speedtest.db-wal /opt/librespeed/speedtest.db-shm /opt/librespeed/speedtest.db.bolt.bak /opt/librespeed/speedtest.db.pre-migrate.*; do
-    if [[ -f "$db_item" && ! -L "$db_item" ]]; then
-        chown librespeed:librespeed "$db_item"
-        chmod 600 "$db_item"
-    fi
-done
+python3 - /opt/librespeed <<'PYEOF'
+import grp, os, pwd, stat, subprocess, sys
+
+state_dir = sys.argv[1]
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+is_root = os.geteuid() == 0
+
+root_uid = 0
+ls_uid = pwd.getpwnam("librespeed").pw_uid if is_root else -1
+ls_gid = grp.getgrnam("librespeed").gr_gid if is_root else -1
+
+dir_fd = os.open(state_dir, os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    dst = os.fstat(dir_fd)
+    if not stat.S_ISDIR(dst.st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {state_dir}")
+
+    def harden_entry(entry_name: str, owner_user: str, uid: int, gid: int, mode: int, required: bool) -> None:
+        try:
+            fd = os.open(entry_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dir_fd)
+        except FileNotFoundError:
+            if required:
+                raise SystemExit(f"Missing required LibreSpeed artifact: {os.path.join(state_dir, entry_name)}")
+            return
+        except OSError as exc:
+            raise SystemExit(
+                f"Refusing symlinked or unsafe LibreSpeed artifact {os.path.join(state_dir, entry_name)}: {exc}"
+            )
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                raise SystemExit(
+                    f"Refusing non-regular or hardlinked LibreSpeed artifact: {os.path.join(state_dir, entry_name)}"
+                )
+            os.fchmod(fd, mode)
+            if is_root:
+                os.fchown(fd, uid, gid)
+            else:
+                subprocess.run(
+                    ["chown", "-h", f"{owner_user}:librespeed", os.path.join(state_dir, entry_name)],
+                    check=True,
+                )
+        finally:
+            os.close(fd)
+
+    harden_entry("settings.toml", "root", root_uid, ls_gid, 0o640, required=True)
+    db_exact = {"speedtest.db", "speedtest.db-wal", "speedtest.db-shm", "speedtest.db.bolt.bak"}
+    for name in sorted(os.listdir(dir_fd)):
+        if name in db_exact or name.startswith("speedtest.db.pre-migrate."):
+            harden_entry(name, "librespeed", ls_uid, ls_gid, 0o600, required=False)
+finally:
+    os.close(dir_fd)
+PYEOF
 
 report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service
@@ -530,11 +593,15 @@ with open(cfg_path, "r", encoding="utf-8", errors="replace") as fh:
 tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt, flags=re.MULTILINE | re.IGNORECASE)
 tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
 bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
-bind_val = bind_m.group(2).strip() if bind_m else "127.0.0.1"
-host = "[::1]" if bind_val in ("::1", "[::1]") else "127.0.0.1"
+bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "127.0.0.1"
+host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
+if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
+    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
 if tls_on:
     print(f"https://{host}:{port}/")
-elif host == "[::1]":
+elif host != "127.0.0.1":
     print(f"http://{host}:{port}/")
 else:
     print("/")

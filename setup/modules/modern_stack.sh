@@ -537,8 +537,37 @@ _build_modern_stack_from_source() {
                 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
                 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang mold >/dev/null 2>&1 || true
             fi
-            curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal --default-toolchain stable || true
+            local rustup_arch="" rustup_sha256=""
+            case "$(uname -m)" in
+                x86_64|amd64)
+                    rustup_arch="x86_64-unknown-linux-gnu"
+                    rustup_sha256="a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f"
+                    ;;
+                aarch64|arm64)
+                    rustup_arch="aarch64-unknown-linux-gnu"
+                    rustup_sha256="c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a"
+                    ;;
+                armv7l|armhf)
+                    rustup_arch="armv7-unknown-linux-gnueabihf"
+                    rustup_sha256="62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb"
+                    ;;
+            esac
+            if [[ -n "${rustup_arch}" ]]; then
+                local rustup_ver="${AF_RUSTUP_VERSION:-1.28.1}"
+                local rust_tc="${AF_RUST_TOOLCHAIN:-1.88.0}"
+                local rustup_bin
+                rustup_bin="$(mktemp /tmp/af-rustup-init.XXXXXX)"
+                if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+                    "https://static.rust-lang.org/rustup/archive/${rustup_ver}/${rustup_arch}/rustup-init" \
+                    -o "${rustup_bin}" \
+                    && printf '%s  %s\n' "${AF_RUSTUP_SHA256:-${rustup_sha256}}" "${rustup_bin}" | sha256sum -c - >/dev/null 2>&1; then
+                    chmod 0700 "${rustup_bin}"
+                    "${rustup_bin}" -y --profile minimal --default-toolchain "${rust_tc}" || true
+                else
+                    echo "[WARN] Pinned rustup-init download or SHA-256 verification failed; skipping automatic Rust bootstrap." >&2
+                fi
+                rm -f "${rustup_bin}"
+            fi
             export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:${PATH}"
         fi
     fi
