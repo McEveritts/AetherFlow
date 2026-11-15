@@ -75,8 +75,13 @@ jobs:
       - name: Prepare Embedded Frontend Staging Directories
         working-directory: .
         run: |
-          mkdir -p web/dist backend/web/dist
-          touch web/dist/.keep backend/web/dist/.keep
+          mkdir -p web/dist
+          touch web/dist/.keep
+
+      - name: Verify Zero-Go Repository Hygiene
+        working-directory: .
+        run: |
+          test -z "$(git ls-files '*.go' '*go.mod' '*go.sum')"
 
       - name: Verify Workspace Lockfile Presence
         run: |
@@ -100,7 +105,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
 
       - name: Rust Security Unit & Contract Tests
         env:
@@ -111,65 +116,6 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --workspace --locked -- --test-threads=1
-
-  security-checks:
-    name: Legacy Go Backend SAST & Vulnerability Scan
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
-      - name: Install pinned Go security tools
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-
-      - name: Dependency verification
-        run: |
-          go mod verify
-
-      - name: Vulnerability scan (govulncheck)
-        run: govulncheck ./...
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: staticcheck
-        run: staticcheck ./...
-
-      - name: gosec (SAST)
-        run: |
-          gosec -severity high -confidence high ./...
-          gosec -include=G201,G202 ./...
-
-      - name: Unit & integration tests
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          TMPDIR: /tmp
-        run: go test -v -count=1 -race ./...
-
-      - name: Hex AES_MASTER_KEY parity tests
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          TMPDIR: /tmp
-        run: AES_MASTER_KEY="$(python3 -c 'print(bytes(range(32)).hex())')" go test ./api ./services -count=1
-
-      - name: Build verification
-        run: go build ./...
 
   npm-security:
     name: Monorepo NPM Production Dependency Audit

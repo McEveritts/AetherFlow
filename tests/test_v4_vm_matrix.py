@@ -637,12 +637,12 @@ class BaselineBuildAndSingleRemoteEngineTests(unittest.TestCase):
         script = vm_matrix.render_baseline_guest_build_script(jobs=2)
         # Never skip frontend build merely because `web/dist` directory exists
         self.assertNotIn("if [[ ! -d web/dist", script)
-        self.assertIn("rm -rf web/dist backend/web/dist frontend/out", script)
+        self.assertIn("rm -rf web/dist frontend/out", script)
         self.assertIn("NEXT_STATIC_EXPORT=1", script)
         self.assertIn("npm run build --workspace frontend", script)
         self.assertIn("test -s web/dist/index.html", script)
         self.assertIn("test -d web/dist/_next", script)
-        self.assertIn("test -s backend/web/dist/index.html", script)
+        self.assertNotIn("backend/web/dist", script)
         # Require Cargo.lock, explicit fetch --locked, then offline compilation with 2 jobs and nice/ionice
         self.assertIn("test -s backend-rs/Cargo.lock", script)
         self.assertIn("cargo fetch --locked", script)

@@ -212,8 +212,8 @@ youtube_asset() {
 
 class YouTubeCatalogTest(unittest.TestCase):
     def test_catalog_contracts(self):
-        catalog = json.loads((REPO / "backend/config/packages.json").read_text())
-        automation = json.loads((REPO / "backend/config/package_automation.json").read_text())
+        catalog = json.loads((REPO / "config/packages.json").read_text())
+        automation = json.loads((REPO / "config/package_automation.json").read_text())
         ports = [app["default_port"] for app in catalog if app.get("default_port")]
         self.assertEqual(len(ports), len(set(ports)))
         for name, port in APPS.items():

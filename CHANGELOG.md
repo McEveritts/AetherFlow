@@ -1,3 +1,12 @@
+## Nightly Patch Notes — November 15, 2026 — Zero-Go Cutover, Native Rust LibreSpeed & Neutral Staging
+
+This release completes the **Zero-Go cutover** across AetherFlow's repository layout, CI/release/security pipelines, test suites, and documentation:
+- **Zero-Go Repository Hygiene**: Removed all Go CI, security, and release jobs (`actions/setup-go`, `gosec`, `staticcheck`, `govulncheck`, `go test`, `go vet`, `go build`) and enforced `git ls-files '*.go' '*go.mod' '*go.sum'` checks across `.github/workflows/{ci,release,security}.yml`.
+- **Native Rust LibreSpeed (`af-librespeed` -> `speedtest-backend`)**: Added strict clippy gating (`-p af-librespeed`) and `speedtest-backend` release binary building/staging across CI and release workflows.
+- **Neutral Asset Paths & Test Cutover**: Migrated CI/release staging and Python/E2E verification suites from legacy `backend/web/dist` and `backend/config/` paths to neutral `web/dist` and canonical root `config/`, backed by `tests/test_zero_go_cutover.py`.
+
+---
+
 ## Nightly Patch Notes — November 15, 2026 — Control-Plane Hardening, OIDC/PKCE Parity & Sigstore Provenance
 
 ### Highlights

@@ -259,7 +259,7 @@ class TestRunner:
                 feat_status[fid]["fail"] += 1
 
         features_meta = [
-            ("F01", "Go Directory Browser Handler", "M1"),
+            ("F01", "Rust Directory Browser Handler", "M1"),
             ("F02", "Auth Session Refresh", "M1"),
             ("F03", "Profile Password Mutation", "M1"),
             ("F04", "Profile Avatar Mutation", "M1"),
@@ -314,7 +314,7 @@ class TestRunner:
         return "\n".join(md)
 
 def main():
-    parser = argparse.ArgumentParser(description="AetherFlow v3.1.7 E2E Test Runner")
+    parser = argparse.ArgumentParser(description="AetherFlow v4.0 E2E Test Runner")
     parser.add_argument("--tier", type=int, default=0, help="Run specific tier (1, 2, 3, or 4)")
     parser.add_argument("--feature", type=str, default="", help="Filter by feature ID (e.g. F01)")
     parser.add_argument("--mode", type=str, choices=["contract", "live", "mock"], default="contract", help="Execution mode")

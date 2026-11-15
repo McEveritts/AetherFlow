@@ -30,7 +30,19 @@ SOCK_PATH = "/tmp/af-runner-test.sock"
 DB_PATH = "/tmp/af-smoke.db"
 PORT = 18080
 BASE_URL = f"http://127.0.0.1:{PORT}"
-BINARY_PATH = "/mnt/c/Users/armyw/OneDrive/Documents/Antigravity/AetherFlow/backend/aetherflow-api"
+BINARY_PATH = os.environ.get(
+    "AETHERFLOW_BINARY",
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "backend-rs",
+            "target",
+            "release",
+            "aetherflow-api",
+        )
+    ),
+)
 
 results = []
 

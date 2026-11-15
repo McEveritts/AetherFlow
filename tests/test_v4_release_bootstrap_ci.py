@@ -17,7 +17,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_CLIPPY = "cargo clippy --workspace --all-targets --locked -- -D warnings"
-STRICT_CORE_CLIPPY = "cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings"
+STRICT_CORE_CLIPPY = "cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings"
 
 
 def parse_workflow_jobs(workflow_text: str) -> dict[str, str]:
@@ -143,7 +143,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         clippy_idx = build_job.index(WORKSPACE_CLIPPY)
         strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
-        build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af")
+        build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend")
         upload_idx = build_job.index("- name: Upload Release Bundle Artifact")
 
         self.assertLess(clippy_idx, test_idx)
@@ -155,14 +155,18 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         publish_idx = pub_job.index("- name: Publish to GitHub Releases")
         self.assertLess(attest_idx, publish_idx)
 
+        self.assertNotIn("actions/setup-go", sec_job)
+        self.assertNotIn("Legacy Go", sec_job)
         self.assertIn('node-version: "24.22.2"', build_job)
         self.assertIn('cp target/release/af "${STAGE_DIR}/af"', build_job)
         self.assertIn('cp target/release/af "${STAGE_DIR}/bin/af"', build_job)
+        self.assertIn('cp target/release/speedtest-backend "${STAGE_DIR}/bin/speedtest-backend"', build_job)
         self.assertIn("release-dist/SHA256SUMS", build_job)
 
     def test_ci_workflow_runs_locked_rust_build_and_embedded_e2e_and_smoke_gate(self):
         ci_yml = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = parse_workflow_jobs(ci_yml)
+        self.assertNotIn("backend", jobs)
         self.assertIn("release-lifecycle-smoke", jobs)
         self.assertIn("backend-rs", jobs)
         self.assertIn("embedded-e2e", jobs)
@@ -172,8 +176,9 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("needs: backend-rs", jobs["embedded-e2e"])
         self.assertIn('node-version: "24.22.2"', ci_yml)
         self.assertIn("bash scripts/smoke_v4_release_lifecycle.sh", jobs["release-lifecycle-smoke"])
+        self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", jobs["backend-rs"])
         self.assertIn("cargo test --workspace --locked", jobs["backend-rs"])
-        self.assertIn("cargo build --release --locked --bin aetherflow-api --bin af", jobs["backend-rs"])
+        self.assertIn("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend", jobs["backend-rs"])
         self.assertIn("bash scripts/run_embedded_e2e.sh", jobs["embedded-e2e"])
 
     def test_security_workflow_covers_nightly_and_retires_experimental(self):
@@ -181,6 +186,8 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertNotIn("- experimental", sec_yml)
         self.assertIn("- nightly", sec_yml)
         self.assertIn("rust-security:", sec_yml)
+        self.assertNotIn("security-checks:", sec_yml)
+        self.assertNotIn("actions/setup-go", sec_yml)
         self.assertIn("cargo deny --locked check advisories bans licenses sources", sec_yml)
         self.assertIn("cargo audit --file Cargo.lock", sec_yml)
         self.assertIn(WORKSPACE_CLIPPY, sec_yml)
@@ -206,7 +213,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
             line for line in workspace_manifest.splitlines()
             if re.match(r"^af-[a-z]+ = \{ path =", line)
         ]
-        self.assertEqual(len(local_dependencies), 8)
+        self.assertGreaterEqual(len(local_dependencies), 8)
         for dependency in local_dependencies:
             self.assertIn('version = "=4.0.0"', dependency)
 
@@ -225,30 +232,23 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("Refusing unlocked source build.", modern)
         self.assertIn("Refusing unlocked source build.", rm)
 
-    def test_canonical_root_config_exists_and_matches_legacy_go_config_without_drift(self):
+    def test_canonical_root_config_exists_without_legacy_go_config(self):
         for filename in ("packages.json", "package_automation.json"):
             canonical_path = ROOT / "config" / filename
             legacy_path = ROOT / "backend" / "config" / filename
             self.assertTrue(canonical_path.is_file(), f"Missing canonical {canonical_path}")
-            self.assertTrue(legacy_path.is_file(), f"Missing compatibility {legacy_path}")
-            canonical_bytes = canonical_path.read_bytes()
-            legacy_bytes = legacy_path.read_bytes()
-            self.assertEqual(
-                canonical_bytes,
-                legacy_bytes,
-                f"Drift detected between {canonical_path} and {legacy_path}",
-            )
+            self.assertFalse(legacy_path.exists(), f"Legacy Go config path must not exist: {legacy_path}")
 
         pkgs = json.loads((ROOT / "config/packages.json").read_text(encoding="utf-8"))
         auto = json.loads((ROOT / "config/package_automation.json").read_text(encoding="utf-8"))
         pkg_ids = {p.get("id") or p.get("name") for p in pkgs}
         auto_ids = set(auto["packages"].keys()) if isinstance(auto, dict) and "packages" in auto else set(auto.keys())
 
-    def test_openapi_embed_uses_neutral_asset_with_legacy_byte_parity(self):
+    def test_openapi_embed_uses_neutral_asset_without_legacy_spec(self):
         canonical = ROOT / "config/openapi-v1.yaml"
         legacy = ROOT / "backend/api/spec/openapi-v1.yaml"
         self.assertTrue(canonical.is_file())
-        self.assertEqual(canonical.read_bytes(), legacy.read_bytes())
+        self.assertFalse(legacy.exists(), f"Legacy Go OpenAPI spec must not exist: {legacy}")
         ignored_assets = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn("!/config/openapi-v1.yaml", ignored_assets)
         routes = (ROOT / "backend-rs/crates/af-api/src/routes.rs").read_text(encoding="utf-8")
@@ -289,6 +289,8 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("_af_is_v4_release_tag", modern)
         self.assertIn("Refusing pre-v4 or malformed release tag", modern)
         self.assertIn("Refusing implicit source-build or legacy v3 downgrade", modern)
+        self.assertNotIn("_install_go", modern)
+        self.assertNotIn("AF_GO_VERSION", modern)
         self.assertIn('AF_NODE_VERSION="${AF_NODE_VERSION:-24.22.2}"', core)
         self.assertIn("_af_verify_sha256", core)
 
