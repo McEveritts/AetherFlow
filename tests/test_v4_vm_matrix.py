@@ -219,11 +219,14 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             "aetherflow-api": (b"\x7fELF-api index.html _next/", 0o755),
             "af": (b"\x7fELF-new-cli", 0o755),
             "bin/af": (b"\x7fELF-new-cli", 0o755),
+            "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
+            "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
             ".version": (b"v4.0.0\n", 0o644),
             "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
             "deploy/release-manager.conf": (b"config\n", 0o644),
             "config/packages.json": (b"{}\n", 0o644),
             "config/package_automation.json": (b"{}\n", 0o644),
+            "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
         }
 
     def test_cli_glibc_requirement_is_checked_independently_of_api(self) -> None:
@@ -239,7 +242,16 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             )
             self.assertFalse(report["valid"])
             self.assertFalse(report["details"]["glibc_compatible_ubuntu_2204"])
-            self.assertEqual(report["details"]["binary_glibc_versions"], {"aetherflow-api": "2.34", "af": "2.38", "bin/af": "2.38"})
+            self.assertEqual(
+                report["details"]["binary_glibc_versions"],
+                {
+                    "aetherflow-api": "2.34",
+                    "af": "2.38",
+                    "bin/af": "2.38",
+                    "speedtest-backend": "2.34",
+                    "bin/speedtest-backend": "2.34",
+                },
+            )
             self.assertTrue(any("af requires GLIBC_2.38" in error for error in report["errors"]))
 
     def test_cli_archive_copies_must_match(self) -> None:
@@ -253,6 +265,35 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             report = vm_matrix.verify_release_artifact_contract(archive, sums, readelf_symbol_Inspector=lambda binary_bytes: "2.34")
             self.assertFalse(report["valid"])
             self.assertIn("af and bin/af must contain identical CLI bytes", report["errors"])
+
+    def test_speedtest_backend_archive_copies_and_glibc_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "aetherflow-linux-amd64.tar.gz"
+            sums = Path(directory) / "SHA256SUMS"
+            entries = self.portable_entries()
+            entries["bin/speedtest-backend"] = (b"\x7fELF-different-speedtest", 0o755)
+            digest = self._build_tarball(archive, entries)
+            sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+            report = vm_matrix.verify_release_artifact_contract(
+                archive, sums, readelf_symbol_Inspector=lambda _: "2.34"
+            )
+            self.assertFalse(report["valid"])
+            self.assertIn(
+                "speedtest-backend and bin/speedtest-backend must contain identical binary bytes",
+                report["errors"],
+            )
+
+            digest_ok = self._build_tarball(archive, self.portable_entries())
+            sums.write_text(f"{digest_ok}  {archive.name}\n", encoding="utf-8")
+            glibc_report = vm_matrix.verify_release_artifact_contract(
+                archive,
+                sums,
+                readelf_symbol_Inspector=lambda b: "2.38" if b"speedtest" in b else "2.34",
+            )
+            self.assertFalse(glibc_report["valid"])
+            self.assertTrue(
+                any("speedtest-backend requires GLIBC_2.38" in e for e in glibc_report["errors"])
+            )
 
     def test_remote_contract_rejects_incompatible_cli_and_failed_readelf(self) -> None:
         namespace = {"__name__": "portability_contract_unit"}
@@ -289,11 +330,14 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                     "aetherflow-api": (b"\x7fELF-binary-payload", 0o755),
                     "af": (b"\x7fELF-cli-payload", 0o755),
                     "bin/af": (b"\x7fELF-cli-payload", 0o755),
+                    "speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
+                    "bin/speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
                     "config/package_automation.json": (b"{}\n", 0o644),
+                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
                 },
             )
             sums.write_text(f"{digest}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
@@ -320,11 +364,14 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                     "aetherflow-api": (b"\x7fELF-debian13-binary", 0o755),
                     "af": (b"\x7fELF-cli", 0o755),
                     "bin/af": (b"\x7fELF-cli", 0o755),
+                    "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
+                    "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
                     "config/package_automation.json": (b"{}\n", 0o644),
+                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
                 },
             )
             sums.write_text(f"{digest}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
@@ -371,11 +418,14 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                     "aetherflow-api": (b"\x7fELF-binary-payload index.html _next/", 0o755),
                     "af": (b"\x7fELF-cli-payload", 0o755),
                     "bin/af": (b"\x7fELF-cli-payload", 0o755),
+                    "speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
+                    "bin/speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
                     "config/package_automation.json": (b"{}\n", 0o644),
+                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
                 },
             )
             # Without SHA256SUMS, require_manifest=True (default) MUST fail closed
@@ -532,11 +582,14 @@ class CertificationInputAndMandatoryPhaseTests(unittest.TestCase):
                     "aetherflow-api": (b"\x7fELF-binary index.html _next/", 0o755),
                     "af": (b"\x7fELF-cli", 0o755),
                     "bin/af": (b"\x7fELF-cli", 0o755),
+                    "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
+                    "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
                     "config/package_automation.json": (b"{}\n", 0o644),
+                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
                 },
             )
             sums.write_text(f"{art_sha}  aetherflow-linux-amd64.tar.gz\n", encoding="utf-8")
@@ -705,11 +758,14 @@ class BaselineBuildAndSingleRemoteEngineTests(unittest.TestCase):
                     "aetherflow-api": (b"\x7fELF-binary index.html _next/", 0o755),
                     "af": (b"\x7fELF-cli", 0o755),
                     "bin/af": (b"\x7fELF-cli", 0o755),
+                    "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
+                    "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
                     "config/package_automation.json": (b"{}\n", 0o644),
+                    "config/openapi-v1.yaml": (b"openapi: 3.1.0\n", 0o644),
                 },
             )
             payload = {

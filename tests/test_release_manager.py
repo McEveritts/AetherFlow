@@ -465,9 +465,11 @@ os.execvp(inner[0], inner)
         self.assertFalse(missing.exists())
         versions = list((self.dry / "releases").glob("*/.version"))
         self.assertEqual(len(versions), 1)
-        self.assertEqual(versions[0].read_text().strip(), "v3.1.7-dryrun")
+        self.assertEqual(versions[0].read_text().strip(), "v4.0.0-dryrun")
         self.assertNotIn("curl ", self.commands.read_text())
         self.assertTrue((self.dry / "current").is_symlink())
+        self.assertTrue((self.dry / "current" / "speedtest-backend").is_file())
+        self.assertTrue((self.dry / "current" / "bin" / "speedtest-backend").is_file())
 
     def test_env_file_aetherflow_db_path_when_db_path_missing(self):
         other_db = self.root / "live" / "from-aether.sqlite"

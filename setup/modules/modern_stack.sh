@@ -574,22 +574,24 @@ _build_modern_stack_from_source() {
             esac
             if [[ "${bootstrapped_via_rustup}" -eq 0 && -n "${rustup_arch}" ]]; then
                 local rustup_ver="${AF_RUSTUP_VERSION:-1.28.1}"
-                local rustup_stage_dir="${AF_RUSTUP_TMPDIR:-}"
-                if [[ -z "${rustup_stage_dir}" ]]; then
+                local rustup_parent="${AF_RUSTUP_TMPDIR:-}"
+                if [[ -z "${rustup_parent}" ]]; then
                     if [[ -d "${af_root}" && -w "${af_root}" ]]; then
-                        rustup_stage_dir="${af_root}/.staging-rustup"
-                        mkdir -p -m 0700 "${rustup_stage_dir}"
+                        rustup_parent="${af_root}/.staging-rustup"
+                        mkdir -p -m 0700 "${rustup_parent}"
                     elif [[ -d "/var/tmp" && -w "/var/tmp" ]]; then
-                        rustup_stage_dir="/var/tmp"
+                        rustup_parent="/var/tmp"
                     else
-                        rustup_stage_dir="${HOME:-/root}/.cache/aetherflow-rustup"
-                        mkdir -p -m 0700 "${rustup_stage_dir}"
+                        rustup_parent="${HOME:-/root}/.cache/aetherflow-rustup"
+                        mkdir -p -m 0700 "${rustup_parent}"
                     fi
                 else
-                    mkdir -p -m 0700 "${rustup_stage_dir}"
+                    mkdir -p -m 0700 "${rustup_parent}"
                 fi
-                local rustup_bin
-                rustup_bin="$(mktemp "${rustup_stage_dir}/af-rustup-init.XXXXXX")"
+                local rustup_stage_dir
+                rustup_stage_dir="$(mktemp -d "${rustup_parent}/af-rustup-stage.XXXXXX")"
+                chmod 0700 "${rustup_stage_dir}"
+                local rustup_bin="${rustup_stage_dir}/rustup-init"
                 if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
                     "https://static.rust-lang.org/rustup/archive/${rustup_ver}/${rustup_arch}/rustup-init" \
                     -o "${rustup_bin}" \
@@ -601,7 +603,7 @@ _build_modern_stack_from_source() {
                 else
                     echo "[WARN] Pinned rustup-init download or SHA-256 verification failed; skipping automatic Rust bootstrap." >&2
                 fi
-                rm -f "${rustup_bin}"
+                rm -rf "${rustup_stage_dir}"
             fi
             export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:${PATH}"
         fi
@@ -660,6 +662,9 @@ _build_modern_stack_from_source() {
     [[ -d "${af_root}/packages" ]] && cp -R "${af_root}/packages" "${release_dir}/packages"
     [[ -d "${af_root}/deploy" ]] && cp -R "${af_root}/deploy" "${release_dir}/deploy"
     printf 'source-%s\n' "${epoch}" > "${release_dir}/.version"
+
+    find "${release_dir}" -type d -exec chmod 0755 {} +
+    find "${release_dir}" -type f -exec chmod a+r,go-w {} +
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_chmod
     for companion_chmod in af speedtest-backend; do
@@ -667,9 +672,24 @@ _build_modern_stack_from_source() {
         [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
     done
 
-    ln -sfn "${release_dir}" "${af_root}/current"
+    local releases_dir="${af_root}/releases"
+    local current_link="${af_root}/current"
+    if [[ -L "${current_link}" ]]; then
+        readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
+    fi
+
+    local tmp_link="${current_link}.tmp.${epoch}"
+    ln -s "${release_dir}" "${tmp_link}"
+    mv -Tf "${tmp_link}" "${current_link}"
+
     mkdir -p "${af_root}/backend"
-    ln -sfn "${af_root}/current/aetherflow-api" "${af_root}/backend/aetherflow-api"
+    ln -sfn "${current_link}/aetherflow-api" "${af_root}/backend/aetherflow-api"
+    if [[ -x "${current_link}/af" ]]; then
+        ln -sfn "${current_link}/af" "${af_root}/backend/af"
+        if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" && -d /usr/local/bin && ! -f /usr/local/bin/AetherFlow/system/af ]]; then
+            ln -sfn "${current_link}/af" /usr/local/bin/af
+        fi
+    fi
     return 0
 }
 

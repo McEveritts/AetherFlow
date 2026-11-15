@@ -28,31 +28,48 @@ static IPV6_CANDIDATE_RE: Lazy<Regex> = Lazy::new(|| {
 
 static SENSITIVE_JSON_STR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng)"\s*:\s*"(?:[^"\\]|\\.)*""#,
+        r#"(?i)"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng|coords|coordinates)"\s*:\s*"(?:[^"\\]|\\.)*""#,
     )
     .expect("valid sensitive JSON string regex")
 });
 
 static SENSITIVE_ESCAPED_JSON_STR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)\\"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng)\\"\s*:\s*\\"(?:[^"\\]|\\[^"])*?\\""#,
+        r#"(?i)\\"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng|coords|coordinates)\\"\s*:\s*\\"(?:[^"\\]|\\[^"])*?\\""#,
     )
     .expect("valid escaped sensitive JSON string regex")
 });
 
 static SENSITIVE_JSON_NUM_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)"(latitude|longitude|lat|lon|lng)"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
+        r#"(?i)"(postal|loc|latitude|longitude|lat|lon|lng)"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
     )
     .expect("valid sensitive JSON numeric regex")
 });
 
 static SENSITIVE_ESCAPED_JSON_NUM_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)\\"(latitude|longitude|lat|lon|lng)\\"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
+        r#"(?i)\\"(postal|loc|latitude|longitude|lat|lon|lng)\\"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
     )
     .expect("valid escaped sensitive JSON numeric regex")
 });
+
+static SENSITIVE_ANY_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\\?"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng|coords|coordinates)\\?"\s*:\s*"#,
+    )
+    .expect("valid sensitive key scanner regex")
+});
+
+fn has_unredacted_sensitive_key(input: &str) -> bool {
+    for mat in SENSITIVE_ANY_KEY_RE.find_iter(input) {
+        let rest = &input[mat.end()..];
+        if !(rest.starts_with(r#""REDACTED""#) || rest.starts_with(r#"\"REDACTED\""#)) {
+            return true;
+        }
+    }
+    false
+}
 
 const MAX_JSON_TREE_DEPTH: usize = 32;
 const MAX_JSON_STR_DEPTH: usize = 8;
@@ -444,23 +461,7 @@ fn redact_json_value_in_place_depth(
     }
     match val {
         serde_json::Value::String(s) => {
-            let trimmed = s.trim();
-            let looks_json_container = (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'));
-            if looks_json_container {
-                if str_depth >= MAX_JSON_STR_DEPTH {
-                    *s = "REDACTED".to_string();
-                    return;
-                }
-                if let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    redact_json_value_in_place_depth(&mut nested, tree_depth + 1, str_depth + 1);
-                    if let Ok(serialized) = serde_json::to_string(&nested) {
-                        *s = redact_freeform_text(&serialized);
-                        return;
-                    }
-                }
-            }
-            *s = redact_freeform_text(s);
+            *s = sanitize_telemetry_field_depth(s, tree_depth + 1, str_depth + 1);
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
@@ -482,6 +483,8 @@ fn redact_json_value_in_place_depth(
                         | "lat"
                         | "lon"
                         | "lng"
+                        | "coords"
+                        | "coordinates"
                 ) {
                     *v = serde_json::Value::String("REDACTED".to_string());
                 } else if key_lower == "ip" {
@@ -503,28 +506,104 @@ pub fn redact_json_value_in_place(val: &mut serde_json::Value) {
     redact_json_value_in_place_depth(val, 0, 0);
 }
 
-pub fn sanitize_ispinfo_for_redaction(raw: &str) -> String {
+fn sanitize_telemetry_field_depth(raw: &str, tree_depth: usize, str_depth: usize) -> String {
     if raw.is_empty() {
         return String::new();
     }
-    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        redact_json_value_in_place(&mut parsed);
-        if let Ok(serialized) = serde_json::to_string(&parsed) {
-            return redact_freeform_text(&serialized);
+    if tree_depth >= MAX_JSON_TREE_DEPTH {
+        return "REDACTED".to_string();
+    }
+    let trimmed = raw.trim();
+    let looks_json_container = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+    if looks_json_container {
+        if str_depth > MAX_JSON_STR_DEPTH {
+            return "REDACTED".to_string();
+        }
+        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            redact_json_value_in_place_depth(&mut parsed, tree_depth, str_depth);
+            if let Ok(serialized) = serde_json::to_string(&parsed) {
+                let scrubbed = redact_freeform_text(&serialized);
+                if has_unredacted_sensitive_key(&scrubbed) {
+                    return "REDACTED".to_string();
+                }
+                return scrubbed;
+            }
+            return "REDACTED".to_string();
         }
     }
-    redact_freeform_text(raw)
+
+    // Scan mixed freeform text for embedded `{...}` / `[...]` JSON values.
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    let mut scan = 0usize;
+    while scan < bytes.len() {
+        let b = bytes[scan];
+        if b == b'{' || b == b'[' {
+            if str_depth > MAX_JSON_STR_DEPTH {
+                return "REDACTED".to_string();
+            }
+            let slice = &raw[scan..];
+            let mut stream =
+                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
+            if let Some(Ok(mut embedded)) = stream.next() {
+                let consumed = stream.byte_offset();
+                if consumed > 0 {
+                    out.push_str(&raw[cursor..scan]);
+                    redact_json_value_in_place_depth(&mut embedded, tree_depth, str_depth);
+                    if let Ok(serialized) = serde_json::to_string(&embedded) {
+                        out.push_str(&serialized);
+                    } else {
+                        out.push_str("\"REDACTED\"");
+                    }
+                    scan += consumed;
+                    cursor = scan;
+                    continue;
+                }
+            }
+        }
+        scan += raw[scan..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(1);
+    }
+    out.push_str(&raw[cursor..]);
+
+    let scrubbed = redact_freeform_text(&out);
+    if has_unredacted_sensitive_key(&scrubbed) {
+        return "REDACTED".to_string();
+    }
+    scrubbed
+}
+
+/// Sanitizes any telemetry string field (`ispinfo`, `extra`, `log`, `ua`, `lang`) when
+/// `redact_ip_addresses = true`:
+/// 1. Full JSON payloads (including non-scalar location fields like `{"loc":[52.52,13.4],"city":["Berlin"]}`)
+///    are recursively scrubbed in-place.
+/// 2. Mixed freeform text containing embedded JSON objects/arrays (`evt: {"loc":[52.52,13.4]}`)
+///    has each embedded JSON value parsed and recursively scrubbed before regex redaction.
+/// 3. Truncated/malformed JSON snippets attempting to attach unredacted values to sensitive
+///    location/hostname keys (`"loc":[52.52...` or `"city":"Berlin` with missing closing delimiter)
+///    fail closed to `"REDACTED"`.
+pub fn sanitize_telemetry_field_for_redaction(raw: &str) -> String {
+    sanitize_telemetry_field_depth(raw, 0, 0)
+}
+
+pub fn sanitize_ispinfo_for_redaction(raw: &str) -> String {
+    sanitize_telemetry_field_for_redaction(raw)
 }
 
 pub fn sanitize_record_for_redaction(rec: &mut crate::db::TelemetryRecord) {
     if !rec.ip.trim().is_empty() {
         rec.ip = redact_single_ip(&rec.ip);
     }
-    rec.ispinfo = sanitize_ispinfo_for_redaction(&rec.ispinfo);
-    rec.extra = redact_freeform_text(&rec.extra);
-    rec.ua = redact_freeform_text(&rec.ua);
-    rec.lang = redact_freeform_text(&rec.lang);
-    rec.log = redact_freeform_text(&rec.log);
+    rec.ispinfo = sanitize_telemetry_field_for_redaction(&rec.ispinfo);
+    rec.extra = sanitize_telemetry_field_for_redaction(&rec.extra);
+    rec.ua = sanitize_telemetry_field_for_redaction(&rec.ua);
+    rec.lang = sanitize_telemetry_field_for_redaction(&rec.lang);
+    rec.log = sanitize_telemetry_field_for_redaction(&rec.log);
 }
 
 #[cfg(test)]
@@ -752,5 +831,35 @@ mod tests {
             !onion_sanitized.contains("unkeyed"),
             "got: {onion_sanitized}"
         );
+    }
+
+    #[test]
+    fn scrubs_non_scalar_json_location_containers_mixed_logs_and_truncated_keys() {
+        // 1. Non-scalar location arrays/objects in JSON (`extra` / `ispinfo`)
+        let structured_extra = r#"{"loc":[52.52,13.405],"city":["Berlin"],"coords":{"lat":52.52,"lng":13.405},"note":"keep-me"}"#;
+        let scrubbed_extra = sanitize_telemetry_field_for_redaction(structured_extra);
+        assert!(!scrubbed_extra.contains("52.52"), "got: {scrubbed_extra}");
+        assert!(!scrubbed_extra.contains("13.405"), "got: {scrubbed_extra}");
+        assert!(!scrubbed_extra.contains("Berlin"), "got: {scrubbed_extra}");
+        assert!(scrubbed_extra.contains("keep-me"), "got: {scrubbed_extra}");
+
+        // 2. Mixed freeform text with embedded JSON array coordinates (`log` / `ua`)
+        let mixed_log = r#"1731638400000: sample evt={"loc":[52.52,13.405],"city":["Berlin"],"dl":940.2} peer=203.0.113.9 done"#;
+        let scrubbed_log = sanitize_telemetry_field_for_redaction(mixed_log);
+        assert!(!scrubbed_log.contains("52.52"), "got: {scrubbed_log}");
+        assert!(!scrubbed_log.contains("Berlin"), "got: {scrubbed_log}");
+        assert!(!scrubbed_log.contains("203.0.113.9"), "got: {scrubbed_log}");
+        assert!(scrubbed_log.contains("940.2"), "got: {scrubbed_log}");
+        assert!(scrubbed_log.contains("0.0.0.0"), "got: {scrubbed_log}");
+
+        // 3. Truncated/malformed JSON attempting to smuggle unclosed sensitive container or string fails closed
+        for malformed in [
+            r#"{"loc":[52.52,13.405"#,
+            r#"prefix {"city":"Berlin"#,
+            r#"{"coordinates":{"lat":52.52"#,
+        ] {
+            let scrubbed_malformed = sanitize_telemetry_field_for_redaction(malformed);
+            assert_eq!(scrubbed_malformed, "REDACTED", "input: {malformed}");
+        }
     }
 }

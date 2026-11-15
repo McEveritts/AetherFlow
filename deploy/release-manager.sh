@@ -1528,8 +1528,20 @@ build_from_source() {
         return 1
     fi
 
-    if [[ ! -d "${RELEASE_DIR}/backend-rs" ]] || ! command -v cargo &>/dev/null; then
-        log_error "Rust backend source (${RELEASE_DIR}/backend-rs) and cargo toolchain are required for source builds."
+    if [[ ! -d "${RELEASE_DIR}/backend-rs" ]] || ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+        log_error "Rust backend source (${RELEASE_DIR}/backend-rs), cargo, and rustc (>= 1.95.0) are required for source builds."
+        return 1
+    fi
+    local rustc_ver
+    rustc_ver="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
+    if [[ "${rustc_ver}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        local r_maj="${BASH_REMATCH[1]}" r_min="${BASH_REMATCH[2]}"
+        if (( 10#${r_maj} < 1 || (10#${r_maj} == 1 && 10#${r_min} < 95) )); then
+            log_error "Installed rustc ${rustc_ver} is older than required MSRV 1.95.0."
+            return 1
+        fi
+    else
+        log_error "Unable to verify rustc version '${rustc_ver}' (requires >= 1.95.0)."
         return 1
     fi
 
@@ -1552,8 +1564,14 @@ build_from_source() {
     if [[ -s "${RELEASE_DIR}/.version" ]]; then
         af_src_ver="$(tr -d '\r\n' < "${RELEASE_DIR}/.version")"
     fi
-    AF_BUILD_VERSION="${af_src_ver}" AETHERFLOW_VERSION="${af_src_ver}" \
-        cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1 || return 1
+    (
+        if ! command -v mold &>/dev/null; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+        fi
+        AF_BUILD_VERSION="${af_src_ver}" AETHERFLOW_VERSION="${af_src_ver}" \
+            cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1
+    ) || return 1
     cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
     local built_bin
     for built_bin in af speedtest-backend; do
@@ -1576,8 +1594,15 @@ simulate_offline_artifact() {
     echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
     echo "#!/bin/bash" > "${RELEASE_DIR}/af"
     cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-    chmod +x "${RELEASE_DIR}/aetherflow-api" "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-    echo "v3.1.7-dryrun" > "${RELEASE_DIR}/.version"
+    echo "#!/bin/bash" > "${RELEASE_DIR}/speedtest-backend"
+    cp -f "${RELEASE_DIR}/speedtest-backend" "${RELEASE_DIR}/bin/speedtest-backend"
+    chmod +x \
+        "${RELEASE_DIR}/aetherflow-api" \
+        "${RELEASE_DIR}/af" \
+        "${RELEASE_DIR}/bin/af" \
+        "${RELEASE_DIR}/speedtest-backend" \
+        "${RELEASE_DIR}/bin/speedtest-backend"
+    echo "v4.0.0-dryrun" > "${RELEASE_DIR}/.version"
     stage_running_release_manager
 }
 

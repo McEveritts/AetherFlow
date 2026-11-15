@@ -974,15 +974,23 @@ pub fn simulate_offline_artifact(
     config: &ReleaseConfig,
 ) -> ReleaseResult<String> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
-    for sub in ["deploy/systemd", "packages", "config"] {
+    for sub in ["deploy/systemd", "packages", "config", "bin"] {
         let dir = release_dir.join(sub);
         crate::fs_security::create_dir_all_no_symlinks(&dir, 0o755)?;
     }
-    let bin_path = release_dir.join("aetherflow-api");
-    crate::fs_security::atomic_write_bytes_with_mode(&bin_path, b"#!/bin/bash\n", 0o755)?;
-    set_executable_permission(&bin_path)?;
+    for rel_bin in [
+        "aetherflow-api",
+        "af",
+        "bin/af",
+        "speedtest-backend",
+        "bin/speedtest-backend",
+    ] {
+        let bin_path = release_dir.join(rel_bin);
+        crate::fs_security::atomic_write_bytes_with_mode(&bin_path, b"#!/bin/bash\n", 0o755)?;
+        set_executable_permission(&bin_path)?;
+    }
 
-    let version_stamp = "v3.1.7-dryrun";
+    let version_stamp = "v4.0.0-dryrun";
     let version_path = release_dir.join(".version");
     crate::fs_security::atomic_write_bytes_with_mode(
         &version_path,

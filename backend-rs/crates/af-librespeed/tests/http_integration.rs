@@ -2555,4 +2555,58 @@ async fn migrated_unredacted_records_are_scrubbed_on_results_json_png_and_stats_
         !check_json_body.contains("Berlin"),
         "deeply nested stringified city leaked: {check_json_body}"
     );
+
+    // 4. Non-scalar location arrays/objects in `extra` and embedded JSON coordinates in `log`
+    // must also be scrubbed at ingestion and never leak over `/results/json` or `/stats`.
+    let non_scalar_extra = r#"{"loc":[52.52,13.405],"city":["Berlin"],"tag":"probe4"}"#;
+    let mixed_log = r#"1731638400000: trace {"loc":[48.8566,2.3522],"postal":75001} ok"#;
+    let enc_extra: String = non_scalar_extra
+        .bytes()
+        .map(|b| format!("%{b:02X}"))
+        .collect();
+    let enc_log: String = mixed_log.bytes().map(|b| format!("%{b:02X}")).collect();
+    let tmp4 = TempDirGuard::new("non-scalar-redact");
+    let (mut cfg4, vault4) = make_test_config(&tmp4);
+    cfg4.redact_ip_addresses = true;
+    cfg4.enable_id_obfuscation = true;
+    let app4 = build_router(cfg4, Some(vault4));
+    let post4 = app4
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/results/telemetry.php")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "dl=600.0&ul=300.0&ping=2.5&jitter=0.3&extra={enc_extra}&log={enc_log}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post4.status(), StatusCode::OK);
+    let id4 = String::from_utf8(body_bytes(post4).await)
+        .unwrap()
+        .strip_prefix("id ")
+        .unwrap()
+        .trim()
+        .to_string();
+    let json4_resp = app4
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={id4}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json4_resp.status(), StatusCode::OK);
+    let json4_body = String::from_utf8(body_bytes(json4_resp).await).unwrap();
+    for forbidden in ["52.52", "13.405", "Berlin", "48.8566", "2.3522", "75001"] {
+        assert!(
+            !json4_body.contains(forbidden),
+            "non-scalar/embedded sensitive data {forbidden:?} leaked in /results/json: {json4_body}"
+        );
+    }
 }

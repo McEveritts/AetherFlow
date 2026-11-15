@@ -10,6 +10,12 @@ sudo apt-get update
 echo "==> Installing build dependencies..."
 sudo apt-get install -y build-essential clang mold curl git bash jq pkg-config libssl-dev sqlite3 xz-utils ca-certificates
 
+BOOTSTRAP_PARENT="${AF_BOOTSTRAP_TMPDIR:-${AF_RUSTUP_TMPDIR:-${HOME}/.cache/aetherflow-bootstrap}}"
+mkdir -p -m 0700 "${BOOTSTRAP_PARENT}"
+AF_BOOTSTRAP_STAGE="$(mktemp -d "${BOOTSTRAP_PARENT}/af-wsl-stage.XXXXXX")"
+chmod 0700 "${AF_BOOTSTRAP_STAGE}"
+trap 'rm -rf "${AF_BOOTSTRAP_STAGE:-}"' EXIT
+
 echo "==> Installing Rust toolchain (pinned rustup-init + SHA-256 verification, >= 1.95.0)..."
 AF_RUSTUP_VERSION="${AF_RUSTUP_VERSION:-1.28.1}"
 AF_RUST_TOOLCHAIN="${AF_RUST_TOOLCHAIN:-1.99.1}"
@@ -47,10 +53,7 @@ if [[ "${NEED_RUST_INSTALL}" -eq 1 ]]; then
                 exit 1
                 ;;
         esac
-        RUSTUP_STAGE_DIR="${AF_RUSTUP_TMPDIR:-${HOME}/.cache/aetherflow-rustup}"
-        mkdir -p -m 0700 "${RUSTUP_STAGE_DIR}"
-        RUSTUP_BIN="$(mktemp "${RUSTUP_STAGE_DIR}/af-rustup-init.XXXXXX")"
-        trap 'rm -f "${RUSTUP_BIN:-}" "${NODE_TAR:-}"' EXIT
+        RUSTUP_BIN="${AF_BOOTSTRAP_STAGE}/rustup-init"
         curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
             "https://static.rust-lang.org/rustup/archive/${AF_RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" \
             -o "${RUSTUP_BIN}"
@@ -75,8 +78,7 @@ if ! command -v node >/dev/null 2>&1 || ! node -v | grep -q '^v24'; then
             exit 1
             ;;
     esac
-    NODE_TAR="$(mktemp /tmp/af-node-dist.XXXXXX.tar.xz)"
-    trap 'rm -f "${RUSTUP_BIN:-}" "${NODE_TAR:-}"' EXIT
+    NODE_TAR="${AF_BOOTSTRAP_STAGE}/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
         "https://nodejs.org/dist/v${AF_NODE_VERSION}/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
         -o "${NODE_TAR}"

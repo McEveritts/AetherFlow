@@ -4,9 +4,9 @@ use crate::db::{NewTelemetryRecord, TelemetryVault};
 use crate::png_card::render_badge_png;
 use crate::redact::{
     classify_ip_note, extract_trusted_forwarded_ip_with_secret, format_getip_display,
-    parse_ip_token, peer_ip_key, redact_freeform_text, redact_json_value_in_place,
-    redact_single_ip, resolve_client_ip_with_secret, sanitize_ispinfo_for_redaction,
-    sanitize_record_for_redaction,
+    parse_ip_token, peer_ip_key, redact_json_value_in_place, redact_single_ip,
+    resolve_client_ip_with_secret, sanitize_record_for_redaction,
+    sanitize_telemetry_field_for_redaction,
 };
 use crate::stats::{
     handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, GarbageStreamGuard, StatsAuth,
@@ -1191,11 +1191,11 @@ async fn handle_telemetry(
     let mut lang = clamp_utf8(lang_raw, 64);
 
     let ip = if state.config.redact_ip_addresses {
-        ispinfo = clamp_utf8(&sanitize_ispinfo_for_redaction(&ispinfo), 8192);
-        log = redact_freeform_text(&log);
-        extra = redact_freeform_text(&extra);
-        ua = redact_freeform_text(&ua);
-        lang = redact_freeform_text(&lang);
+        ispinfo = clamp_utf8(&sanitize_telemetry_field_for_redaction(&ispinfo), 8192);
+        log = clamp_utf8(&sanitize_telemetry_field_for_redaction(&log), 65_536);
+        extra = clamp_utf8(&sanitize_telemetry_field_for_redaction(&extra), 8192);
+        ua = clamp_utf8(&sanitize_telemetry_field_for_redaction(&ua), 512);
+        lang = clamp_utf8(&sanitize_telemetry_field_for_redaction(&lang), 64);
         redact_single_ip(&raw_ip)
     } else {
         raw_ip

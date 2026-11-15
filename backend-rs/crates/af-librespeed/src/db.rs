@@ -223,22 +223,7 @@ fn init_telemetry_schema(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    {
-        let mut stmt =
-            conn.prepare("SELECT uuid FROM telemetry_legacy_raw_ids WHERE ulid_suffix IS NULL")?;
-        let pending: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if !pending.is_empty() {
-            let mut upd = conn
-                .prepare("UPDATE telemetry_legacy_raw_ids SET ulid_suffix = ?1 WHERE uuid = ?2")?;
-            for uuid in pending {
-                if let Some(sfx) = ulid_suffix_blob(&uuid) {
-                    upd.execute(params![sfx.as_slice(), uuid])?;
-                }
-            }
-        }
-    }
+    backfill_legacy_ulid_suffixes(conn)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_telemetry_legacy_ulid_suffix
          ON telemetry_legacy_raw_ids (ulid_suffix);",
@@ -1324,6 +1309,24 @@ pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecor
     parse_boltdb_telemetry_from_source(&data)
 }
 
+fn backfill_legacy_ulid_suffixes(conn: &Connection) -> Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT uuid FROM telemetry_legacy_raw_ids WHERE ulid_suffix IS NULL")?;
+    let pending: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !pending.is_empty() {
+        let mut upd =
+            conn.prepare("UPDATE telemetry_legacy_raw_ids SET ulid_suffix = ?1 WHERE uuid = ?2")?;
+        for uuid in pending {
+            if let Some(sfx) = ulid_suffix_blob(&uuid) {
+                upd.execute(params![sfx.as_slice(), uuid])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn init_or_load_obfuscation_key(conn: &Connection) -> Result<[u8; 32]> {
     let had_obfuscation_key: Option<i64> = conn
         .query_row(
@@ -1339,6 +1342,8 @@ fn init_or_load_obfuscation_key(conn: &Connection) -> Result<[u8; 32]> {
             [],
         )
         .context("failed preserving pre-obfuscation SQLite share IDs")?;
+        backfill_legacy_ulid_suffixes(conn)
+            .context("failed backfilling ULID suffixes for pre-obfuscation SQLite share IDs")?;
     }
 
     let mut candidate_key = [0u8; 32];
@@ -2234,5 +2239,63 @@ mod tests {
             .is_legacy_raw_id("01JABCDEFGHJKMNPQRSTVWXYA2".to_string())
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn first_open_of_pre_obfuscation_sqlite_db_backfills_ulid_suffix_without_salt() {
+        use crate::ulid::{encode_legacy_go_obfuscated_ulid, generate_ulid};
+
+        let tmp = TempDirGuard::new("first-open-legacy-suffix");
+        let db_path = tmp.0.join("legacy_go.sql");
+
+        let legacy_uuid = generate_ulid();
+        let unknown_salt = [0xDE, 0xAD, 0xBE, 0xEF];
+        let legacy_share_token =
+            encode_legacy_go_obfuscated_ulid(&legacy_uuid, &unknown_salt).unwrap();
+
+        // Simulate pre-existing Go SQLite database (`speedtest_users` only, no `telemetry_meta` or salt file)
+        {
+            let raw_conn = Connection::open(&db_path).unwrap();
+            raw_conn
+                .execute_batch(
+                    "CREATE TABLE speedtest_users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        ip TEXT NOT NULL,
+                        ispinfo TEXT,
+                        extra TEXT,
+                        ua TEXT NOT NULL,
+                        lang TEXT NOT NULL,
+                        dl TEXT,
+                        ul TEXT,
+                        ping TEXT,
+                        jitter TEXT,
+                        log TEXT,
+                        uuid TEXT UNIQUE
+                    );",
+                )
+                .unwrap();
+            raw_conn
+                .execute(
+                    "INSERT INTO speedtest_users (timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log, uuid)
+                     VALUES ('2026-11-15T10:00:00Z', '198.51.100.12', '', '', 'TestUA', 'en', '777.0', '333.0', '3.1', '0.2', '', ?1)",
+                    params![&legacy_uuid],
+                )
+                .unwrap();
+        }
+
+        // Very FIRST open of TelemetryVault (no restart, no `idObfuscation_salt.bin` on disk)
+        let vault = TelemetryVault::open(&db_path).unwrap();
+        assert!(vault.legacy_go_salt.is_none());
+
+        let resolved = vault
+            .resolve_legacy_go_share_id(legacy_share_token)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(legacy_uuid.as_str()),
+            "first startup must backfill ulid_suffix so saltless Go XOR share tokens resolve immediately"
+        );
     }
 }
