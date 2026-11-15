@@ -83,6 +83,42 @@ pub fn is_trusted_proxy_peer(peer_addr: Option<SocketAddr>, trusted_proxies: &[I
         .any(|trusted| canonicalize_ip_addr(*trusted) == peer_ip)
 }
 
+/// Extracts the canonical forwarded client IP ONLY when `peer_addr` is an
+/// explicitly configured `trusted_proxies` peer and a valid rightmost
+/// `X-Forwarded-For` hop or `X-Real-IP` header is present.
+pub fn extract_trusted_forwarded_ip(
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> Option<IpAddr> {
+    if !is_trusted_proxy_peer(peer_addr, trusted_proxies) {
+        return None;
+    }
+    if let Some(xff) = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(rightmost) = xff.rsplit(',').next() {
+            if let Some(ip) = parse_ip_token(rightmost) {
+                return Some(ip);
+            }
+        }
+    }
+    if let Some(xri) = headers
+        .get_all("x-real-ip")
+        .iter()
+        .next_back()
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(ip) = parse_ip_token(xri) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
 /// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (strictly the
 /// single rightmost hop appended by the trusted reverse proxy) and `X-Real-IP`
 /// ONLY when the direct TCP peer IP is explicitly configured in `trusted_proxies`.
@@ -91,35 +127,12 @@ pub fn resolve_client_ip(
     headers: &HeaderMap,
     trusted_proxies: &[IpAddr],
 ) -> String {
-    let peer_ip = peer_addr.map(|s| canonicalize_ip_addr(s.ip()));
-
-    if is_trusted_proxy_peer(peer_addr, trusted_proxies) {
-        if let Some(xff) = headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .next_back()
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(rightmost) = xff.rsplit(',').next() {
-                if let Some(ip) = parse_ip_token(rightmost) {
-                    return ip.to_string();
-                }
-            }
-        }
-        if let Some(xri) = headers
-            .get_all("x-real-ip")
-            .iter()
-            .next_back()
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(ip) = parse_ip_token(xri) {
-                return ip.to_string();
-            }
-        }
+    if let Some(forwarded) = extract_trusted_forwarded_ip(peer_addr, headers, trusted_proxies) {
+        return forwarded.to_string();
     }
 
-    peer_ip
-        .map(|ip| ip.to_string())
+    peer_addr
+        .map(|s| canonicalize_ip_addr(s.ip()).to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 

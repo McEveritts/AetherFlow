@@ -166,6 +166,17 @@ else
         LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
         LS_VER_CLEAN="${LS_VERSION#v}"
     fi
+    if [[ -z "${AF_FIXTURE_VERSION:-}" && "$LS_VER_CLEAN" =~ ^[0-3]\. ]]; then
+        V4_TAG="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=20" 2>/dev/null \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\(v\([4-9]\|[1-9][0-9]\{1,\}\)\.[0-9]\{1,\}\.[0-9]\{1,\}[^"]*\)".*/\1/p' | head -n1 || true)"
+        if [[ -n "$V4_TAG" ]]; then
+            LS_VERSION="$V4_TAG"
+            LS_VER_CLEAN="${V4_TAG#v}"
+        else
+            LS_VERSION="v4.0.0"
+            LS_VER_CLEAN="4.0.0"
+        fi
+    fi
     LS_ARCHIVE_NAME="speedtest-backend_${LS_VER_CLEAN}_linux_${LS_ARCH}.tar.gz"
     LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VER_CLEAN}/${LS_ARCHIVE_NAME}"
     report_progress 60 "Downloading and verifying LibreSpeed ${LS_VER_CLEAN}..."
@@ -269,48 +280,125 @@ if not re.search(r"^[ \t]*enable_id_obfuscation\s*=", text, re.MULTILINE):
 db_type_m = re.search(r'^[ \t]*database_type\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
 db_type = db_type_m.group(2).strip().lower() if db_type_m else "sqlite"
 db_file_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
-if db_type not in ("", "none") and db_file_m:
+if db_type != "none" and db_file_m:
     raw_db_file = db_file_m.group(2).strip()
     if raw_db_file:
-        resolved_db = raw_db_file if os.path.isabs(raw_db_file) else os.path.normpath(os.path.join(state_dir, raw_db_file))
         norm_state = os.path.normpath(state_dir)
+        resolved_db = os.path.normpath(
+            raw_db_file if os.path.isabs(raw_db_file) else os.path.join(norm_state, raw_db_file)
+        )
+        cur = os.path.dirname(resolved_db)
+        while cur and cur != os.sep:
+            if os.path.islink(cur):
+                raise SystemExit(f"Refusing symlinked parent directory for retained database_file: {cur}")
+            cur = os.path.dirname(cur)
         in_state_dir = (resolved_db != norm_state) and resolved_db.startswith(norm_state + os.sep)
-        if not in_state_dir:
-            cur = os.path.dirname(os.path.normpath(resolved_db))
-            while cur and cur != os.sep:
-                if os.path.islink(cur):
-                    raise SystemExit(f"Refusing symlinked parent directory for retained database_file: {cur}")
-                cur = os.path.dirname(cur)
+        if in_state_dir:
             if os.path.lexists(resolved_db):
-                st = os.lstat(resolved_db)
-                if not stat.S_ISREG(st.st_mode):
+                st_in = os.lstat(resolved_db)
+                if not stat.S_ISREG(st_in.st_mode):
                     raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
-                if not os.path.lexists(confined_db):
-                    for suffix in ("", "-wal", "-shm"):
-                        src_p = resolved_db + suffix
-                        dst_p = confined_db + suffix
-                        if not os.path.lexists(src_p):
-                            continue
-                        src_st = os.lstat(src_p)
-                        if not stat.S_ISREG(src_st.st_mode):
-                            raise SystemExit(f"Refusing non-regular or symlinked SQLite sidecar: {src_p}")
-                        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                        fd_in = os.open(src_p, flags)
-                        tmp_dst = dst_p + ".migrated.tmp"
-                        try:
-                            with os.fdopen(fd_in, "rb") as f_in:
-                                fd_out = os.open(tmp_dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-                                with os.fdopen(fd_out, "wb") as f_out:
-                                    shutil.copyfileobj(f_in, f_out)
-                                    f_out.flush()
-                                    os.fsync(f_out.fileno())
-                            os.replace(tmp_dst, dst_p)
-                        except Exception:
-                            try:
-                                os.unlink(tmp_dst)
-                            except OSError:
-                                pass
-                            raise
+            if raw_db_file != resolved_db:
+                text = re.sub(
+                    r'^[ \t]*database_file\s*=.*',
+                    f'database_file="{resolved_db}"',
+                    text,
+                    flags=re.MULTILINE,
+                )
+        else:
+            allowed_ext_prefixes = (
+                "/var/lib/librespeed/",
+                "/var/opt/librespeed/",
+                "/srv/librespeed/",
+                "/opt/librespeed-",
+                "/opt/librespeed_",
+                "/opt/librespeed.",
+            )
+            if not any(resolved_db.startswith(pfx) for pfx in allowed_ext_prefixes):
+                raise SystemExit(
+                    f"Refusing external database_file outside dedicated LibreSpeed directories: {resolved_db}"
+                )
+            if not os.path.lexists(resolved_db):
+                raise SystemExit(
+                    f"Configured external database_file is missing; refusing to silently switch databases: {resolved_db}"
+                )
+            st = os.lstat(resolved_db)
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
+
+            o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+            fd_main = os.open(resolved_db, os.O_RDONLY | o_nofollow)
+            try:
+                fst = os.fstat(fd_main)
+                if not stat.S_ISREG(fst.st_mode):
+                    raise SystemExit(f"Refusing non-regular open descriptor for database_file: {resolved_db}")
+                hdr = os.read(fd_main, 32)
+                is_empty_db = fst.st_size == 0
+                is_sqlite_db = hdr.startswith(b"SQLite format 3\x00")
+                is_bolt_db = len(hdr) >= 20 and hdr[16:20] in (b"\xed\xda\x0c\xed", b"\xed\x0c\xda\xed")
+                if not (is_empty_db or is_sqlite_db or is_bolt_db):
+                    raise SystemExit(
+                        f"Refusing external database_file without valid SQLite or BoltDB header: {resolved_db}"
+                    )
+            finally:
+                os.close(fd_main)
+
+            if any(os.path.lexists(confined_db + sfx) for sfx in ("", "-wal", "-shm")):
+                import time
+                ts_tag = int(time.time() * 1000)
+                bak_base = f"{confined_db}.pre-migrate.{ts_tag}.bak"
+                idx_bak = 0
+                while any(
+                    os.path.lexists(f"{bak_base}{'' if idx_bak == 0 else f'.{idx_bak}'}{sfx}")
+                    for sfx in ("", "-wal", "-shm")
+                ):
+                    idx_bak += 1
+                if idx_bak > 0:
+                    bak_base = f"{bak_base}.{idx_bak}"
+                for suffix in ("", "-wal", "-shm"):
+                    existing_p = confined_db + suffix
+                    if not os.path.lexists(existing_p):
+                        continue
+                    ex_st = os.lstat(existing_p)
+                    if not stat.S_ISREG(ex_st.st_mode):
+                        raise SystemExit(f"Refusing non-regular or symlinked local database artifact: {existing_p}")
+                    os.rename(existing_p, bak_base + suffix)
+                    os.chmod(bak_base + suffix, 0o600)
+
+            for suffix in ("", "-wal", "-shm"):
+                src_p = resolved_db + suffix
+                dst_p = confined_db + suffix
+                if not os.path.lexists(src_p):
+                    continue
+                src_st = os.lstat(src_p)
+                if not stat.S_ISREG(src_st.st_mode):
+                    raise SystemExit(f"Refusing non-regular or symlinked SQLite sidecar: {src_p}")
+                fd_in = os.open(src_p, os.O_RDONLY | o_nofollow)
+                tmp_dst = dst_p + ".migrated.tmp"
+                try:
+                    with os.fdopen(fd_in, "rb") as f_in:
+                        if suffix == "":
+                            f_fst = os.fstat(f_in.fileno())
+                            if (f_fst.st_dev, f_fst.st_ino) != (fst.st_dev, fst.st_ino):
+                                raise SystemExit("External database_file changed inode during migration")
+                        fd_out = os.open(tmp_dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | o_nofollow, 0o600)
+                        with os.fdopen(fd_out, "wb") as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                            f_out.flush()
+                            os.fsync(f_out.fileno())
+                    os.replace(tmp_dst, dst_p)
+                except Exception:
+                    try:
+                        os.unlink(tmp_dst)
+                    except OSError:
+                        pass
+                    raise
+
+            if not os.path.isfile(confined_db) or os.path.islink(confined_db):
+                raise SystemExit(f"External database migration verification failed for {confined_db}")
+            if os.lstat(confined_db).st_size != fst.st_size:
+                raise SystemExit("External database migration byte-size verification failed")
+
             text = re.sub(
                 r'^[ \t]*database_file\s*=.*',
                 f'database_file="{confined_db}"',
@@ -375,8 +463,18 @@ EOF
 fi
 
 chown -hRP librespeed:librespeed /opt/librespeed
-chmod 750 /opt/librespeed
-chmod 600 /opt/librespeed/settings.toml
+chown -h root:librespeed /opt/librespeed
+chmod 1770 /opt/librespeed
+chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
+chmod 755 /opt/librespeed/speedtest-backend
+chown root:librespeed /opt/librespeed/settings.toml
+chmod 640 /opt/librespeed/settings.toml
+for db_item in /opt/librespeed/speedtest.db /opt/librespeed/speedtest.db-wal /opt/librespeed/speedtest.db-shm /opt/librespeed/speedtest.db.bolt.bak /opt/librespeed/speedtest.db.pre-migrate.*; do
+    if [[ -f "$db_item" && ! -L "$db_item" ]]; then
+        chown librespeed:librespeed "$db_item"
+        chmod 600 "$db_item"
+    fi
+done
 
 report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service

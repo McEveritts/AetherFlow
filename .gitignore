@@ -37,6 +37,7 @@ backend-rs/target/
 backend-rs/aetherflow-api
 plugins/**/target/
 plugins/**/Cargo.lock
+!plugins/sdk-template-rust/backend/Cargo.lock
 plugins/**/bin/
 plugins/**/ui-link
 

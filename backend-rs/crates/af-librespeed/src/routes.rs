@@ -3,7 +3,8 @@ use crate::config::Config;
 use crate::db::{NewTelemetryRecord, TelemetryVault};
 use crate::png_card::render_badge_png;
 use crate::redact::{
-    format_getip_display, peer_ip_key, redact_freeform_text, redact_single_ip, resolve_client_ip,
+    extract_trusted_forwarded_ip, format_getip_display, peer_ip_key, redact_freeform_text,
+    redact_single_ip, resolve_client_ip,
 };
 use crate::stats::{
     handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, GarbageStreamGuard, StatsAuth,
@@ -15,9 +16,9 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Multipart, Query
 use axum::http::header::{
     ACCEPT_LANGUAGE, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH,
-    CONTENT_TYPE, PRAGMA, RETRY_AFTER, USER_AGENT,
+    CONTENT_TYPE, PRAGMA, RETRY_AFTER, TRANSFER_ENCODING, USER_AGENT,
 };
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -40,13 +41,33 @@ pub const MAX_TELEMETRY_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_STATS_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_CONCURRENT_GARBAGE_STREAMS: usize = 64;
 pub const MAX_GARBAGE_STREAMS_PER_IP: usize = 16;
+pub const MAX_CONCURRENT_UPLOAD_STREAMS: usize = 64;
+pub const MAX_UPLOAD_STREAMS_PER_IP: usize = 16;
 const MAX_GARBAGE_STREAM_DURATION: Duration = Duration::from_secs(60);
 const MAX_EMPTY_UPLOAD_DURATION: Duration = Duration::from_secs(60);
+const MAX_STATS_BODY_DURATION: Duration = Duration::from_secs(10);
 const MAX_TELEMETRY_READ_DURATION: Duration = Duration::from_secs(30);
 const GARBAGE_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const MIN_GARBAGE_CHUNKS: usize = 1;
 const MAX_GARBAGE_CHUNKS: usize = 1024;
 const DEFAULT_GARBAGE_CHUNKS: usize = 4;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouteTimeouts {
+    pub garbage_stream: Duration,
+    pub empty_upload: Duration,
+    pub stats_body: Duration,
+}
+
+impl Default for RouteTimeouts {
+    fn default() -> Self {
+        Self {
+            garbage_stream: MAX_GARBAGE_STREAM_DURATION,
+            empty_upload: MAX_EMPTY_UPLOAD_DURATION,
+            stats_body: MAX_STATS_BODY_DURATION,
+        }
+    }
+}
 
 static RANDOM_CHUNK_1MIB: Lazy<Bytes> = Lazy::new(|| {
     let mut buf = vec![0u8; GARBAGE_CHUNK_BYTES];
@@ -55,13 +76,28 @@ static RANDOM_CHUNK_1MIB: Lazy<Bytes> = Lazy::new(|| {
 });
 
 pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
-    build_router_with_stream_timeout(config, vault, MAX_GARBAGE_STREAM_DURATION)
+    build_router_with_timeouts(config, vault, RouteTimeouts::default())
 }
 
 pub fn build_router_with_stream_timeout(
     config: Config,
     vault: Option<TelemetryVault>,
     garbage_stream_timeout: Duration,
+) -> Router {
+    build_router_with_timeouts(
+        config,
+        vault,
+        RouteTimeouts {
+            garbage_stream: garbage_stream_timeout,
+            ..RouteTimeouts::default()
+        },
+    )
+}
+
+pub fn build_router_with_timeouts(
+    config: Config,
+    vault: Option<TelemetryVault>,
+    timeouts: RouteTimeouts,
 ) -> Router {
     let obfuscation_key = vault
         .as_ref()
@@ -78,7 +114,11 @@ pub fn build_router_with_stream_timeout(
         obfuscation_key,
         garbage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_GARBAGE_STREAMS)),
         garbage_ip_tracker: GarbageIpTracker::new(),
-        garbage_stream_timeout,
+        garbage_stream_timeout: timeouts.garbage_stream,
+        upload_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOAD_STREAMS)),
+        upload_ip_tracker: GarbageIpTracker::new(),
+        empty_upload_timeout: timeouts.empty_upload,
+        stats_body_timeout: timeouts.stats_body,
         telemetry_limiter: TelemetryRateLimiter::new(),
     };
 
@@ -129,7 +169,32 @@ pub fn build_router_with_stream_timeout(
         .with_state(state)
 }
 
+fn request_has_non_empty_body_framing(headers: &HeaderMap) -> bool {
+    if headers.contains_key(TRANSFER_ENCODING) {
+        return true;
+    }
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| {
+            let trimmed = raw.trim();
+            !trimmed.is_empty() && trimmed != "0"
+        })
+        .unwrap_or(false)
+}
+
 async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let unread_non_post_h1 = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && req.version() != Version::HTTP_2
+        && request_has_non_empty_body_framing(req.headers());
+    let abort_signal = if unread_non_post_h1 {
+        req.extensions()
+            .get::<crate::tls::ConnectionAbortSignal>()
+            .cloned()
+    } else {
+        None
+    };
+
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
     headers
@@ -141,6 +206,12 @@ async fn security_headers_middleware(req: Request, next: Next) -> Response {
     headers
         .entry(HeaderName::from_static("referrer-policy"))
         .or_insert_with(|| HeaderValue::from_static("no-referrer"));
+    if unread_non_post_h1 {
+        headers.insert(CONNECTION, HeaderValue::from_static("close"));
+        if let Some(sig) = abort_signal {
+            sig.abort_after_flush();
+        }
+    }
     res
 }
 
@@ -190,30 +261,104 @@ fn query_flag_truthy(query: Option<&str>, key: &str) -> bool {
     false
 }
 
-async fn handle_empty(body: Body) -> Response {
-    let mut stream = body.into_data_stream();
-    let mut total: usize = 0;
-    let read_outcome = tokio::time::timeout(MAX_EMPTY_UPLOAD_DURATION, async {
-        while let Some(next_chunk) = stream.next().await {
-            let Ok(chunk) = next_chunk else {
-                return Err((StatusCode::BAD_REQUEST, "failed reading upload stream"));
-            };
-            total = total.saturating_add(chunk.len());
-            if total > MAX_EMPTY_BODY_BYTES {
-                return Err((
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "upload body exceeds 64 MiB limit",
-                ));
-            }
+fn abort_stalled_h1_response(
+    mut resp: Response,
+    version: Version,
+    conn_abort: &Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
+) -> Response {
+    if version != Version::HTTP_2 {
+        resp.headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+        if let Some(axum::Extension(sig)) = conn_abort {
+            sig.abort_after_flush();
         }
-        Ok(())
-    })
-    .await;
+    }
+    resp
+}
 
-    match read_outcome {
-        Err(_) => return (StatusCode::REQUEST_TIMEOUT, "upload stream timed out").into_response(),
-        Ok(Err(err_resp)) => return err_resp.into_response(),
-        Ok(Ok(())) => {}
+async fn handle_empty(
+    State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    conn_abort: Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
+    version: Version,
+    method: Method,
+    req_headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let has_upload_payload =
+        method == Method::POST || request_has_non_empty_body_framing(&req_headers);
+
+    if has_upload_payload {
+        let _ip_guard = if let Some(ConnectInfo(addr)) = peer {
+            let client_ip =
+                resolve_client_ip(Some(addr), &req_headers, &state.config.trusted_proxies);
+            match state
+                .upload_ip_tracker
+                .try_acquire(&client_ip, MAX_UPLOAD_STREAMS_PER_IP)
+            {
+                Some(guard) => Some(guard),
+                None => {
+                    return abort_stalled_h1_response(
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(RETRY_AFTER, HeaderValue::from_static("5"))],
+                            "Too many concurrent upload streams from this client IP",
+                        )
+                            .into_response(),
+                        version,
+                        &conn_abort,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
+        let Ok(_permit) = state.upload_semaphore.clone().try_acquire_owned() else {
+            return abort_stalled_h1_response(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(RETRY_AFTER, HeaderValue::from_static("5"))],
+                    "Too many concurrent upload streams",
+                )
+                    .into_response(),
+                version,
+                &conn_abort,
+            );
+        };
+
+        let mut stream = body.into_data_stream();
+        let mut total: usize = 0;
+        let read_outcome = tokio::time::timeout(state.empty_upload_timeout, async {
+            while let Some(next_chunk) = stream.next().await {
+                let Ok(chunk) = next_chunk else {
+                    return Err((StatusCode::BAD_REQUEST, "failed reading upload stream"));
+                };
+                total = total.saturating_add(chunk.len());
+                if total > MAX_EMPTY_BODY_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "upload body exceeds 64 MiB limit",
+                    ));
+                }
+            }
+            Ok(())
+        })
+        .await;
+
+        match read_outcome {
+            Err(_) => {
+                return abort_stalled_h1_response(
+                    (StatusCode::REQUEST_TIMEOUT, "upload stream timed out").into_response(),
+                    version,
+                    &conn_abort,
+                );
+            }
+            Ok(Err(err_resp)) => {
+                return abort_stalled_h1_response(err_resp.into_response(), version, &conn_abort);
+            }
+            Ok(Ok(())) => {}
+        }
     }
 
     let mut headers = HeaderMap::new();
@@ -224,7 +369,9 @@ async fn handle_empty(body: Body) -> Response {
         ),
     );
     headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
-    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    if version != Version::HTTP_2 {
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    }
     (StatusCode::OK, headers, "").into_response()
 }
 
@@ -257,6 +404,7 @@ async fn handle_garbage(
     State(state): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
     conn_abort: Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
+    version: Version,
     headers: HeaderMap,
     method: Method,
     Query(q): Query<GarbageQuery>,
@@ -338,7 +486,11 @@ async fn handle_garbage(
     });
     let watchdog_lease = Arc::clone(&lease);
     let stream_timeout = state.garbage_stream_timeout;
-    let abort_signal = conn_abort.map(|axum::Extension(sig)| sig.0);
+    let abort_signal = if version != Version::HTTP_2 {
+        conn_abort.map(|axum::Extension(sig)| sig)
+    } else {
+        None
+    };
     tokio::spawn(async move {
         tokio::select! {
             _ = watchdog_lease.done_notify.notified() => {}
@@ -348,7 +500,7 @@ async fn handle_garbage(
                     let _ = slot.take();
                 }
                 if let Some(abort) = abort_signal {
-                    abort.notify_waiters();
+                    abort.abort();
                 }
             }
         }
@@ -493,23 +645,35 @@ async fn handle_telemetry(
 ) -> Response {
     let (parts, body) = req.into_parts();
     let headers = parts.headers.clone();
+    let version = parts.version;
+    let conn_abort = parts
+        .extensions
+        .get::<crate::tls::ConnectionAbortSignal>()
+        .cloned()
+        .map(axum::Extension);
 
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let raw_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
     let peer_ip = peer_ip_key(peer_addr);
+    let enforce_peer_bucket =
+        extract_trusted_forwarded_ip(peer_addr, &headers, &state.config.trusted_proxies).is_none();
     let now_unix = Utc::now().timestamp();
     if state.config.telemetry_enabled()
         && state.vault.is_some()
         && !state
             .telemetry_limiter
-            .try_acquire(&peer_ip, &raw_ip, now_unix)
+            .try_acquire(&peer_ip, &raw_ip, enforce_peer_bucket, now_unix)
     {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(RETRY_AFTER, HeaderValue::from_static("60"))],
-            "Telemetry write rate limit exceeded",
-        )
-            .into_response();
+        return abort_stalled_h1_response(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, HeaderValue::from_static("60"))],
+                "Telemetry write rate limit exceeded",
+            )
+                .into_response(),
+            version,
+            &conn_abort,
+        );
     }
 
     let mut stream = body.into_data_stream();
@@ -533,9 +697,15 @@ async fn handle_telemetry(
 
     match telemetry_read {
         Err(_) => {
-            return (StatusCode::REQUEST_TIMEOUT, "telemetry body read timed out").into_response()
+            return abort_stalled_h1_response(
+                (StatusCode::REQUEST_TIMEOUT, "telemetry body read timed out").into_response(),
+                version,
+                &conn_abort,
+            )
         }
-        Ok(Err(err_resp)) => return err_resp.into_response(),
+        Ok(Err(err_resp)) => {
+            return abort_stalled_h1_response(err_resp.into_response(), version, &conn_abort)
+        }
         Ok(Ok(())) => {}
     }
 

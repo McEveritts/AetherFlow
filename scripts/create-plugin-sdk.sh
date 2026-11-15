@@ -44,7 +44,8 @@ fi
 
 mkdir -p "${TARGET_DIR}"
 cp -R "${TEMPLATE_DIR}/." "${TARGET_DIR}/"
-rm -rf "${TARGET_DIR}/backend/target" "${TARGET_DIR}/backend/Cargo.lock" "${TARGET_DIR}/bin"
+chmod -R u+w "${TARGET_DIR}"
+rm -rf "${TARGET_DIR}/backend/target" "${TARGET_DIR}/bin"
 
 python3 - "${TARGET_DIR}" "${PLUGIN_ID}" "${PLUGIN_NAME}" <<'PYEOF'
 import pathlib
@@ -62,7 +63,7 @@ for path in target_dir.rglob("*"):
     except UnicodeDecodeError:
         continue
     updated = text.replace("{{PLUGIN_ID}}", plugin_id).replace("{{PLUGIN_NAME}}", plugin_name)
-    if path.name == "Cargo.toml":
+    if path.name in ("Cargo.toml", "Cargo.lock"):
         updated = updated.replace(
             'name = "aetherflow-plugin-sdk-template"',
             f'name = "aetherflow-plugin-{plugin_id}"',

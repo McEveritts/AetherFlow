@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -282,6 +283,14 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             self.assertIn("-p af-librespeed", text)
             if name in ("ci.yml", "release.yml"):
                 self.assertIn("speedtest-backend", text)
+                self.assertIn("plugins/sdk-template-rust/backend/Cargo.toml", text)
+            if name == "security.yml":
+                self.assertIn("plugins/sdk-template-rust/backend/Cargo.lock", text)
+
+        self.assertTrue(
+            (ROOT / "plugins/sdk-template-rust/backend/Cargo.lock").is_file(),
+            "Missing committed Cargo.lock for plugins/sdk-template-rust/backend",
+        )
 
         rel_text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn('AF_BUILD_VERSION="${RELEASE_TAG#v}"', rel_text)
@@ -480,8 +489,8 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
             settings_path = root / "opt/librespeed/settings.toml"
             settings_text = settings_path.read_text(encoding="utf-8")
-            self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual((root / "opt/librespeed").stat().st_mode & 0o777, 0o750)
+            self.assertEqual(settings_path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual((root / "opt/librespeed").stat().st_mode & 0o7777, 0o1770)
             self.assertNotIn("top-secret-master-pass-999", settings_text)
             expected_derived = hmac.new(
                 b"top-secret-master-pass-999",
@@ -544,23 +553,25 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 f"Expected HTTPS readiness probe with -k in commands: {logged_cmds}",
             )
 
-            # 4. Retained external database_file is safely migrated into confined /opt/librespeed/speedtest.db,
-            #    and redact_ip_addresses=false does not auto-inject trusted_proxies
+            # 4a. Retained external database_file (including database_type="" and .. traversal normalization)
+            #     wins over a stale local speedtest.db while preserving the stale local DB as .pre-migrate.*.bak
             ext_db_dir = root / "var/lib/librespeed"
             ext_db_dir.mkdir(parents=True, exist_ok=True)
             ext_db = ext_db_dir / "speedtest.db"
             ext_db.write_bytes(b"SQLite format 3\x00external-telemetry-payload")
             (ext_db_dir / "speedtest.db-wal").write_bytes(b"external-wal-frames")
-            for stale_name in ("speedtest.db", "speedtest.db-wal", "speedtest.db-shm"):
-                (root / "opt/librespeed" / stale_name).unlink(missing_ok=True)
+            confined_db = root / "opt/librespeed/speedtest.db"
+            confined_db.write_bytes(b"SQLite format 3\x00stale-local-payload")
+            (root / "opt/librespeed/speedtest.db-wal").write_bytes(b"stale-local-wal")
+            unnormalized_ext = f"{root}/opt/librespeed/../../var/lib/librespeed/speedtest.db"
 
             settings_path.write_text(
                 'bind_address="127.0.0.1"\n'
                 'listen_port=8988\n'
                 'statistics_password="custom-stats-password"\n'
                 'redact_ip_addresses=false\n'
-                'database_type="sqlite"\n'
-                f'database_file="{ext_db}"\n'
+                'database_type=""\n'
+                f'database_file="{unnormalized_ext}"\n'
                 'enable_tls=false\n',
                 encoding="utf-8",
             )
@@ -572,12 +583,67 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             )
             self.assertEqual(ext_res.returncode, 0, ext_res.stdout + ext_res.stderr)
             migrated_cfg = settings_path.read_text(encoding="utf-8")
-            confined_db = root / "opt/librespeed/speedtest.db"
             self.assertIn(f'database_file="{confined_db}"', migrated_cfg)
             self.assertEqual(confined_db.read_bytes(), b"SQLite format 3\x00external-telemetry-payload")
             self.assertEqual((root / "opt/librespeed/speedtest.db-wal").read_bytes(), b"external-wal-frames")
+            pre_migrate_baks = list((root / "opt/librespeed").glob("speedtest.db.pre-migrate.*.bak"))
+            self.assertEqual(len(pre_migrate_baks), 1)
+            self.assertEqual(pre_migrate_baks[0].read_bytes(), b"SQLite format 3\x00stale-local-payload")
             self.assertTrue(ext_db.exists(), "Original external DB must remain intact as backup")
             self.assertNotIn("trusted_proxies=", migrated_cfg)
+
+            # 4b. Missing external database_file (e.g. unmounted volume) fails closed without rewriting settings.toml
+            missing_ext = ext_db_dir / "unmounted-volume.db"
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'statistics_password="custom-stats-password"\n'
+                'database_type="sqlite"\n'
+                f'database_file="{missing_ext}"\n',
+                encoding="utf-8",
+            )
+            missing_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(missing_res.returncode, 0)
+            self.assertIn(f'database_file="{missing_ext}"', settings_path.read_text(encoding="utf-8"))
+
+            # 4c. Disallowed host path (/etc/...) and non-SQLite/non-Bolt file header both fail closed
+            etc_secret = root / "etc/aetherflow.env"
+            etc_secret.parent.mkdir(parents=True, exist_ok=True)
+            etc_secret.write_bytes(b"SQLite format 3\x00fake-header-in-etc")
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'database_type="sqlite"\n'
+                f'database_file="{etc_secret}"\n',
+                encoding="utf-8",
+            )
+            etc_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(etc_res.returncode, 0)
+
+            bad_magic_db = ext_db_dir / "not-a-database.db"
+            bad_magic_db.write_bytes(b"-----BEGIN PRIVATE KEY-----\nNOT_A_DB")
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'database_type="sqlite"\n'
+                f'database_file="{bad_magic_db}"\n',
+                encoding="utf-8",
+            )
+            bad_magic_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_magic_res.returncode, 0)
 
     def test_update_aetherflow_executes_real_af_binary_and_common_https_readiness_guard(self) -> None:
         with tempfile.TemporaryDirectory(prefix="af-shim-bin-") as tmp:
@@ -700,6 +766,38 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertEqual(manifest["backend"]["binary_name"], "aetherflow-plugin-sample-plugin")
             cargo_toml = (out_dir / "backend/Cargo.toml").read_text(encoding="utf-8")
             self.assertIn('name = "aetherflow-plugin-sample-plugin"', cargo_toml)
+            cargo_lock = (out_dir / "backend/Cargo.lock").read_text(encoding="utf-8")
+            self.assertIn('name = "aetherflow-plugin-sample-plugin"', cargo_lock)
+            self.assertNotIn("aetherflow-plugin-template", cargo_lock)
+
+            # Verify read-only template trees (e.g. Debian/tarball root-owned packaging) still scaffold cleanly.
+            ro_repo = Path(tmp) / "ro-repo"
+            (ro_repo / "scripts").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/create-plugin-sdk.sh", ro_repo / "scripts/create-plugin-sdk.sh")
+            shutil.copytree(ROOT / "plugins/sdk-template-rust", ro_repo / "plugins/sdk-template-rust")
+            for p in (ro_repo / "plugins/sdk-template-rust").rglob("*"):
+                if p.is_file():
+                    p.chmod(0o444)
+            try:
+                ro_out = Path(tmp) / "ro-sample-plugin"
+                ro_ok = subprocess.run(
+                    [
+                        "bash",
+                        str(ro_repo / "scripts/create-plugin-sdk.sh"),
+                        "ro-plugin",
+                        "Readonly Plugin",
+                        str(ro_out),
+                    ],
+                    cwd=ro_repo,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(ro_ok.returncode, 0)
+                self.assertTrue(os.access(ro_out / "plugin.manifest.json", os.W_OK))
+            finally:
+                for p in (ro_repo / "plugins/sdk-template-rust").rglob("*"):
+                    p.chmod(0o755 if p.is_dir() else 0o644)
 
         modern_stack = (ROOT / "setup/modules/modern_stack.sh").read_text(encoding="utf-8")
         build_gold = (ROOT / "scripts/build_gold.sh").read_text(encoding="utf-8")

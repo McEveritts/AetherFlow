@@ -223,6 +223,19 @@ jobs:
       - name: Enforce Rust Formatting Gate
         run: cargo fmt --all -- --check
 
+      - name: Verify Pure-Rust Plugin SDK & Generated Scaffold
+        working-directory: .
+        run: |
+          test -f plugins/sdk-template-rust/backend/Cargo.lock
+          cargo fmt --manifest-path plugins/sdk-template-rust/backend/Cargo.toml -- --check
+          cargo clippy --manifest-path plugins/sdk-template-rust/backend/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path plugins/sdk-template-rust/backend/Cargo.toml --locked
+          TMP_SDK="$(mktemp -d)"
+          trap 'rm -rf "$TMP_SDK"' EXIT
+          bash scripts/create-plugin-sdk.sh ci-verify-plugin "CI Verify Plugin" "$TMP_SDK/ci-verify-plugin" rust
+          cargo clippy --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
+          cargo test --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --locked
+
       - name: Build Embedded Single-Binary & Native CLI (Rust)
         run: |
           cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend

@@ -1,9 +1,9 @@
 ## Nightly Patch Notes — November 15, 2026 — Zero-Go Cutover, Native Rust LibreSpeed & Neutral Staging
 
-This release completes the **Zero-Go cutover** across AetherFlow's repository layout, CI/release/security pipelines, test suites, and documentation:
-- **Zero-Go Repository Hygiene**: Removed all Go CI, security, and release jobs (`actions/setup-go`, `gosec`, `staticcheck`, `govulncheck`, `go test`, `go vet`, `go build`) and enforced `git ls-files '*.go' '*go.mod' '*go.sum'` checks across `.github/workflows/{ci,release,security}.yml`.
-- **Native Rust LibreSpeed (`af-librespeed` -> `speedtest-backend`)**: Added strict clippy gating (`-p af-librespeed`) and `speedtest-backend` release binary building/staging across CI and release workflows.
-- **Neutral Asset Paths & Test Cutover**: Migrated CI/release staging and Python/E2E verification suites from legacy `backend/web/dist` and `backend/config/` paths to neutral `web/dist` and canonical root `config/`, backed by `tests/test_zero_go_cutover.py`.
+This release completes the **Zero-Go cutover** across AetherFlow's repository layout, CI/release/security pipelines, test suites, and documentation (superseding all legacy Go toolchain/SAST gates referenced in pre-cutover release notes below):
+- **Zero-Go Repository Hygiene**: Decommissioned `backend/`, `plugins/sdk-template/`, and `packages/package/assets/librespeed/backend-patches/`, removed all legacy Go CI/security/release steps, and enforced `git ls-files '*.go' '*go.mod' '*go.sum'` checks plus locked Cargo gates across both `backend-rs/` and `plugins/sdk-template-rust/backend/` (`cargo fmt`, `cargo clippy -D warnings`, `cargo test --locked`, `cargo-deny`, `cargo-audit`, and scaffold compilation checks).
+- **Native Rust LibreSpeed (`af-librespeed` -> `speedtest-backend`)**: Replaced upstream `speedtest-go` + Go overlay patches with memory-safe `af-librespeed`, enforcing bounded connection/stream/body deadlines, `openat` + `O_NOFOLLOW` asset confinement, `0600` SQLite WAL telemetry with non-destructive `.bolt.bak` preservation, and SLSA v1 Sigstore provenance verification across `amd64`, `arm64`, and `armv7`.
+- **Zero-CDN OpenAPI 3.1 UI & Canonical Root Config**: Embedded a zero-`innerHTML`, zero-CDN OpenAPI 3.1 explorer in `af-api`, migrated CI/release staging and runtime config loading to neutral `web/dist` and canonical root `config/` with `O_NOFOLLOW` symlink rejection, and added end-to-end invariant coverage in `tests/test_zero_go_cutover.py`.
 
 ---
 

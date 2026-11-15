@@ -1,15 +1,17 @@
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
-use crate::redact::{is_trusted_proxy_peer, peer_ip_key, resolve_client_ip};
+use crate::redact::{extract_trusted_forwarded_ip, is_trusted_proxy_peer, peer_ip_key};
 use crate::ulid::{canonicalize_ulid, obfuscate_ulid, resolve_id};
-use axum::body::Bytes;
-use axum::extract::{ConnectInfo, OriginalUri, Query, State};
+use axum::body::Body;
+use axum::extract::{ConnectInfo, OriginalUri, Query, Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, RETRY_AFTER, SET_COOKIE,
+    CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, COOKIE, LOCATION,
+    RETRY_AFTER, SET_COOKIE, TRANSFER_ENCODING,
 };
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
 use chrono::Utc;
+use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -19,6 +21,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -28,6 +31,7 @@ const SESSION_TTL_SECS: i64 = 3600;
 const LOGIN_WINDOW_SECS: i64 = 60;
 const MAX_FAILED_LOGINS_PER_WINDOW: usize = 10;
 const MAX_TRACKED_LOGIN_IPS: usize = 4096;
+const MAX_STATS_FORM_BYTES: usize = 64 * 1024;
 const STATS_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 #[derive(Clone)]
@@ -178,7 +182,13 @@ impl TelemetryRateLimiter {
         Self::default()
     }
 
-    pub fn try_acquire(&self, peer_ip: &str, client_ip: &str, now_unix: i64) -> bool {
+    pub fn try_acquire(
+        &self,
+        peer_ip: &str,
+        client_ip: &str,
+        enforce_peer_bucket: bool,
+        now_unix: i64,
+    ) -> bool {
         let Ok(mut state) = self.inner.lock() else {
             return false;
         };
@@ -193,9 +203,11 @@ impl TelemetryRateLimiter {
             return false;
         }
 
-        let peer_used = current_bucket_count(&mut state.by_peer, peer_ip, now_unix);
-        if peer_used >= MAX_TELEMETRY_PER_PEER_IP {
-            return false;
+        if enforce_peer_bucket {
+            let peer_used = current_bucket_count(&mut state.by_peer, peer_ip, now_unix);
+            if peer_used >= MAX_TELEMETRY_PER_PEER_IP {
+                return false;
+            }
         }
 
         if state.global_count >= MAX_TELEMETRY_GLOBAL_PER_WINDOW {
@@ -203,7 +215,9 @@ impl TelemetryRateLimiter {
         }
 
         bump_bucket(&mut state.by_client, client_ip, now_unix);
-        bump_bucket(&mut state.by_peer, peer_ip, now_unix);
+        if enforce_peer_bucket {
+            bump_bucket(&mut state.by_peer, peer_ip, now_unix);
+        }
         state.global_count = state.global_count.saturating_add(1);
         true
     }
@@ -300,7 +314,11 @@ pub struct AppState {
     pub obfuscation_key: [u8; 32],
     pub garbage_semaphore: Arc<Semaphore>,
     pub garbage_ip_tracker: GarbageIpTracker,
-    pub garbage_stream_timeout: std::time::Duration,
+    pub garbage_stream_timeout: Duration,
+    pub upload_semaphore: Arc<Semaphore>,
+    pub upload_ip_tracker: GarbageIpTracker,
+    pub empty_upload_timeout: Duration,
+    pub stats_body_timeout: Duration,
     pub telemetry_limiter: TelemetryRateLimiter,
 }
 
@@ -324,6 +342,36 @@ fn stats_html_response(status: StatusCode, html_body: String) -> Response {
         .into_response()
 }
 
+fn request_declares_body(headers: &HeaderMap) -> bool {
+    if headers.contains_key(TRANSFER_ENCODING) {
+        return true;
+    }
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| {
+            let trimmed = raw.trim();
+            !trimmed.is_empty() && trimmed != "0"
+        })
+        .unwrap_or(false)
+}
+
+fn close_h1_if_unread_body(
+    mut resp: Response,
+    unread_body: bool,
+    version: Version,
+    conn_abort: &Option<axum::Extension<crate::tls::ConnectionAbortSignal>>,
+) -> Response {
+    if unread_body && version != Version::HTTP_2 {
+        resp.headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+        if let Some(axum::Extension(sig)) = conn_abort {
+            sig.abort_after_flush();
+        }
+    }
+    resp
+}
+
 fn is_https_via_trusted_proxy(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
@@ -345,12 +393,19 @@ fn is_https_via_trusted_proxy(
 pub async fn handle_stats(
     State(state): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
-    method: Method,
     OriginalUri(orig_uri): OriginalUri,
-    headers: HeaderMap,
     Query(query): Query<StatsQuery>,
-    body: Bytes,
+    req: Request<Body>,
 ) -> Response {
+    let (parts, body) = req.into_parts();
+    let version = parts.version;
+    let method = parts.method;
+    let headers = parts.headers;
+    let conn_abort = parts
+        .extensions
+        .get::<crate::tls::ConnectionAbortSignal>()
+        .cloned()
+        .map(axum::Extension);
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let cookie_path = resolve_stats_cookie_path(&state.config.url_base, orig_uri.path());
     let secure_attr = if state.config.enable_tls
@@ -360,25 +415,74 @@ pub async fn handle_stats(
     } else {
         ""
     };
+    let declared_body = request_declares_body(&headers);
 
     if !state.config.telemetry_enabled() || state.vault.is_none() {
-        return stats_html_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            render_layout(
-                "Telemetry Disabled",
-                r#"<section class="obs-auth-panel">
+        return close_h1_if_unread_body(
+            stats_html_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                render_layout(
+                    "Telemetry Disabled",
+                    r#"<section class="obs-auth-panel">
                     <h2>Statistics Disabled</h2>
                     <p class="obs-muted">Telemetry storage is currently disabled (<code>database_type = "none"</code>).</p>
                 </section>"#,
+                ),
             ),
+            declared_body,
+            version,
+            &conn_abort,
         );
     }
 
     let form_map = if method == Method::POST {
-        parse_urlencoded_map(&body)
+        let mut stream = body.into_data_stream();
+        let mut raw_body = Vec::with_capacity(256);
+        let body_read = tokio::time::timeout(state.stats_body_timeout, async {
+            while let Some(next_chunk) = stream.next().await {
+                let Ok(chunk) = next_chunk else {
+                    return Err((StatusCode::BAD_REQUEST, "failed reading stats form body"));
+                };
+                if raw_body.len().saturating_add(chunk.len()) > MAX_STATS_FORM_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "stats form body exceeds 64 KiB limit",
+                    ));
+                }
+                raw_body.extend_from_slice(&chunk);
+            }
+            Ok(())
+        })
+        .await;
+
+        match body_read {
+            Err(_) => {
+                return close_h1_if_unread_body(
+                    (
+                        StatusCode::REQUEST_TIMEOUT,
+                        "stats request body read timed out",
+                    )
+                        .into_response(),
+                    true,
+                    version,
+                    &conn_abort,
+                );
+            }
+            Ok(Err(err_resp)) => {
+                return close_h1_if_unread_body(
+                    err_resp.into_response(),
+                    true,
+                    version,
+                    &conn_abort,
+                );
+            }
+            Ok(Ok(())) => parse_urlencoded_map(&raw_body),
+        }
     } else {
         HashMap::new()
     };
+
+    let unread_non_post_body = method != Method::POST && declared_body;
 
     let op = form_map
         .get("op")
@@ -388,7 +492,12 @@ pub async fn handle_stats(
 
     if op == "logout" {
         if method != Method::POST {
-            return (StatusCode::METHOD_NOT_ALLOWED, "POST required for logout").into_response();
+            return close_h1_if_unread_body(
+                (StatusCode::METHOD_NOT_ALLOWED, "POST required for logout").into_response(),
+                unread_non_post_body,
+                version,
+                &conn_abort,
+            );
         }
         let now_logout = Utc::now().timestamp();
         let has_valid_session = extract_cookie(&headers, COOKIE_NAME)
@@ -406,27 +515,38 @@ pub async fn handle_stats(
     }
 
     if state.config.stats_locked() {
-        return stats_html_response(
-            StatusCode::OK,
-            render_layout(
-                "Statistics Locked",
-                r#"<section class="obs-auth-panel">
+        return close_h1_if_unread_body(
+            stats_html_response(
+                StatusCode::OK,
+                render_layout(
+                    "Statistics Locked",
+                    r#"<section class="obs-auth-panel">
                     <h2>Statistics Access Locked</h2>
                     <p class="obs-alert">Set a custom non-default <code>statistics_password</code> in <code>settings.toml</code> to unlock the telemetry vault.</p>
                 </section>"#,
+                ),
             ),
+            unread_non_post_body,
+            version,
+            &conn_abort,
         );
     }
 
     let now_unix = Utc::now().timestamp();
 
     if method == Method::POST && op == "login" {
-        let client_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
-        let peer_key = format!("peer:{}", peer_ip_key(peer_addr));
-        let client_key = format!("client:{client_ip}");
-        if !state.stats_auth.check_login_allowed(&peer_key, now_unix)
-            || !state.stats_auth.check_login_allowed(&client_key, now_unix)
-        {
+        // When accessed via an explicitly configured trusted reverse proxy (e.g. loopback Apache)
+        // that supplies a valid forwarded client IP, key login throttling strictly on that client IP
+        // so one remote attacker cannot lock out all users sharing the proxy's loopback peer IP.
+        let rate_key = match extract_trusted_forwarded_ip(
+            peer_addr,
+            &headers,
+            &state.config.trusted_proxies,
+        ) {
+            Some(forwarded_ip) => format!("client:{forwarded_ip}"),
+            None => format!("peer:{}", peer_ip_key(peer_addr)),
+        };
+        if !state.stats_auth.check_login_allowed(&rate_key, now_unix) {
             let mut resp = stats_html_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 render_login_page(
@@ -444,16 +564,14 @@ pub async fn handle_stats(
             .stats_auth
             .verify_password(&state.config.statistics_password, candidate)
         {
-            state.stats_auth.clear_login_failures(&client_key);
-            state.stats_auth.clear_login_failures(&peer_key);
+            state.stats_auth.clear_login_failures(&rate_key);
             let token = state.stats_auth.issue_cookie_token(now_unix);
             let set_cookie = format!(
                 "{COOKIE_NAME}={token}; Path={cookie_path}; Max-Age={SESSION_TTL_SECS}; HttpOnly; SameSite=Strict{secure_attr}"
             );
             return redirect_with_cookie(&cookie_path, &set_cookie);
         }
-        state.stats_auth.record_login_failure(&peer_key, now_unix);
-        state.stats_auth.record_login_failure(&client_key, now_unix);
+        state.stats_auth.record_login_failure(&rate_key, now_unix);
         return stats_html_response(
             StatusCode::UNAUTHORIZED,
             render_login_page(&cookie_path, Some("Invalid statistics password.")),
@@ -465,7 +583,12 @@ pub async fn handle_stats(
         .unwrap_or(false);
 
     if !is_authenticated {
-        return stats_html_response(StatusCode::OK, render_login_page(&cookie_path, None));
+        return close_h1_if_unread_body(
+            stats_html_response(StatusCode::OK, render_login_page(&cookie_path, None)),
+            unread_non_post_body,
+            version,
+            &conn_abort,
+        );
     }
 
     let lookup_id = form_map

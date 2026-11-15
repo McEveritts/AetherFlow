@@ -564,7 +564,8 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .unwrap();
     assert!(clear_cookie.contains("Max-Age=0"));
 
-    // Brute-force login rate limiter triggers 429 after 10 failures even when rotating BOTH leftmost AND rightmost XFF behind loopback proxy (peer bucket enforced!)
+    // Case A: Behind trusted loopback proxy, rotating spoofed leftmost XFF while rightmost hop stays
+    // the attacker's IP (198.51.100.42) triggers 429 on the 11th attempt without locking out other proxy clients.
     for attempt in 0..10 {
         let fail_res = app
             .clone()
@@ -575,7 +576,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(
                         "x-forwarded-for",
-                        format!("192.0.2.{attempt}, 198.51.100.{attempt}"),
+                        format!("192.0.2.{attempt}, 198.51.100.42"),
                     )
                     .body(Body::from("op=login&password=bad"))
                     .unwrap(),
@@ -590,12 +591,13 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
             .is_none());
     }
     let throttled = app
+        .clone()
         .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/stats.php")
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("x-forwarded-for", "192.0.2.250, 198.51.100.250")
+                .header("x-forwarded-for", "192.0.2.250, 198.51.100.42")
                 .body(Body::from("op=login&password=bad"))
                 .unwrap(),
             "127.0.0.1:50000",
@@ -610,6 +612,43 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .to_str()
         .unwrap()
         .contains("default-src 'none'"));
+
+    // Case B: Direct untrusted peer (not in trusted_proxies) rotating BOTH leftmost and rightmost XFF
+    // is still throttled by peer IP after 10 failures.
+    for attempt in 0..10 {
+        let fail_res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/stats.php")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        "x-forwarded-for",
+                        format!("192.0.2.{attempt}, 198.51.100.{attempt}"),
+                    )
+                    .body(Body::from("op=login&password=bad"))
+                    .unwrap(),
+                "203.0.113.99:50000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(fail_res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let untrusted_throttled = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/stats.php")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("x-forwarded-for", "192.0.2.250, 198.51.100.250")
+                .body(Body::from("op=login&password=bad"))
+                .unwrap(),
+            "203.0.113.99:50000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(untrusted_throttled.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
@@ -1065,4 +1104,351 @@ async fn bundled_multistream_parity_and_stalled_non_reading_client_deadline_reco
     drop(stalled_sockets);
     let _ = tx.send(());
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stalled_post_stats_body_times_out_and_releases_http_and_https_listener_permits() {
+    use af_librespeed::routes::{build_router_with_timeouts, RouteTimeouts};
+    use af_librespeed::tls::{
+        build_tls_acceptor, serve_http_with_limits, serve_tls_with_limits, ListenerLimits,
+    };
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, ServerName};
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    use tokio_rustls::TlsConnector;
+
+    let limits = ListenerLimits {
+        max_connections: 4,
+        header_read_timeout: Duration::from_secs(2),
+        idle_connection_timeout: Duration::from_millis(400),
+        http2_max_concurrent_streams: 8,
+    };
+    let timeouts = RouteTimeouts {
+        garbage_stream: Duration::from_secs(5),
+        empty_upload: Duration::from_millis(250),
+        stats_body: Duration::from_millis(200),
+    };
+
+    // 1. Plain HTTP socket-level test: saturate all 4 permits with stalled POST /stats bodies
+    {
+        let tmp = TempDirGuard::new("stalled-stats-http");
+        let (cfg, vault) = make_test_config(&tmp);
+        let app = build_router_with_timeouts(cfg, Some(vault), timeouts);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            serve_http_with_limits(
+                listener,
+                app,
+                async move {
+                    let _ = rx.await;
+                },
+                limits,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut stalled = Vec::new();
+        for _ in 0..limits.max_connections {
+            let mut sock = TcpStream::connect(addr).await.unwrap();
+            sock.write_all(
+                b"POST /stats HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            stalled.push(sock);
+        }
+
+        tokio::time::sleep(Duration::from_millis(380)).await;
+
+        for mut sock in stalled {
+            let mut buf = Vec::new();
+            sock.read_to_end(&mut buf).await.unwrap();
+            let resp = String::from_utf8_lossy(&buf);
+            assert!(
+                resp.starts_with("HTTP/1.1 408"),
+                "expected 408 timeout on stalled HTTP POST /stats, got: {resp}"
+            );
+        }
+
+        let mut healthy = TcpStream::connect(addr).await.unwrap();
+        healthy
+            .write_all(b"GET /getIP HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut ok_buf = Vec::new();
+        healthy.read_to_end(&mut ok_buf).await.unwrap();
+        let ok_resp = String::from_utf8_lossy(&ok_buf);
+        assert!(
+            ok_resp.starts_with("HTTP/1.1 200 OK"),
+            "expected recovered HTTP listener permit, got: {ok_resp}"
+        );
+
+        let _ = tx.send(());
+        server_task.await.unwrap();
+    }
+
+    // 2. Native HTTPS socket-level test: saturate all 4 TLS permits with stalled POST /stats bodies
+    {
+        let tmp = TempDirGuard::new("stalled-stats-https");
+        let cert_path = tmp.0.join("cert.pem");
+        let key_path = tmp.0.join("key.pem");
+        let status = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:prime256v1",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-keyout",
+            ])
+            .arg(&key_path)
+            .arg("-out")
+            .arg(&cert_path)
+            .status()
+            .expect("openssl available");
+        assert!(status.success());
+
+        let (mut cfg, vault) = make_test_config(&tmp);
+        cfg.enable_tls = true;
+        cfg.tls_cert_file = cert_path.clone();
+        cfg.tls_key_file = key_path;
+        let acceptor = build_tls_acceptor(&cfg).expect("build TLS acceptor");
+        let app = build_router_with_timeouts(cfg, Some(vault), timeouts);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            serve_tls_with_limits(
+                listener,
+                acceptor,
+                app,
+                async move {
+                    let _ = rx.await;
+                },
+                limits,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_file_iter(&cert_path).unwrap() {
+            root_store.add(cert.unwrap()).unwrap();
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_cfg));
+
+        let mut stalled_tls = Vec::new();
+        for _ in 0..limits.max_connections {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let domain = ServerName::try_from("localhost").unwrap();
+            let mut tls_stream = connector.connect(domain, tcp).await.unwrap();
+            tls_stream
+                .write_all(
+                    b"POST /stats HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stalled_tls.push(tls_stream);
+        }
+
+        tokio::time::sleep(Duration::from_millis(380)).await;
+
+        let tcp_ok = TcpStream::connect(addr).await.unwrap();
+        let domain_ok = ServerName::try_from("localhost").unwrap();
+        let mut tls_ok = connector.connect(domain_ok, tcp_ok).await.unwrap();
+        tls_ok
+            .write_all(b"GET /getIP HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut ok_buf = Vec::new();
+        tls_ok.read_to_end(&mut ok_buf).await.unwrap();
+        let ok_resp = String::from_utf8_lossy(&ok_buf);
+        assert!(
+            ok_resp.starts_with("HTTP/1.1 200 OK"),
+            "expected recovered HTTPS listener permit while stalled_tls held open, got: {ok_resp}"
+        );
+
+        drop(stalled_tls);
+        let _ = tx.send(());
+        server_task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn upload_empty_enforces_per_ip_cap_and_reclaims_stalled_upload_permits() {
+    use af_librespeed::routes::{
+        build_router_with_timeouts, RouteTimeouts, MAX_UPLOAD_STREAMS_PER_IP,
+    };
+    use af_librespeed::tls::serve_http;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    let tmp = TempDirGuard::new("upload-cap");
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_type = "none".to_string();
+    let app = build_router_with_timeouts(
+        cfg,
+        None,
+        RouteTimeouts {
+            garbage_stream: Duration::from_secs(5),
+            empty_upload: Duration::from_millis(250),
+            stats_body: Duration::from_millis(250),
+        },
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        serve_http(listener, app, async move {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut stalled_uploads = Vec::new();
+    for _ in 0..MAX_UPLOAD_STREAMS_PER_IP {
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        sock.write_all(b"POST /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1024\r\n\r\n")
+            .await
+            .unwrap();
+        stalled_uploads.push(sock);
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    // 17th concurrent POST /empty from same IP must be rejected with 429
+    {
+        let mut extra = TcpStream::connect(addr).await.unwrap();
+        extra
+            .write_all(
+                b"POST /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        extra.read_to_end(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(
+            resp.starts_with("HTTP/1.1 429"),
+            "expected 429 on 17th concurrent upload stream, got: {resp}"
+        );
+    }
+
+    // Lightweight GET /empty ping probe remains unaffected during upload saturation
+    {
+        let mut ping = TcpStream::connect(addr).await.unwrap();
+        ping.write_all(b"GET /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        ping.read_to_end(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+    }
+
+    // Wait past 250ms upload deadline and confirm upload slots recover
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    {
+        let mut recovered = TcpStream::connect(addr).await.unwrap();
+        recovered
+            .write_all(
+                b"POST /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        recovered.read_to_end(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+    }
+
+    drop(stalled_uploads);
+    let _ = tx.send(());
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn trusted_proxy_stats_login_lockout_isolates_forwarded_clients() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let tmp = TempDirGuard::new("proxy-stats-lockout");
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
+    let app = build_router(cfg, Some(vault));
+    let proxy_peer: SocketAddr = "127.0.0.1:44001".parse().unwrap();
+
+    // Attacker at 203.0.113.77 sends 10 bad passwords via trusted loopback reverse proxy
+    for _ in 0..10 {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(Body::from("op=login&password=wrong"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 11th attempt from attacker 203.0.113.77 is throttled with 429
+    {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(Body::from("op=login&password=VaultSecretPassword!9"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // Legitimate admin at 198.51.100.10 arriving via the SAME loopback reverse proxy succeeds!
+    {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/stats")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "198.51.100.10")
+            .body(Body::from("op=login&password=VaultSecretPassword!9"))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(proxy_peer));
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
 }

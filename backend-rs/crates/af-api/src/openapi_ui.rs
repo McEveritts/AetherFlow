@@ -684,7 +684,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
           <div class="brand-title">
             <h1 id="api-title">AetherFlow API</h1>
             <span class="pill pill-indigo" id="spec-version">OpenAPI 3.1.0</span>
-            <span class="pill" id="api-version">v3.1.0</span>
+            <span class="pill" id="api-version">v4.0.0</span>
             <span class="pill pill-emerald" id="security-pill">cookieAuth</span>
           </div>
           <div class="muted" style="font-size:12px;">Zero-CDN offline OpenAPI explorer</div>

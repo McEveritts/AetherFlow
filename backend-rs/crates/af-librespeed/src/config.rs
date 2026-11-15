@@ -72,9 +72,9 @@ impl Config {
                 "unsupported database_type {other:?} in settings.toml; speedtest-backend supports only \"sqlite\" (or \"none\" to disable telemetry)"
             ),
         }
-        if db_type != "none" && self.database_file.as_os_str().is_empty() {
+        if !matches!(db_type.as_str(), "" | "none") && self.database_file.as_os_str().is_empty() {
             bail!(
-                "database_file must be non-empty in settings.toml unless database_type = \"none\""
+                "database_file must be non-empty in settings.toml when database_type = {db_type:?}"
             );
         }
         if self.enable_tls
@@ -618,6 +618,24 @@ listen_port = 18_988
         assert_eq!(cfg.listen_port, 18988);
         assert_eq!(cfg.url_base, "");
         assert!(!cfg.telemetry_enabled());
+    }
+
+    #[test]
+    fn empty_database_type_contract_matches_telemetry_enabled() {
+        let disabled = Config::parse_toml_str("database_type = \"\"\ndatabase_file = \"\"\n")
+            .expect("empty database_type + empty database_file disables telemetry");
+        assert!(!disabled.telemetry_enabled());
+
+        let enabled = Config::parse_toml_str(
+            "database_type = \"\"\ndatabase_file = \"/var/lib/librespeed/speedtest.db\"\n",
+        )
+        .expect("empty database_type + path enables SQLite telemetry");
+        assert!(enabled.telemetry_enabled());
+
+        assert!(
+            Config::parse_toml_str("database_type = \"sqlite\"\ndatabase_file = \"\"\n").is_err(),
+            "explicit sqlite database_type with empty database_file must fail closed"
+        );
     }
 
     #[test]
