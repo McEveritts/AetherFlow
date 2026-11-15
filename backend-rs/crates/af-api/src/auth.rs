@@ -946,10 +946,75 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
                 "Session bound to a different client",
             );
         }
+        let caller_strict_fp = legacy_client_fingerprint(&hdr_ip, req_ua);
+        let check_uid = claims.user_id;
+        let check_ver = claims.ver;
+        let check_jti = claims.jti.clone();
+        let logout_subject = blocking_auth_work(move || -> Result<ActiveSubject, StatusCode> {
+            let conn = af_db::get_read_conn().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let subj = match load_active_human_subject(&conn, check_uid) {
+                Ok(s) => s,
+                Err(SubjectStatusError::Suspended) => return Err(StatusCode::FORBIDDEN),
+                Err(_) => return Err(StatusCode::UNAUTHORIZED),
+            };
+            if check_ver < subj.sessions_revoked_after {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            let revoked = af_db::token_revocation_status_with_conn(&conn, &check_jti)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if revoked {
+                let in_grace = ROTATED_TOKEN_GRACE
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(&check_jti).cloned())
+                    .is_some_and(|e| {
+                        e.user_id == check_uid
+                            && e.expires_at > Instant::now()
+                            && (e.strict_fp.is_empty() || e.strict_fp == caller_strict_fp)
+                    });
+                if !in_grace {
+                    let rotated_family_live = af_db::resolve_revoked_token_family_in_tx(
+                        &conn, &check_jti, check_uid,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|fam| {
+                        conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?2))",
+                            params![check_uid, fam],
+                            |r| r.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false)
+                    });
+                    if !rotated_family_live {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                }
+            }
+            Ok(subj)
+        })
+        .await;
+        let subj = match logout_subject {
+            Ok(Ok(subj)) => subj,
+            Ok(Err(StatusCode::FORBIDDEN)) => {
+                return attach_logout_clear_cookie(api_error(
+                    StatusCode::FORBIDDEN,
+                    "ACCOUNT_SUSPENDED",
+                    "Account is not active",
+                ));
+            }
+            _ => {
+                return attach_logout_clear_cookie(api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "UNAUTHORIZED",
+                    "Unauthorized",
+                ));
+            }
+        };
         req.extensions_mut().insert(AuthUser {
             user_id: claims.user_id,
-            username: claims.sub,
-            role: "user".to_string(),
+            username: subj.username,
+            role: subj.role,
             jti: claims.jti,
             plugin_id: None,
             plugin_scopes: Vec::new(),
@@ -1254,18 +1319,39 @@ fn revoke_session_family_in_tx(
         }
     }
 
+    if family_id.is_empty() {
+        if let Ok(Some(fam)) = af_db::resolve_revoked_token_family_in_tx(tx, target_jti, user_id) {
+            if !fam.trim().is_empty() {
+                family_id = fam.trim().to_string();
+            }
+        }
+        if family_id.is_empty() && !resolved_jti.is_empty() && resolved_jti != target_jti {
+            if let Ok(Some(fam)) =
+                af_db::resolve_revoked_token_family_in_tx(tx, &resolved_jti, user_id)
+            {
+                if !fam.trim().is_empty() {
+                    family_id = fam.trim().to_string();
+                }
+            }
+        }
+    }
+
     if table_exists(tx, "active_sessions").unwrap_or(false) {
         let has_family = column_exists(tx, "active_sessions", "family_id").unwrap_or(false);
         if has_family && family_id.is_empty() {
             family_id = tx
                 .query_row(
                     "SELECT COALESCE(family_id, '') FROM active_sessions \
-                     WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3) AND COALESCE(family_id, '') != '' LIMIT 1",
+                     WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3 OR family_id = ?2 OR family_id = ?3) \
+                     AND COALESCE(family_id, '') != '' LIMIT 1",
                     params![user_id, target_jti, resolved_jti],
                     |r| r.get(0),
                 )
                 .optional()?
                 .unwrap_or_default();
+        }
+        if family_id.is_empty() {
+            family_id = target_jti.to_string();
         }
         if has_family && !family_id.is_empty() {
             let mut stmt = tx.prepare(
@@ -1282,10 +1368,15 @@ fn revoke_session_family_in_tx(
                 }
             }
         }
+    } else if family_id.is_empty() {
+        family_id = target_jti.to_string();
     }
 
     for jti in &jtis_to_revoke {
         af_db::revoke_token_in_tx(tx, jti, MIN_REVOCATION_TTL)?;
+        if !family_id.is_empty() {
+            let _ = af_db::record_revoked_token_lineage_in_tx(tx, jti, &family_id, user_id);
+        }
     }
 
     if table_exists(tx, "active_sessions").unwrap_or(false) {
@@ -1303,15 +1394,6 @@ fn revoke_session_family_in_tx(
     }
 
     if revoke_oidc_grants {
-        if family_id.is_empty() {
-            if let Ok(Some(fam)) =
-                af_db::resolve_revoked_token_family_in_tx(tx, target_jti, user_id)
-            {
-                if !fam.trim().is_empty() {
-                    family_id = fam.trim().to_string();
-                }
-            }
-        }
         let mut sess_tags = Vec::new();
         if !family_id.is_empty() {
             sess_tags.push(oidc_session_tag(&family_id));
@@ -2556,14 +2638,22 @@ fn recovery_hash(salt: &[u8], compact: &str) -> String {
 
 pub(crate) fn generate_recovery_codes() -> Vec<String> {
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const UNBIASED_CEILING: usize = 256 - (256 % CHARSET.len());
     let mut codes = Vec::with_capacity(8);
     for _ in 0..8 {
-        let mut raw = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut raw);
-        let chars: Vec<char> = raw
-            .iter()
-            .map(|&b| CHARSET[(b as usize) % CHARSET.len()] as char)
-            .collect();
+        let mut chars = Vec::with_capacity(8);
+        while chars.len() < 8 {
+            let mut raw = [0u8; 16];
+            rand::rngs::OsRng.fill_bytes(&mut raw);
+            for &b in &raw {
+                if (b as usize) < UNBIASED_CEILING {
+                    chars.push(CHARSET[(b as usize) % CHARSET.len()] as char);
+                    if chars.len() == 8 {
+                        break;
+                    }
+                }
+            }
+        }
         let code = format!(
             "{}-{}",
             chars[0..4].iter().collect::<String>(),
@@ -2625,8 +2715,6 @@ pub(crate) fn validate_recovery_code(
     } else {
         normalized.clone()
     };
-    let sha_hash = hex::encode(Sha256::digest(dashed.as_bytes()));
-    let sha_compact_hash = hex::encode(Sha256::digest(normalized_compact.as_bytes()));
 
     let mut matched_id: Option<i64> = None;
     if let Ok(mut stmt) = conn.prepare(
@@ -2650,8 +2738,6 @@ pub(crate) fn validate_recovery_code(
                             )
                     });
                 let is_match = salted_match
-                    || trimmed_hash.eq_ignore_ascii_case(&sha_hash)
-                    || trimmed_hash.eq_ignore_ascii_case(&sha_compact_hash)
                     || (trimmed_hash.starts_with("$2")
                         && (bcrypt::verify(&dashed, trimmed_hash).unwrap_or(false)
                             || bcrypt::verify(&normalized_compact, trimmed_hash).unwrap_or(false)));
@@ -2842,6 +2928,38 @@ pub async fn verify_2fa(req: Request) -> Response {
     }))
     .into_response()
     }).await
+}
+
+pub(crate) fn verify_user_totp_stepup(user_id: i64, code: &str) -> bool {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return false;
+    }
+    let Ok(mut conn) = af_db::get_conn() else {
+        return false;
+    };
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        return false;
+    };
+    let Ok((totp_enabled, enc_secret)) = tx.query_row(
+        "SELECT COALESCE(totp_enabled, 0), COALESCE(totp_secret, '') FROM users WHERE id = ?1",
+        params![user_id],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ) else {
+        return false;
+    };
+    if totp_enabled == 0 || enc_secret.is_empty() {
+        return false;
+    }
+    let Ok(secret) = af_db::decrypt_key(&enc_secret) else {
+        return false;
+    };
+    let ok = consume_totp_code(&tx, user_id, &secret, trimmed)
+        || validate_recovery_code(&tx, user_id, trimmed);
+    if ok && tx.commit().is_ok() {
+        return true;
+    }
+    false
 }
 
 pub async fn disable_2fa(req: Request) -> Response {
@@ -3622,10 +3740,26 @@ mod tests {
         assert_eq!(hash, "old-hash");
         conn.execute_batch("DROP TRIGGER reject_insert; DELETE FROM recovery_codes;")
             .unwrap();
-        let legacy_hash = hex::encode(Sha256::digest(b"ABCD-EFGH"));
+        let unsalted_sha = hex::encode(Sha256::digest(b"ABCD-EFGH"));
         conn.execute(
             "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
-            params![legacy_hash],
+            params![unsalted_sha],
+        )
+        .unwrap();
+        assert!(
+            !validate_recovery_code(&conn, 1, "abcdefgh"),
+            "unsalted 64-hex SHA-256 recovery hashes must be rejected"
+        );
+        conn.execute("DELETE FROM recovery_codes", []).unwrap();
+        let salt = [0x42u8; 16];
+        let salted_hash = format!(
+            "sha256:v1:{}:{}",
+            hex::encode(salt),
+            recovery_hash(&salt, "ABCDEFGH")
+        );
+        conn.execute(
+            "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
+            params![salted_hash],
         )
         .unwrap();
         conn.execute_batch("CREATE TRIGGER reject_consume BEFORE UPDATE ON recovery_codes BEGIN SELECT RAISE(IGNORE); END;").unwrap();

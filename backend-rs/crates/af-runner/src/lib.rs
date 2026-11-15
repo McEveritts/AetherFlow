@@ -378,6 +378,144 @@ fn deferred_restart_arguments(service: &str) -> Result<Vec<String>, String> {
     ])
 }
 
+pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
+    let trimmed = raw_unit.trim();
+    if trimmed.is_empty() || !SAFE_SERVICE_NAME.is_match(trimmed) || trimmed.contains("..") {
+        return false;
+    }
+    let strip_suffixes = |s: &str| -> String {
+        s.trim()
+            .trim_end_matches(".service")
+            .trim_end_matches(".timer")
+            .trim_end_matches(".socket")
+            .to_ascii_lowercase()
+    };
+    let lower = strip_suffixes(trimmed);
+    if lower.is_empty() {
+        return false;
+    }
+
+    if let Some((prefix, instance)) = lower.split_once('@') {
+        if instance.is_empty() {
+            return false;
+        }
+        return matches!(
+            prefix,
+            "wg-quick"
+                | "rtorrent"
+                | "deluged"
+                | "deluge-web"
+                | "qbittorrent-nox"
+                | "syncthing"
+                | "irssi"
+                | "autodl"
+                | "flood"
+        );
+    }
+
+    if matches!(
+        lower.as_str(),
+        "aetherflow-api"
+            | "aetherflow-runner"
+            | "aetherflow-frontend"
+            | "apache2"
+            | "nginx"
+            | "fail2ban"
+            | "pihole-ftl"
+            | "netdata"
+            | "node_exporter"
+            | "prometheus"
+            | "mariadb"
+            | "mysql"
+            | "postgresql"
+            | "redis"
+            | "redis-server"
+            | "tailscale"
+            | "tailscaled"
+            | "wireguard"
+            | "mergerfs"
+            | "rclone"
+            | "rclone-vfs"
+            | "deluge"
+            | "deluged"
+            | "deluge-web"
+            | "qbittorrent"
+            | "qbittorrent-nox"
+            | "rtorrent"
+            | "transmission-daemon"
+            | "paperless"
+            | "paperless-ngx"
+            | "paperless-webserver"
+            | "paperless-worker"
+            | "paperless-scheduler"
+            | "scrutiny"
+            | "scrutiny-collector"
+            | "recyclarr"
+            | "dispatcharr"
+            | "dispatcharr-celery"
+            | "dispatcharr-celerybeat"
+            | "novnc"
+            | "novnc-xvnc"
+            | "x2goserver"
+            | "xrdp"
+            | "xrdp-sesman"
+            | "vsftpd"
+            | "proftpd"
+            | "znc"
+            | "thelounge"
+            | "quasselcore"
+            | "syncthing"
+            | "maintainerr"
+            | "af-maintainerr"
+            | "palate"
+            | "af-palate"
+            | "kasmvnc"
+            | "af-kasmvnc"
+            | "mcvnc"
+            | "af-mcvnc"
+    ) {
+        return true;
+    }
+
+    let raw_pkgs = load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        "packages.json",
+        EMBEDDED_PACKAGES_JSON,
+    );
+    if let Ok(pkgs) = serde_json::from_str::<Vec<Package>>(&raw_pkgs) {
+        for p in &pkgs {
+            if strip_suffixes(&p.name) == lower
+                || (!p.service_name.trim().is_empty() && strip_suffixes(&p.service_name) == lower)
+                || p.sandbox_service_ids
+                    .iter()
+                    .any(|u| strip_suffixes(u) == lower)
+            {
+                return true;
+            }
+        }
+    }
+
+    let raw_auto = load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "package_automation.json",
+        EMBEDDED_AUTOMATION_JSON,
+    );
+    if let Ok(auto_map) = serde_json::from_str::<HashMap<String, PackageAutomation>>(&raw_auto) {
+        for (pkg_id, auto) in &auto_map {
+            if strip_suffixes(pkg_id) == lower
+                || auto
+                    .sandbox_service_ids
+                    .iter()
+                    .any(|u| strip_suffixes(u) == lower)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Json<RunnerResponse>) {
     if !ALLOWED_SERVICE_ACTIONS.contains(req.action.as_str()) {
         return (
@@ -396,6 +534,16 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
                 success: false,
                 output: String::new(),
                 error: "invalid service name".to_string(),
+            }),
+        );
+    }
+    if !is_managed_runner_systemd_unit(&req.service) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "unmanaged systemd unit".to_string(),
             }),
         );
     }

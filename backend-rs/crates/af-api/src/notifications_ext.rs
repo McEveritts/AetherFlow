@@ -284,28 +284,54 @@ pub async fn update_notification_rule(
     let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(ref name) = req.name {
-        if !name.is_empty() {
-            bind_params.push(Box::new(name.clone()));
-            set_clauses.push(format!("name = ?{}", bind_params.len()));
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Rule name must be between 1 and 128 characters",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("name = ?{}", bind_params.len()));
     }
     if let Some(ref ct) = req.condition_type {
-        if !ct.is_empty() {
-            bind_params.push(Box::new(ct.clone()));
-            set_clauses.push(format!("condition_type = ?{}", bind_params.len()));
+        let trimmed = ct.trim();
+        let valid_types = ["disk_usage", "cpu_usage", "memory_usage", "service_down"];
+        if !valid_types.contains(&trimmed) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("condition_type = ?{}", bind_params.len()));
     }
     if let Some(ref cv) = req.condition_value {
-        if !cv.is_empty() {
-            bind_params.push(Box::new(cv.clone()));
-            set_clauses.push(format!("condition_value = ?{}", bind_params.len()));
+        let trimmed = cv.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "condition_value must be non-empty",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("condition_value = ?{}", bind_params.len()));
     }
     if let Some(ref lvl) = req.level {
-        if !lvl.is_empty() {
-            bind_params.push(Box::new(lvl.clone()));
-            set_clauses.push(format!("level = ?{}", bind_params.len()));
+        let trimmed = lvl.trim();
+        let valid_levels = ["info", "warning", "critical", "error"];
+        if !valid_levels.contains(&trimmed) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid level. Allowed: info, warning, critical, error",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("level = ?{}", bind_params.len()));
     }
     if let Some(enabled) = req.enabled {
         bind_params.push(Box::new(enabled));
@@ -336,15 +362,15 @@ pub async fn update_notification_rule(
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = bind_params.iter().map(|b| b.as_ref()).collect();
-    if conn.execute(&query, param_refs.as_slice()).is_err() {
-        return api_error(
+    match conn.execute(&query, param_refs.as_slice()) {
+        Ok(0) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Rule not found"),
+        Ok(_) => Json(serde_json::json!({ "message": "Rule updated" })).into_response(),
+        Err(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to update rule",
-        );
+        ),
     }
-
-    Json(serde_json::json!({ "message": "Rule updated" })).into_response()
 }
 
 pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {

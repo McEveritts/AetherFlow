@@ -1146,7 +1146,9 @@ pub async fn handle_websocket(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_ws_socket(socket, entry))
+    ws.max_message_size(64 * 1024)
+        .max_frame_size(16 * 1024)
+        .on_upgrade(move |socket| handle_ws_socket(socket, entry))
 }
 
 // A ticket authorizes the upgrade only. Existing sockets must not keep a stale
@@ -1578,147 +1580,150 @@ pub async fn handle_log_websocket(
         expires_at: Instant::now(),
         diagnostics_allowed: true,
     };
-    ws.on_upgrade(move |mut socket| async move {
-        // Upgrading a connection does not grant a lasting raw-log capability.
-        if current_ws_authorization(&mut authorization).await != Some(true) {
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-        let welcome = serde_json::json!({
-            "type": "LOG_ENTRY",
-            "data": {
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "source": "aetherflow-api",
-                "unit": "aetherflow-api.service",
-                "priority": "info",
-                "message": "Connected to AetherFlow Rust log stream"
-            }
-        });
-        if let Ok(txt) = serde_json::to_string(&welcome) {
-            if socket.send(Message::Text(txt)).await.is_err() {
+    ws.max_message_size(64 * 1024)
+        .max_frame_size(16 * 1024)
+        .on_upgrade(move |mut socket| async move {
+            // Upgrading a connection does not grant a lasting raw-log capability.
+            if current_ws_authorization(&mut authorization).await != Some(true) {
+                let _ = socket.send(Message::Close(None)).await;
                 return;
             }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
-        let reader_task = tokio::spawn(async move {
-            use std::process::Stdio;
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            use tokio::process::Command;
-
-            // Try journalctl first on Linux, then fall back to tailing system/deploy log files
-            let mut spawned: Option<(tokio::process::Child, &'static str)> = None;
-            if cfg!(target_os = "linux") {
-                if let Ok(child) = Command::new("journalctl")
-                    .args(["-f", "-n", "50", "--no-pager", "-o", "short-iso"])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .kill_on_drop(true)
-                    .spawn()
-                {
-                    spawned = Some((child, "journald"));
+            let welcome = serde_json::json!({
+                "type": "LOG_ENTRY",
+                "data": {
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "source": "aetherflow-api",
+                    "unit": "aetherflow-api.service",
+                    "priority": "info",
+                    "message": "Connected to AetherFlow Rust log stream"
+                }
+            });
+            if let Ok(txt) = serde_json::to_string(&welcome) {
+                if socket.send(Message::Text(txt)).await.is_err() {
+                    return;
                 }
             }
 
-            if let Some((mut child, source_name)) = spawned {
-                if let Some(stdout) = child.stdout.take() {
-                    let mut lines = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        let entry = parse_live_log_line(&line, source_name);
-                        if tx.send(entry).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                let _ = child.kill().await;
-            } else {
-                let fallback_files = [
-                    ("/var/log/aetherflow/deploy.log", "deploy"),
-                    ("/var/log/aetherflow-deploy.log", "deploy"),
-                    ("/var/log/syslog", "syslog"),
-                    ("/var/log/messages", "syslog"),
-                ];
-                let mut opened_fallback: Option<(std::fs::File, &'static str)> = None;
-                for (path_str, source_name) in fallback_files {
-                    if let Some(file) = open_confined_live_log_file(std::path::Path::new(path_str))
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
+            let reader_task = tokio::spawn(async move {
+                use std::process::Stdio;
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                use tokio::process::Command;
+
+                // Try journalctl first on Linux, then fall back to tailing system/deploy log files
+                let mut spawned: Option<(tokio::process::Child, &'static str)> = None;
+                if cfg!(target_os = "linux") {
+                    if let Ok(child) = Command::new("journalctl")
+                        .args(["-f", "-n", "50", "--no-pager", "-o", "short-iso"])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()
                     {
-                        opened_fallback = Some((file, source_name));
-                        break;
+                        spawned = Some((child, "journald"));
                     }
                 }
-                if let Some((std_file, source_name)) = opened_fallback {
-                    tail_open_log_file_to_channel(std_file, source_name, &tx).await;
-                } else {
-                    // Keep channel alive if no external log source binary or confined log file is available
-                    std::future::pending::<()>().await;
-                }
-            }
-        });
 
-        let mut filter = WsLogFilter::default();
-        let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
-        ping_interval.tick().await;
-        let mut auth_interval = tokio::time::interval(Duration::from_secs(5));
-        auth_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        auth_interval.tick().await;
-
-        loop {
-            tokio::select! {
-                msg_opt = socket.recv() => {
-                    match msg_opt {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Ok(new_filter) = serde_json::from_str::<WsLogFilter>(&text) {
-                                filter = new_filter;
+                if let Some((mut child, source_name)) = spawned {
+                    if let Some(stdout) = child.stdout.take() {
+                        let mut lines = BufReader::new(stdout).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let entry = parse_live_log_line(&line, source_name);
+                            if tx.send(entry).await.is_err() {
+                                break;
                             }
                         }
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
-                            break;
-                        }
-                        _ => {}
                     }
-                }
-                _ = auth_interval.tick() => {
-                    if current_ws_authorization(&mut authorization).await != Some(true) {
-                        let _ = socket.send(Message::Close(None)).await;
-                        break;
-                    }
-                }
-                Some(entry) = rx.recv() => {
-                    if current_ws_authorization(&mut authorization).await != Some(true) {
-                        let _ = socket.send(Message::Close(None)).await;
-                        break;
-                    }
-                    if !log_entry_matches_filter(&entry, &filter) {
-                        continue;
-                    }
-                    let payload = serde_json::json!({
-                        "type": "LOG_ENTRY",
-                        "data": entry,
-                    });
-                    if let Ok(txt) = serde_json::to_string(&payload) {
-                        if socket.send(Message::Text(txt)).await.is_err() {
+                    let _ = child.kill().await;
+                } else {
+                    let fallback_files = [
+                        ("/var/log/aetherflow/deploy.log", "deploy"),
+                        ("/var/log/aetherflow-deploy.log", "deploy"),
+                        ("/var/log/syslog", "syslog"),
+                        ("/var/log/messages", "syslog"),
+                    ];
+                    let mut opened_fallback: Option<(std::fs::File, &'static str)> = None;
+                    for (path_str, source_name) in fallback_files {
+                        if let Some(file) =
+                            open_confined_live_log_file(std::path::Path::new(path_str))
+                        {
+                            opened_fallback = Some((file, source_name));
                             break;
                         }
                     }
-                }
-                _ = ping_interval.tick() => {
-                    if current_ws_authorization(&mut authorization).await != Some(true) {
-                        let _ = socket.send(Message::Close(None)).await;
-                        break;
+                    if let Some((std_file, source_name)) = opened_fallback {
+                        tail_open_log_file_to_channel(std_file, source_name, &tx).await;
+                    } else {
+                        // Keep channel alive if no external log source binary or confined log file is available
+                        std::future::pending::<()>().await;
                     }
-                    if socket.send(Message::Ping(Vec::new())).await.is_err() {
-                        break;
+                }
+            });
+
+            let mut filter = WsLogFilter::default();
+            let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
+            ping_interval.tick().await;
+            let mut auth_interval = tokio::time::interval(Duration::from_secs(5));
+            auth_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            auth_interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    msg_opt = socket.recv() => {
+                        match msg_opt {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(new_filter) = serde_json::from_str::<WsLogFilter>(&text) {
+                                    filter = new_filter;
+                                }
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = auth_interval.tick() => {
+                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                            let _ = socket.send(Message::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Some(entry) = rx.recv() => {
+                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                            let _ = socket.send(Message::Close(None)).await;
+                            break;
+                        }
+                        if !log_entry_matches_filter(&entry, &filter) {
+                            continue;
+                        }
+                        let payload = serde_json::json!({
+                            "type": "LOG_ENTRY",
+                            "data": entry,
+                        });
+                        if let Ok(txt) = serde_json::to_string(&payload) {
+                            if socket.send(Message::Text(txt)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ = ping_interval.tick() => {
+                        if current_ws_authorization(&mut authorization).await != Some(true) {
+                            let _ = socket.send(Message::Close(None)).await;
+                            break;
+                        }
+                        if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        reader_task.abort();
-        let _ = reader_task.await;
-    })
+            reader_task.abort();
+            let _ = reader_task.await;
+        })
 }
 
 fn open_confined_live_log_file(path: &std::path::Path) -> Option<std::fs::File> {

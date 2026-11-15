@@ -679,14 +679,52 @@ fn extract_usage_Rollups(req: &WorkerHeartbeatRequest) -> (f64, f64, f64) {
 // Master TCP / HTTP JSON-RPC Listener (`CLUSTER_GRPC_PORT`, default 50051)
 // ─────────────────────────────────────────────────────────────────────────────
 
+const MAX_PREAUTH_HEADER_BYTES: u64 = 16 * 1024;
+const MAX_HTTP_HEADERS: usize = 32;
+const MAX_CLUSTER_CONCURRENT_CONNS: usize = 64;
+
+async fn read_bounded_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    max_len: usize,
+) -> anyhow::Result<Option<String>> {
+    let mut buf = Vec::with_capacity(256);
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            let take_len = newline_pos + 1;
+            if buf.len() + take_len > max_len {
+                anyhow::bail!("cluster request line exceeds {} bytes", max_len);
+            }
+            buf.extend_from_slice(&available[..take_len]);
+            reader.consume(take_len);
+            break;
+        }
+        let chunk_len = available.len();
+        if buf.len() + chunk_len > max_len {
+            anyhow::bail!("cluster request line exceeds {} bytes", max_len);
+        }
+        buf.extend_from_slice(available);
+        reader.consume(chunk_len);
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 async fn handle_master_connection(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut reader = BufReader::new(&mut stream);
-    let mut first_line = String::new();
-    let n =
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut first_line)).await??;
-    if n == 0 {
+    let Some(first_line) = tokio::time::timeout(
+        Duration::from_secs(10),
+        read_bounded_line(&mut reader, MAX_PREAUTH_HEADER_BYTES as usize),
+    )
+    .await??
+    else {
         return Ok(());
-    }
+    };
 
     let trimmed_first = first_line.trim();
     if trimmed_first.is_empty() {
@@ -711,13 +749,26 @@ async fn handle_master_connection(mut stream: TcpStream) -> anyhow::Result<()> {
 
     let mut content_length = 0usize;
     let mut header_psk = String::new();
+    let mut header_count = 0usize;
+    let mut total_header_bytes = first_line.len();
 
     loop {
-        let mut line = String::new();
-        let bytes_read =
-            tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await??;
-        if bytes_read == 0 || line == "\r\n" || line == "\n" {
+        let Some(line) = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_bounded_line(&mut reader, 8 * 1024),
+        )
+        .await??
+        else {
             break;
+        };
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        header_count += 1;
+        total_header_bytes += line.len();
+        if header_count > MAX_HTTP_HEADERS || total_header_bytes > MAX_PREAUTH_HEADER_BYTES as usize
+        {
+            anyhow::bail!("cluster HTTP headers exceed bounds");
         }
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
@@ -1281,10 +1332,19 @@ pub fn start_cluster_runtime() {
                             addr = %bind_addr,
                             "cluster heartbeat TCP/HTTP JSON-RPC listener bound"
                         );
+                        let conn_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                            MAX_CLUSTER_CONCURRENT_CONNS,
+                        ));
                         loop {
                             match listener.accept().await {
                                 Ok((stream, _peer)) => {
+                                    let Ok(permit) = conn_semaphore.clone().try_acquire_owned()
+                                    else {
+                                        tracing::warn!("cluster listener at connection capacity; dropping socket");
+                                        continue;
+                                    };
                                     tokio::spawn(async move {
+                                        let _permit = permit;
                                         if let Err(e) = handle_master_connection(stream).await {
                                             tracing::debug!(
                                                 error = %e,

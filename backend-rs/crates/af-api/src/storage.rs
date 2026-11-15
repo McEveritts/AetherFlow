@@ -841,6 +841,29 @@ static BACKUP_REAUTH: Lazy<Mutex<BackupReauth>> = Lazy::new(|| {
     })
 });
 
+fn check_backup_reauth_quota(user_id: i64) -> bool {
+    let Ok(mut state) = BACKUP_REAUTH.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    state.attempts.retain(|_, entries| {
+        entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+        !entries.is_empty()
+    });
+    state.attempts.entry(user_id).or_default().len() < 10
+}
+
+fn record_failed_backup_reauth(user_id: i64) {
+    if let Ok(mut state) = BACKUP_REAUTH.lock() {
+        let now = Instant::now();
+        state.attempts.retain(|_, entries| {
+            entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+            !entries.is_empty()
+        });
+        state.attempts.entry(user_id).or_default().push(now);
+    }
+}
+
 fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &str) -> bool {
     let mut digest = Sha256::new();
     digest.update(hash.as_bytes());
@@ -851,34 +874,35 @@ fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &st
         session.to_string(),
         <[u8; 32]>::from(digest.finalize()),
     );
-    let Ok(mut state) = BACKUP_REAUTH.lock() else {
-        return false;
-    };
-    let now = Instant::now();
-    state
-        .verified
-        .retain(|_, timestamp| now.duration_since(*timestamp) < StdDuration::from_secs(60));
-    if state.verified.contains_key(&key) {
-        return true;
+    {
+        let Ok(mut state) = BACKUP_REAUTH.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        state
+            .verified
+            .retain(|_, timestamp| now.duration_since(*timestamp) < StdDuration::from_secs(60));
+        if state.verified.contains_key(&key) {
+            return true;
+        }
+        state.attempts.retain(|_, entries| {
+            entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+            !entries.is_empty()
+        });
+        if state.attempts.entry(user_id).or_default().len() >= 10 {
+            return false;
+        }
     }
-    state.attempts.retain(|_, entries| {
-        entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
-        !entries.is_empty()
-    });
-    let attempts = state.attempts.entry(user_id).or_default();
-    if attempts.len() >= 10 {
-        return false;
-    }
-    attempts.push(now);
-    drop(state);
     let valid = !hash.is_empty() && bcrypt::verify(password, hash).unwrap_or(false);
     if valid {
         if let Ok(mut state) = BACKUP_REAUTH.lock() {
             if state.verified.len() >= 1024 {
                 state.verified.clear();
             }
-            state.verified.insert(key, now);
+            state.verified.insert(key, Instant::now());
         }
+    } else {
+        record_failed_backup_reauth(user_id);
     }
     valid
 }
@@ -953,7 +977,19 @@ async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    if password.is_empty() || password.len() > 1024 {
+    let totp_code = headers
+        .get("X-Reauth-TOTP")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let oauth_confirm = headers
+        .get("X-Reauth-Confirm")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("oauth");
+    if password.len() > 1024 || totp_code.len() > 64 {
         return false;
     }
     let uid = user.user_id;
@@ -961,13 +997,49 @@ async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool
     matches!(
         blocking_auth_work(move || -> anyhow::Result<bool> {
             let conn = af_db::get_read_conn()?;
-            let hash: String = conn.query_row(
-                "SELECT COALESCE(password_hash, '') FROM users WHERE id = ?1",
+            let (hash, totp_enabled): (String, i64) = conn.query_row(
+                "SELECT COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
                 params![uid],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            drop(conn);
-            Ok(verify_backup_password(uid, &session, &password, &hash))
+            if !hash.is_empty() {
+                drop(conn);
+                if password.is_empty() {
+                    return Ok(false);
+                }
+                return Ok(verify_backup_password(uid, &session, &password, &hash));
+            }
+            // Passwordless OAuth-only admin step-up path:
+            if !check_backup_reauth_quota(uid) {
+                return Ok(false);
+            }
+            if totp_enabled != 0 {
+                drop(conn);
+                if totp_code.is_empty() {
+                    record_failed_backup_reauth(uid);
+                    return Ok(false);
+                }
+                let ok = crate::auth::verify_user_totp_stepup(uid, &totp_code);
+                if !ok {
+                    record_failed_backup_reauth(uid);
+                }
+                return Ok(ok);
+            }
+            if !oauth_confirm || session.trim().is_empty() {
+                record_failed_backup_reauth(uid);
+                return Ok(false);
+            }
+            let fresh_session: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND created_at >= datetime('now', '-300 seconds'))",
+                    params![session, uid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !fresh_session {
+                record_failed_backup_reauth(uid);
+            }
+            Ok(fresh_session)
         })
         .await,
         Ok(Ok(true))

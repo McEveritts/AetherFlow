@@ -283,7 +283,7 @@ fn build_v1_router() -> Router {
         .route("/system/topology", get(get_system_topology))
         .route("/fs", get(browse_directories))
         .route("/user/quota", get(get_own_quota))
-        .route("/user/2fa/setup", get(setup_2fa))
+        .route("/user/2fa/setup", post(setup_2fa))
         .route("/user/2fa/verify", post(verify_2fa))
         .route("/user/2fa/disable", post(disable_2fa))
         .route(
@@ -6414,6 +6414,22 @@ fn resolve_patched_ingress_config(
     })
 }
 
+fn is_valid_ingress_app_slug(slug: &str) -> bool {
+    let bytes = slug.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return false;
+    }
+    if !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit() {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
 async fn update_app_ingress_config(
     Path(app_name): Path<String>,
     Json(req): Json<UpdateIngressReq>,
@@ -6424,6 +6440,13 @@ async fn update_app_ingress_config(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
             "App name is required",
+        );
+    }
+    if !is_valid_ingress_app_slug(&clean_app) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "Invalid application name; must be a DNS-safe lowercase slug",
         );
     }
     let guarded_app = clean_app.clone();
@@ -6611,8 +6634,12 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
     .into_response()
 }
 
-fn parse_action_gate_service_command(raw_action: &str) -> Option<(String, String)> {
+fn parse_action_gate_service_command(raw_action: &str) -> Result<(String, String, String), String> {
     let trimmed = raw_action.trim();
+    if trimmed.is_empty() {
+        return Err("Action payload is empty".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
     for (prefix, act) in [
         ("restart_service:", "restart"),
         ("start_service:", "start"),
@@ -6624,24 +6651,39 @@ fn parse_action_gate_service_command(raw_action: &str) -> Option<(String, String
         ("start:", "start"),
         ("stop:", "stop"),
     ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let svc = rest.trim();
-            if !svc.is_empty() {
-                return Some((svc.to_string(), act.to_string()));
+        if lower.starts_with(prefix) {
+            let rest = trimmed[prefix.len()..].trim();
+            if rest.is_empty() {
+                return Err("Missing target service name".into());
             }
+            if let Some((svc, mgr)) = rest.split_once(':') {
+                let svc = svc.trim();
+                let mgr = mgr.trim();
+                if svc.is_empty() || svc.contains(':') || mgr.contains(':') {
+                    return Err("Malformed service action target".into());
+                }
+                return Ok((svc.to_string(), act.to_string(), mgr.to_string()));
+            }
+            return Ok((rest.to_string(), act.to_string(), String::new()));
         }
     }
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() == 2 && matches!(parts[0], "restart" | "start" | "stop") {
-        return Some((parts[1].to_string(), parts[0].to_string()));
+    if parts.len() == 2 {
+        let verb = parts[0].to_ascii_lowercase();
+        if matches!(verb.as_str(), "restart" | "start" | "stop") {
+            return Ok((parts[1].to_string(), verb, String::new()));
+        }
     }
-    if parts.len() == 3
-        && parts[0] == "systemctl"
-        && matches!(parts[1], "restart" | "start" | "stop")
-    {
-        return Some((parts[2].to_string(), parts[1].to_string()));
+    if parts.len() == 3 && parts[0].eq_ignore_ascii_case("systemctl") {
+        let verb = parts[1].to_ascii_lowercase();
+        if matches!(verb.as_str(), "restart" | "start" | "stop") {
+            return Ok((parts[2].to_string(), verb, "systemd".to_string()));
+        }
     }
-    None
+    Err(format!(
+        "Unsupported or non-executable gated action: {}",
+        trimmed
+    ))
 }
 
 async fn approve_action(
@@ -6649,7 +6691,10 @@ async fn approve_action(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    match af_db::get_pending_action_by_id(id) {
+    if let Some(message) = system_update_lifecycle_block().await {
+        return message.into_response();
+    }
+    let existing = match af_db::get_pending_action_by_id(id) {
         Ok(Some(existing)) => {
             if existing.status != "pending" {
                 return api_error(
@@ -6658,6 +6703,7 @@ async fn approve_action(
                     format!("Action already resolved: {}", existing.status),
                 );
             }
+            existing
         }
         Ok(None) => {
             return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found");
@@ -6669,7 +6715,35 @@ async fn approve_action(
                 "Failed to query action",
             );
         }
-    }
+    };
+
+    let (svc_name, svc_act, managed_by) = match parse_action_gate_service_command(&existing.action)
+    {
+        Ok(parsed) => parsed,
+        Err(msg) => return api_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_ACTION", msg),
+    };
+
+    let validation_req = ServiceControlReq {
+        action: svc_act.clone(),
+        managed_by: managed_by.clone(),
+        process: svc_name.clone(),
+    };
+    let validation_name = svc_name.clone();
+    let target = match tokio::task::spawn_blocking(move || {
+        validate_service_control_request(&validation_name, &validation_req)
+    })
+    .await
+    {
+        Ok(Ok(target)) => target,
+        Ok(Err((status, code, message))) => return api_error(status, code, message),
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Service control status could not be confirmed",
+            )
+        }
+    };
 
     let Ok(mut action) = af_db::resolve_action(id, "approved", &auth_user.username) else {
         return api_error(
@@ -6679,30 +6753,67 @@ async fn approve_action(
         );
     };
 
-    if let Some((svc_name, svc_act)) = parse_action_gate_service_command(&action.action) {
-        match af_services::control_service(&svc_name, &svc_act).await {
-            Ok(()) => {
-                let log_msg = format!(
-                    "Service '{}' {} executed successfully by {}",
-                    svc_name, svc_act, auth_user.username
-                );
-                af_db::mark_action_executed(id, &log_msg);
-            }
-            Err(e) => {
-                let err_msg = format!("Failed to {} service '{}': {}", svc_act, svc_name, e);
-                af_db::mark_action_failed(id, &err_msg);
-            }
-        }
-        if let Ok(Some(updated)) = af_db::get_pending_action_by_id(id) {
-            action = updated;
-        }
-    }
+    let manager = managed_by.trim();
+    let deferred = svc_act == "restart"
+        && matches!(
+            target.trim_end_matches(".service"),
+            "aetherflow-api" | "aetherflow-runner"
+        );
+    let exec_res = if deferred {
+        af_runner::dispatch_core_restart(&target).await.map(|_| ())
+    } else if manager.is_empty() {
+        af_services::control_service(&target, &svc_act).await
+    } else {
+        af_services::control_service_with_manager(&target, &svc_act, manager).await
+    };
 
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    match exec_res {
+        Ok(()) => {
+            let log_msg = format!(
+                "Service '{}' {} executed successfully by {}",
+                target, svc_act, auth_user.username
+            );
+            af_db::mark_action_executed(id, &log_msg);
+            af_services::mutators::clear_app_runtime_meta_cache();
+        }
+        Err(e) => {
+            let err_msg = format!("Failed to {} service '{}': {}", svc_act, target, e);
+            af_db::mark_action_failed(id, &err_msg);
+            af_db::record_audit(
+                auth_user.user_id,
+                &auth_user.username,
+                "action_approve_failed",
+                "action_gate",
+                &id.to_string(),
+                &existing.action,
+                &ip,
+                ua,
+            );
+            if af_runner::is_lifecycle_busy(&e) {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "LIFECYCLE_BUSY",
+                    af_runner::LifecycleBusy.to_string(),
+                );
+            }
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "ACTION_EXECUTION_FAILED",
+                "Approved service action failed to execute; check service diagnostics.",
+            );
+        }
+    }
+
+    if let Ok(Some(updated)) = af_db::get_pending_action_by_id(id) {
+        action = updated;
+    }
+
     af_db::record_audit(
         auth_user.user_id,
         &auth_user.username,
@@ -6714,8 +6825,8 @@ async fn approve_action(
         ua,
     );
     Json(serde_json::json!({
-        "status": "approved",
-        "message": "Action approved. The originating subsystem will execute it.",
+        "status": "executed",
+        "message": "Action approved and executed successfully.",
         "action": action,
     }))
     .into_response()

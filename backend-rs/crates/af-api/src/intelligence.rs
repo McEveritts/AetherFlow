@@ -145,7 +145,7 @@ mod audit_tests {
             std::fs::write(root.join(name), []).unwrap();
         }
         let mut files = Vec::new();
-        collect_mediaflow_files(&root, &root, &mut files);
+        collect_mediaflow_files(&root, &root, 0, &mut files);
         assert_eq!(files, vec![root.join("nested/movie.MKV")]);
     }
 
@@ -166,7 +166,7 @@ mod audit_tests {
             StatusCode::FORBIDDEN
         );
         let mut files = Vec::new();
-        collect_mediaflow_files(&root, &root, &mut files);
+        collect_mediaflow_files(&root, &root, 0, &mut files);
         assert!(files.is_empty());
     }
 
@@ -1253,6 +1253,10 @@ fn extract_service_target(message: &str) -> &'static str {
 }
 
 fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<ProposedAction> {
+    let target = extract_service_target(user_message);
+    if target == "target service" {
+        return None;
+    }
     let combined = format!("{} {}", ai_reply, user_message).to_lowercase();
     let specs: &[(&[&str], &str, &str, &str)] = &[
         (
@@ -1267,24 +1271,11 @@ fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<Propose
             "Stop",
             "Service will become unavailable until manually started.",
         ),
-        (
-            &["delete", "remove", "uninstall", "purge"],
-            "critical",
-            "Delete",
-            "Data associated with this service may be permanently lost.",
-        ),
-        (
-            &["update", "upgrade", "patch"],
-            "warn",
-            "Update",
-            "Service will restart after update. Configuration may change.",
-        ),
     ];
 
     for (keywords, classification, verb, impact) in specs {
         for kw in *keywords {
             if combined.contains(kw) {
-                let target = extract_service_target(user_message);
                 let title = format!("{} {}", verb, target);
                 return Some(ProposedAction {
                     action_type: "system_action".to_string(),
@@ -1470,36 +1461,48 @@ async fn run_chat_session(
         }
     };
 
-    if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
-        let (action_id, needs_approval) = af_db::queue_action(
-            &proposal.danger_level,
-            "FlowAI",
-            &proposal.title,
-            &proposal.description,
-        );
-        if needs_approval {
-            proposal.action_id = action_id;
-            let (uid, uname) = user
-                .map(|u| (u.user_id, u.username))
-                .unwrap_or((0, "anonymous".to_string()));
-            af_db::record_audit(
-                uid,
-                &uname,
-                "ai_action_proposed",
-                "pending_action",
-                &action_id.to_string(),
-                &format!(
-                    "classification={} title={}",
-                    proposal.danger_level, proposal.title
-                ),
-                ip,
-                ua,
-            );
-            return Json(serde_json::json!({
-                "reply": reply_text,
-                "proposed_action": proposal,
-            }))
-            .into_response();
+    let is_admin = user.as_ref().is_some_and(|u| u.role == "admin");
+    if is_admin {
+        if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
+            let pending_flow_ai = af_db::list_pending_actions(100, 0)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|r| r.status == "pending" && r.source == "FlowAI")
+                        .count()
+                })
+                .unwrap_or(0);
+            if pending_flow_ai < 50 {
+                let (action_id, needs_approval) = af_db::queue_action(
+                    &proposal.danger_level,
+                    "FlowAI",
+                    &proposal.title,
+                    &proposal.description,
+                );
+                if needs_approval {
+                    proposal.action_id = action_id;
+                    let (uid, uname) = user
+                        .map(|u| (u.user_id, u.username))
+                        .unwrap_or((0, "anonymous".to_string()));
+                    af_db::record_audit(
+                        uid,
+                        &uname,
+                        "ai_action_proposed",
+                        "pending_action",
+                        &action_id.to_string(),
+                        &format!(
+                            "classification={} title={}",
+                            proposal.danger_level, proposal.title
+                        ),
+                        ip,
+                        ua,
+                    );
+                    return Json(serde_json::json!({
+                        "reply": reply_text,
+                        "proposed_action": proposal,
+                    }))
+                    .into_response();
+                }
+            }
         }
     }
 
@@ -2049,22 +2052,86 @@ pub(crate) async fn call_configured_ai(
     }
 }
 
-fn collect_files_recursive(dir: &StdPath, allowed_exts: &[&str], out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+const MAX_SCAN_DEPTH: usize = 16;
+const MAX_SCAN_FILES: usize = 10_000;
+
+static MEDIAFLOW_SCANNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct MediaflowScanGuard;
+impl Drop for MediaflowScanGuard {
+    fn drop(&mut self) {
+        MEDIAFLOW_SCANNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct EnricherScanGuard {
+    keep_scanning: bool,
+}
+impl Drop for EnricherScanGuard {
+    fn drop(&mut self) {
+        if !self.keep_scanning {
+            if let Ok(mut st) = ENRICHER_STATE.lock() {
+                st.scanning = false;
+            }
+        }
+    }
+}
+
+fn collect_files_recursive(
+    dir: &StdPath,
+    root: &StdPath,
+    allowed_exts: &[&str],
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > MAX_SCAN_DEPTH || out.len() >= MAX_SCAN_FILES {
+        return;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return;
+    }
+    let Ok(resolved_dir) = dir.canonicalize() else {
+        return;
+    };
+    if !resolved_dir.starts_with(root) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&resolved_dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
+        if out.len() >= MAX_SCAN_FILES {
+            break;
+        }
         let file_name = entry.file_name().to_string_lossy().to_string();
         if file_name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
-            collect_files_recursive(&path, allowed_exts, out);
-        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let dot_ext = format!(".{}", ext.to_lowercase());
-            if allowed_exts.iter().any(|&a| a == dot_ext) {
-                out.push(path);
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_files_recursive(&path, root, allowed_exts, depth + 1, out);
+        } else if ft.is_file() {
+            let Ok(canonical_file) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_file.starts_with(root) {
+                continue;
+            }
+            if let Some(ext) = canonical_file.extension().and_then(|e| e.to_str()) {
+                let dot_ext = format!(".{}", ext.to_lowercase());
+                if allowed_exts.iter().any(|&a| a == dot_ext) {
+                    out.push(canonical_file);
+                }
             }
         }
     }
@@ -2244,14 +2311,26 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
             "Path traversal not allowed",
         );
     }
-    let allowed_roots = mediaflow_library_roots();
-    let clean_path = match validate_mediaflow_directory(&PathBuf::from(raw_path), &allowed_roots) {
-        Ok(path) => path,
-        Err((status, message)) => return api_error(status, "INVALID_SCAN_PATH", message),
+    let raw_path_owned = raw_path.to_string();
+    let check_path = PathBuf::from(&raw_path_owned);
+    let clean_path = match tokio::task::spawn_blocking(move || {
+        validate_mediaflow_directory(&check_path, &mediaflow_library_roots())
+    })
+    .await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err((status, message))) => return api_error(status, "INVALID_SCAN_PATH", message),
+        Err(error) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                error.to_string(),
+            )
+        }
     };
 
     {
-        let st = ENRICHER_STATE.lock().unwrap();
+        let mut st = ENRICHER_STATE.lock().unwrap();
         if st.scanning {
             return api_error(
                 StatusCode::CONFLICT,
@@ -2259,69 +2338,114 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                 "A scan is already in progress",
             );
         }
-    }
-
-    let mut media_files = Vec::new();
-    collect_files_recursive(&clean_path, MEDIA_EXTENSIONS, &mut media_files);
-    let total_files = media_files.len();
-
-    if let Ok(mut st) = ENRICHER_STATE.lock() {
         st.scanning = true;
         st.progress = 0.0;
-        st.total = total_files;
+        st.total = 0;
         st.done = 0;
         st.processed = 0;
         st.results.clear();
         st.last_err.clear();
     }
+    let mut scan_guard = EnricherScanGuard {
+        keep_scanning: false,
+    };
 
     let ps = resolve_provider_settings();
     let has_gemini_key = !ps.gemini_api_key.is_empty();
 
-    // First pass: deterministically parse filenames and persist immediately so results
-    // and progress are immediately available even before optional AI enrichment completes.
-    let mut enriched_items = Vec::with_capacity(total_files);
-    for (idx, path) in media_files.iter().enumerate() {
-        let file_path_str = path.to_string_lossy().to_string();
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
-        if let Some(row) = upsert_media_metadata_row(
-            &file_path_str,
-            &filename,
-            &title,
-            &year,
-            &language,
-            &quality,
-            &subs,
-        ) {
-            enriched_items.push(row);
-        }
+    let scan_root = clean_path.clone();
+    let initial_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<PathBuf>, Vec<serde_json::Value>)> {
+        let mut media_files = Vec::new();
+        collect_files_recursive(&scan_root, &scan_root, MEDIA_EXTENSIONS, 0, &mut media_files);
+        let total_files = media_files.len();
         if let Ok(mut st) = ENRICHER_STATE.lock() {
-            st.done = idx + 1;
-            st.processed = idx + 1;
-            st.progress = if total_files > 0 {
-                ((idx + 1) as f64 / total_files as f64) * 100.0
-            } else {
-                100.0
-            };
+            st.total = total_files;
         }
-    }
+
+        let mut enriched_items = Vec::with_capacity(total_files);
+        if total_files > 0 {
+            let mut conn = af_db::get_conn()?;
+            let tx = conn.transaction()?;
+            let now_str = Utc::now().to_rfc3339();
+            for path in &media_files {
+                let file_path_str = path.to_string_lossy().to_string();
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
+                let subs_json = serde_json::to_string(&subs).unwrap_or_else(|_| "[]".to_string());
+                let updated = tx
+                    .execute(
+                        "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
+                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                    )
+                    .unwrap_or(0);
+                if updated == 0 {
+                    let _ = tx.execute(
+                        "INSERT INTO media_metadata (file_path, filename, title, year, language, quality, subtitles_json, enriched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                    );
+                }
+                let id = tx
+                    .query_row(
+                        "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
+                        params![file_path_str],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+                enriched_items.push(serde_json::json!({
+                    "id": id,
+                    "file_path": file_path_str,
+                    "filename": filename,
+                    "title": title,
+                    "year": year,
+                    "language": language,
+                    "quality": quality,
+                    "subtitles_json": subs_json,
+                    "enriched_at": now_str,
+                }));
+            }
+            tx.commit()?;
+        }
+        Ok((media_files, enriched_items))
+    })
+    .await;
+
+    let (media_files, enriched_items) = match initial_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Metadata scan failed: {e}"),
+            );
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Metadata scan worker failed: {e}"),
+            );
+        }
+    };
+    let total_files = media_files.len();
 
     if let Ok(mut st) = ENRICHER_STATE.lock() {
+        st.done = total_files;
+        st.processed = total_files;
         st.results = enriched_items;
         st.progress = 100.0;
-        if !has_gemini_key || media_files.is_empty() {
-            st.scanning = false;
-        }
     }
 
     if has_gemini_key && !media_files.is_empty() {
+        scan_guard.keep_scanning = true;
         let api_key = ps.gemini_api_key.clone();
         tokio::spawn(async move {
+            let _async_guard = EnricherScanGuard {
+                keep_scanning: false,
+            };
             let batch_size = 10usize;
             let total = media_files.len();
             let mut updated_results = Vec::new();
@@ -3297,7 +3421,15 @@ fn validate_mediaflow_directory(
     Ok(resolved)
 }
 
-fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<PathBuf>) {
+fn collect_mediaflow_files(
+    directory: &StdPath,
+    root: &StdPath,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > MAX_SCAN_DEPTH || out.len() >= MAX_SCAN_FILES {
+        return;
+    }
     let Ok(metadata) = std::fs::symlink_metadata(directory) else {
         return;
     };
@@ -3314,6 +3446,9 @@ fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<Pa
         return;
     };
     for entry in entries.flatten() {
+        if out.len() >= MAX_SCAN_FILES {
+            break;
+        }
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
@@ -3325,7 +3460,7 @@ fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<Pa
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_mediaflow_files(&path, root, out);
+            collect_mediaflow_files(&path, root, depth + 1, out);
         } else if file_type.is_file() {
             let Ok(path) = path.canonicalize() else {
                 continue;
@@ -3348,7 +3483,7 @@ fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<Pa
 
 fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
     let mut video_files = Vec::new();
-    collect_mediaflow_files(root_dir, root_dir, &mut video_files);
+    collect_mediaflow_files(root_dir, root_dir, 0, &mut video_files);
 
     for path in video_files {
         let path_str = path.to_string_lossy().to_string();
@@ -3412,8 +3547,24 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
             )
         }
     };
+    if MEDIAFLOW_SCANNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "A MediaFlow scan is already in progress",
+        );
+    }
     let response_directory = dir_buf.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || {
+        let _guard = MediaflowScanGuard;
         if let Err(error) = scan_directory_for_mediaflow(&dir_buf) {
             tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
         }

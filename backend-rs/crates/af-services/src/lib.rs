@@ -73,7 +73,12 @@ pub fn resolve_owning_package_id(target: &str) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
-pub const CORE_SERVICE_IDS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
+pub const CORE_SERVICE_IDS: [&str; 4] = [
+    "aetherflow-api",
+    "aetherflow-runner",
+    "aetherflow-frontend",
+    "apache2",
+];
 
 /// Validates a Services control request and returns the exact control target.
 ///
@@ -2617,7 +2622,14 @@ pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
             address.is_unspecified()
                 || address.is_link_local()
                 || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
                 || octets == [168, 63, 129, 16]
+                || (octets[0] == 192
+                    && ((octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                        || (octets[1] == 88 && octets[2] == 99)))
+                || (octets[0] == 198 && (octets[1] & 0xfe) == 18)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
                 || octets[0] >= 224
         }
         std::net::IpAddr::V6(address) => address
