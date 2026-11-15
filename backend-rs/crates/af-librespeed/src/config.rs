@@ -1,11 +1,13 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::env;
+use std::ffi::CString;
 use std::fmt;
-use std::fs::OpenOptions;
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/opt/librespeed/settings.toml";
 pub const VERSION_STRING: &str = concat!(
@@ -16,58 +18,133 @@ pub const DEFAULT_MAX_TELEMETRY_ROWS: usize = 100_000;
 pub const DEFAULT_IPINFO_BASE_URL: &str = "https://ipinfo.io";
 pub const MAX_CONFIG_AND_PEM_BYTES: usize = 1024 * 1024;
 
-/// Opens `path` with `O_NOFOLLOW | O_CLOEXEC`, verifies via `fstat` that the
-/// descriptor is a regular non-world-writable file, and reads at most `max_bytes`.
-pub fn read_regular_file_nofollow(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
-    for ancestor in path.ancestors().skip(1) {
-        if ancestor.as_os_str().is_empty() || ancestor == Path::new("/") {
-            break;
-        }
-        match std::fs::symlink_metadata(ancestor) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    bail!(
-                        "refusing symlinked ancestor directory for {label}: {}",
-                        ancestor.display()
-                    );
-                }
-                if !meta.is_dir() {
-                    bail!(
-                        "ancestor path is not a directory for {label}: {}",
-                        ancestor.display()
-                    );
-                }
+fn open_regular_file_nofollow(path: &Path, label: &str) -> Result<std::fs::File> {
+    let comps: Vec<Component<'_>> = path.components().collect();
+    if comps.is_empty() {
+        bail!("{label} path is empty");
+    }
+    let Some(Component::Normal(leaf_os)) = comps.last().copied() else {
+        bail!("{label} is not a regular file: {}", path.display());
+    };
+
+    let mut cur_dir: Option<OwnedFd> = None;
+    for comp in &comps[..comps.len() - 1] {
+        let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        match *comp {
+            Component::Prefix(_) => {
+                bail!("unsupported path prefix for {label}: {}", path.display());
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "failed to inspect ancestor directory for {label}: {}",
-                        ancestor.display()
+            Component::RootDir => {
+                let c_root = CString::new("/").expect("static CString");
+                // SAFETY: `c_root` is NUL-terminated and valid for the duration of `open`.
+                let fd = unsafe {
+                    libc::open(
+                        c_root.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
                     )
-                });
+                };
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .with_context(|| format!("failed to open '/' for {label}"));
+                }
+                // SAFETY: `fd` is a freshly opened valid file descriptor owned exclusively here.
+                cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                bail!(
+                    "refusing parent-directory '..' traversal for {label}: {}",
+                    path.display()
+                );
+            }
+            Component::Normal(seg) => {
+                let c_seg = CString::new(seg.as_bytes()).with_context(|| {
+                    format!(
+                        "interior NUL byte in path segment for {label}: {}",
+                        path.display()
+                    )
+                })?;
+                // SAFETY: `dirfd` is either `AT_FDCWD` or a live `OwnedFd`, and `c_seg` is NUL-terminated.
+                let fd = unsafe {
+                    libc::openat(
+                        dirfd,
+                        c_seg.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if fd < 0 {
+                    let err = std::io::Error::last_os_error();
+                    let is_symlink = err.raw_os_error() == Some(libc::ELOOP) || {
+                        // On Linux, `openat(..., O_DIRECTORY | O_NOFOLLOW)` on a symlink returns `ENOTDIR`
+                        // because the unfollowed symlink inode is `S_IFLNK` rather than `S_IFDIR`.
+                        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                        let rc = unsafe {
+                            libc::fstatat(dirfd, c_seg.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
+                        };
+                        rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
+                    };
+                    if is_symlink {
+                        bail!(
+                            "refusing symlinked ancestor directory for {label}: {}",
+                            path.display()
+                        );
+                    }
+                    return match err.raw_os_error() {
+                        Some(libc::ENOTDIR) => bail!(
+                            "ancestor path is not a directory for {label}: {}",
+                            path.display()
+                        ),
+                        _ => Err(err).with_context(|| {
+                            format!(
+                                "failed to inspect ancestor directory for {label}: {}",
+                                path.display()
+                            )
+                        }),
+                    };
+                }
+                // SAFETY: `fd` is a freshly opened valid directory descriptor owned exclusively here.
+                cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
             }
         }
     }
 
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(f) => f,
-        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
-            bail!("refusing symlinked {label}: {}", path.display());
-        }
-        Err(err) => {
-            return Err(err).with_context(|| {
+    let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+    let c_leaf = CString::new(leaf_os.as_bytes()).with_context(|| {
+        format!(
+            "interior NUL byte in filename for {label}: {}",
+            path.display()
+        )
+    })?;
+    // SAFETY: `dirfd` is either `AT_FDCWD` or a live `OwnedFd`, and `c_leaf` is NUL-terminated.
+    let leaf_fd = unsafe {
+        libc::openat(
+            dirfd,
+            c_leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if leaf_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ELOOP) => bail!("refusing symlinked {label}: {}", path.display()),
+            _ => Err(err).with_context(|| {
                 format!(
                     "{label} does not exist or cannot be read: {}",
                     path.display()
                 )
-            });
-        }
-    };
+            }),
+        };
+    }
+    // SAFETY: `leaf_fd` is a freshly opened valid file descriptor owned exclusively here.
+    let owned_leaf = unsafe { OwnedFd::from_raw_fd(leaf_fd) };
+    Ok(std::fs::File::from(owned_leaf))
+}
+
+/// Walks every ancestor component and the leaf file via `openat(..., O_NOFOLLOW | O_CLOEXEC)`,
+/// verifies via `fstat` that the descriptor is a regular non-world-writable file, and reads at
+/// most `max_bytes`.
+pub fn read_regular_file_nofollow(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
+    let file = open_regular_file_nofollow(path, label)?;
 
     let meta = file
         .metadata()
@@ -275,9 +352,13 @@ impl Config {
         } else {
             unbracketed
         };
-        let ip: IpAddr = addr_str
-            .parse()
-            .with_context(|| format!("invalid bind_address {:?}", self.bind_address))?;
+        let ip: IpAddr = if addr_str.eq_ignore_ascii_case("localhost") {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            addr_str
+                .parse()
+                .with_context(|| format!("invalid bind_address {:?}", self.bind_address))?
+        };
         Ok(SocketAddr::new(ip, self.listen_port))
     }
 
@@ -1294,5 +1375,35 @@ extra_flags = [
             Config::parse_toml_str("ipinfo_base_url = \"http://127.0.0.1:18080\"\n")
                 .expect("loopback ipinfo_base_url must parse");
         assert_eq!(loopback_ipinfo.ipinfo_base_url, "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn socket_addr_accepts_localhost_and_read_nofollow_rejects_parent_traversal() {
+        let cfg = Config::parse_toml_str("bind_address = \"localhost\"\nlisten_port = 18988\n")
+            .expect("localhost bind_address must parse");
+        assert_eq!(
+            cfg.socket_addr().expect("localhost socket_addr"),
+            "127.0.0.1:18988".parse::<SocketAddr>().unwrap()
+        );
+
+        let upper_cfg =
+            Config::parse_toml_str("bind_address = \"LOCALHOST\"\nlisten_port = 18989\n")
+                .expect("LOCALHOST bind_address must parse");
+        assert_eq!(
+            upper_cfg.socket_addr().expect("LOCALHOST socket_addr"),
+            "127.0.0.1:18989".parse::<SocketAddr>().unwrap()
+        );
+
+        let traversal_err = read_regular_file_nofollow(
+            Path::new("/tmp/nonexistent/../settings.toml"),
+            1024,
+            "settings.toml",
+        )
+        .expect_err("parent-directory '..' traversal must fail closed")
+        .to_string();
+        assert!(
+            traversal_err.contains(".."),
+            "unexpected error: {traversal_err}"
+        );
     }
 }

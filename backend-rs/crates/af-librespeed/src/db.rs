@@ -89,12 +89,14 @@ const TELEMETRY_SCHEMA_SQL: &str = "
         imported_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS telemetry_legacy_raw_ids (
-        uuid TEXT PRIMARY KEY
+        uuid TEXT PRIMARY KEY,
+        ulid_suffix BLOB
     );
     CREATE TABLE IF NOT EXISTS speedtest_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uuid TEXT NOT NULL UNIQUE,
         timestamp TEXT NOT NULL,
+        ts_epoch_ms INTEGER,
         ip TEXT NOT NULL DEFAULT '',
         ispinfo TEXT NOT NULL DEFAULT '',
         extra TEXT NOT NULL DEFAULT '',
@@ -110,6 +112,161 @@ const TELEMETRY_SCHEMA_SQL: &str = "
         ON speedtest_users (timestamp DESC, uuid DESC);
 ";
 
+pub fn parse_timestamp_epoch_ms(ts: &str) -> i64 {
+    let mut trimmed = ts.trim();
+    if trimmed.is_empty() {
+        return i64::MIN;
+    }
+    if let Some((before_mono, _)) = trimmed.split_once(" m=") {
+        trimmed = before_mono.trim();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return dt.timestamp_millis();
+    }
+    let candidate = {
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 4
+            && (parts[2].starts_with('+') || parts[2].starts_with('-'))
+            && parts[3].bytes().all(|b| b.is_ascii_alphabetic())
+        {
+            format!("{} {} {}", parts[0], parts[1], parts[2])
+        } else {
+            trimmed.to_string()
+        }
+    };
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f %z",
+        "%Y-%m-%d %H:%M:%S %z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(&candidate, fmt) {
+            return dt.timestamp_millis();
+        }
+    }
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return ndt.and_utc().timestamp_millis();
+        }
+    }
+    if let Ok(nd) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        if let Some(ndt) = nd.and_hms_opt(0, 0, 0) {
+            return ndt.and_utc().timestamp_millis();
+        }
+    }
+    if let Ok(num) = trimmed.parse::<i64>() {
+        return if num.abs() >= 100_000_000_000 {
+            num
+        } else {
+            num.saturating_mul(1000)
+        };
+    }
+    i64::MIN
+}
+
+fn ulid_suffix_blob(uuid: &str) -> Option<[u8; 12]> {
+    let canon = canonicalize_ulid(uuid)?;
+    let val = decode_ulid(&canon)?;
+    let bytes = val.to_be_bytes();
+    let mut out = [0u8; 12];
+    out.copy_from_slice(&bytes[4..16]);
+    Some(out)
+}
+
+fn table_has_column(conn: &Connection, table: &str, col_name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == col_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn init_telemetry_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(TELEMETRY_SCHEMA_SQL)?;
+
+    if !table_has_column(conn, "speedtest_users", "ts_epoch_ms")? {
+        conn.execute(
+            "ALTER TABLE speedtest_users ADD COLUMN ts_epoch_ms INTEGER",
+            [],
+        )?;
+    }
+    {
+        let mut stmt =
+            conn.prepare("SELECT id, timestamp FROM speedtest_users WHERE ts_epoch_ms IS NULL")?;
+        let pending: Vec<(i64, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if !pending.is_empty() {
+            let mut upd =
+                conn.prepare("UPDATE speedtest_users SET ts_epoch_ms = ?1 WHERE id = ?2")?;
+            for (id, ts) in pending {
+                upd.execute(params![parse_timestamp_epoch_ms(&ts), id])?;
+            }
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_speedtest_users_retention
+         ON speedtest_users (ts_epoch_ms DESC, timestamp DESC, id DESC);",
+    )?;
+
+    if !table_has_column(conn, "telemetry_legacy_raw_ids", "ulid_suffix")? {
+        conn.execute(
+            "ALTER TABLE telemetry_legacy_raw_ids ADD COLUMN ulid_suffix BLOB",
+            [],
+        )?;
+    }
+    {
+        let mut stmt =
+            conn.prepare("SELECT uuid FROM telemetry_legacy_raw_ids WHERE ulid_suffix IS NULL")?;
+        let pending: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if !pending.is_empty() {
+            let mut upd = conn
+                .prepare("UPDATE telemetry_legacy_raw_ids SET ulid_suffix = ?1 WHERE uuid = ?2")?;
+            for uuid in pending {
+                if let Some(sfx) = ulid_suffix_blob(&uuid) {
+                    upd.execute(params![sfx.as_slice(), uuid])?;
+                }
+            }
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_legacy_ulid_suffix
+         ON telemetry_legacy_raw_ids (ulid_suffix);",
+    )?;
+    Ok(())
+}
+
+fn enforce_retention_on_conn(conn: &Connection, max_rows: usize) -> Result<()> {
+    let keep = i64::try_from(max_rows).unwrap_or(100_000);
+    conn.execute(
+        "DELETE FROM speedtest_users
+         WHERE id NOT IN (
+             SELECT id FROM speedtest_users
+             ORDER BY ts_epoch_ms DESC, timestamp DESC, id DESC
+             LIMIT ?1
+         )",
+        params![keep],
+    )
+    .context("failed to enforce telemetry retention cap")?;
+    conn.execute(
+        "DELETE FROM telemetry_legacy_raw_ids
+         WHERE uuid NOT IN (SELECT uuid FROM speedtest_users)",
+        [],
+    )
+    .context("failed to prune telemetry_legacy_raw_ids")?;
+    Ok(())
+}
+
 impl TelemetryVault {
     pub fn open(db_path: &Path) -> Result<Self> {
         Self::open_with_max_rows(db_path, crate::config::DEFAULT_MAX_TELEMETRY_ROWS)
@@ -121,8 +278,7 @@ impl TelemetryVault {
         }
         let conn = Connection::open_in_memory()
             .context("failed to open in-memory SQLite telemetry database")?;
-        conn.execute_batch(TELEMETRY_SCHEMA_SQL)
-            .context("failed to initialize in-memory telemetry schema")?;
+        init_telemetry_schema(&conn).context("failed to initialize in-memory telemetry schema")?;
         let obfuscation_key = init_or_load_obfuscation_key(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -195,7 +351,7 @@ impl TelemetryVault {
              PRAGMA busy_timeout = 5000;",
         )
         .with_context(|| format!("failed to configure WAL pragmas at {}", db_path.display()))?;
-        conn.execute_batch(TELEMETRY_SCHEMA_SQL)
+        init_telemetry_schema(&conn)
             .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
 
         verify_and_harden_sidecars(db_path)?;
@@ -207,6 +363,7 @@ impl TelemetryVault {
             &mut conn,
             max_rows,
         );
+        enforce_retention_on_conn(&conn, max_rows)?;
 
         let obfuscation_key = init_or_load_obfuscation_key(&conn)?;
         let legacy_go_salt = init_or_load_legacy_go_salt(db_path, &conn)?;
@@ -237,7 +394,7 @@ impl TelemetryVault {
     /// migrated canonical ULID in `telemetry_legacy_raw_ids`.
     ///
     /// Uses the imported `idObfuscation_salt.bin` 4-byte salt for exact O(1) lookup when
-    /// available, and falls back to matching the unmasked 96-bit suffix (`bytes[4..16]`)
+    /// available, and falls back to an O(1) indexed lookup on `ulid_suffix` (`bytes[4..16]`)
     /// across `telemetry_legacy_raw_ids` iff the match is globally unique.
     pub async fn resolve_legacy_go_share_id(&self, token: String) -> Result<Option<String>> {
         let Some(raw_bytes) = decode_legacy_go_obfuscated_ulid_bytes(&token) else {
@@ -269,31 +426,28 @@ impl TelemetryVault {
                 }
             }
 
+            let suffix = &raw_bytes[4..16];
             let mut stmt = conn
                 .prepare(
                     "SELECT u.uuid
-                     FROM speedtest_users u
-                     INNER JOIN telemetry_legacy_raw_ids l ON l.uuid = u.uuid",
+                     FROM telemetry_legacy_raw_ids l
+                     INNER JOIN speedtest_users u ON u.uuid = l.uuid
+                     WHERE l.ulid_suffix = ?1
+                     LIMIT 2",
                 )
-                .context("failed preparing legacy Go suffix scan")?;
+                .context("failed preparing indexed legacy Go suffix lookup")?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .context("failed executing legacy Go suffix scan")?;
-            let mut matched: Option<String> = None;
+                .query_map(params![suffix], |row| row.get::<_, String>(0))
+                .context("failed executing indexed legacy Go suffix lookup")?;
+            let mut matched: Vec<String> = Vec::with_capacity(2);
             for row in rows {
-                let cand_uuid = row.context("failed decoding legacy Go candidate UUID")?;
-                let Some(val) = decode_ulid(&cand_uuid) else {
-                    continue;
-                };
-                if val.to_be_bytes()[4..16] == raw_bytes[4..16] {
-                    if matched.is_some() {
-                        // Ambiguous suffix match: fail closed rather than returning wrong record.
-                        return Ok(None);
-                    }
-                    matched = Some(cand_uuid);
-                }
+                matched.push(row.context("failed decoding legacy Go candidate UUID")?);
             }
-            Ok(matched)
+            if matched.len() == 1 {
+                Ok(matched.pop())
+            } else {
+                Ok(None)
+            }
         })
         .await
         .context("legacy Go share ID lookup panicked")?
@@ -335,13 +489,15 @@ impl TelemetryVault {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SQLite vault mutex poisoned"))?;
             let uuid_copy = record.uuid.clone();
+            let ts_epoch_ms = parse_timestamp_epoch_ms(&record.timestamp);
             conn.execute(
                 "INSERT INTO speedtest_users
-                 (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 (uuid, timestamp, ts_epoch_ms, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     record.uuid,
                     record.timestamp,
+                    ts_epoch_ms,
                     record.ip,
                     record.ispinfo,
                     record.extra,
@@ -357,29 +513,15 @@ impl TelemetryVault {
             .context("failed to insert telemetry record")?;
 
             if issued_raw_id {
+                let suffix_opt = ulid_suffix_blob(&uuid_copy);
                 conn.execute(
-                    "INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid) VALUES (?1)",
-                    params![uuid_copy],
+                    "INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid, ulid_suffix) VALUES (?1, ?2)",
+                    params![uuid_copy, suffix_opt.as_ref().map(|b| b.as_slice())],
                 )
                 .context("failed to record unobfuscated share ID")?;
             }
 
-            let keep = i64::try_from(max_rows).unwrap_or(100_000);
-            conn.execute(
-                "DELETE FROM speedtest_users
-                 WHERE id <= COALESCE(
-                     (SELECT id FROM speedtest_users ORDER BY id DESC LIMIT 1 OFFSET ?1),
-                     -1
-                 )",
-                params![keep],
-            )
-            .context("failed to enforce telemetry retention cap")?;
-            conn.execute(
-                "DELETE FROM telemetry_legacy_raw_ids
-                 WHERE uuid NOT IN (SELECT uuid FROM speedtest_users)",
-                [],
-            )
-            .context("failed to prune telemetry_legacy_raw_ids")?;
+            enforce_retention_on_conn(&conn, max_rows)?;
             Ok(())
         })
         .await
@@ -418,7 +560,7 @@ impl TelemetryVault {
                 .prepare(
                     "SELECT id, uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log
                      FROM speedtest_users
-                     ORDER BY id DESC
+                     ORDER BY ts_epoch_ms DESC, timestamp DESC, id DESC
                      LIMIT ?1",
                 )
                 .context("failed to prepare recent telemetry query")?;
@@ -1450,16 +1592,23 @@ fn import_legacy_boltdb_if_valid(
     if records.is_empty() {
         return;
     }
+    records.sort_by(|a, b| {
+        let a_ms = parse_timestamp_epoch_ms(&a.timestamp);
+        let b_ms = parse_timestamp_epoch_ms(&b.timestamp);
+        b_ms.cmp(&a_ms)
+            .then_with(|| b.timestamp.cmp(&a.timestamp))
+            .then_with(|| b.uuid.cmp(&a.uuid))
+    });
     if records.len() > max_rows {
-        let drop_count = records.len() - max_rows;
-        records.drain(0..drop_count);
+        records.truncate(max_rows);
     }
+    // Insert oldest-to-newest among retained BoltDB rows so `id` increases chronologically too.
+    records.reverse();
 
     let now_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let keep = i64::try_from(max_rows).unwrap_or(100_000);
 
     let imported = (|| -> Result<usize> {
         let tx = conn.transaction()?;
@@ -1467,15 +1616,18 @@ fn import_legacy_boltdb_if_valid(
         {
             let mut stmt = tx.prepare(
                 "INSERT OR IGNORE INTO speedtest_users
-                 (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 (uuid, timestamp, ts_epoch_ms, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
-            let mut legacy_id_stmt =
-                tx.prepare("INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid) VALUES (?1)")?;
+            let mut legacy_id_stmt = tx.prepare(
+                "INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid, ulid_suffix) VALUES (?1, ?2)",
+            )?;
             for rec in &records {
+                let ts_epoch_ms = parse_timestamp_epoch_ms(&rec.timestamp);
                 inserted += stmt.execute(params![
                     rec.uuid,
                     rec.timestamp,
+                    ts_epoch_ms,
                     rec.ip,
                     rec.ispinfo,
                     rec.extra,
@@ -1487,23 +1639,12 @@ fn import_legacy_boltdb_if_valid(
                     rec.jitter,
                     rec.log,
                 ])?;
-                legacy_id_stmt.execute(params![rec.uuid])?;
+                let suffix_opt = ulid_suffix_blob(&rec.uuid);
+                legacy_id_stmt
+                    .execute(params![rec.uuid, suffix_opt.as_ref().map(|b| b.as_slice())])?;
             }
         }
-        tx.execute(
-            "DELETE FROM speedtest_users
-             WHERE id NOT IN (
-                 SELECT id FROM speedtest_users
-                 ORDER BY timestamp DESC, uuid DESC, id DESC
-                 LIMIT ?1
-             )",
-            params![keep],
-        )?;
-        tx.execute(
-            "DELETE FROM telemetry_legacy_raw_ids
-             WHERE uuid NOT IN (SELECT uuid FROM speedtest_users)",
-            [],
-        )?;
+        enforce_retention_on_conn(&tx, max_rows)?;
         tx.execute(
             "INSERT OR IGNORE INTO telemetry_bolt_migrations (source_name, imported_at) VALUES (?1, ?2)",
             params![source_name, now_ts],
@@ -2016,5 +2157,82 @@ mod tests {
                 .as_deref(),
             Some("01JABCDEFGHJKMNPQRSTVWXYZ5")
         );
+    }
+
+    #[tokio::test]
+    async fn reopen_enforces_lowered_max_rows_and_mixed_offset_timestamp_ordering() {
+        let tmp = TempDirGuard::new("reopen-retention-offsets");
+        let db_path = tmp.0.join("speedtest.db");
+
+        // 1. Insert 3 records with mixed timezone offsets where row insertion order != UTC chronological order:
+        // - r1: 2026-11-15T18:00:00+02:00 == 16:00:00Z (middle)
+        // - r2: 2026-11-15T15:30:00Z       == 15:30:00Z (oldest, inserted 2nd!)
+        // - r3: 2026-11-15 16:45:00.250 +0000 UTC m=+12.34 == 16:45:00.250Z (newest, Go time.Time.String())
+        {
+            let v = TelemetryVault::open_with_max_rows(&db_path, 10).unwrap();
+            for (uuid, ts, dl) in [
+                (
+                    "01JABCDEFGHJKMNPQRSTVWXYA1",
+                    "2026-11-15T18:00:00+02:00",
+                    "200.0",
+                ),
+                (
+                    "01JABCDEFGHJKMNPQRSTVWXYA2",
+                    "2026-11-15T15:30:00Z",
+                    "100.0",
+                ),
+                (
+                    "01JABCDEFGHJKMNPQRSTVWXYA3",
+                    "2026-11-15 16:45:00.250 +0000 UTC m=+12.345",
+                    "300.0",
+                ),
+            ] {
+                v.insert_with_mode(
+                    NewTelemetryRecord {
+                        uuid: uuid.to_string(),
+                        timestamp: ts.to_string(),
+                        ip: "0.0.0.0".to_string(),
+                        ispinfo: String::new(),
+                        extra: String::new(),
+                        ua: String::new(),
+                        lang: String::new(),
+                        dl: dl.to_string(),
+                        ul: "50.0".to_string(),
+                        ping: "4.0".to_string(),
+                        jitter: "0.5".to_string(),
+                        log: String::new(),
+                    },
+                    true,
+                )
+                .await
+                .unwrap();
+            }
+
+            let ordered = v.list_recent(10).await.unwrap();
+            let uuids: Vec<&str> = ordered.iter().map(|r| r.uuid.as_str()).collect();
+            assert_eq!(
+                uuids,
+                vec![
+                    "01JABCDEFGHJKMNPQRSTVWXYA3",
+                    "01JABCDEFGHJKMNPQRSTVWXYA1",
+                    "01JABCDEFGHJKMNPQRSTVWXYA2",
+                ],
+                "list_recent must order by parsed UTC epoch ms, not string or rowid order"
+            );
+        }
+
+        // 2. Reopen the existing SQLite DB with lowered `max_rows = 2` (with NO BoltDB import);
+        // the oldest UTC record (`A2`, 15:30Z) must be pruned immediately on reopen even though it had higher `id` than `A1`!
+        let v_reopened = TelemetryVault::open_with_max_rows(&db_path, 2).unwrap();
+        let after_reopen = v_reopened.list_recent(10).await.unwrap();
+        let kept_uuids: Vec<&str> = after_reopen.iter().map(|r| r.uuid.as_str()).collect();
+        assert_eq!(
+            kept_uuids,
+            vec!["01JABCDEFGHJKMNPQRSTVWXYA3", "01JABCDEFGHJKMNPQRSTVWXYA1"]
+        );
+        assert!(!v_reopened
+            .is_legacy_raw_id("01JABCDEFGHJKMNPQRSTVWXYA2".to_string())
+            .await
+            .unwrap());
     }
 }

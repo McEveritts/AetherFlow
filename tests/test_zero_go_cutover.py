@@ -1059,21 +1059,34 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             )
             mock_rm.chmod(0o755)
 
-            # Even if a global `af` binary exists in PATH, explicit AF_INSTALL_ROOT must strictly confine resolution
+            # Even if a global `af` binary exists in PATH or AETHERFLOW_RELEASE_ROOT points outside,
+            # explicit AF_INSTALL_ROOT must strictly confine resolution and override AETHERFLOW_RELEASE_ROOT.
+            outside_target = Path(tmp) / "outside-release-root"
+            outside_target.mkdir()
             fake_path_bin = Path(tmp) / "fake-path-bin"
             fake_path_bin.mkdir()
             poison_af = fake_path_bin / "af"
             poison_af.write_text("#!/bin/sh\necho POISON >&2\nexit 99\n", encoding="utf-8")
             poison_af.chmod(0o755)
 
+            # A 02-packages.sh / packages/system/af batch wrapper inside usr/local/bin/af must be skipped (not treated as native Rust af)
+            usr_local_bin = isolated_root / "usr" / "local" / "bin"
+            usr_local_bin.mkdir(parents=True)
+            pkg_wrapper_af = usr_local_bin / "af"
+            pkg_wrapper_af.write_text(
+                "#!/bin/bash\nexec /usr/local/bin/AetherFlow/system/af \"$@\"\n",
+                encoding="utf-8",
+            )
+            pkg_wrapper_af.chmod(0o755)
+
             env = {
                 **os.environ,
                 "AF_INSTALL_ROOT": str(isolated_root),
+                "AETHERFLOW_RELEASE_ROOT": str(outside_target),
                 "RM_LOG": str(rm_log),
                 "PATH": f"{fake_path_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             }
             env.pop("AF_BIN", None)
-            env.pop("AETHERFLOW_RELEASE_ROOT", None)
 
             subprocess.run(
                 ["bash", str(update_shim), "--channel", "experimental", "--dry-run", "--offline"],
@@ -1121,12 +1134,35 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 calls[1]["argv"],
                 ["--dry-run", "--root", str(isolated_root), "release", "deploy", "--local", "--channel", "nightly", "--offline"],
             )
-            self.assertEqual(calls[1]["release_root"], str(isolated_root))
+            self.assertEqual(calls[1]["release_root"], str(isolated_root.resolve()))
+
+            # Symlinked af or symlinked release-manager.sh escaping AF_INSTALL_ROOT must be rejected (no fallback to REPO_ROOT)
+            escape_root = Path(tmp) / "escape-af"
+            (escape_root / "current" / "bin").mkdir(parents=True)
+            (escape_root / "deploy").mkdir(parents=True)
+            (escape_root / "current" / "bin" / "af").symlink_to(poison_af)
+            (escape_root / "deploy" / "release-manager.sh").symlink_to(ROOT / "deploy" / "release-manager.sh")
+            escape_res = subprocess.run(
+                ["bash", str(update_shim), "--dry-run"],
+                env={**env, "AF_INSTALL_ROOT": str(escape_root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(escape_res.returncode, 0, "Symlink escaping AF_INSTALL_ROOT must fail closed")
+
+            rel_res = subprocess.run(
+                ["bash", str(update_shim), "--dry-run"],
+                env={**env, "AF_INSTALL_ROOT": "relative/install/root"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(rel_res.returncode, 0, "Relative AF_INSTALL_ROOT must fail closed")
 
         ls_install = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
         ls_remove = (ROOT / "packages/package/remove/removepackage-librespeed").read_text(encoding="utf-8")
         self.assertIn("/etc/systemd/system/librespeed.socket", ls_install)
         self.assertIn("Requires=librespeed.socket", ls_install)
+        self.assertIn("idObfuscation_salt.bin", ls_install)
         self.assertIn('purge_systemd_unit "librespeed.socket" "librespeed"', ls_remove)
 
 

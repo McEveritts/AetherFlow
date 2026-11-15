@@ -173,6 +173,17 @@ pub fn extract_isp_display(ispinfo: &str) -> String {
         return "Direct / Unknown".to_string();
     }
     let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+        if let Some((lhs, rhs)) = trimmed.split_once(" - ") {
+            if lhs.trim() == "0.0.0.0" || lhs.trim() == "::" {
+                let rhs = rhs.trim();
+                if !rhs.is_empty() {
+                    return rhs.chars().take(48).collect();
+                }
+            }
+        }
+        if trimmed == "0.0.0.0" || trimmed == "::" {
+            return "Direct / Unknown".to_string();
+        }
         return trimmed.chars().take(48).collect();
     };
 

@@ -11342,13 +11342,14 @@ fn apply_runner_blueprint_app_config_changes(
             .as_ref()
             .and_then(|c| c.ca_cert_file.as_deref());
         let ssl_proxy_directive = if librespeed_tls == Some(true) {
-            if let Some(ca_cert) = librespeed_ca_cert {
-                format!(
-                    "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+            let ca_cert = librespeed_ca_cert.ok_or_else(|| {
+                PackageExecutorError::VerificationFailed(
+                    "LibreSpeed enable_tls=true requires a valid, regular, non-symlinked absolute tls_cert_file in /opt/librespeed/settings.toml for Apache SSLProxyCACertificateFile pinning".to_string(),
                 )
-            } else {
-                "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n".to_string()
-            }
+            })?;
+            format!(
+                "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+            )
         } else {
             String::new()
         };
@@ -11893,7 +11894,7 @@ fn render_or_update_runner_apache_vhost_with_ca(
                     out_lines.push(line.to_string());
                 }
             }
-            if upstream_tls == Some(true) {
+            if let (Some(true), Some(ca_cert)) = (upstream_tls, upstream_ca_cert) {
                 let insert_pos = out_lines
                     .iter()
                     .position(|l| {
@@ -11907,16 +11908,14 @@ fn render_or_update_runner_apache_vhost_with_ca(
                             .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
                     })
                     .unwrap_or(out_lines.len());
-                let mut ssl_lines = vec!["    SSLProxyEngine On".to_string()];
-                if let Some(ca_cert) = upstream_ca_cert {
-                    ssl_lines.push("    SSLProxyVerify require".to_string());
-                    ssl_lines.push(format!("    SSLProxyCACertificateFile {ca_cert}"));
-                } else {
-                    ssl_lines.push("    SSLProxyVerify none".to_string());
-                }
-                ssl_lines.push("    SSLProxyCheckPeerCN off".to_string());
-                ssl_lines.push("    SSLProxyCheckPeerName off".to_string());
-                ssl_lines.push("    SSLProxyCheckPeerExpire off".to_string());
+                let ssl_lines = vec![
+                    "    SSLProxyEngine On".to_string(),
+                    "    SSLProxyVerify require".to_string(),
+                    format!("    SSLProxyCACertificateFile {ca_cert}"),
+                    "    SSLProxyCheckPeerCN off".to_string(),
+                    "    SSLProxyCheckPeerName off".to_string(),
+                    "    SSLProxyCheckPeerExpire off".to_string(),
+                ];
                 out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
@@ -18470,24 +18469,9 @@ int main(int argc, char** argv) {
 
         let http_default = "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName librespeed.aether.local\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{HTTP:Upgrade} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:8988/$1 [P,L]\n    ProxyPass / http://127.0.0.1:8988/\n    ProxyPassReverse / http://127.0.0.1:8988/\n    RequestHeader set X-Forwarded-Proto \"http\"\n    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n</VirtualHost>\n";
 
-        // Upgrade existing HTTP vhost in-place when enable_tls=true and port changes to 18988
-        let promoted_tls = render_or_update_runner_apache_vhost(
-            Some(http_default),
-            http_default,
-            Some("librespeed.aether.local"),
-            18988,
-            Some(true),
-            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
-        );
-        assert!(promoted_tls.contains("SSLProxyEngine On"));
-        assert!(promoted_tls.contains("SSLProxyVerify none"));
-        assert!(promoted_tls.contains("wss://127.0.0.1:18988/$1"));
-        assert!(promoted_tls.contains("ProxyPass / https://127.0.0.1:18988/"));
-        assert!(promoted_tls.contains("ProxyPassReverse / https://127.0.0.1:18988/"));
-
-        // Pin operator certificate via SSLProxyCACertificateFile + SSLProxyVerify require when tls_cert_file is provided
+        // Pin operator certificate via SSLProxyCACertificateFile + SSLProxyVerify require when enable_tls=true
         let pinned_tls = render_or_update_runner_apache_vhost_with_ca(
-            Some(&promoted_tls),
+            Some(http_default),
             http_default,
             Some("librespeed.aether.local"),
             18988,
@@ -18495,9 +18479,72 @@ int main(int argc, char** argv) {
             Some("/opt/librespeed/cert.pem"),
             &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
         );
+        assert!(pinned_tls.contains("SSLProxyEngine On"));
         assert!(pinned_tls.contains("SSLProxyVerify require"));
         assert!(pinned_tls.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
         assert!(!pinned_tls.contains("SSLProxyVerify none"));
+        assert!(pinned_tls.contains("wss://127.0.0.1:18988/$1"));
+        assert!(pinned_tls.contains("ProxyPass / https://127.0.0.1:18988/"));
+        assert!(pinned_tls.contains("ProxyPassReverse / https://127.0.0.1:18988/"));
+
+        // Fail closed if enable_tls=true in settings.toml lacks a valid regular tls_cert_file
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "af-runner-librespeed-tls-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(tmp_dir.join("etc/apache2/sites-available")).unwrap();
+        fs::create_dir_all(tmp_dir.join("etc/apache2/sites-enabled")).unwrap();
+        fs::create_dir_all(tmp_dir.join("opt/librespeed")).unwrap();
+        fs::write(
+            tmp_dir.join("opt/librespeed/settings.toml"),
+            "enable_tls = true\ntls_cert_file = \"/opt/librespeed/missing-cert.pem\"\ntls_key_file = \"/opt/librespeed/key.pem\"\n",
+        )
+        .unwrap();
+        let mut changes = RunnerBlueprintConfigChanges {
+            fs_root: Some(&tmp_dir),
+            backups: Vec::new(),
+        };
+        let err =
+            apply_runner_blueprint_app_config_changes(&mut changes, "librespeed", 18988, |_| {
+                Ok(None)
+            })
+            .expect_err("enable_tls=true without valid tls_cert_file must fail closed");
+        assert!(
+            err.to_string().contains("SSLProxyCACertificateFile"),
+            "unexpected error: {err}"
+        );
+
+        // Succeeds with pinned SSLProxyCACertificateFile once regular tls_cert_file exists
+        fs::write(
+            tmp_dir.join("opt/librespeed/cert.pem"),
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp_dir.join("opt/librespeed/settings.toml"),
+            "enable_tls = true\ntls_cert_file = \"/opt/librespeed/cert.pem\"\ntls_key_file = \"/opt/librespeed/key.pem\"\n",
+        )
+        .unwrap();
+        let mut ok_changes = RunnerBlueprintConfigChanges {
+            fs_root: Some(&tmp_dir),
+            backups: Vec::new(),
+        };
+        apply_runner_blueprint_app_config_changes(&mut ok_changes, "librespeed", 18988, |_| {
+            Ok(None)
+        })
+        .expect("enable_tls=true with valid regular tls_cert_file must succeed");
+        let rendered_on_disk = fs::read_to_string(
+            tmp_dir.join("etc/apache2/sites-available/aetherflow-app-librespeed.conf"),
+        )
+        .unwrap();
+        assert!(rendered_on_disk.contains("SSLProxyVerify require"));
+        assert!(rendered_on_disk.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
+        assert!(!rendered_on_disk.contains("SSLProxyVerify none"));
+        let _ = fs::remove_dir_all(&tmp_dir);
 
         // Downgrade back to HTTP cleanly when enable_tls=false
         let demoted_http = render_or_update_runner_apache_vhost(

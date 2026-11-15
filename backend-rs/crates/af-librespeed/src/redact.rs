@@ -298,9 +298,16 @@ pub fn format_getip_display(ip_str: &str, redact: bool) -> String {
 }
 
 pub fn redact_single_ip(ip_str: &str) -> String {
-    match parse_ip_token(ip_str) {
-        Some(IpAddr::V6(_)) => "::".to_string(),
-        _ => "0.0.0.0".to_string(),
+    if let Some(ip) = parse_ip_token(ip_str) {
+        return match ip {
+            IpAddr::V6(_) => "::".to_string(),
+            IpAddr::V4(_) => "0.0.0.0".to_string(),
+        };
+    }
+    if ip_str.contains(':') && !IPV4_RE.is_match(ip_str) {
+        "::".to_string()
+    } else {
+        "0.0.0.0".to_string()
     }
 }
 
@@ -399,6 +406,90 @@ pub fn redact_freeform_text(input: &str) -> String {
     HOSTNAME_ESCAPED_JSON_RE
         .replace_all(&after_unescaped, r#"\"hostname\":\"REDACTED\""#)
         .into_owned()
+}
+
+fn redact_json_value_in_place_depth(val: &mut serde_json::Value, depth: usize) {
+    match val {
+        serde_json::Value::String(s) => {
+            if depth < 4 {
+                let trimmed = s.trim();
+                if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                    || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                {
+                    if let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        redact_json_value_in_place_depth(&mut nested, depth + 1);
+                        if let Ok(serialized) = serde_json::to_string(&nested) {
+                            *s = redact_freeform_text(&serialized);
+                            return;
+                        }
+                    }
+                }
+            }
+            *s = redact_freeform_text(s);
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                redact_json_value_in_place_depth(item, depth + 1);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (k, v) in obj.iter_mut() {
+                let key_lower = k.to_ascii_lowercase();
+                if matches!(
+                    key_lower.as_str(),
+                    "hostname"
+                        | "city"
+                        | "region"
+                        | "postal"
+                        | "loc"
+                        | "latitude"
+                        | "longitude"
+                        | "lat"
+                        | "lon"
+                        | "lng"
+                ) {
+                    *v = serde_json::Value::String("REDACTED".to_string());
+                } else if key_lower == "ip" {
+                    let scrubbed = v
+                        .as_str()
+                        .map(redact_single_ip)
+                        .unwrap_or_else(|| "0.0.0.0".to_string());
+                    *v = serde_json::Value::String(scrubbed);
+                } else {
+                    redact_json_value_in_place_depth(v, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn redact_json_value_in_place(val: &mut serde_json::Value) {
+    redact_json_value_in_place_depth(val, 0);
+}
+
+pub fn sanitize_ispinfo_for_redaction(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+        redact_json_value_in_place(&mut parsed);
+        if let Ok(serialized) = serde_json::to_string(&parsed) {
+            return redact_freeform_text(&serialized);
+        }
+    }
+    redact_freeform_text(raw)
+}
+
+pub fn sanitize_record_for_redaction(rec: &mut crate::db::TelemetryRecord) {
+    if !rec.ip.trim().is_empty() {
+        rec.ip = redact_single_ip(&rec.ip);
+    }
+    rec.ispinfo = sanitize_ispinfo_for_redaction(&rec.ispinfo);
+    rec.extra = redact_freeform_text(&rec.extra);
+    rec.ua = redact_freeform_text(&rec.ua);
+    rec.lang = redact_freeform_text(&rec.lang);
+    rec.log = redact_freeform_text(&rec.log);
 }
 
 #[cfg(test)]

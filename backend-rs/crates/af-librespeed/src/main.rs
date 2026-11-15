@@ -9,8 +9,53 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{error, info, warn};
 
-#[tokio::main]
-async fn main() {
+struct SystemdListenEnv {
+    pid: Option<String>,
+    fds: Option<String>,
+}
+
+/// Captures and removes systemd `LISTEN_*` environment variables while the process is
+/// guaranteed single-threaded (prior to `tracing_subscriber` and Tokio worker creation),
+/// and closes any extra inherited activation socket descriptors beyond primary `fd = 3`.
+fn capture_and_clear_systemd_listen_env() -> SystemdListenEnv {
+    let pid = std::env::var("LISTEN_PID").ok();
+    let fds = std::env::var("LISTEN_FDS").ok();
+    std::env::remove_var("LISTEN_PID");
+    std::env::remove_var("LISTEN_FDS");
+    std::env::remove_var("LISTEN_FDNAMES");
+
+    if let (Some(pid_raw), Some(fds_raw)) = (pid.as_deref(), fds.as_deref()) {
+        if let (Ok(target_pid), Ok(fd_count)) = (
+            pid_raw.trim().parse::<u32>(),
+            fds_raw.trim().parse::<usize>(),
+        ) {
+            if target_pid == process::id() && fd_count > 1 {
+                let end_fd = 3usize.saturating_add(fd_count.min(64));
+                for extra_fd in 4..end_fd {
+                    let Ok(raw_fd) = libc::c_int::try_from(extra_fd) else {
+                        break;
+                    };
+                    // SAFETY: `fstat` inspects `raw_fd` into a stack-zeroed `libc::stat` while single-threaded;
+                    // only socket descriptors passed beyond primary fd 3 are closed.
+                    unsafe {
+                        let mut st: libc::stat = std::mem::zeroed();
+                        if libc::fstat(raw_fd, &mut st) == 0
+                            && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+                        {
+                            let _ = libc::close(raw_fd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SystemdListenEnv { pid, fds }
+}
+
+fn main() {
+    let systemd_env = capture_and_clear_systemd_listen_env();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -18,14 +63,26 @@ async fn main() {
         )
         .init();
 
-    if let Err(err) = run().await {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            error!(error = %err, "failed initializing Tokio runtime");
+            eprintln!("Error: failed initializing Tokio runtime: {err:#}");
+            process::exit(1);
+        }
+    };
+
+    if let Err(err) = runtime.block_on(run(systemd_env)) {
         error!(error = %err, "speedtest-backend exiting with error");
         eprintln!("Error: {err:#}");
         process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
+async fn run(systemd_env: SystemdListenEnv) -> Result<()> {
     let action = match parse_env_cli() {
         Ok(action) => action,
         Err(err) => {
@@ -90,7 +147,8 @@ async fn run() -> Result<()> {
     };
 
     let configured_addr = config.socket_addr()?;
-    let (listener, bind_addr, socket_activated) = acquire_tcp_listener(configured_addr).await?;
+    let (listener, bind_addr, socket_activated) =
+        acquire_tcp_listener(configured_addr, systemd_env).await?;
 
     let app = build_router(config.clone(), vault);
     if let Some(acceptor) = tls_acceptor {
@@ -123,14 +181,9 @@ async fn run() -> Result<()> {
 
 async fn acquire_tcp_listener(
     configured_addr: SocketAddr,
+    systemd_env: SystemdListenEnv,
 ) -> Result<(TcpListener, SocketAddr, bool)> {
-    let listen_pid = std::env::var("LISTEN_PID").ok();
-    let listen_fds = std::env::var("LISTEN_FDS").ok();
-    std::env::remove_var("LISTEN_PID");
-    std::env::remove_var("LISTEN_FDS");
-    std::env::remove_var("LISTEN_FDNAMES");
-
-    if let (Some(pid_raw), Some(fds_raw)) = (listen_pid, listen_fds) {
+    if let (Some(pid_raw), Some(fds_raw)) = (systemd_env.pid, systemd_env.fds) {
         let target_pid: u32 = pid_raw
             .trim()
             .parse()
@@ -146,7 +199,7 @@ async fn acquire_tcp_listener(
             if fd_count > 1 {
                 warn!(
                     listen_fds = fd_count,
-                    "Multiple systemd activation sockets passed; adopting primary fd 3"
+                    "Multiple systemd activation sockets passed; extra descriptors closed and adopting primary fd 3"
                 );
             }
             let (listener, local_addr) = adopt_systemd_socket_fd(3, false)?;

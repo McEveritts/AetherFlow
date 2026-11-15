@@ -416,6 +416,46 @@ if db_type not in ("none", "memory") and db_file_m:
             if os.lstat(confined_db).st_size != fst.st_size:
                 raise SystemExit("External database migration byte-size verification failed")
 
+            src_salt = os.path.join(os.path.dirname(resolved_db), "idObfuscation_salt.bin")
+            dst_salt = os.path.join(os.path.dirname(confined_db), "idObfuscation_salt.bin")
+            if os.path.lexists(src_salt) and not os.path.lexists(dst_salt):
+                salt_lst = os.lstat(src_salt)
+                if stat.S_ISREG(salt_lst.st_mode) and salt_lst.st_nlink == 1 and salt_lst.st_size == 4:
+                    fd_salt_in = os.open(src_salt, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
+                    try:
+                        salt_fst = os.fstat(fd_salt_in)
+                        if (
+                            stat.S_ISREG(salt_fst.st_mode)
+                            and salt_fst.st_nlink == 1
+                            and salt_fst.st_size == 4
+                            and (salt_fst.st_dev, salt_fst.st_ino) == (salt_lst.st_dev, salt_lst.st_ino)
+                        ):
+                            salt_bytes = os.read(fd_salt_in, 5)
+                            if len(salt_bytes) == 4:
+                                tmp_salt = dst_salt + ".migrated.tmp"
+                                if os.path.lexists(tmp_salt):
+                                    os.unlink(tmp_salt)
+                                fd_salt_out = os.open(
+                                    tmp_salt,
+                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | getattr(os, "O_CLOEXEC", 0),
+                                    0o600,
+                                )
+                                try:
+                                    with os.fdopen(fd_salt_out, "wb") as f_salt_out:
+                                        os.fchmod(f_salt_out.fileno(), 0o600)
+                                        f_salt_out.write(salt_bytes)
+                                        f_salt_out.flush()
+                                        os.fsync(f_salt_out.fileno())
+                                    os.replace(tmp_salt, dst_salt)
+                                except Exception:
+                                    try:
+                                        os.unlink(tmp_salt)
+                                    except OSError:
+                                        pass
+                                    raise
+                    finally:
+                        os.close(fd_salt_in)
+
             text = re.sub(
                 r'^[ \t]*database_file\s*=.*',
                 f'database_file="{confined_db}"',

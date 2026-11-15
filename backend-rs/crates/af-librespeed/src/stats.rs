@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
 use crate::redact::{
-    extract_trusted_forwarded_ip_with_secret, is_trusted_proxy_peer, peer_ip_key,
-    verify_proxy_secret,
+    extract_trusted_forwarded_ip_with_secret, is_trusted_proxy_peer, peer_ip_key, redact_single_ip,
+    sanitize_record_for_redaction, verify_proxy_secret,
 };
 use crate::ulid::{canonicalize_ulid, obfuscate_ulid, resolve_id};
 use axum::body::Body;
@@ -949,9 +949,14 @@ fn render_recent_table(
         } else {
             rec.uuid.clone()
         };
+        let display_ip = if cfg.redact_ip_addresses && !rec.ip.trim().is_empty() {
+            redact_single_ip(&rec.ip)
+        } else {
+            rec.ip.clone()
+        };
         let esc_ext = escape_html(&external_id);
         let esc_ts = escape_html(&rec.timestamp);
-        let esc_ip = escape_html(&rec.ip);
+        let esc_ip = escape_html(&display_ip);
         let esc_dl = escape_html(&rec.dl);
         let esc_ul = escape_html(&rec.ul);
         let esc_ping = escape_html(&rec.ping);
@@ -977,11 +982,19 @@ fn render_recent_table(
 
 fn render_single_record(
     out: &mut String,
-    rec: &TelemetryRecord,
+    raw_rec: &TelemetryRecord,
     cfg: &Config,
     obfuscation_key: &[u8; 32],
     stats_path: &str,
 ) {
+    let mut sanitized_buf;
+    let rec = if cfg.redact_ip_addresses {
+        sanitized_buf = raw_rec.clone();
+        sanitize_record_for_redaction(&mut sanitized_buf);
+        &sanitized_buf
+    } else {
+        raw_rec
+    };
     let external_id = if cfg.enable_id_obfuscation {
         obfuscate_ulid(&rec.uuid, obfuscation_key)
     } else {

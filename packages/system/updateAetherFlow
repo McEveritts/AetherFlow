@@ -3,6 +3,15 @@ set -euo pipefail
 
 # AetherFlow v4 update compatibility shim delegating to `af release` / `release-manager.sh`.
 AF_ROOT="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
+AF_ROOT_REAL=""
+if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+    if [[ "${AF_ROOT}" != /* ]]; then
+        echo "[ERROR] AF_INSTALL_ROOT must be an absolute path: ${AF_ROOT}" >&2
+        exit 1
+    fi
+    AF_ROOT_REAL="$(readlink -f -- "${AF_ROOT}" 2>/dev/null || realpath -m -- "${AF_ROOT}")"
+    AF_ROOT="${AF_ROOT_REAL}"
+fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHANNEL="" CHECK_ONLY=false DRY_RUN=false OFFLINE=false
 
@@ -41,6 +50,24 @@ if [[ "${DRY_RUN}" != "true" && "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
+is_confined_to_install_root() {
+    local target_real="$1"
+    [[ -n "${target_real}" ]] || return 1
+    if [[ -z "${AF_INSTALL_ROOT:-}" ]]; then
+        return 0
+    fi
+    if [[ "${AF_ROOT_REAL}" == "/" ]]; then
+        [[ "${target_real}" == /* ]]
+    else
+        [[ "${target_real}" == "${AF_ROOT_REAL}" || "${target_real}" == "${AF_ROOT_REAL}/"* ]]
+    fi
+}
+
+is_known_shell_shim() {
+    local target_file="$1"
+    grep -qE 'AetherFlow v4 update compatibility shim|AetherFlow Package Manager Batch CLI Installer|/usr/local/bin/AetherFlow/system/af' "${target_file}" 2>/dev/null
+}
+
 resolve_af_bin() {
     local path_af cand self_real cand_real magic
     local -a candidates=()
@@ -64,10 +91,12 @@ resolve_af_bin() {
     fi
     for cand in "${candidates[@]}"; do
         [[ -n "${cand}" && -x "${cand}" && ! -d "${cand}" ]] || continue
-        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || printf '%s' "${cand}")"
+        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+        [[ -n "${cand_real}" && -x "${cand_real}" && ! -d "${cand_real}" ]] || continue
         [[ "${cand_real}" == "${self_real}" ]] && continue
-        magic="$(LC_ALL=C head -c 2 -- "${cand}" 2>/dev/null || true)"
-        if [[ "${magic}" == "#!" ]] && grep -qF 'AetherFlow v4 update compatibility shim' "${cand}" 2>/dev/null; then
+        is_confined_to_install_root "${cand_real}" || continue
+        magic="$(LC_ALL=C head -c 2 -- "${cand_real}" 2>/dev/null || true)"
+        if [[ "${magic}" == "#!" ]] && is_known_shell_shim "${cand_real}"; then
             continue
         fi
         printf '%s\n' "${cand}"; return 0
@@ -76,14 +105,21 @@ resolve_af_bin() {
 }
 
 resolve_release_manager() {
-    local cand
-    for cand in \
-        "${AF_ROOT}/current/deploy/release-manager.sh" \
-        "${AF_ROOT}/deploy/release-manager.sh" \
-        "${AF_ROOT}/opt/AetherFlow/current/deploy/release-manager.sh" \
-        "${AF_ROOT}/opt/AetherFlow/deploy/release-manager.sh" \
-        "${REPO_ROOT}/deploy/release-manager.sh"; do
+    local cand cand_real
+    local -a candidates=(
+        "${AF_ROOT}/current/deploy/release-manager.sh"
+        "${AF_ROOT}/deploy/release-manager.sh"
+        "${AF_ROOT}/opt/AetherFlow/current/deploy/release-manager.sh"
+        "${AF_ROOT}/opt/AetherFlow/deploy/release-manager.sh"
+    )
+    if [[ -z "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates+=("${REPO_ROOT}/deploy/release-manager.sh")
+    fi
+    for cand in "${candidates[@]}"; do
         [[ -f "${cand}" ]] || continue
+        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+        [[ -n "${cand_real}" && -f "${cand_real}" ]] || continue
+        is_confined_to_install_root "${cand_real}" || continue
         printf '%s\n' "${cand}"; return 0
     done
     return 1
@@ -95,8 +131,8 @@ AF_GLOBAL_ARGS=()
 RM_GLOBAL_ARGS=()
 if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
     AF_GLOBAL_ARGS+=(--root "${AF_ROOT}")
-    export AETHERFLOW_RELEASE_ROOT="${AETHERFLOW_RELEASE_ROOT:-${AF_ROOT}}"
-    RM_GLOBAL_ARGS+=(--root "${AETHERFLOW_RELEASE_ROOT}")
+    export AETHERFLOW_RELEASE_ROOT="${AF_ROOT}"
+    RM_GLOBAL_ARGS+=(--root "${AF_ROOT}")
 fi
 
 if [[ "${CHECK_ONLY}" == "true" ]]; then

@@ -4,8 +4,9 @@ use crate::db::{NewTelemetryRecord, TelemetryVault};
 use crate::png_card::render_badge_png;
 use crate::redact::{
     classify_ip_note, extract_trusted_forwarded_ip_with_secret, format_getip_display,
-    parse_ip_token, peer_ip_key, redact_freeform_text, redact_single_ip,
-    resolve_client_ip_with_secret,
+    parse_ip_token, peer_ip_key, redact_freeform_text, redact_json_value_in_place,
+    redact_single_ip, resolve_client_ip_with_secret, sanitize_ispinfo_for_redaction,
+    sanitize_record_for_redaction,
 };
 use crate::stats::{
     handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, GarbageStreamGuard, StatsAuth,
@@ -857,48 +858,6 @@ async fn fetch_ipinfo_object(
     Some(map)
 }
 
-fn redact_json_value_in_place(val: &mut serde_json::Value) {
-    match val {
-        serde_json::Value::String(s) => {
-            *s = redact_freeform_text(s);
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                redact_json_value_in_place(item);
-            }
-        }
-        serde_json::Value::Object(obj) => {
-            for (k, v) in obj.iter_mut() {
-                let key_lower = k.to_ascii_lowercase();
-                if matches!(
-                    key_lower.as_str(),
-                    "hostname"
-                        | "city"
-                        | "region"
-                        | "postal"
-                        | "loc"
-                        | "latitude"
-                        | "longitude"
-                        | "lat"
-                        | "lon"
-                        | "lng"
-                ) {
-                    *v = serde_json::Value::String("REDACTED".to_string());
-                } else if key_lower == "ip" {
-                    let scrubbed = v
-                        .as_str()
-                        .map(redact_single_ip)
-                        .unwrap_or_else(|| "0.0.0.0".to_string());
-                    *v = serde_json::Value::String(scrubbed);
-                } else {
-                    redact_json_value_in_place(v);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 #[derive(Debug, Deserialize, Default)]
 struct GetIpQuery {
     #[serde(default)]
@@ -1232,13 +1191,7 @@ async fn handle_telemetry(
     let mut lang = clamp_utf8(lang_raw, 64);
 
     let ip = if state.config.redact_ip_addresses {
-        if let Ok(mut parsed_isp) = serde_json::from_str::<serde_json::Value>(&ispinfo) {
-            redact_json_value_in_place(&mut parsed_isp);
-            if let Ok(serialized) = serde_json::to_string(&parsed_isp) {
-                ispinfo = clamp_utf8(&serialized, 8192);
-            }
-        }
-        ispinfo = redact_freeform_text(&ispinfo);
+        ispinfo = clamp_utf8(&sanitize_ispinfo_for_redaction(&ispinfo), 8192);
         log = redact_freeform_text(&log);
         extra = redact_freeform_text(&extra);
         ua = redact_freeform_text(&ua);
@@ -1353,6 +1306,17 @@ struct ResultsJsonPayload {
     extra: String,
 }
 
+fn finalize_result_record(
+    state: &AppState,
+    mut rec: crate::db::TelemetryRecord,
+    display_id: String,
+) -> (crate::db::TelemetryRecord, String) {
+    if state.config.redact_ip_addresses {
+        sanitize_record_for_redaction(&mut rec);
+    }
+    (rec, display_id)
+}
+
 async fn lookup_result_record(
     state: &AppState,
     vault: &TelemetryVault,
@@ -1370,7 +1334,7 @@ async fn lookup_result_record(
                 } else {
                     rec.uuid.clone()
                 };
-                return Ok((rec, display_id));
+                return Ok(finalize_result_record(state, rec, display_id));
             }
             Ok(None) => {}
             Err(err) => {
@@ -1389,7 +1353,7 @@ async fn lookup_result_record(
         match vault.get_by_uuid(raw_id.to_string()).await {
             Ok(Some(rec)) => {
                 let display_id = rec.uuid.clone();
-                return Ok((rec, display_id));
+                return Ok(finalize_result_record(state, rec, display_id));
             }
             Ok(None) => {}
             Err(err) => {
@@ -1404,7 +1368,7 @@ async fn lookup_result_record(
             Ok(true) => match vault.get_by_uuid(legacy_cand).await {
                 Ok(Some(rec)) => {
                     let display_id = obfuscate_ulid(&rec.uuid, &state.obfuscation_key);
-                    return Ok((rec, display_id));
+                    return Ok(finalize_result_record(state, rec, display_id));
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -1429,7 +1393,7 @@ async fn lookup_result_record(
                     } else {
                         rec.uuid.clone()
                     };
-                    return Ok((rec, display_id));
+                    return Ok(finalize_result_record(state, rec, display_id));
                 }
                 Ok(None) => {}
                 Err(err) => {

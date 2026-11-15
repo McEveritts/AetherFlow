@@ -934,7 +934,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
       }
 
       function parseObject() {
-        const obj = {};
+        const obj = Object.create(null);
         i++;
         while (i < len) {
           skipWs();
@@ -1136,7 +1136,8 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
               const itemIndent = cleaned.indexOf('-') + 2;
               const afterDashCol = cleaned.indexOf(afterDash[0], cleaned.indexOf('-') + 1);
               const firstVal = parseValueAfterColon(idx, itemIndent, rest, afterDashCol + colon + 1);
-              const itemObj = { [k]: firstVal.value };
+              const itemObj = Object.create(null);
+              itemObj[k] = firstVal.value;
               idx = firstVal.nextLine;
               while (idx < lines.length) {
                 idx = nextNonEmptyLine(idx);
@@ -1164,7 +1165,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
         return { value: arr, nextLine: idx };
       }
 
-      const obj = {};
+      const obj = Object.create(null);
       while (idx < lines.length) {
         idx = nextNonEmptyLine(idx);
         if (idx >= lines.length) break;
@@ -1185,7 +1186,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
     }
 
     const first = nextNonEmptyLine(0);
-    if (first >= lines.length) return {};
+    if (first >= lines.length) return Object.create(null);
     const firstCleaned = stripComment(lines[first]);
     if (firstCleaned.trim().startsWith('{') || firstCleaned.trim().startsWith('[')) {
       return parseFlow(src, lineOffsets[first] + lineIndent(firstCleaned)).value;
@@ -1255,7 +1256,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
       if (target) {
         const resolved = deref(doc, target, visited);
         if (typeof resolved === 'object' && !Array.isArray(resolved)) {
-          return Object.assign({}, resolved, { _refName: obj.$ref.split('/').pop() });
+          return Object.assign(Object.create(null), resolved, { _refName: obj.$ref.split('/').pop() });
         }
         return resolved;
       }
@@ -1320,7 +1321,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
       return [sampleFromSchema(doc, schema.items || { type: 'object' }, d + 1, visited)];
     }
     if (schema.type === 'object' || schema.properties || schema.additionalProperties) {
-      const out = {};
+      const out = Object.create(null);
       if (schema.properties && typeof schema.properties === 'object') {
         for (const [k, prop] of Object.entries(schema.properties)) {
           out[k] = sampleFromSchema(doc, prop, d + 1, visited);
@@ -1993,3 +1994,15 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
 </body>
 </html>
 "####;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_parser_uses_null_prototype_maps_preventing_proto_mutation() {
+        assert!(OPENAPI_VIEWER_HTML.contains("const obj = Object.create(null);"));
+        assert!(OPENAPI_VIEWER_HTML.contains("const itemObj = Object.create(null);"));
+        assert!(!OPENAPI_VIEWER_HTML.contains("const itemObj = { [k]: firstVal.value };"));
+    }
+}

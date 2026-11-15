@@ -2371,3 +2371,138 @@ async fn legacy_go_obfuscated_share_links_resolve_on_results_png_json_and_stats(
     assert_eq!(json_payload["dl"], "812.50");
     assert_eq!(json_payload["extra"], "migrated-go-share");
 }
+
+#[tokio::test]
+async fn migrated_unredacted_records_are_scrubbed_on_results_json_png_and_stats_when_redaction_enabled(
+) {
+    use af_librespeed::db::NewTelemetryRecord;
+    use axum::http::header::COOKIE;
+
+    let tmp = TempDirGuard::new("migrated-redaction-export");
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.redact_ip_addresses = true;
+    cfg.enable_id_obfuscation = false;
+    cfg.statistics_password = "RedactExportAdmin!99".to_string();
+
+    let migrated_uuid = "01JABCDEFGHJKMNPQRSTVWXYZ7";
+    let raw_ispinfo = serde_json::json!({
+        "processedString": "203.0.113.77 - Example Fiber, US (18 km)",
+        "rawIspInfo": {
+            "ip": "203.0.113.77",
+            "hostname": "cpe-203-0-113-77.example.net",
+            "city": "Austin",
+            "region": "Texas",
+            "postal": "78701",
+            "loc": "30.2672,-97.7431",
+            "org": "AS64500 Example Fiber",
+            "country": "US"
+        }
+    })
+    .to_string();
+
+    // Simulate a legacy BoltDB-imported row stored with unredacted PII
+    vault
+        .insert_with_mode(
+            NewTelemetryRecord {
+                uuid: migrated_uuid.to_string(),
+                timestamp: "2026-11-15T14:00:00.000Z".to_string(),
+                ip: "203.0.113.77".to_string(),
+                ispinfo: raw_ispinfo,
+                extra: "client=203.0.113.77 peer=2001:db8::99".to_string(),
+                ua: "SpeedClient/1.0 (203.0.113.77)".to_string(),
+                lang: "en-US".to_string(),
+                dl: "750.00".to_string(),
+                ul: "350.00".to_string(),
+                ping: "3.10".to_string(),
+                jitter: "0.40".to_string(),
+                log: "connected from 203.0.113.77".to_string(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+    let app = build_router(cfg, Some(vault));
+
+    // 1. Public GET /results/json must scrub IP, hostname, city, region, postal, loc, and extra
+    let json_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={migrated_uuid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json_resp.status(), StatusCode::OK);
+    let body_text = String::from_utf8(body_bytes(json_resp).await).unwrap();
+    assert!(
+        !body_text.contains("203.0.113.77"),
+        "leaked IPv4: {body_text}"
+    );
+    assert!(
+        !body_text.contains("2001:db8::99"),
+        "leaked IPv6: {body_text}"
+    );
+    assert!(
+        !body_text.contains("cpe-203-0-113-77.example.net"),
+        "leaked hostname: {body_text}"
+    );
+    assert!(
+        !body_text.contains("30.2672,-97.7431"),
+        "leaked loc: {body_text}"
+    );
+    assert!(!body_text.contains("Austin"), "leaked city: {body_text}");
+    assert!(
+        body_text.contains("AS64500 Example Fiber"),
+        "expected non-PII ISP org to remain intact: {body_text}"
+    );
+
+    // 2. Authenticated /stats table + single-record detail view must also scrub migrated PII
+    let login_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/stats")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("op=login&password=RedactExportAdmin%2199"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_resp.status(), StatusCode::SEE_OTHER);
+    let cookie_hdr = login_resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let detail_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/stats?op=id&id={migrated_uuid}"))
+                .header(COOKIE, &cookie_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail_resp.status(), StatusCode::OK);
+    let stats_html = String::from_utf8(body_bytes(detail_resp).await).unwrap();
+    assert!(
+        !stats_html.contains("203.0.113.77"),
+        "stats detail leaked migrated IPv4: {stats_html}"
+    );
+    assert!(
+        !stats_html.contains("30.2672,-97.7431"),
+        "stats detail leaked migrated loc: {stats_html}"
+    );
+    assert!(stats_html.contains("0.0.0.0"));
+}
