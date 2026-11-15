@@ -21,6 +21,16 @@ case "${SDK}" in
         ;;
 esac
 
+if [[ ! "${PLUGIN_ID}" =~ ^[a-z0-9][a-z0-9_-]{1,62}$ ]]; then
+    echo "Invalid plugin-id '${PLUGIN_ID}': must match ^[a-z0-9][a-z0-9_-]{1,62}$" >&2
+    exit 1
+fi
+
+if [[ -z "${PLUGIN_NAME}" || "${PLUGIN_NAME}" =~ [\"\\] || "${PLUGIN_NAME}" == *$'\n'* || "${PLUGIN_NAME}" == *$'\r'* ]]; then
+    echo "Invalid plugin-name: must be non-empty and must not contain quotes, backslashes, or newlines" >&2
+    exit 1
+fi
+
 if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     echo "Template directory not found: ${TEMPLATE_DIR}"
     exit 1
@@ -33,13 +43,32 @@ fi
 
 mkdir -p "${TARGET_DIR}"
 cp -R "${TEMPLATE_DIR}/." "${TARGET_DIR}/"
+rm -rf "${TARGET_DIR}/backend/target" "${TARGET_DIR}/backend/Cargo.lock" "${TARGET_DIR}/bin"
 
-ESCAPED_PLUGIN_ID="$(printf '%s' "${PLUGIN_ID}" | sed 's/[\/&]/\\&/g')"
-ESCAPED_PLUGIN_NAME="$(printf '%s' "${PLUGIN_NAME}" | sed 's/[\/&]/\\&/g')"
+python3 - "${TARGET_DIR}" "${PLUGIN_ID}" "${PLUGIN_NAME}" <<'PYEOF'
+import pathlib
+import sys
 
-while IFS= read -r -d '' file; do
-    sed -i "s/{{PLUGIN_ID}}/${ESCAPED_PLUGIN_ID}/g; s/{{PLUGIN_NAME}}/${ESCAPED_PLUGIN_NAME}/g" "${file}"
-done < <(find "${TARGET_DIR}" -type f -print0)
+target_dir = pathlib.Path(sys.argv[1])
+plugin_id = sys.argv[2]
+plugin_name = sys.argv[3]
+
+for path in target_dir.rglob("*"):
+    if not path.is_file() or path.is_symlink():
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    updated = text.replace("{{PLUGIN_ID}}", plugin_id).replace("{{PLUGIN_NAME}}", plugin_name)
+    if path.name == "Cargo.toml":
+        updated = updated.replace(
+            'name = "aetherflow-plugin-sdk-template"',
+            f'name = "aetherflow-plugin-{plugin_id}"',
+        )
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+PYEOF
 
 echo "Plugin scaffold created at ${TARGET_DIR}"
 

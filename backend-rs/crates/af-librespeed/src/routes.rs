@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 pub const MAX_EMPTY_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TELEMETRY_BODY_BYTES: usize = 256 * 1024;
+pub const MAX_STATS_BODY_BYTES: usize = 64 * 1024;
 const GARBAGE_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const MIN_GARBAGE_CHUNKS: usize = 1;
 const MAX_GARBAGE_CHUNKS: usize = 1024;
@@ -44,10 +45,19 @@ static RANDOM_CHUNK_1MIB: Lazy<Bytes> = Lazy::new(|| {
 });
 
 pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
+    let obfuscation_key = vault
+        .as_ref()
+        .map(|v| *v.obfuscation_key())
+        .unwrap_or_else(|| {
+            let mut ephemeral = [0u8; 32];
+            OsRng.fill_bytes(&mut ephemeral);
+            ephemeral
+        });
     let state = AppState {
         config: Arc::new(config),
         vault,
         stats_auth: StatsAuth::new(),
+        obfuscation_key,
     };
 
     let empty_routes = Router::new()
@@ -61,9 +71,17 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
         .route("/results/telemetry.php", post(handle_telemetry))
         .layer(DefaultBodyLimit::max(MAX_TELEMETRY_BODY_BYTES));
 
+    let stats_routes = Router::new()
+        .route("/stats", get(handle_stats).post(handle_stats))
+        .route("/stats/", get(handle_stats).post(handle_stats))
+        .route("/stats.php", get(handle_stats).post(handle_stats))
+        .route("/stats/stats.php", get(handle_stats).post(handle_stats))
+        .layer(DefaultBodyLimit::max(MAX_STATS_BODY_BYTES));
+
     let core_routes = Router::new()
         .merge(empty_routes)
         .merge(telemetry_routes)
+        .merge(stats_routes)
         .route("/garbage", get(handle_garbage))
         .route("/garbage.php", get(handle_garbage))
         .route("/backend/garbage.php", get(handle_garbage))
@@ -72,10 +90,7 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
         .route("/backend/getIP.php", get(handle_get_ip))
         .route("/results", get(handle_results_png))
         .route("/results/", get(handle_results_png))
-        .route("/results/index.php", get(handle_results_png))
-        .route("/stats", get(handle_stats).post(handle_stats))
-        .route("/stats/", get(handle_stats).post(handle_stats))
-        .route("/stats/stats.php", get(handle_stats).post(handle_stats));
+        .route("/results/index.php", get(handle_results_png));
 
     let mut app = core_routes.clone();
     if !state.config.url_base.is_empty() {
@@ -87,12 +102,33 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
     }
 
     app.fallback(handle_static_asset)
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn(cors_middleware))
         .with_state(state)
 }
 
+async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    headers
+        .entry(HeaderName::from_static("x-content-type-options"))
+        .or_insert_with(|| HeaderValue::from_static("nosniff"));
+    headers
+        .entry(HeaderName::from_static("x-frame-options"))
+        .or_insert_with(|| HeaderValue::from_static("DENY"));
+    headers
+        .entry(HeaderName::from_static("referrer-policy"))
+        .or_insert_with(|| HeaderValue::from_static("no-referrer"));
+    res
+}
+
 async fn cors_middleware(req: Request, next: Next) -> Response {
-    let cors_enabled = query_flag_truthy(req.uri().query(), "cors");
+    let path = req.uri().path();
+    let is_stats = path == "/stats"
+        || path.ends_with("/stats")
+        || path.contains("/stats/")
+        || path.ends_with("/stats.php");
+    let cors_enabled = !is_stats && query_flag_truthy(req.uri().query(), "cors");
     if req.method() == Method::OPTIONS && cors_enabled {
         let mut res = StatusCode::NO_CONTENT.into_response();
         apply_cors_headers(res.headers_mut());
@@ -268,6 +304,17 @@ async fn handle_get_ip(
     (StatusCode::OK, resp_headers, display).into_response()
 }
 
+fn clamp_utf8(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    input[..end].to_string()
+}
+
 async fn handle_telemetry(
     State(state): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
@@ -307,37 +354,32 @@ async fn handle_telemetry(
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let raw_ip = resolve_client_ip(peer_addr, &headers);
 
-    let mut ispinfo = fields.get("ispinfo").cloned().unwrap_or_default();
-    let extra = fields.get("extra").cloned().unwrap_or_default();
-    let dl = fields.get("dl").cloned().unwrap_or_default();
-    let ul = fields.get("ul").cloned().unwrap_or_default();
-    let ping = fields.get("ping").cloned().unwrap_or_default();
-    let jitter = fields.get("jitter").cloned().unwrap_or_default();
-    let mut log = fields.get("log").cloned().unwrap_or_default();
+    let mut ispinfo = clamp_utf8(
+        fields.get("ispinfo").map(String::as_str).unwrap_or(""),
+        8192,
+    );
+    let extra = clamp_utf8(fields.get("extra").map(String::as_str).unwrap_or(""), 8192);
+    let dl = clamp_utf8(fields.get("dl").map(String::as_str).unwrap_or(""), 64);
+    let ul = clamp_utf8(fields.get("ul").map(String::as_str).unwrap_or(""), 64);
+    let ping = clamp_utf8(fields.get("ping").map(String::as_str).unwrap_or(""), 64);
+    let jitter = clamp_utf8(fields.get("jitter").map(String::as_str).unwrap_or(""), 64);
+    let mut log = clamp_utf8(fields.get("log").map(String::as_str).unwrap_or(""), 65_536);
 
-    let ua = fields
+    let ua_raw = fields
         .get("ua")
         .filter(|s| !s.is_empty())
-        .cloned()
-        .or_else(|| {
-            headers
-                .get(USER_AGENT)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
+        .map(String::as_str)
+        .or_else(|| headers.get(USER_AGENT).and_then(|v| v.to_str().ok()))
+        .unwrap_or("");
+    let ua = clamp_utf8(ua_raw, 512);
 
-    let lang = fields
+    let lang_raw = fields
         .get("lang")
         .filter(|s| !s.is_empty())
-        .cloned()
-        .or_else(|| {
-            headers
-                .get(ACCEPT_LANGUAGE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
+        .map(String::as_str)
+        .or_else(|| headers.get(ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()))
+        .unwrap_or("");
+    let lang = clamp_utf8(lang_raw, 64);
 
     let ip = if state.config.redact_ip_addresses {
         ispinfo = redact_freeform_text(&ispinfo);
@@ -370,7 +412,7 @@ async fn handle_telemetry(
     }
 
     let response_id = if state.config.enable_id_obfuscation {
-        obfuscate_ulid(&uuid)
+        obfuscate_ulid(&uuid, &state.obfuscation_key)
     } else {
         uuid
     };
@@ -454,7 +496,11 @@ async fn handle_results_png(
         return (StatusCode::BAD_REQUEST, "Missing speedtest id").into_response();
     };
 
-    let Some(canon_uuid) = resolve_id(raw_id, state.config.enable_id_obfuscation) else {
+    let Some(canon_uuid) = resolve_id(
+        raw_id,
+        state.config.enable_id_obfuscation,
+        &state.obfuscation_key,
+    ) else {
         return (StatusCode::NOT_FOUND, "Result not found").into_response();
     };
 
@@ -468,7 +514,7 @@ async fn handle_results_png(
     };
 
     let display_id = if state.config.enable_id_obfuscation {
-        obfuscate_ulid(&record.uuid)
+        obfuscate_ulid(&record.uuid, &state.obfuscation_key)
     } else {
         record.uuid.clone()
     };
@@ -481,6 +527,11 @@ async fn handle_results_png(
                 CACHE_CONTROL,
                 HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
             );
+            if let Ok(disp) =
+                HeaderValue::from_str(&format!("inline; filename=\"speedtest-{display_id}.png\""))
+            {
+                headers.insert(CONTENT_DISPOSITION, disp);
+            }
             (StatusCode::OK, headers, png_bytes).into_response()
         }
         Err(err) => {

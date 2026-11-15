@@ -527,7 +527,7 @@
     {
         "name": "librespeed",
         "label": "LibreSpeed",
-        "description": "Lightweight, self-hosted HTML5 speedtest server powered by speedtest-go.",
+        "description": "Lightweight, self-hosted HTML5 speedtest server powered by native Rust speedtest-backend.",
         "lock_file": "/install/.librespeed.lock",
         "category": "Network",
         "service_type": "systemd",

@@ -553,7 +553,8 @@ pub fn extract_and_validate_release_archive(
 /// matching `prepare_release_permissions` in `deploy/release-manager.sh`:
 /// - `0755` on all directories
 /// - `a+r,go-w` (`(mode | 0o444) & !0o022`) on all regular files
-/// - `0755` on `aetherflow-api`, `af` (if present), and `deploy/release-manager.sh` (if present)
+/// - `0755` on `aetherflow-api`, companion binaries (`af`, `bin/af`, `speedtest-backend`,
+///   `bin/speedtest-backend`), and deploy helper scripts (if present)
 /// - Verifies `.version` is readable and `./aetherflow-api` is executable.
 pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
@@ -562,14 +563,15 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
     let api_bin = release_dir.join("aetherflow-api");
     crate::fs_security::set_file_mode(&api_bin, 0o755)?;
 
-    let af_bin = release_dir.join("af");
-    if let Ok(meta) = fs::symlink_metadata(&af_bin) {
-        if !meta.file_type().is_symlink() && meta.is_file() {
-            crate::fs_security::set_file_mode(&af_bin, 0o755)?;
-        }
-    }
-
-    for rel_exec in ["deploy/release-manager.sh", "deploy/verify-provenance.py"] {
+    for rel_exec in [
+        "af",
+        "bin/af",
+        "speedtest-backend",
+        "bin/speedtest-backend",
+        "deploy/release-manager.sh",
+        "deploy/verify-provenance.py",
+        "deploy/log-retention.py",
+    ] {
         let staged_exec = release_dir.join(rel_exec);
         if let Ok(meta) = fs::symlink_metadata(&staged_exec) {
             if !meta.file_type().is_symlink() && meta.is_file() {

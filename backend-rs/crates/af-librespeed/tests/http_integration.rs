@@ -161,11 +161,11 @@ async fn getip_proxy_trust_classification_isp_and_redaction() {
     let (mut cfg, vault) = make_test_config(&tmp);
     let app = build_router(cfg.clone(), Some(vault.clone()));
 
-    // Loopback proxy trusts leftmost valid X-Forwarded-For and classifies documentation IP
+    // Loopback proxy trusts rightmost non-loopback X-Forwarded-For (defeating leftmost spoofing)
     let req_loop = with_peer(
         Request::builder()
             .uri("/backend/getIP.php?isp=true")
-            .header("x-forwarded-for", "203.0.113.42, 10.0.0.1")
+            .header("x-forwarded-for", "10.0.0.1, 203.0.113.42, 127.0.0.1")
             .body(Body::empty())
             .unwrap(),
         "127.0.0.1:50000",
@@ -277,9 +277,14 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
         .unwrap();
     assert_eq!(raw_png_res.status(), StatusCode::NOT_FOUND);
 
-    // Obfuscated ID renders valid 500x286 PNG
-    let ok_png_res = app
-        .clone()
+    // Obfuscated ID renders valid 500x286 PNG and survives daemon restart (DB reopen)
+    let reopened_vault = TelemetryVault::open(&tmp.0.join("speedtest.db")).unwrap();
+    let mut cfg_reopened = make_test_config(&tmp).0;
+    cfg_reopened.redact_ip_addresses = true;
+    cfg_reopened.enable_id_obfuscation = true;
+    let reopened_app = build_router(cfg_reopened, Some(reopened_vault));
+
+    let ok_png_res = reopened_app
         .oneshot(
             Request::builder()
                 .uri(format!("/results/?id={obf_id}"))
@@ -290,6 +295,10 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
         .unwrap();
     assert_eq!(ok_png_res.status(), StatusCode::OK);
     assert_eq!(ok_png_res.headers().get(CONTENT_TYPE).unwrap(), "image/png");
+    assert_eq!(
+        ok_png_res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
     let png_bytes = body_bytes(ok_png_res).await;
     let img = image::load_from_memory(&png_bytes).unwrap();
     assert_eq!((img.width(), img.height()), (500, 286));
@@ -419,17 +428,19 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .unwrap();
     assert_eq!(bad_pw.status(), StatusCode::UNAUTHORIZED);
 
-    // Valid login under /speedtest/stats sets signed HttpOnly SameSite=Strict cookie scoped to /speedtest/stats
+    // Valid login under /speedtest/stats with trusted loopback X-Forwarded-Proto=https sets Secure signed cookie
     let login_res = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/speedtest/stats")
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("x-forwarded-proto", "https")
                 .body(Body::from("op=login&password=StrongAdminPassword%2142"))
                 .unwrap(),
-        )
+            "127.0.0.1:41234",
+        ))
         .await
         .unwrap();
     assert_eq!(login_res.status(), StatusCode::SEE_OTHER);
@@ -447,6 +458,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
     assert!(set_cookie.contains("Path=/speedtest/stats"));
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Strict"));
+    assert!(set_cookie.contains("Secure"));
     let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
 
     // Authenticated L100 lookup
@@ -486,6 +498,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
 
     // Logout clears cookie
     let logout_res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/speedtest/stats?op=logout")
@@ -503,6 +516,53 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .to_str()
         .unwrap();
     assert!(clear_cookie.contains("Max-Age=0"));
+
+    // Brute-force login rate limiter triggers 429 after 10 failures even when rotating spoofed leftmost XFF behind loopback proxy
+    for attempt in 0..10 {
+        let fail_res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/stats.php?cors=true")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        "x-forwarded-for",
+                        format!("192.0.2.{attempt}, 198.51.100.99"),
+                    )
+                    .body(Body::from("op=login&password=bad"))
+                    .unwrap(),
+                "127.0.0.1:50000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(fail_res.status(), StatusCode::UNAUTHORIZED);
+        assert!(fail_res
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+    let throttled = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/stats.php")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("x-forwarded-for", "192.0.2.250, 198.51.100.99")
+                .body(Body::from("op=login&password=bad"))
+                .unwrap(),
+            "127.0.0.1:50000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(throttled
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("default-src 'none'"));
 }
 
 #[tokio::test]

@@ -7,6 +7,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PLUGIN_ROOT="$(cd "${BACKEND_DIR}/.." && pwd)"
+BIN_NAME="aetherflow-plugin-{{PLUGIN_ID}}"
+
+if [[ -x "${PLUGIN_ROOT}/bin/${BIN_NAME}" ]]; then
+    exec "${PLUGIN_ROOT}/bin/${BIN_NAME}"
+elif [[ -x "${BACKEND_DIR}/target/release/${BIN_NAME}" ]]; then
+    exec "${BACKEND_DIR}/target/release/${BIN_NAME}"
+fi
 
 cd "${BACKEND_DIR}"
 exec cargo run --release

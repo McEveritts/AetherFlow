@@ -59,9 +59,11 @@ Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`), the sole
    cd plugins/my-plugin/backend
    cargo test
    ```
-3. Build the release binary so the AetherFlow plugin manager can supervise it:
+3. Build and stage the release binary so the AetherFlow plugin manager can supervise it directly:
    ```bash
    cd plugins/my-plugin/backend
    cargo build --release
+   mkdir -p ../bin
+   cp target/release/aetherflow-plugin-my-plugin ../bin/
    ```
 4. Enable and start the plugin from **Marketplace -> Installed Plugins & Runtime Extensions** (or `POST /api/v1/admin/plugins/my-plugin/control` with `{"action":"start"}`).

@@ -1577,12 +1577,12 @@
   "librespeed": {
     "update_source": "github",
     "require_download_sha256": true,
-    "update_repo": "librespeed/speedtest-go",
+    "update_repo": "McEveritts/AetherFlow",
     "version_command": [
       "cat",
       "/opt/librespeed/.af-version"
     ],
-    "sandbox_profile": "go",
+    "sandbox_profile": "native",
     "sandbox_rw_paths": [
       "/opt/librespeed",
       "{{SERVICE_HOME}}",

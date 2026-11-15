@@ -494,7 +494,7 @@ pub enum ProvisionCliCommand {
     },
     /// Inspect persisted `# STATE_VERSION=2` step completion and configuration state.
     Status,
-    /// List all 39 canonical `ALL_STEPS` from `setup/modules/06-state.sh` and their Rust migration/foundation status.
+    /// List all 38 canonical `ALL_STEPS` from `setup/modules/06-state.sh` and their Rust migration/foundation status.
     ListSteps,
     /// Run or resume bounded Rust-native provisioning steps with persisted state (`--fresh` resets prior state).
     Run {

@@ -1709,8 +1709,20 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let sb = TempSandbox::new("release-perms");
         let release_dir = sb.path().join("release");
         fs::create_dir_all(release_dir.join("config")).unwrap();
+        fs::create_dir_all(release_dir.join("bin")).unwrap();
         fs::write(release_dir.join("aetherflow-api"), b"#!/bin/sh\nexit 0\n").unwrap();
         fs::write(release_dir.join("af"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(release_dir.join("bin/af"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            release_dir.join("speedtest-backend"),
+            b"#!/bin/sh\nexit 0\n",
+        )
+        .unwrap();
+        fs::write(
+            release_dir.join("bin/speedtest-backend"),
+            b"#!/bin/sh\nexit 0\n",
+        )
+        .unwrap();
         fs::write(release_dir.join(".version"), b"v4.0.0\n").unwrap();
         fs::write(release_dir.join("config/app.json"), b"{}").unwrap();
 
@@ -1728,12 +1740,45 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         .unwrap();
         fs::set_permissions(release_dir.join("af"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::set_permissions(
+            release_dir.join("bin/af"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::set_permissions(
+            release_dir.join("speedtest-backend"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::set_permissions(
+            release_dir.join("bin/speedtest-backend"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::set_permissions(
             release_dir.join(".version"),
             fs::Permissions::from_mode(0o666),
         )
         .unwrap();
 
         prepare_release_permissions(&release_dir).unwrap();
+
+        for exec_rel in [
+            "aetherflow-api",
+            "af",
+            "bin/af",
+            "speedtest-backend",
+            "bin/speedtest-backend",
+        ] {
+            assert_eq!(
+                fs::symlink_metadata(release_dir.join(exec_rel))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "expected 0755 on {exec_rel}"
+            );
+        }
 
         assert_eq!(
             fs::symlink_metadata(&release_dir)

@@ -141,8 +141,8 @@ Expected `/health/ready` response:
 ### Binary Baseline & Reproducibility
 
 - Prebuilt release archives (`aetherflow-linux-amd64.tar.gz`) must be built against the **Ubuntu 22.04 (`GLIBC 2.35`)** baseline (`.github/workflows/release.yml` and `.github/workflows/ci.yml`) so dynamically linked binaries run across Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13, and Kali Linux.
-- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af`).
-- Release archives package both `aetherflow-api` and `af` (`./af` and `./bin/af`), canonical `config/`, `packages/`, `deploy/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
+- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend`).
+- Release archives package `aetherflow-api`, `af` (`./af` and `./bin/af`), and `speedtest-backend` (`./speedtest-backend` and `./bin/speedtest-backend`), canonical `config/`, `packages/`, `deploy/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
 
 ### Fresh Installation (`setup/AetherFlow-Setup`)
 

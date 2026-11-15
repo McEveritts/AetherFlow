@@ -25,7 +25,7 @@ wsl -d Debian -- bash -c "cd backend-rs && cargo test --locked --workspace"
 
 Write-Host ""
 Write-Host "4. Building Rust Backend Release Binaries (backend-rs)..."
-wsl -d Debian -- bash -c "cd backend-rs && cargo build --release --locked --bin aetherflow-api --bin af"
+wsl -d Debian -- bash -c "cd backend-rs && cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend"
 
 Write-Host ""
 Write-Host "============================================="

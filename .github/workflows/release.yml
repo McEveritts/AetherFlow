@@ -303,9 +303,16 @@ jobs:
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
           chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/speedtest-backend" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/bin/speedtest-backend" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py" "${STAGE_DIR}/deploy/log-retention.py"
 
+          SPEEDTEST_STAGE_DIR="$(mktemp -d)"
+          cp "${STAGE_DIR}/speedtest-backend" "${SPEEDTEST_STAGE_DIR}/speedtest-backend"
+          chmod 0755 "${SPEEDTEST_STAGE_DIR}/speedtest-backend"
+          SPEEDTEST_TAR="speedtest-backend_${RELEASE_TAG#v}_linux_amd64.tar.gz"
+
           mkdir -p release-dist
           tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
-          (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
+          tar --owner=0 --group=0 --numeric-owner -C "${SPEEDTEST_STAGE_DIR}" -czf "release-dist/${SPEEDTEST_TAR}" speedtest-backend
+          rm -rf "${SPEEDTEST_STAGE_DIR}"
+          (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz "${SPEEDTEST_TAR}" > SHA256SUMS)
 
       - name: Upload Release Bundle Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -313,6 +320,7 @@ jobs:
           name: release-dist
           path: |
             release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/speedtest-backend_*_linux_amd64.tar.gz
             release-dist/SHA256SUMS
           if-no-files-found: error
 
@@ -349,6 +357,7 @@ jobs:
         with:
           subject-path: |
             release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/speedtest-backend_*_linux_amd64.tar.gz
             release-dist/SHA256SUMS
 
       - name: Publish to GitHub Releases
@@ -387,6 +396,11 @@ jobs:
             release-dist/aetherflow-linux-amd64.tar.gz
             release-dist/SHA256SUMS
           )
+          for extra_tar in release-dist/speedtest-backend_*_linux_amd64.tar.gz; do
+            if [[ -f "${extra_tar}" ]]; then
+              RELEASE_ASSETS+=("${extra_tar}")
+            fi
+          done
           if [[ -z "${ATTEST_BUNDLE_PATH:-}" || ! -s "${ATTEST_BUNDLE_PATH}" ]]; then
             echo "::error::Missing or empty Sigstore attestation bundle from actions/attest-build-provenance" >&2
             exit 1

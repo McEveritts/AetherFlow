@@ -227,7 +227,10 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertNotIn('CARGO_LOCKED="${CARGO_LOCKED:-auto}"', gold)
         self.assertIn("Cargo.lock is required for reproducible locked builds", gold)
         self.assertIn('--bin "${CARGO_CLI_BIN_NAME}"', gold)
-        self.assertIn('${target_dir}/bin/${CLI_BINARY_NAME}', gold)
+        self.assertIn('--bin "${CARGO_SPEEDTEST_BIN_NAME}"', gold)
+        self.assertIn('${target_dir}/bin/${dest_name}', gold)
+        self.assertIn('stage_companion_binary "${cargo_target_dir}/${rust_target}/release/${CARGO_CLI_BIN_NAME}" "${target_dir}" "${CLI_BINARY_NAME}"', gold)
+        self.assertIn('stage_companion_binary "${compiled_speedtest}" "${target_dir}" "${SPEEDTEST_BINARY_NAME}"', gold)
 
         self.assertIn("Refusing unlocked source build.", modern)
         self.assertIn("Refusing unlocked source build.", rm)

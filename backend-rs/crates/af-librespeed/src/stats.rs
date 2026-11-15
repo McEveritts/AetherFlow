@@ -1,9 +1,12 @@
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
+use crate::redact::resolve_client_ip;
 use crate::ulid::{canonicalize_ulid, obfuscate_ulid, resolve_id};
 use axum::body::Bytes;
-use axum::extract::{OriginalUri, Query, State};
-use axum::http::header::{CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
+use axum::extract::{ConnectInfo, OriginalUri, Query, State};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, RETRY_AFTER, SET_COOKIE,
+};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use chrono::Utc;
@@ -14,17 +17,23 @@ use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 type HmacSha256 = Hmac<Sha256>;
 
 const COOKIE_NAME: &str = "logged";
 const SESSION_TTL_SECS: i64 = 3600;
+const LOGIN_WINDOW_SECS: i64 = 60;
+const MAX_FAILED_LOGINS_PER_WINDOW: usize = 10;
+const MAX_TRACKED_LOGIN_IPS: usize = 4096;
+const STATS_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 #[derive(Clone)]
 pub struct StatsAuth {
     auth_key: [u8; 32],
     session_key: [u8; 32],
+    login_attempts: Arc<Mutex<HashMap<String, (usize, i64)>>>,
 }
 
 impl Default for StatsAuth {
@@ -42,6 +51,7 @@ impl StatsAuth {
         Self {
             auth_key,
             session_key,
+            login_attempts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -52,6 +62,49 @@ impl StatsAuth {
         let expected_tag = compute_hmac(&self.auth_key, configured.as_bytes());
         let actual_tag = compute_hmac(&self.auth_key, candidate.as_bytes());
         constant_time_eq(&expected_tag, &actual_tag)
+    }
+
+    pub fn check_login_allowed(&self, ip: &str, now_unix: i64) -> bool {
+        let Ok(mut map) = self.login_attempts.lock() else {
+            return false;
+        };
+        if let Some(&(count, window_start)) = map.get(ip) {
+            if now_unix.saturating_sub(window_start) < LOGIN_WINDOW_SECS {
+                return count < MAX_FAILED_LOGINS_PER_WINDOW;
+            }
+            map.remove(ip);
+        }
+        true
+    }
+
+    pub fn record_login_failure(&self, ip: &str, now_unix: i64) {
+        let Ok(mut map) = self.login_attempts.lock() else {
+            return;
+        };
+        if map.len() >= MAX_TRACKED_LOGIN_IPS && !map.contains_key(ip) {
+            map.retain(|_, (_, ws)| now_unix.saturating_sub(*ws) < LOGIN_WINDOW_SECS);
+            if map.len() >= MAX_TRACKED_LOGIN_IPS {
+                if let Some(oldest_ip) = map
+                    .iter()
+                    .min_by_key(|(_, (_, ws))| *ws)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_ip);
+                }
+            }
+        }
+        let entry = map.entry(ip.to_string()).or_insert((0, now_unix));
+        if now_unix.saturating_sub(entry.1) >= LOGIN_WINDOW_SECS {
+            *entry = (1, now_unix);
+        } else {
+            entry.0 = entry.0.saturating_add(1);
+        }
+    }
+
+    pub fn clear_login_failures(&self, ip: &str) {
+        if let Ok(mut map) = self.login_attempts.lock() {
+            map.remove(ip);
+        }
     }
 
     pub fn issue_cookie_token(&self, now_unix: i64) -> String {
@@ -104,6 +157,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub vault: Option<TelemetryVault>,
     pub stats_auth: StatsAuth,
+    pub obfuscation_key: [u8; 32],
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -114,29 +168,62 @@ pub struct StatsQuery {
     pub id: Option<String>,
 }
 
+fn stats_html_response(status: StatusCode, html_body: String) -> Response {
+    (
+        status,
+        [
+            (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (CONTENT_SECURITY_POLICY, HeaderValue::from_static(STATS_CSP)),
+        ],
+        Html(html_body),
+    )
+        .into_response()
+}
+
+fn is_https_via_trusted_proxy(peer_addr: Option<SocketAddr>, headers: &HeaderMap) -> bool {
+    let trusted_peer = match peer_addr {
+        Some(addr) => crate::redact::canonicalize_ip_addr(addr.ip()).is_loopback(),
+        None => false,
+    };
+    if !trusted_peer {
+        return false;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| raw.rsplit(',').next())
+        .map(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
 pub async fn handle_stats(
     State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     method: Method,
     OriginalUri(orig_uri): OriginalUri,
     headers: HeaderMap,
     Query(query): Query<StatsQuery>,
     body: Bytes,
 ) -> Response {
+    let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let cookie_path = resolve_stats_cookie_path(&state.config.url_base, orig_uri.path());
+    let secure_attr = if is_https_via_trusted_proxy(peer_addr, &headers) {
+        "; Secure"
+    } else {
+        ""
+    };
 
     if !state.config.telemetry_enabled() || state.vault.is_none() {
-        return (
+        return stats_html_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Html(render_layout(
+            render_layout(
                 "Telemetry Disabled",
                 r#"<section class="obs-auth-panel">
                     <h2>Statistics Disabled</h2>
                     <p class="obs-muted">Telemetry storage is currently disabled (<code>database_type = "none"</code>).</p>
                 </section>"#,
-            )),
-        )
-            .into_response();
+            ),
+        );
     }
 
     let form_map = if method == Method::POST {
@@ -154,48 +241,59 @@ pub async fn handle_stats(
     if op == "logout" {
         return redirect_with_cookie(
             &cookie_path,
-            &format!("{COOKIE_NAME}=; Path={cookie_path}; Max-Age=0; HttpOnly; SameSite=Strict"),
+            &format!(
+                "{COOKIE_NAME}=; Path={cookie_path}; Max-Age=0; HttpOnly; SameSite=Strict{secure_attr}"
+            ),
         );
     }
 
     if state.config.stats_locked() {
-        return (
+        return stats_html_response(
             StatusCode::OK,
-            [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Html(render_layout(
+            render_layout(
                 "Statistics Locked",
                 r#"<section class="obs-auth-panel">
                     <h2>Statistics Access Locked</h2>
                     <p class="obs-alert">Set a custom non-default <code>statistics_password</code> in <code>settings.toml</code> to unlock the telemetry vault.</p>
                 </section>"#,
-            )),
-        )
-            .into_response();
+            ),
+        );
     }
 
     let now_unix = Utc::now().timestamp();
 
     if method == Method::POST && op == "login" {
+        let client_ip = resolve_client_ip(peer_addr, &headers);
+        if !state.stats_auth.check_login_allowed(&client_ip, now_unix) {
+            let mut resp = stats_html_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                render_login_page(
+                    &cookie_path,
+                    Some("Too many failed login attempts. Please wait 60 seconds."),
+                ),
+            );
+            resp.headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("60"));
+            return resp;
+        }
+
         let candidate = form_map.get("password").map(String::as_str).unwrap_or("");
         if state
             .stats_auth
             .verify_password(&state.config.statistics_password, candidate)
         {
+            state.stats_auth.clear_login_failures(&client_ip);
             let token = state.stats_auth.issue_cookie_token(now_unix);
             let set_cookie = format!(
-                "{COOKIE_NAME}={token}; Path={cookie_path}; Max-Age={SESSION_TTL_SECS}; HttpOnly; SameSite=Strict"
+                "{COOKIE_NAME}={token}; Path={cookie_path}; Max-Age={SESSION_TTL_SECS}; HttpOnly; SameSite=Strict{secure_attr}"
             );
             return redirect_with_cookie(&cookie_path, &set_cookie);
         }
-        return (
+        state.stats_auth.record_login_failure(&client_ip, now_unix);
+        return stats_html_response(
             StatusCode::UNAUTHORIZED,
-            [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Html(render_login_page(
-                &cookie_path,
-                Some("Invalid statistics password."),
-            )),
-        )
-            .into_response();
+            render_login_page(&cookie_path, Some("Invalid statistics password.")),
+        );
     }
 
     let is_authenticated = extract_cookie(&headers, COOKIE_NAME)
@@ -203,12 +301,7 @@ pub async fn handle_stats(
         .unwrap_or(false);
 
     if !is_authenticated {
-        return (
-            StatusCode::OK,
-            [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Html(render_login_page(&cookie_path, None)),
-        )
-            .into_response();
+        return stats_html_response(StatusCode::OK, render_login_page(&cookie_path, None));
     }
 
     let lookup_id = form_map
@@ -226,7 +319,13 @@ pub async fn handle_stats(
     if lookup_id.eq_ignore_ascii_case("L100") || (op.is_empty() && lookup_id.is_empty()) {
         match vault.list_recent(100).await {
             Ok(records) => {
-                render_recent_table(&mut body_html, &records, &state.config, &cookie_path);
+                render_recent_table(
+                    &mut body_html,
+                    &records,
+                    &state.config,
+                    &state.obfuscation_key,
+                    &cookie_path,
+                );
             }
             Err(err) => {
                 tracing::error!(error = %err, "Failed querying recent telemetry records");
@@ -236,7 +335,11 @@ pub async fn handle_stats(
             }
         }
     } else {
-        let mut resolved = resolve_id(&lookup_id, state.config.enable_id_obfuscation);
+        let mut resolved = resolve_id(
+            &lookup_id,
+            state.config.enable_id_obfuscation,
+            &state.obfuscation_key,
+        );
         if resolved.is_none() && state.config.enable_id_obfuscation {
             // Allow authenticated admins in /stats to also search directly by canonical DB UUID.
             resolved = canonicalize_ulid(&lookup_id);
@@ -264,7 +367,13 @@ pub async fn handle_stats(
 
         match record_opt {
             Some(rec) => {
-                render_single_record(&mut body_html, &rec, &state.config, &cookie_path);
+                render_single_record(
+                    &mut body_html,
+                    &rec,
+                    &state.config,
+                    &state.obfuscation_key,
+                    &cookie_path,
+                );
             }
             None => {
                 let escaped_id = escape_html(&lookup_id);
@@ -276,12 +385,10 @@ pub async fn handle_stats(
         }
     }
 
-    (
+    stats_html_response(
         StatusCode::OK,
-        [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-        Html(render_layout("LibreSpeed Telemetry Vault", &body_html)),
+        render_layout("LibreSpeed Telemetry Vault", &body_html),
     )
-        .into_response()
 }
 
 pub fn resolve_stats_cookie_path(url_base: &str, request_path: &str) -> String {
@@ -409,6 +516,7 @@ fn render_recent_table(
     out: &mut String,
     records: &[TelemetryRecord],
     cfg: &Config,
+    obfuscation_key: &[u8; 32],
     stats_path: &str,
 ) {
     let escaped_stats = escape_html(stats_path);
@@ -440,7 +548,7 @@ fn render_recent_table(
 
     for rec in records {
         let external_id = if cfg.enable_id_obfuscation {
-            obfuscate_ulid(&rec.uuid)
+            obfuscate_ulid(&rec.uuid, obfuscation_key)
         } else {
             rec.uuid.clone()
         };
@@ -470,9 +578,15 @@ fn render_recent_table(
     out.push_str("</tbody></table></div></div>");
 }
 
-fn render_single_record(out: &mut String, rec: &TelemetryRecord, cfg: &Config, stats_path: &str) {
+fn render_single_record(
+    out: &mut String,
+    rec: &TelemetryRecord,
+    cfg: &Config,
+    obfuscation_key: &[u8; 32],
+    stats_path: &str,
+) {
     let external_id = if cfg.enable_id_obfuscation {
-        obfuscate_ulid(&rec.uuid)
+        obfuscate_ulid(&rec.uuid, obfuscation_key)
     } else {
         rec.uuid.clone()
     };

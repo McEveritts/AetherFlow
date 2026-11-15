@@ -80,6 +80,8 @@ pub const CORE_SERVICE_IDS: [&str; 4] = [
     "apache2",
 ];
 
+const INVENTORY_CORE_UNITS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
+
 /// Validates a Services control request and returns the exact control target.
 ///
 /// A card may only control its own logical service, primary unit, or catalog
@@ -1591,7 +1593,7 @@ pub fn get_active_services_with_jobs(
                 .is_some_and(|outcome| outcome.status != "completed")
     };
     let mut policies = policies_for_units(
-        CORE_SERVICE_IDS
+        INVENTORY_CORE_UNITS
             .iter()
             .map(|unit| unit.to_string())
             .collect(),
@@ -1624,7 +1626,7 @@ pub fn get_active_services_with_jobs(
         (status, uptime, process)
     };
 
-    // 1. Core Systemd Services (`service_manager.go`: AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
+    // 1. Core Systemd Services (AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
     let (_api_st, api_up, _api_unit) = core_info("aetherflow-api");
     map.insert(
         "AetherFlow API".to_string(),

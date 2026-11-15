@@ -422,7 +422,7 @@ ALL_STEPS=(
     askdashtheme adduser askffmpeg askvsftpd denyhosts askbbr
     repos updates depends syscommands skel lshell ffmpeg
     apachesudo
-    install_go install_node build_modern
+    install_node build_modern
     apacheconf fix_cert makedirs
     installftpd ftpdconfig boot
     firewall harden_perms perms bbr bcm

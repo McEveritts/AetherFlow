@@ -67,18 +67,29 @@ pub fn normalize_ip_string(raw: &str) -> String {
     }
 }
 
-/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (leftmost) and
-/// `X-Real-IP` ONLY when the direct TCP peer is a loopback address.
+/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (rightmost
+/// non-loopback hop, defeating client-injected leftmost spoofing behind a local
+/// reverse proxy) and `X-Real-IP` ONLY when the direct TCP peer is loopback.
 pub fn resolve_client_ip(peer_addr: Option<SocketAddr>, headers: &HeaderMap) -> String {
     let peer_ip = peer_addr.map(|s| canonicalize_ip_addr(s.ip()));
     let trusted_proxy = peer_ip.map(|ip| ip.is_loopback()).unwrap_or(false);
 
     if trusted_proxy {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            for candidate in xff.split(',') {
+            let mut loopback_fallback: Option<IpAddr> = None;
+            for candidate in xff.rsplit(',') {
                 if let Some(ip) = parse_ip_token(candidate) {
+                    if ip.is_loopback() {
+                        if loopback_fallback.is_none() {
+                            loopback_fallback = Some(ip);
+                        }
+                        continue;
+                    }
                     return ip.to_string();
                 }
+            }
+            if let Some(loop_ip) = loopback_fallback {
+                return loop_ip.to_string();
             }
         }
         if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
@@ -210,7 +221,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("198.51.100.77, 10.0.0.5"),
+            HeaderValue::from_static("10.0.0.5, 198.51.100.77, 127.0.0.1"),
         );
         headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
 

@@ -182,9 +182,14 @@ fn read_regular_file(
     if size > MAX_STATIC_ASSET_BYTES as u64 {
         return Err(AssetError::Forbidden("static asset exceeds size cap"));
     }
-    let mut buf = Vec::with_capacity(size as usize);
-    file.read_to_end(&mut buf)
+    let mut buf = Vec::with_capacity((size as usize).min(MAX_STATIC_ASSET_BYTES));
+    (&mut file)
+        .take((MAX_STATIC_ASSET_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
         .map_err(|e| AssetError::Internal(e.into()))?;
+    if buf.len() > MAX_STATIC_ASSET_BYTES {
+        return Err(AssetError::Forbidden("static asset exceeds size cap"));
+    }
 
     let mime = guess_mime_header(filename);
     Ok((buf, mime))

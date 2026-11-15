@@ -113,8 +113,7 @@ for candidate in \
     "/opt/AetherFlow/current/bin/speedtest-backend" \
     "/opt/AetherFlow/current/speedtest-backend" \
     "/opt/AetherFlow/bin/speedtest-backend" \
-    "${SELF_DIR}/../../../bin/speedtest-backend" \
-    "${SELF_DIR}/../../../backend-rs/target/release/speedtest-backend"; do
+    "/opt/AetherFlow/backend-rs/target/release/speedtest-backend"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
         LOCAL_SPEEDTEST_BIN="$candidate"
         break
@@ -126,7 +125,7 @@ TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
 if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
     report_progress 35 "Staging local native LibreSpeed binary..."
     TMP_STAGE_DIR=$(mktemp -d /tmp/librespeed-stage-XXXXXX)
-    cp -f "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
+    cp -fL "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
     chmod 755 "${TMP_STAGE_DIR}/speedtest-backend"
     report_progress 60 "Packaging staged LibreSpeed binary..."
     tar -czf "$TMP_TAR" -C "$TMP_STAGE_DIR" speedtest-backend
@@ -134,8 +133,9 @@ if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
 else
     report_progress 35 "Resolving latest speedtest-backend release..."
     LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
-    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VERSION}/speedtest-backend_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
-    report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
+    LS_VER_CLEAN="${LS_VERSION#v}"
+    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VER_CLEAN}/speedtest-backend_${LS_VER_CLEAN}_linux_${LS_ARCH}.tar.gz"
+    report_progress 60 "Downloading and extracting LibreSpeed ${LS_VER_CLEAN}..."
     af_logged download_file "$LS_URL" "$TMP_TAR"
 fi
 stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"

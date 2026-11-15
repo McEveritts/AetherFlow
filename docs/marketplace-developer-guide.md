@@ -64,7 +64,7 @@ Uninstalling an application (`removepackage-<app_id>`) must stop and remove the 
 Nextcloud purge resolves the retained `config.php` before detaching Apache. Automatic SQL deletion requires a matching installer-created, private database-ownership record in `/opt/AetherFlow/logs/nextcloud_database_owner.json`. New installations record ownership only after creating a previously absent local MySQL database and account; existing accounts are never adopted or reset. Missing, stale, linked, or insecure records, ambiguous configurations, unsupported SQL backends, and unproven external data directories fail closed with configuration, credentials, data, and installation marker retained. Legacy or operator-managed SQL databases require explicit operator cleanup after verifying backups and ownership; updates do not manufacture provenance. Confined SQLite storage is removed without issuing MySQL commands. Default retained uninstall does not require a database-ownership record.
 
 ### 3. Systemd Unit & Sandbox Conventions
-- Name managed units `af-<app_id>.service` (or register the exact unit name in `backend/config/packages.json` and `af-runner` allowlists).
+- Name managed units `af-<app_id>.service` (or register the exact unit name in `config/packages.json` and `af-runner` allowlists).
 - Bind web listeners to `127.0.0.1:<allocated_port>` behind the AetherFlow Apache2 Subdomain Gateway rather than exposing unencrypted ports on `0.0.0.0`.
 - Where supported, `AF_BIND_ADDRESS` explicitly overrides the loopback default; keep the allocated `AF_APP_PORT` unchanged. Retain existing application authentication and whitelist policies during updates.
 - Create credential/configuration files privately before writing any secret bytes: use `write_config_file <path> 0600` under `umask 077`, and maintain credential-log directories at `0700`. Pass secrets to configuration helpers through the environment or standard input, never external command arguments.
@@ -74,7 +74,7 @@ Nextcloud purge resolves the retained `config.php` before detaching Apache. Auto
 
 ### 4. Catalog & Automation Registration
 When adding a new package:
-1. Add the package definition to both `config/packages.json` and `backend/config/packages.json`, keeping the copies identical. Register automation in both `config/package_automation.json` and `backend/config/package_automation.json` when required.
+1. Add the package definition to `config/packages.json` and register automation in `config/package_automation.json` when required.
 2. Place the brand icon in `frontend/public/img/<app_id>.png` (or `.svg`).
 3. Add syntax and lifecycle regression tests under `tests/` and verify with `python3 tests/check_shell_hygiene.py`.
 

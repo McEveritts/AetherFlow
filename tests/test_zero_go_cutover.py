@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -83,11 +84,47 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         self.assertIn("rust", sdk_script)
         self.assertNotIn("plugins/sdk-template/", sdk_script)
 
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = subprocess.run(
+                ["bash", str(ROOT / "scripts/create-plugin-sdk.sh"), "../bad", "Bad", f"{tmp}/bad"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+
+            out_dir = Path(tmp) / "sample-plugin"
+            ok = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / "scripts/create-plugin-sdk.sh"),
+                    "sample-plugin",
+                    "Sample Plugin",
+                    str(out_dir),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(ok.returncode, 0)
+            manifest = json.loads((out_dir / "plugin.manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["id"], "sample-plugin")
+            self.assertEqual(manifest["backend"]["binary_name"], "aetherflow-plugin-sample-plugin")
+            cargo_toml = (out_dir / "backend/Cargo.toml").read_text(encoding="utf-8")
+            self.assertIn('name = "aetherflow-plugin-sample-plugin"', cargo_toml)
+
         modern_stack = (ROOT / "setup/modules/modern_stack.sh").read_text(encoding="utf-8")
         build_gold = (ROOT / "scripts/build_gold.sh").read_text(encoding="utf-8")
         for label, content in (("modern_stack.sh", modern_stack), ("build_gold.sh", build_gold)):
-            for token in ("_install_go", "AF_GO_VERSION", "go build", "backend/web/dist", "backend/config"):
+            for token in ("_install_go", "AF_GO_VERSION", "backend/web/dist", "backend/config"):
                 self.assertNotIn(token, content, f"{label} must not reference legacy token {token!r}")
+            self.assertIsNone(
+                re.search(r"\bgo\s+build\b", content),
+                f"{label} must not invoke standalone 'go build'",
+            )
 
 
 if __name__ == "__main__":

@@ -104,6 +104,9 @@ pub fn sanitize_token(raw: Option<&str>) -> Option<String> {
     }
 }
 
+/// Maximum upstream JSON payload accepted from the control plane (16 MiB).
+pub const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("invalid endpoint path '{0}': must start with '/'")]
@@ -118,6 +121,8 @@ pub enum ClientError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("upstream response from {url} exceeded {max_bytes} bytes")]
+    ResponseTooLarge { url: String, max_bytes: usize },
     #[error("AetherFlow API {status} at {url}: {body}")]
     UpstreamStatus {
         url: String,
@@ -143,6 +148,9 @@ pub struct AetherFlowClient {
 impl AetherFlowClient {
     pub fn new(base_url: impl AsRef<str>, bearer_token: Option<String>) -> Self {
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -201,7 +209,7 @@ impl AetherFlowClient {
         let url = self.endpoint_url(path)?;
         let headers = self.build_headers(require_auth, path)?;
 
-        let response = self
+        let mut response = self
             .http
             .get(&url)
             .headers(headers)
@@ -213,10 +221,32 @@ impl AetherFlowClient {
             })?;
 
         let status = response.status();
-        let body_text = response.text().await.map_err(|source| ClientError::Transport {
-            url: url.clone(),
-            source,
-        })?;
+        if let Some(len) = response.content_length() {
+            if len > MAX_UPSTREAM_RESPONSE_BYTES as u64 {
+                return Err(ClientError::ResponseTooLarge {
+                    url,
+                    max_bytes: MAX_UPSTREAM_RESPONSE_BYTES,
+                });
+            }
+        }
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|source| ClientError::Transport {
+                url: url.clone(),
+                source,
+            })?
+        {
+            if body_bytes.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BYTES {
+                return Err(ClientError::ResponseTooLarge {
+                    url,
+                    max_bytes: MAX_UPSTREAM_RESPONSE_BYTES,
+                });
+            }
+            body_bytes.extend_from_slice(&chunk);
+        }
+        let body_text = String::from_utf8_lossy(&body_bytes);
 
         if !status.is_success() {
             return Err(ClientError::UpstreamStatus {
@@ -226,10 +256,8 @@ impl AetherFlowClient {
             });
         }
 
-        serde_json::from_str::<Value>(&body_text).map_err(|source| ClientError::InvalidJson {
-            url,
-            source,
-        })
+        serde_json::from_slice::<Value>(&body_bytes)
+            .map_err(|source| ClientError::InvalidJson { url, source })
     }
 
     /// Queries the public marketplace catalog (`GET /api/v1/public/marketplace`).
@@ -319,7 +347,7 @@ async fn snapshot_handler(State(client): State<Arc<AetherFlowClient>>) -> Respon
         (
             None,
             Some(format!(
-                "AETHERFLOW_PLUGIN_TOKEN not configured; skipped {} (plugin-scoped token minting is not yet active in backend-rs)",
+                "AETHERFLOW_PLUGIN_TOKEN not configured; skipped {} (launch via AetherFlow plugin manager or set AETHERFLOW_PLUGIN_TOKEN)",
                 PATH_AUTH_SYSTEM_METRICS
             )),
         )
@@ -379,7 +407,9 @@ mod tests {
             "http://127.0.0.1:8080/api/v1/public/marketplace"
         );
         assert_eq!(
-            unauth_client.endpoint_url(PATH_AUTH_SYSTEM_METRICS).unwrap(),
+            unauth_client
+                .endpoint_url(PATH_AUTH_SYSTEM_METRICS)
+                .unwrap(),
             "http://127.0.0.1:8080/api/v1/auth/system/metrics"
         );
         assert!(unauth_client.endpoint_url("api/system/metrics").is_err());

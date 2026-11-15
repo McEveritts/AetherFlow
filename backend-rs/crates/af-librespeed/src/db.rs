@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +50,7 @@ pub struct NewTelemetryRecord {
 pub struct TelemetryVault {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+    obfuscation_key: [u8; 32],
 }
 
 impl TelemetryVault {
@@ -61,8 +64,9 @@ impl TelemetryVault {
         guard_and_backup_legacy_boltdb(db_path)?;
         verify_sidecar_symlinks(db_path)?;
 
-        // Create/verify leaf file with O_NOFOLLOW and 0600 permissions before SQLite opens it.
-        let _leaf = OpenOptions::new()
+        // Create/verify leaf file with O_NOFOLLOW and enforce 0600 permissions on the opened fd
+        // so pre-existing database files with looser permissions are hardened atomically.
+        let leaf = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -75,6 +79,14 @@ impl TelemetryVault {
                     db_path.display()
                 )
             })?;
+        leaf.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to tighten permissions to 0600 on telemetry database {}",
+                    db_path.display()
+                )
+            })?;
+        drop(leaf);
 
         let conn = Connection::open_with_flags(
             db_path,
@@ -87,6 +99,10 @@ impl TelemetryVault {
              PRAGMA synchronous = NORMAL;
              PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS telemetry_meta (
+                 key TEXT PRIMARY KEY,
+                 value BLOB NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS speedtest_users (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  uuid TEXT NOT NULL UNIQUE,
@@ -107,14 +123,48 @@ impl TelemetryVault {
         )
         .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
 
+        let mut candidate_key = [0u8; 32];
+        OsRng.fill_bytes(&mut candidate_key);
+        conn.execute(
+            "INSERT OR IGNORE INTO telemetry_meta (key, value) VALUES ('obfuscation_key', ?1)",
+            params![candidate_key.as_slice()],
+        )
+        .context("failed to seed telemetry obfuscation_key")?;
+
+        let stored_blob: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM telemetry_meta WHERE key = 'obfuscation_key'",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to load telemetry obfuscation_key")?;
+
+        let obfuscation_key = if stored_blob.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&stored_blob);
+            arr
+        } else {
+            conn.execute(
+                "UPDATE telemetry_meta SET value = ?1 WHERE key = 'obfuscation_key'",
+                params![candidate_key.as_slice()],
+            )
+            .context("failed to repair telemetry obfuscation_key")?;
+            candidate_key
+        };
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: db_path.to_path_buf(),
+            obfuscation_key,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn obfuscation_key(&self) -> &[u8; 32] {
+        &self.obfuscation_key
     }
 
     pub async fn insert(&self, record: NewTelemetryRecord) -> Result<()> {
@@ -347,7 +397,7 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     struct TempDirGuard(PathBuf);
 
@@ -411,6 +461,15 @@ mod tests {
 
         let recent = vault.list_recent(10).await.unwrap();
         assert_eq!(recent.len(), 1);
+
+        // Verify obfuscation_key persists across reopen and pre-existing 0644 perms tighten to 0600
+        let first_key = *vault.obfuscation_key();
+        drop(vault);
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let reopened = TelemetryVault::open(&db_path).expect("reopen vault");
+        assert_eq!(reopened.obfuscation_key(), &first_key);
+        let tightened = fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(tightened, 0o600);
     }
 
     #[test]
