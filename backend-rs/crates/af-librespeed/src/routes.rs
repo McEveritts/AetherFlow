@@ -145,12 +145,15 @@ pub fn build_router_with_timeouts(
     let empty_routes = Router::new()
         .route("/empty", get(handle_empty).post(handle_empty))
         .route("/empty.php", get(handle_empty).post(handle_empty))
+        .route("/backend/empty", get(handle_empty).post(handle_empty))
         .route("/backend/empty.php", get(handle_empty).post(handle_empty))
         .layer(DefaultBodyLimit::max(MAX_EMPTY_BODY_BYTES));
 
     let telemetry_routes = Router::new()
         .route("/results/telemetry", post(handle_telemetry))
         .route("/results/telemetry.php", post(handle_telemetry))
+        .route("/backend/results/telemetry", post(handle_telemetry))
+        .route("/backend/results/telemetry.php", post(handle_telemetry))
         .layer(DefaultBodyLimit::max(MAX_TELEMETRY_BODY_BYTES));
 
     let stats_routes = Router::new()
@@ -158,6 +161,9 @@ pub fn build_router_with_timeouts(
         .route("/stats/", get(handle_stats).post(handle_stats))
         .route("/stats.php", get(handle_stats).post(handle_stats))
         .route("/stats/stats.php", get(handle_stats).post(handle_stats))
+        .route("/backend/stats", get(handle_stats).post(handle_stats))
+        .route("/backend/stats/", get(handle_stats).post(handle_stats))
+        .route("/backend/stats.php", get(handle_stats).post(handle_stats))
         .layer(DefaultBodyLimit::max(MAX_STATS_BODY_BYTES));
 
     let core_routes = Router::new()
@@ -166,13 +172,22 @@ pub fn build_router_with_timeouts(
         .merge(stats_routes)
         .route("/garbage", get(handle_garbage))
         .route("/garbage.php", get(handle_garbage))
+        .route("/backend/garbage", get(handle_garbage))
         .route("/backend/garbage.php", get(handle_garbage))
         .route("/getIP", get(handle_get_ip))
         .route("/getIP.php", get(handle_get_ip))
+        .route("/backend/getIP", get(handle_get_ip))
         .route("/backend/getIP.php", get(handle_get_ip))
         .route("/results", get(handle_results_png))
         .route("/results/", get(handle_results_png))
-        .route("/results/index.php", get(handle_results_png));
+        .route("/results/index.php", get(handle_results_png))
+        .route("/backend/results", get(handle_results_png))
+        .route("/backend/results/", get(handle_results_png))
+        .route("/backend/results/index.php", get(handle_results_png))
+        .route("/results/json", get(handle_results_json))
+        .route("/results/json.php", get(handle_results_json))
+        .route("/backend/results/json", get(handle_results_json))
+        .route("/backend/results/json.php", get(handle_results_json));
 
     let mut app = core_routes.clone();
     if !state.config.url_base.is_empty() {
@@ -1231,7 +1246,8 @@ async fn handle_telemetry(
         log,
     };
 
-    if let Err(err) = vault.insert(record).await {
+    let issued_raw_id = !state.config.enable_id_obfuscation;
+    if let Err(err) = vault.insert_with_mode(record, issued_raw_id).await {
         tracing::error!(error = %err, "Failed persisting telemetry record");
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed saving telemetry").into_response();
     }
@@ -1306,6 +1322,88 @@ struct ResultsQuery {
     id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ResultsJsonPayload {
+    id: String,
+    timestamp: String,
+    dl: String,
+    ul: String,
+    ping: String,
+    jitter: String,
+    ispinfo: String,
+    extra: String,
+}
+
+async fn lookup_result_record(
+    state: &AppState,
+    vault: &TelemetryVault,
+    raw_id: &str,
+) -> std::result::Result<(crate::db::TelemetryRecord, String), (StatusCode, &'static str)> {
+    if let Some(canon_uuid) = resolve_id(
+        raw_id,
+        state.config.enable_id_obfuscation,
+        &state.obfuscation_key,
+    ) {
+        match vault.get_by_uuid(canon_uuid).await {
+            Ok(Some(rec)) => {
+                let display_id = if state.config.enable_id_obfuscation {
+                    obfuscate_ulid(&rec.uuid, &state.obfuscation_key)
+                } else {
+                    rec.uuid.clone()
+                };
+                return Ok((rec, display_id));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(error = %err, "Failed loading telemetry record");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+            }
+        }
+    }
+
+    let safe_ascii_id = raw_id.len() <= 64
+        && raw_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+
+    if !state.config.enable_id_obfuscation && safe_ascii_id {
+        match vault.get_by_uuid(raw_id.to_string()).await {
+            Ok(Some(rec)) => {
+                let display_id = rec.uuid.clone();
+                return Ok((rec, display_id));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(error = %err, "Failed loading non-ULID telemetry record");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+            }
+        }
+    } else if state.config.enable_id_obfuscation && safe_ascii_id {
+        let legacy_cand =
+            crate::ulid::canonicalize_ulid(raw_id).unwrap_or_else(|| raw_id.to_string());
+        match vault.is_legacy_raw_id(legacy_cand.clone()).await {
+            Ok(true) => match vault.get_by_uuid(legacy_cand).await {
+                Ok(Some(rec)) => {
+                    let display_id = obfuscate_ulid(&rec.uuid, &state.obfuscation_key);
+                    return Ok((rec, display_id));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::error!(error = %err, "Failed loading migrated legacy telemetry record");
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+                }
+            },
+            Ok(false) => {}
+            Err(err) => {
+                tracing::error!(error = %err, "Failed checking legacy telemetry ID table");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+            }
+        }
+    }
+
+    Err((StatusCode::NOT_FOUND, "Result not found"))
+}
+
 async fn handle_results_png(
     State(state): State<AppState>,
     Query(q): Query<ResultsQuery>,
@@ -1321,27 +1419,9 @@ async fn handle_results_png(
         return (StatusCode::BAD_REQUEST, "Missing speedtest id").into_response();
     };
 
-    let Some(canon_uuid) = resolve_id(
-        raw_id,
-        state.config.enable_id_obfuscation,
-        &state.obfuscation_key,
-    ) else {
-        return (StatusCode::NOT_FOUND, "Result not found").into_response();
-    };
-
-    let record = match vault.get_by_uuid(canon_uuid).await {
-        Ok(Some(rec)) => rec,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Result not found").into_response(),
-        Err(err) => {
-            tracing::error!(error = %err, "Failed loading telemetry record for PNG");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
-
-    let display_id = if state.config.enable_id_obfuscation {
-        obfuscate_ulid(&record.uuid, &state.obfuscation_key)
-    } else {
-        record.uuid.clone()
+    let (record, display_id) = match lookup_result_record(&state, vault, raw_id).await {
+        Ok(found) => found,
+        Err((status, msg)) => return (status, msg).into_response(),
     };
 
     match render_badge_png(&record, &display_id) {
@@ -1364,4 +1444,46 @@ async fn handle_results_png(
             (StatusCode::INTERNAL_SERVER_ERROR, "PNG render failure").into_response()
         }
     }
+}
+
+async fn handle_results_json(
+    State(state): State<AppState>,
+    Query(q): Query<ResultsQuery>,
+) -> Response {
+    if !state.config.telemetry_enabled() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Telemetry disabled").into_response();
+    }
+    let Some(vault) = state.vault.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Telemetry disabled").into_response();
+    };
+
+    let Some(raw_id) = q.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "Missing speedtest id").into_response();
+    };
+
+    let (record, display_id) = match lookup_result_record(&state, vault, raw_id).await {
+        Ok(found) => found,
+        Err((status, msg)) => return (status, msg).into_response(),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    (
+        StatusCode::OK,
+        headers,
+        Json(ResultsJsonPayload {
+            id: display_id,
+            timestamp: record.timestamp,
+            dl: record.dl,
+            ul: record.ul,
+            ping: record.ping,
+            jitter: record.jitter,
+            ispinfo: record.ispinfo,
+            extra: record.extra,
+        }),
+    )
+        .into_response()
 }

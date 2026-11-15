@@ -530,12 +530,32 @@ _build_modern_stack_from_source() {
     mkdir -p "${release_dir}"
 
     export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:/usr/local/cargo/bin:${PATH}"
-    if [ -d "${af_root}/backend-rs" ] && ! command -v cargo >/dev/null 2>&1; then
+    local need_rust_bootstrap=0
+    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+        need_rust_bootstrap=1
+    else
+        local current_rustc_ver
+        current_rustc_ver="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
+        if [[ "${current_rustc_ver}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+            local r_maj="${BASH_REMATCH[1]}" r_min="${BASH_REMATCH[2]}"
+            if (( 10#${r_maj} < 1 || (10#${r_maj} == 1 && 10#${r_min} < 95) )); then
+                need_rust_bootstrap=1
+            fi
+        fi
+    fi
+    if [ -d "${af_root}/backend-rs" ] && [[ "${need_rust_bootstrap}" -eq 1 ]]; then
         if [[ "${EUID:-$(id -u)}" -eq 0 && "${AF_OFFLINE:-0}" != "1" ]]; then
-            echo "Rust toolchain (cargo) not found; bootstrapping rustup and linker prerequisites for --from-source..."
+            local rust_tc="${AF_RUST_TOOLCHAIN:-1.99.1}"
+            echo "Rust toolchain >= 1.95.0 required for Zero-Go workspace; bootstrapping toolchain ${rust_tc} and linker prerequisites for --from-source..."
             if command -v apt-get >/dev/null 2>&1; then
                 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
                 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang mold >/dev/null 2>&1 || true
+            fi
+            local bootstrapped_via_rustup=0
+            if command -v rustup >/dev/null 2>&1; then
+                if rustup toolchain install "${rust_tc}" --profile minimal && rustup default "${rust_tc}"; then
+                    bootstrapped_via_rustup=1
+                fi
             fi
             local rustup_arch="" rustup_sha256=""
             case "$(uname -m)" in
@@ -552,9 +572,8 @@ _build_modern_stack_from_source() {
                     rustup_sha256="62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb"
                     ;;
             esac
-            if [[ -n "${rustup_arch}" ]]; then
+            if [[ "${bootstrapped_via_rustup}" -eq 0 && -n "${rustup_arch}" ]]; then
                 local rustup_ver="${AF_RUSTUP_VERSION:-1.28.1}"
-                local rust_tc="${AF_RUST_TOOLCHAIN:-1.88.0}"
                 local rustup_bin
                 rustup_bin="$(mktemp /tmp/af-rustup-init.XXXXXX)"
                 if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \

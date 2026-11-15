@@ -153,6 +153,10 @@ pub fn extract_trusted_forwarded_ip_with_secret(
     {
         return None;
     }
+    let peer_is_loopback = peer_addr
+        .map(|s| canonicalize_ip_addr(s.ip()).is_loopback())
+        .unwrap_or(true);
+    let allow_multi_hop_peeling = !peer_is_loopback || !proxy_secret.trim().is_empty();
     if headers.contains_key("x-forwarded-for") {
         let mut saw_any_hop = false;
         let mut fallback_trusted_hop: Option<IpAddr> = None;
@@ -164,7 +168,8 @@ pub fn extract_trusted_forwarded_ip_with_secret(
                 let hop_str = std::str::from_utf8(trimmed).ok()?;
                 let ip = parse_ip_token(hop_str)?;
                 saw_any_hop = true;
-                let is_trusted_non_loopback = !ip.is_loopback()
+                let is_trusted_non_loopback = allow_multi_hop_peeling
+                    && !ip.is_loopback()
                     && trusted_proxies
                         .iter()
                         .any(|trusted| canonicalize_ip_addr(*trusted) == ip);
@@ -299,9 +304,73 @@ pub fn redact_single_ip(ip_str: &str) -> String {
     }
 }
 
-/// Redacts IPv4 addresses, verified IPv6 addresses (with optional `%zone`), and
-/// `"hostname":"..."` JSON values while leaving Unix timestamps (`1731638400000: ...`)
-/// untouched.
+fn is_ascii_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn find_verified_ipv6_subspan(input: &str, m_start: usize, m_end: usize) -> Option<(usize, usize)> {
+    let raw = &input[m_start..m_end];
+    let (core_rel_end, has_zone) = match raw.find('%') {
+        Some(idx) => (idx, true),
+        None => (raw.len(), false),
+    };
+    let core_abs_end = m_start + core_rel_end;
+    if core_abs_end <= m_start {
+        return None;
+    }
+
+    let bytes = input.as_bytes();
+    let mut candidate_starts: Vec<usize> = Vec::with_capacity(6);
+    if m_start == 0 || !is_ascii_word_byte(bytes[m_start - 1]) {
+        candidate_starts.push(m_start);
+    }
+
+    // Also inspect positions immediately after leading separator colons or a single
+    // hex-compatible label prefix (e.g. `peer:2001:db8::1`, `id:2001:db8::1`, `addr:::1`).
+    for rel_idx in 0..core_rel_end.min(48) {
+        if bytes[m_start + rel_idx] == b':' {
+            let next_abs = m_start + rel_idx + 1;
+            if next_abs < core_abs_end && !candidate_starts.contains(&next_abs) {
+                candidate_starts.push(next_abs);
+                if candidate_starts.len() >= 6 {
+                    break;
+                }
+            }
+        }
+    }
+
+    for start in candidate_starts {
+        if start >= core_abs_end {
+            continue;
+        }
+        let full_slice = &input[start..core_abs_end];
+        if full_slice.bytes().filter(|&b| b == b':').count() >= 2
+            && full_slice.parse::<Ipv6Addr>().is_ok()
+        {
+            let end = if has_zone { m_end } else { core_abs_end };
+            return Some((start, end));
+        }
+        if !has_zone {
+            if let Some(last_colon_rel) = full_slice.rfind(':') {
+                let port_part = &full_slice[last_colon_rel + 1..];
+                let trimmed_slice = &full_slice[..last_colon_rel];
+                if !port_part.is_empty()
+                    && port_part.len() <= 5
+                    && port_part.bytes().all(|b| b.is_ascii_digit())
+                    && trimmed_slice.bytes().filter(|&b| b == b':').count() >= 2
+                    && trimmed_slice.parse::<Ipv6Addr>().is_ok()
+                {
+                    return Some((start, start + last_colon_rel));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Redacts IPv4 addresses, verified IPv6 addresses (with optional `%zone` and
+/// adjacent `label:` separators), and `"hostname":"..."` JSON values while leaving
+/// Unix timestamps (`1731638400000: ...`) and MAC addresses untouched.
 pub fn redact_freeform_text(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -312,14 +381,12 @@ pub fn redact_freeform_text(input: &str) -> String {
     let mut after_v6 = String::with_capacity(input.len());
     let mut last = 0usize;
     for m in IPV6_CANDIDATE_RE.find_iter(input) {
-        let token = m.as_str();
-        let addr_part = token.split('%').next().unwrap_or(token);
-        if addr_part.bytes().filter(|&b| b == b':').count() >= 2
-            && addr_part.parse::<Ipv6Addr>().is_ok()
-        {
-            after_v6.push_str(&input[last..m.start()]);
-            after_v6.push_str("::");
-            last = m.end();
+        if let Some((v6_start, v6_end)) = find_verified_ipv6_subspan(input, m.start(), m.end()) {
+            if v6_start >= last {
+                after_v6.push_str(&input[last..v6_start]);
+                after_v6.push_str("::");
+                last = v6_end;
+            }
         }
     }
     after_v6.push_str(&input[last..]);
@@ -385,7 +452,10 @@ mod tests {
             "192.0.2.50"
         );
 
-        // Multi-tier non-loopback ingress chain: Edge (10.10.0.2) -> Apache (127.0.0.1)
+        // Multi-tier non-loopback ingress chain: Edge (10.10.0.2) -> Apache (127.0.0.1).
+        // Unauthenticated loopback (empty proxy_secret) MUST NOT peel 10.10.0.2 (blocks local
+        // client spoofing `X-Forwarded-For: 8.8.8.8, 10.10.0.2`), whereas authenticated
+        // loopback (`X-AetherFlow-Proxy-Token`) or direct non-loopback proxy peer peels cleanly.
         let multi_tier_trusted = vec![
             "127.0.0.1".parse::<IpAddr>().unwrap(),
             "::1".parse::<IpAddr>().unwrap(),
@@ -398,6 +468,24 @@ mod tests {
         );
         assert_eq!(
             resolve_client_ip(loopback, &chain_headers, &multi_tier_trusted),
+            "10.10.0.2"
+        );
+        chain_headers.insert(
+            PROXY_TOKEN_HEADER,
+            HeaderValue::from_static("proxy-shared-secret"),
+        );
+        assert_eq!(
+            resolve_client_ip_with_secret(
+                loopback,
+                &chain_headers,
+                &multi_tier_trusted,
+                "proxy-shared-secret"
+            ),
+            "203.0.113.44"
+        );
+        let edge_peer = Some("10.10.0.2:42311".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            resolve_client_ip(edge_peer, &chain_headers, &multi_tier_trusted),
             "203.0.113.44"
         );
 
@@ -490,5 +578,15 @@ mod tests {
         assert!(!redacted_isp.contains("203.0.113.42"));
         assert!(!redacted_isp.contains("cpe-box.example.net"));
         assert!(redacted_isp.contains("AS64500 FiberCo"));
+    }
+
+    #[test]
+    fn redacts_colon_prefixed_and_label_attached_ipv6_tokens_without_false_positives() {
+        let tricky = "peer:2001:4860:4860::8888 id:2001:db8::1 addr:::1 [2001:db8::abcd]:8443 peer:fe80::1%eth0 map:::ffff:198.51.100.9 mac=aa:bb:cc:dd:ee:ff ts=1731638400000: ok";
+        let out = redact_freeform_text(tricky);
+        assert_eq!(
+            out,
+            "peer::: id::: addr::: [::]:8443 peer::: map::: mac=aa:bb:cc:dd:ee:ff ts=1731638400000: ok"
+        );
     }
 }

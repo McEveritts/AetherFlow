@@ -8918,6 +8918,18 @@ mod tests {
         }
 
         let admin = progress_test_user("admin", None);
+        async fn wait_and_clear_job(pkg_name: &str) {
+            for _ in 0..500 {
+                let still_active = af_services::package_job_snapshot()
+                    .map(|snap| snap.active.contains_key(pkg_name))
+                    .unwrap_or(false);
+                if !still_active {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            af_services::clear_package_job_info(pkg_name);
+        }
 
         // A. Verify 'remove' succeeds even when app_updates has a last_error
         let res_remove = dispatch_package_lifecycle_with_target(
@@ -8935,7 +8947,7 @@ mod tests {
             StatusCode::OK,
             "remove must not be blocked by app_updates last_error"
         );
-        af_services::clear_package_job_info("test-err-pkg");
+        wait_and_clear_job("test-err-pkg").await;
 
         // B. Verify 'install' succeeds on uninstalled package without app_updates record
         let res_install = dispatch_package_lifecycle_with_target(
@@ -8953,7 +8965,7 @@ mod tests {
             StatusCode::OK,
             "install must not require app_updates or confirmed target"
         );
-        af_services::clear_package_job_info("test-fresh-pkg");
+        wait_and_clear_job("test-fresh-pkg").await;
 
         // C. Verify 'reinstall' succeeds even when app_updates has last_error
         let res_reinstall = dispatch_package_lifecycle_with_target(
@@ -8971,7 +8983,7 @@ mod tests {
             StatusCode::OK,
             "reinstall must not be blocked by app_updates last_error"
         );
-        af_services::clear_package_job_info("test-err-pkg");
+        wait_and_clear_job("test-err-pkg").await;
 
         // D. Verify 'remove' succeeds unconditionally on a retired package (readarr)
         let res_retired_remove = dispatch_package_lifecycle_with_target(
@@ -8989,7 +9001,7 @@ mod tests {
             StatusCode::OK,
             "remove on retired package must succeed unconditionally"
         );
-        af_services::clear_package_job_info("readarr");
+        wait_and_clear_job("readarr").await;
 
         // E. Verify 'update' on test-err-pkg IS blocked by app_updates last_error
         let res_update_blocked = dispatch_package_lifecycle_with_target(
@@ -9134,6 +9146,18 @@ mod tests {
         std::env::set_current_dir(&root).unwrap();
 
         let admin = progress_test_user("admin", None);
+        async fn wait_and_clear_job(pkg_name: &str) {
+            for _ in 0..500 {
+                let still_active = af_services::package_job_snapshot()
+                    .map(|snap| snap.active.contains_key(pkg_name))
+                    .unwrap_or(false);
+                if !still_active {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            af_services::clear_package_job_info(pkg_name);
+        }
 
         // 1. Update with explicit target when app_updates row is missing -> 409 Conflict
         let res_missing = dispatch_package_lifecycle_with_target(
@@ -9223,7 +9247,7 @@ mod tests {
         )
         .await;
         assert_eq!(res_matching.status(), StatusCode::OK);
-        af_services::clear_package_job_info("test-target-pkg");
+        wait_and_clear_job("test-target-pkg").await;
 
         // 4. Install, reinstall, and remove still succeed when app_updates has last_error
         {
@@ -9253,7 +9277,7 @@ mod tests {
         )
         .await;
         assert_eq!(res_rem.status(), StatusCode::OK);
-        af_services::clear_package_job_info("test-remove-pkg");
+        wait_and_clear_job("test-remove-pkg").await;
 
         let res_reinst = dispatch_package_lifecycle_with_target(
             "test-reinstall-pkg".into(),
@@ -9266,7 +9290,7 @@ mod tests {
         )
         .await;
         assert_eq!(res_reinst.status(), StatusCode::OK);
-        af_services::clear_package_job_info("test-reinstall-pkg");
+        wait_and_clear_job("test-reinstall-pkg").await;
 
         let res_inst = dispatch_package_lifecycle_with_target(
             "test-install-pkg".into(),
@@ -9279,7 +9303,7 @@ mod tests {
         )
         .await;
         assert_eq!(res_inst.status(), StatusCode::OK);
-        af_services::clear_package_job_info("test-install-pkg");
+        wait_and_clear_job("test-install-pkg").await;
 
         // 5. Update with explicit target when last_error is present and update_available = 0 (even with valid checked_at and matching target) -> 409 Conflict
         {
@@ -9374,7 +9398,7 @@ mod tests {
         )
         .await;
         assert_eq!(res_clean_update.status(), StatusCode::OK);
-        af_services::clear_package_job_info("test-target-pkg");
+        wait_and_clear_job("test-target-pkg").await;
 
         // 8b. action == "update" with empty last_error and empty checked_at -> 409 Conflict
         {

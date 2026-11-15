@@ -4858,11 +4858,11 @@ pub async fn get_streaming_dashboard_handler(
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock, clippy::type_complexity)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    static TEST_STREAMING_DB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    pub(crate) static TEST_STREAMING_DB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn mark_dashboard_fixtures_as_observed() {
         af_db::get_conn().unwrap().execute("UPDATE streaming_history SET provenance='observed_session', timestamp_certainty='observed', byte_accuracy='estimated' WHERE provider!='demo'", []).unwrap();
@@ -5248,6 +5248,8 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let db_path = dir.join("aetherflow_test.sqlite");
+        std::env::remove_var("AF_DB_PATH");
+        std::env::remove_var("AETHERFLOW_DB_PATH");
         std::env::set_var("DB_PATH", &db_path);
         std::env::remove_var("AETHERFLOW_DEMO_MODE");
         af_services::set_streaming_demo_mode(false);

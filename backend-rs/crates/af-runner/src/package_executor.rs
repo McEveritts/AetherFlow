@@ -11325,6 +11325,30 @@ fn apply_runner_blueprint_app_config_changes(
         } else {
             ""
         };
+        let librespeed_tls = if clean_app == "librespeed" {
+            let settings_path = match fs_root {
+                Some(root) => root.join("opt/librespeed/settings.toml"),
+                None => PathBuf::from("/opt/librespeed/settings.toml"),
+            };
+            Some(librespeed_runner_settings_tls_enabled(&settings_path))
+        } else {
+            None
+        };
+        let ssl_proxy_directive = if librespeed_tls == Some(true) {
+            "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+        } else {
+            ""
+        };
+        let http_scheme = if librespeed_tls == Some(true) {
+            "https"
+        } else {
+            "http"
+        };
+        let ws_scheme = if librespeed_tls == Some(true) {
+            "wss"
+        } else {
+            "ws"
+        };
         let existing_ingress = load_ingress(canonical)?;
 
         let mut modified_any = false;
@@ -11332,7 +11356,7 @@ fn apply_runner_blueprint_app_config_changes(
         if sites_avail_exists {
             let int_dom = format!("{}.aether.local", clean_app);
             let default_vhost = format!(
-                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
+                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
             );
             let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
             let prev_int = read_runner_apache_vhost(&conf_file, fs_root, false)?;
@@ -11341,6 +11365,7 @@ fn apply_runner_blueprint_app_config_changes(
                 &default_vhost,
                 Some(&int_dom),
                 listen_port,
+                librespeed_tls,
                 &preserved_blocks,
             );
             if prev_int.as_deref() != Some(vhost.as_str()) {
@@ -11360,13 +11385,14 @@ fn apply_runner_blueprint_app_config_changes(
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
             if ing.external_access_enabled && valid_dom && sites_avail_exists {
                 let default_ext_vhost = format!(
-                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
+                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
                 );
                 let ext_vhost = render_or_update_runner_apache_vhost(
                     prev_ext.as_deref(),
                     &default_ext_vhost,
                     Some(&pub_dom),
                     listen_port,
+                    librespeed_tls,
                     &preserved_blocks,
                 );
                 if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
@@ -11383,6 +11409,7 @@ fn apply_runner_blueprint_app_config_changes(
                 &prev_ext,
                 None,
                 listen_port,
+                librespeed_tls,
                 &preserved_blocks,
             );
             if prev_ext != ext_vhost {
@@ -11407,6 +11434,7 @@ fn apply_runner_blueprint_app_config_changes(
                     &prev_raw,
                     None,
                     listen_port,
+                    librespeed_tls,
                     &preserved_blocks,
                 );
                 if prev_raw != updated {
@@ -11450,9 +11478,109 @@ fn apply_runner_blueprint_app_config_changes(
     Ok(())
 }
 
-fn rewrite_runner_apache_proxy_url_port(token: &str, listen_port: i32) -> Option<String> {
+pub fn librespeed_runner_settings_tls_enabled(settings_path: &Path) -> bool {
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut cur = settings_path.parent();
+    while let Some(dir) = cur {
+        if dir.as_os_str().is_empty() || dir == Path::new("/") {
+            break;
+        }
+        if fs::symlink_metadata(dir)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        cur = dir.parent();
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    let Ok(file) = opts.open(settings_path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > 262_144 {
+        return false;
+    }
+    let mut raw = String::new();
+    if file.take(262_144).read_to_string(&mut raw).is_err() {
+        return false;
+    }
+    parse_librespeed_root_tls_flag(&raw)
+}
+
+fn parse_librespeed_root_tls_flag(raw: &str) -> bool {
+    let mut enabled = false;
+    for line in raw.lines() {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let mut comment_idx = line.len();
+        for (idx, ch) in line.char_indices() {
+            if in_double {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_double = false;
+                }
+            } else if in_single {
+                if ch == '\'' {
+                    in_single = false;
+                }
+            } else {
+                match ch {
+                    '"' => in_double = true,
+                    '\'' => in_single = true,
+                    '#' => {
+                        comment_idx = idx;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let cleaned = line[..comment_idx].trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if cleaned.starts_with('[') && !cleaned.contains('=') {
+            break;
+        }
+        if let Some((k, v)) = cleaned.split_once('=') {
+            let key = k.trim().trim_matches('"').trim_matches('\'');
+            if key == "enable_tls" {
+                let val = v.trim().trim_matches('"').trim_matches('\'');
+                enabled = val.eq_ignore_ascii_case("true");
+            }
+        }
+    }
+    enabled
+}
+
+fn rewrite_runner_apache_proxy_url_port(
+    token: &str,
+    listen_port: i32,
+    upstream_tls: Option<bool>,
+) -> Option<String> {
     for scheme in ["http://", "https://", "ws://", "wss://"] {
         if let Some(rest) = token.strip_prefix(scheme) {
+            let out_scheme = match (scheme, upstream_tls) {
+                ("http://" | "https://", Some(true)) => "https://",
+                ("http://" | "https://", Some(false)) => "http://",
+                ("ws://" | "wss://", Some(true)) => "wss://",
+                ("ws://" | "wss://", Some(false)) => "ws://",
+                _ => scheme,
+            };
             for host in ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"] {
                 if let Some(after_host) = rest.strip_prefix(host) {
                     let digit_len = after_host
@@ -11461,7 +11589,7 @@ fn rewrite_runner_apache_proxy_url_port(token: &str, listen_port: i32) -> Option
                         .count();
                     if digit_len > 0 {
                         let suffix = &after_host[digit_len..];
-                        return Some(format!("{scheme}{host}{listen_port}{suffix}"));
+                        return Some(format!("{out_scheme}{host}{listen_port}{suffix}"));
                     }
                 }
             }
@@ -11597,6 +11725,7 @@ fn render_or_update_runner_apache_vhost(
     default_template: &str,
     desired_server_name: Option<&str>,
     listen_port: i32,
+    upstream_tls: Option<bool>,
     preserved_blocks: &[String],
 ) -> String {
     let base = match existing_raw {
@@ -11606,6 +11735,20 @@ fn render_or_update_runner_apache_vhost(
                 let trimmed = line.trim_start();
                 let indent = &line[..line.len() - trimmed.len()];
                 let lower = trimmed.to_ascii_lowercase();
+                if upstream_tls == Some(false)
+                    && (lower.starts_with("sslproxyengine ")
+                        || lower.starts_with("sslproxyengine\t")
+                        || lower.starts_with("sslproxyverify ")
+                        || lower.starts_with("sslproxyverify\t")
+                        || lower.starts_with("sslproxycheckpeercn ")
+                        || lower.starts_with("sslproxycheckpeercn\t")
+                        || lower.starts_with("sslproxycheckpeername ")
+                        || lower.starts_with("sslproxycheckpeername\t")
+                        || lower.starts_with("sslproxycheckpeerexpire ")
+                        || lower.starts_with("sslproxycheckpeerexpire\t"))
+                {
+                    continue;
+                }
                 if let Some(dom) = desired_server_name {
                     if lower.starts_with("servername ") || lower.starts_with("servername\t") {
                         out_lines.push(format!("{indent}ServerName {dom}"));
@@ -11622,7 +11765,7 @@ fn render_or_update_runner_apache_vhost(
                     let tokens: Vec<String> = trimmed
                         .split_whitespace()
                         .map(|tok| {
-                            rewrite_runner_apache_proxy_url_port(tok, listen_port)
+                            rewrite_runner_apache_proxy_url_port(tok, listen_port, upstream_tls)
                                 .unwrap_or_else(|| tok.to_string())
                         })
                         .collect();
@@ -11630,6 +11773,33 @@ fn render_or_update_runner_apache_vhost(
                 } else {
                     out_lines.push(line.to_string());
                 }
+            }
+            if upstream_tls == Some(true)
+                && !out_lines
+                    .iter()
+                    .any(|l| l.trim().to_ascii_lowercase().starts_with("sslproxyengine "))
+            {
+                let insert_pos = out_lines
+                    .iter()
+                    .position(|l| {
+                        l.trim()
+                            .to_ascii_lowercase()
+                            .starts_with("proxypreservehost ")
+                    })
+                    .or_else(|| {
+                        out_lines
+                            .iter()
+                            .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
+                    })
+                    .unwrap_or(out_lines.len());
+                let ssl_lines = [
+                    "    SSLProxyEngine On".to_string(),
+                    "    SSLProxyVerify none".to_string(),
+                    "    SSLProxyCheckPeerCN off".to_string(),
+                    "    SSLProxyCheckPeerName off".to_string(),
+                    "    SSLProxyCheckPeerExpire off".to_string(),
+                ];
+                out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
             joined.push('\n');
@@ -18169,4 +18339,45 @@ int main(int argc, char** argv) {
     }
 
     include!("native_catalog_regressions.rs");
+
+    #[test]
+    fn test_librespeed_apache_vhost_honors_and_toggles_upstream_tls() {
+        assert!(!parse_librespeed_root_tls_flag("enable_tls = false\n"));
+        assert!(parse_librespeed_root_tls_flag(
+            "listen_port = 8988\nenable_tls = true # comment\n"
+        ));
+        assert!(!parse_librespeed_root_tls_flag(
+            "enable_tls = false\n[extra]\nenable_tls = true\n"
+        ));
+
+        let http_default = "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName librespeed.aether.local\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{HTTP:Upgrade} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:8988/$1 [P,L]\n    ProxyPass / http://127.0.0.1:8988/\n    ProxyPassReverse / http://127.0.0.1:8988/\n    RequestHeader set X-Forwarded-Proto \"http\"\n    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n</VirtualHost>\n";
+
+        // Upgrade existing HTTP vhost in-place when enable_tls=true and port changes to 18988
+        let promoted_tls = render_or_update_runner_apache_vhost(
+            Some(http_default),
+            http_default,
+            Some("librespeed.aether.local"),
+            18988,
+            Some(true),
+            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
+        );
+        assert!(promoted_tls.contains("SSLProxyEngine On"));
+        assert!(promoted_tls.contains("SSLProxyVerify none"));
+        assert!(promoted_tls.contains("wss://127.0.0.1:18988/$1"));
+        assert!(promoted_tls.contains("ProxyPass / https://127.0.0.1:18988/"));
+        assert!(promoted_tls.contains("ProxyPassReverse / https://127.0.0.1:18988/"));
+
+        // Downgrade back to HTTP cleanly when enable_tls=false
+        let demoted_http = render_or_update_runner_apache_vhost(
+            Some(&promoted_tls),
+            http_default,
+            Some("librespeed.aether.local"),
+            18989,
+            Some(false),
+            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
+        );
+        assert!(!demoted_http.contains("SSLProxyEngine"));
+        assert!(demoted_http.contains("ws://127.0.0.1:18989/$1"));
+        assert!(demoted_http.contains("ProxyPass / http://127.0.0.1:18989/"));
+    }
 }

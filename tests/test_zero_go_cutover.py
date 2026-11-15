@@ -753,8 +753,8 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         self.assertIn("sha256sum -c -", wsl_script)
 
         common_text = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
-        self.assertIn("https://127.0.0.1:*", common_text)
-        self.assertIn("https://\\[::1\\]:*", common_text)
+        self.assertIn(r"\[::1\]|localhost", common_text)
+        self.assertNotIn("https://127.*:*", common_text)
 
     def test_af_certbot_sync_v4_sqlite_and_hosts_reconcile(self) -> None:
         import sqlite3
@@ -943,6 +943,104 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
         flowai_doc = (ROOT / "docs/flowai.md").read_text(encoding="utf-8")
         self.assertNotIn("backend/providers/", flowai_doc)
+
+    def test_shell_db_precedence_strict_loopback_tls_and_rust_toolchain_pin(self) -> None:
+        import sqlite3
+
+        modern_stack = (ROOT / "setup/modules/modern_stack.sh").read_text(encoding="utf-8")
+        wsl_dev = (ROOT / "scripts/setup_wsl_dev.sh").read_text(encoding="utf-8")
+        self.assertIn("AF_RUST_TOOLCHAIN:-1.99.1", modern_stack)
+        self.assertNotIn("AF_RUST_TOOLCHAIN:-1.88.0", modern_stack)
+        self.assertIn("AF_RUST_TOOLCHAIN:-1.99.1", wsl_dev)
+
+        get_base_domain_fn = common_functions("get_base_domain")
+        wait_ready_fn = common_functions(
+            "resolve_app_readiness_path",
+            "application_readiness_url",
+            "wait_for_service_ready",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / "aetherflow.env"
+            custom_data = root / "custom-data"
+            custom_data.mkdir()
+            active_db = custom_data / "aetherflow.sqlite"
+            stale_db = root / "stale-default.sqlite"
+
+            with sqlite3.connect(active_db) as conn:
+                conn.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT)")
+                conn.execute("INSERT INTO settings (id, base_domain) VALUES (1, '')")
+            with sqlite3.connect(stale_db) as conn:
+                conn.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT)")
+                conn.execute("INSERT INTO settings (id, base_domain) VALUES (1, 'stale.example.com')")
+
+            rebased_gbd = get_base_domain_fn.replace(
+                "/var/lib/aetherflow/aetherflow.sqlite", str(stale_db)
+            )
+            env_file.write_text(f'DATA_DIR="{custom_data}"\n', encoding="utf-8")
+
+            # Active custom DATA_DIR DB with empty base_domain MUST NOT fall back to stale default DB
+            dom_empty = subprocess.check_output(
+                ["bash", "-c", f"{rebased_gbd}\nget_base_domain"],
+                env={**os.environ, "AETHERFLOW_ENV_FILE": str(env_file)},
+                text=True,
+            ).strip()
+            self.assertEqual(dom_empty, "")
+
+            with sqlite3.connect(active_db) as conn:
+                conn.execute("UPDATE settings SET base_domain = 'live.example.org' WHERE id = 1")
+            dom_live = subprocess.check_output(
+                ["bash", "-c", f"{rebased_gbd}\nget_base_domain"],
+                env={**os.environ, "AETHERFLOW_ENV_FILE": str(env_file)},
+                text=True,
+            ).strip()
+            self.assertEqual(dom_live, "live.example.org")
+
+            # Verify wait_for_service_ready only passes `-k` for strict loopback HTTPS
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            curl_log = root / "curl.jsonl"
+            (bin_dir / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bin_dir / "systemctl").chmod(0o755)
+            (bin_dir / "curl").write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "p = pathlib.Path(os.environ['CURL_LOG'])\n"
+                "with p.open('a', encoding='utf-8') as fh:\n"
+                "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "sys.exit(0)\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "curl").chmod(0o755)
+
+            for probe_url, expect_k in (
+                ("https://127.0.0.1:8988/", True),
+                ("https://[::1]:8988/", True),
+                ("https://203.0.113.50:8988/", False),
+                ("https://[2001:db8::1]:8988/", False),
+                ("https://127.0.0.1.evil.example:8988/", False),
+            ):
+                curl_log.unlink(missing_ok=True)
+                subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f"{wait_ready_fn}\nwait_for_service_ready librespeed 8988 '{probe_url}' 1",
+                    ],
+                    env={
+                        **os.environ,
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "CURL_LOG": str(curl_log),
+                    },
+                    check=True,
+                )
+                logged = json.loads(curl_log.read_text(encoding="utf-8").splitlines()[0])
+                self.assertEqual(
+                    "-k" in logged,
+                    expect_k,
+                    f"Unexpected -k={('-k' in logged)} for {probe_url}: {logged}",
+                )
 
 
 if __name__ == "__main__":

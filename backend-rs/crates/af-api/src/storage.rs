@@ -4535,7 +4535,11 @@ mod updater_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_oauth_only_admin_backup_stepup_against_live_schema_v24() {
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp_dir =
             std::env::temp_dir().join(format!("af-oauth-backup-stepup-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp_dir).unwrap();

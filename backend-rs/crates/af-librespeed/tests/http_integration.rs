@@ -2193,3 +2193,77 @@ async fn trusted_proxy_secret_blocks_local_loopback_xff_spoofing_and_url_tls_nof
         .unwrap();
     assert!(cookie_with_tok.contains("Secure"));
 }
+
+#[tokio::test]
+async fn upstream_unsuffixed_backend_aliases_results_json_and_memory_vault_parity() {
+    let tmp = TempDirGuard::new("upstream-aliases-json");
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_type = "memory".to_string();
+    cfg.database_file.clear();
+    cfg.enable_id_obfuscation = true;
+    cfg.statistics_password = "AliasAdminPassword!77".to_string();
+    let vault = TelemetryVault::open_in_memory(100).expect("open memory vault");
+    let app = build_router(cfg, Some(vault));
+
+    for path in ["/backend/empty", "/backend/garbage", "/backend/getIP"] {
+        let resp = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder().uri(path).body(Body::empty()).unwrap(),
+                "198.51.100.25:51000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "failed alias {path}");
+    }
+
+    let stats_resp = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/backend/stats")
+                .body(Body::empty())
+                .unwrap(),
+            "198.51.100.25:51001",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stats_resp.status(), StatusCode::OK);
+
+    let post_resp = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/backend/results/telemetry")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "dl=912.34&ul=456.78&ping=3.21&jitter=0.45&ispinfo=FiberNet&extra=json-check",
+                ))
+                .unwrap(),
+            "198.51.100.25:51002",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post_resp.status(), StatusCode::OK);
+    let body_str = String::from_utf8(body_bytes(post_resp).await).unwrap();
+    let returned_id = body_str.strip_prefix("id ").expect("id prefix").trim();
+
+    let json_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={returned_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json_resp.status(), StatusCode::OK);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body_bytes(json_resp).await).expect("valid JSON result");
+    assert_eq!(payload["id"], returned_id);
+    assert_eq!(payload["dl"], "912.34");
+    assert_eq!(payload["ul"], "456.78");
+    assert_eq!(payload["extra"], "json-check");
+    assert!(payload.get("ip").is_none());
+}

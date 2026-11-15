@@ -280,7 +280,7 @@ if not re.search(r"^[ \t]*enable_id_obfuscation\s*=", text, re.MULTILINE):
 db_type_m = re.search(r'^[ \t]*database_type\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
 db_type = db_type_m.group(2).strip().lower() if db_type_m else "sqlite"
 db_file_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
-if db_type != "none" and db_file_m:
+if db_type not in ("none", "memory") and db_file_m:
     raw_db_file = db_file_m.group(2).strip()
     if raw_db_file:
         norm_state = os.path.normpath(state_dir)
@@ -455,7 +455,11 @@ import json, os
 print(json.dumps(os.environ["AF_DERIVED_PASS"]))
 PYEOF
 )"
-    LS_PROXY_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    LS_PROXY_SECRET="$(python3 - <<'PYEOF'
+import secrets
+print(secrets.token_hex(32))
+PYEOF
+)"
     write_config_file /opt/librespeed/settings.toml <<EOF
 bind_address="127.0.0.1"
 listen_port=${APP_PORT}
@@ -659,8 +663,17 @@ finally:
 PYEOF
 
 if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
-    if [[ ! -e /etc/apache2/mods-enabled/headers.load ]] && command -v a2enmod >/dev/null 2>&1; then
-        af_logged a2enmod -q headers || true
+    if command -v a2enmod >/dev/null 2>&1; then
+        if [[ ! -e /etc/apache2/mods-enabled/headers.load ]]; then
+            af_logged a2enmod -q headers || true
+        fi
+        if [[ ! -L /opt/librespeed && ! -L /opt/librespeed/settings.toml && -f /opt/librespeed/settings.toml ]] && grep -Eiq '^[[:space:]]*enable_tls[[:space:]]*=[[:space:]]*"?true"?([[:space:]]*(#.*)?)$' /opt/librespeed/settings.toml; then
+            for _mod in ssl proxy proxy_http proxy_wstunnel rewrite; do
+                if [[ ! -e "/etc/apache2/mods-enabled/${_mod}.load" ]]; then
+                    af_logged a2enmod -q "${_mod}" || true
+                fi
+            done
+        fi
     fi
     if systemctl is-active --quiet apache2 2>/dev/null; then
         af_logged systemctl reload apache2 || true

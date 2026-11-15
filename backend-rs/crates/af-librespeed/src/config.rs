@@ -167,11 +167,18 @@ impl Default for Config {
 
 impl Config {
     /// Returns true unless `database_type` is `"none"` (case-insensitive) or
-    /// `database_file` is empty. Legacy values like `"bolt"` or `""` resolve
-    /// to SQLite at `database_file`.
+    /// Returns true unless telemetry storage is explicitly disabled (`"none"`) or
+    /// `database_file` is empty (except for `"memory"`, which runs an in-memory SQLite vault).
+    /// Legacy values like `"bolt"` or `""` resolve to SQLite at `database_file`.
     pub fn telemetry_enabled(&self) -> bool {
-        !self.database_type.trim().eq_ignore_ascii_case("none")
-            && !self.database_file.as_os_str().is_empty()
+        let db_type = self.database_type.trim();
+        if db_type.eq_ignore_ascii_case("none") {
+            return false;
+        }
+        if db_type.eq_ignore_ascii_case("memory") {
+            return true;
+        }
+        !self.database_file.as_os_str().is_empty()
     }
 
     pub fn stats_locked(&self) -> bool {
@@ -180,14 +187,17 @@ impl Config {
     }
 
     pub fn validate_listener_security(&self) -> Result<()> {
+        validate_url_base(&self.url_base)?;
         let db_type = self.database_type.trim().to_ascii_lowercase();
         match db_type.as_str() {
-            "" | "none" | "sqlite" | "bolt" => {}
+            "" | "none" | "sqlite" | "bolt" | "memory" => {}
             other => bail!(
-                "unsupported database_type {other:?} in settings.toml; speedtest-backend supports only \"sqlite\" (or \"none\" to disable telemetry)"
+                "unsupported database_type {other:?} in settings.toml; speedtest-backend supports only \"sqlite\", \"memory\", or \"none\" to disable telemetry"
             ),
         }
-        if !matches!(db_type.as_str(), "" | "none") && self.database_file.as_os_str().is_empty() {
+        if !matches!(db_type.as_str(), "" | "none" | "memory")
+            && self.database_file.as_os_str().is_empty()
+        {
             bail!(
                 "database_file must be non-empty in settings.toml when database_type = {db_type:?}"
             );
@@ -359,6 +369,31 @@ impl Config {
 
 pub fn normalize_url_base(raw: &str) -> String {
     raw.trim().trim_matches('/').to_string()
+}
+
+pub fn validate_url_base(normalized: &str) -> Result<()> {
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    if normalized.len() > 128 {
+        bail!("url_base exceeds maximum length of 128 characters");
+    }
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            bail!(
+                "invalid url_base {normalized:?}: empty or dot-traversal path segments are not allowed"
+            );
+        }
+        if !segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+        {
+            bail!(
+                "invalid url_base {normalized:?}: only URL-safe path segment characters [A-Za-z0-9._~/-] are permitted"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1172,5 +1207,30 @@ extra_flags = [
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn supports_memory_database_and_rejects_unsafe_url_base() {
+        let mem_cfg = Config::parse_toml_str("database_type = \"memory\"\ndatabase_file = \"\"\n")
+            .expect("memory database_type must succeed with empty database_file");
+        assert!(mem_cfg.telemetry_enabled());
+
+        let nested_base = Config::parse_toml_str("url_base = \"/api/v1/speedtest/\"\n")
+            .expect("multi-segment url_base must parse");
+        assert_eq!(nested_base.url_base, "api/v1/speedtest");
+
+        for bad_base in [
+            "url_base = \"speed; Domain=evil.example\"\n",
+            "url_base = \"../admin\"\n",
+            "url_base = \"speed?foo=bar\"\n",
+            "url_base = \"speed#frag\"\n",
+            "url_base = \"speed//double\"\n",
+            "url_base = \"speed with space\"\n",
+        ] {
+            assert!(
+                Config::parse_toml_str(bad_base).is_err(),
+                "expected unsafe url_base to fail closed: {bad_base}"
+            );
+        }
     }
 }

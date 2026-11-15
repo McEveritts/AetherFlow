@@ -2435,20 +2435,66 @@ write_lock() {
 }
 
 get_base_domain() {
-    local dom="" db_cand="" env_db=""
-    if [[ -f /etc/aetherflow/aetherflow.env ]]; then
-        env_db="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+    local dom="" db_cand=""
+    local env_file="${AETHERFLOW_ENV_FILE:-/etc/aetherflow/aetherflow.env}"
+    local env_af_db="" env_db="" env_aetherflow_db="" env_data_dir="" env_base_domain=""
+    if [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" && -f "$env_file" ]]; then
+        local _k="" _v=""
+        while IFS= read -r _line || [[ -n "$_line" ]]; do
+            _line="${_line%$'\r'}"
+            [[ "$_line" =~ ^[[:space:]]*# || -z "${_line//[[:space:]]/}" ]] && continue
+            if [[ "$_line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+                _k="${BASH_REMATCH[2]}"
+                _v="${BASH_REMATCH[3]}"
+                _v="${_v#"${_v%%[![:space:]]*}"}"
+                _v="${_v%"${_v##*[![:space:]]}"}"
+                if [[ ( "$_v" == \"*\" && "$_v" == *\" ) || ( "$_v" == \'*\' && "$_v" == *\' ) ]]; then
+                    _v="${_v:1:${#_v}-2}"
+                fi
+                case "$_k" in
+                    AF_DB_PATH) env_af_db="$_v" ;;
+                    DB_PATH) env_db="$_v" ;;
+                    AETHERFLOW_DB_PATH) env_aetherflow_db="$_v" ;;
+                    DATA_DIR) env_data_dir="$_v" ;;
+                    AETHERFLOW_BASE_DOMAIN) env_base_domain="$_v" ;;
+                esac
+            fi
+        done < "$env_file"
+    fi
+    local eff_data_dir="${DATA_DIR:-$env_data_dir}"
+    local custom_data_db=""
+    if [[ -n "$eff_data_dir" && "${eff_data_dir%/}" != "/var/lib/aetherflow" ]]; then
+        custom_data_db="${eff_data_dir%/}/aetherflow.sqlite"
     fi
     if command -v sqlite3 >/dev/null 2>&1; then
-        for db_cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$env_db" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+        for db_cand in \
+            "${AF_DB_PATH:-}" \
+            "${DB_PATH:-}" \
+            "${AETHERFLOW_DB_PATH:-}" \
+            "$env_af_db" \
+            "$env_db" \
+            "$env_aetherflow_db" \
+            "$custom_data_db" \
+            /var/lib/aetherflow/aetherflow.sqlite \
+            /opt/AetherFlow/current/data/aetherflow.sqlite \
+            /opt/AetherFlow/data/aetherflow.sqlite \
+            /opt/AetherFlow/backend/data/aetherflow.sqlite
+        do
             if [[ -n "$db_cand" && -f "$db_cand" ]]; then
-                dom="$(sqlite3 "$db_cand" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
-                [[ -n "$dom" ]] && break
+                local has_settings=""
+                has_settings="$(sqlite3 "$db_cand" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings';" 2>/dev/null | tr -d '[:space:]' || true)"
+                if [[ "$has_settings" == "1" ]]; then
+                    dom="$(sqlite3 "$db_cand" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+                    break
+                fi
             fi
         done
     fi
-    if [[ -z "$dom" && -f /etc/aetherflow/aetherflow.env ]]; then
-        dom="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+    if [[ -z "$dom" ]]; then
+        local raw_env_dom="${AETHERFLOW_BASE_DOMAIN:-$env_base_domain}"
+        if [[ -n "$raw_env_dom" ]]; then
+            dom="$(printf '%s' "$raw_env_dom" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]')"
+        fi
     fi
     local domain_regex='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'
     if [[ "$dom" == "localhost" || "$dom" == *.local ]] || { [[ -n "$dom" ]] && [[ ! "$dom" =~ $domain_regex ]]; }; then
@@ -4558,16 +4604,17 @@ wait_for_service_ready() {
     [[ "$port" =~ ^[0-9]{1,5}$ && "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
     (( 10#$port > 0 && 10#$port <= 65535 )) || return 1
     local -a curl_tls_args=()
-    case "$readiness_path" in
-        http://*) ready_url="$readiness_path" ;;
-        https://127.0.0.1:*|https://127.0.0.1/*|https://\[::1\]:*|https://\[::1\]/*|https://localhost:*|https://localhost/*|https://[0-9]*.[0-9]*.[0-9]*.[0-9]*:*|https://\[*\]:*)
-            ready_url="$readiness_path"
-            curl_tls_args=(-k)
-            ;;
-        https://*) ready_url="$readiness_path" ;;
-        /*) ready_url="http://127.0.0.1:${port}${readiness_path}" ;;
-        *) return 1 ;;
-    esac
+    local loopback_https_re='^https://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
+    if [[ "$readiness_path" =~ $loopback_https_re ]]; then
+        ready_url="$readiness_path"
+        curl_tls_args=(-k)
+    elif [[ "$readiness_path" == http://* || "$readiness_path" == https://* ]]; then
+        ready_url="$readiness_path"
+    elif [[ "$readiness_path" == /* ]]; then
+        ready_url="http://127.0.0.1:${port}${readiness_path}"
+    else
+        return 1
+    fi
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet "$unit"; then
             if [[ -n "$credentials" ]]; then

@@ -37,6 +37,7 @@ cleanup() {
     if [[ "${rc}" -ne 0 || "${KEEP_SMOKE_ARTIFACTS:-0}" == "1" ]]; then
         echo "[SMOKE-INFO] Preserving smoke work directory and logs at: ${WORK_DIR}" >&2
     else
+        chmod -R u+w "${WORK_DIR}" 2>/dev/null || true
         rm -rf "${WORK_DIR}"
     fi
     exit "${rc}"

@@ -971,7 +971,13 @@ fn is_pid_alive(pid: u32) -> bool {
                 return true;
             }
         }
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let Ok(raw_pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if raw_pid <= 0 {
+            return false;
+        }
+        let rc = unsafe { libc::kill(raw_pid, 0) };
         if rc == 0 {
             return true;
         }
@@ -1928,5 +1934,18 @@ fn execute_single_rust_step(
             operation: format!("provision step {}", other),
             reason: "step is retained in setup/AetherFlow-Setup shell bootstrap".to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod pid_bounds_tests {
+    use super::is_pid_alive;
+
+    #[test]
+    fn is_pid_alive_rejects_zero_and_out_of_range_u32_pids() {
+        assert!(!is_pid_alive(0));
+        assert!(!is_pid_alive(u32::MAX));
+        assert!(!is_pid_alive((i32::MAX as u32).saturating_add(1)));
+        assert!(is_pid_alive(std::process::id()));
     }
 }

@@ -10,38 +10,54 @@ sudo apt-get update
 echo "==> Installing build dependencies..."
 sudo apt-get install -y build-essential clang mold curl git bash jq pkg-config libssl-dev sqlite3 xz-utils ca-certificates
 
-echo "==> Installing Rust toolchain (pinned rustup-init + SHA-256 verification)..."
-if ! command -v cargo >/dev/null 2>&1; then
-    AF_RUSTUP_VERSION="${AF_RUSTUP_VERSION:-1.28.1}"
-    AF_RUST_TOOLCHAIN="${AF_RUST_TOOLCHAIN:-stable}"
-    case "$(uname -m)" in
-        x86_64|amd64)
-            RUSTUP_ARCH="x86_64-unknown-linux-gnu"
-            RUSTUP_SHA256="${AF_RUSTUP_SHA256:-a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f}"
-            ;;
-        aarch64|arm64)
-            RUSTUP_ARCH="aarch64-unknown-linux-gnu"
-            RUSTUP_SHA256="${AF_RUSTUP_SHA256:-c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a}"
-            ;;
-        armv7l|armhf)
-            RUSTUP_ARCH="armv7-unknown-linux-gnueabihf"
-            RUSTUP_SHA256="${AF_RUSTUP_SHA256:-62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb}"
-            ;;
-        *)
-            echo "error: unsupported architecture '$(uname -m)' for automatic rustup bootstrap" >&2
-            exit 1
-            ;;
-    esac
-    RUSTUP_BIN="$(mktemp /tmp/af-rustup-init.XXXXXX)"
-    trap 'rm -f "${RUSTUP_BIN:-}" "${NODE_TAR:-}"' EXIT
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-        "https://static.rust-lang.org/rustup/archive/${AF_RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" \
-        -o "${RUSTUP_BIN}"
-    printf '%s  %s\n' "${RUSTUP_SHA256}" "${RUSTUP_BIN}" | sha256sum -c -
-    chmod 0700 "${RUSTUP_BIN}"
-    "${RUSTUP_BIN}" -y --profile minimal --default-toolchain "${AF_RUST_TOOLCHAIN}"
-    rm -f "${RUSTUP_BIN}"
-    export PATH="${HOME}/.cargo/bin:${PATH}"
+echo "==> Installing Rust toolchain (pinned rustup-init + SHA-256 verification, >= 1.95.0)..."
+AF_RUSTUP_VERSION="${AF_RUSTUP_VERSION:-1.28.1}"
+AF_RUST_TOOLCHAIN="${AF_RUST_TOOLCHAIN:-1.99.1}"
+NEED_RUST_INSTALL=0
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    NEED_RUST_INSTALL=1
+else
+    CURRENT_RUSTC_VER="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
+    if [[ "${CURRENT_RUSTC_VER}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        if (( 10#${BASH_REMATCH[1]} < 1 || (10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 95) )); then
+            NEED_RUST_INSTALL=1
+        fi
+    fi
+fi
+if [[ "${NEED_RUST_INSTALL}" -eq 1 ]]; then
+    if command -v rustup >/dev/null 2>&1; then
+        rustup toolchain install "${AF_RUST_TOOLCHAIN}" --profile minimal
+        rustup default "${AF_RUST_TOOLCHAIN}"
+    else
+        case "$(uname -m)" in
+            x86_64|amd64)
+                RUSTUP_ARCH="x86_64-unknown-linux-gnu"
+                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f}"
+                ;;
+            aarch64|arm64)
+                RUSTUP_ARCH="aarch64-unknown-linux-gnu"
+                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a}"
+                ;;
+            armv7l|armhf)
+                RUSTUP_ARCH="armv7-unknown-linux-gnueabihf"
+                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb}"
+                ;;
+            *)
+                echo "error: unsupported architecture '$(uname -m)' for automatic rustup bootstrap" >&2
+                exit 1
+                ;;
+        esac
+        RUSTUP_BIN="$(mktemp /tmp/af-rustup-init.XXXXXX)"
+        trap 'rm -f "${RUSTUP_BIN:-}" "${NODE_TAR:-}"' EXIT
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+            "https://static.rust-lang.org/rustup/archive/${AF_RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" \
+            -o "${RUSTUP_BIN}"
+        printf '%s  %s\n' "${RUSTUP_SHA256}" "${RUSTUP_BIN}" | sha256sum -c -
+        chmod 0700 "${RUSTUP_BIN}"
+        "${RUSTUP_BIN}" -y --profile minimal --default-toolchain "${AF_RUST_TOOLCHAIN}"
+        rm -f "${RUSTUP_BIN}"
+        export PATH="${HOME}/.cargo/bin:${PATH}"
+    fi
 fi
 
 echo "==> Installing Node.js v24 (official release tarball + SHA-256 verification)..."

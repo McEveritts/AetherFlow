@@ -63,13 +63,25 @@ async fn run() -> Result<()> {
     };
 
     let vault = if config.telemetry_enabled() {
-        let opened =
-            TelemetryVault::open_with_max_rows(&config.database_file, config.max_telemetry_rows)?;
-        info!(
-            db_path = %opened.path().display(),
-            max_rows = config.max_telemetry_rows,
-            "Initialized SQLite WAL telemetry vault"
-        );
+        let opened = if config.database_type.trim().eq_ignore_ascii_case("memory") {
+            let mem = TelemetryVault::open_in_memory(config.max_telemetry_rows)?;
+            info!(
+                max_rows = config.max_telemetry_rows,
+                "Initialized in-memory SQLite telemetry vault"
+            );
+            mem
+        } else {
+            let disk = TelemetryVault::open_with_max_rows(
+                &config.database_file,
+                config.max_telemetry_rows,
+            )?;
+            info!(
+                db_path = %disk.path().display(),
+                max_rows = config.max_telemetry_rows,
+                "Initialized SQLite WAL telemetry vault"
+            );
+            disk
+        };
         Some(opened)
     } else {
         info!("Telemetry storage disabled via database_type=none");

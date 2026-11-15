@@ -262,6 +262,8 @@ if [[ "${RUN_TESTS}" == "1" ]]; then
     export JWT_SECRET="${JWT_SECRET:-ci-test-secret-exactly-32bytes!!}"
     export AES_MASTER_KEY="${AES_MASTER_KEY:-ci-test-aes-key-exactly-32bytes!}"
     export ALLOWED_HOSTS="${ALLOWED_HOSTS:-localhost:8080,127.0.0.1:8080}"
+    export AETHERFLOW_DISABLE_BACKGROUND_WORKERS="${AETHERFLOW_DISABLE_BACKGROUND_WORKERS:-1}"
+    export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
     if ! command -v mold >/dev/null 2>&1; then
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"

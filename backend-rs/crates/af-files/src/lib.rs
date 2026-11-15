@@ -2376,19 +2376,30 @@ fn openat2_with_resolve(
         },
         resolve,
     };
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            dirfd,
-            name.as_ptr(),
-            &how as *const OpenHow,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if rc >= 0 {
-        return Ok(unsafe { OwnedFd::from_raw_fd(rc as libc::c_int) });
+    for attempt in 0..64 {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                dirfd,
+                name.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            )
+        };
+        if rc >= 0 {
+            return Ok(unsafe { OwnedFd::from_raw_fd(rc as libc::c_int) });
+        }
+        let err = Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::EINTR) if attempt < 63 => {
+                if attempt >= 4 {
+                    std::thread::yield_now();
+                }
+            }
+            _ => return Err(err),
+        }
     }
-    Err(Error::last_os_error())
+    Err(Error::from_raw_os_error(libc::EAGAIN))
 }
 
 fn openat_no_symlinks(
@@ -2406,22 +2417,29 @@ fn openat_no_symlinks(
         },
         resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
     };
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            dirfd,
-            name.as_ptr(),
-            &how as *const OpenHow,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if rc >= 0 {
-        return Ok(unsafe { OwnedFd::from_raw_fd(rc as libc::c_int) });
-    }
-    let err = Error::last_os_error();
-    match err.raw_os_error() {
-        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => {}
-        _ => return Err(err),
+    for attempt in 0..64 {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                dirfd,
+                name.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            )
+        };
+        if rc >= 0 {
+            return Ok(unsafe { OwnedFd::from_raw_fd(rc as libc::c_int) });
+        }
+        let err = Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::EINTR) if attempt < 63 => {
+                if attempt >= 4 {
+                    std::thread::yield_now();
+                }
+            }
+            Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => break,
+            _ => return Err(err),
+        }
     }
 
     let fd = unsafe {

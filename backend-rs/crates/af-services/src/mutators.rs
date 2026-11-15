@@ -1424,6 +1424,31 @@ pub fn sync_apache_app_vhost(
     } else {
         ""
     };
+    let librespeed_tls = if clean_app == "librespeed" {
+        let settings_path = std::env::var("AETHERFLOW_LIBRESPEED_SETTINGS_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/opt/librespeed/settings.toml"));
+        Some(librespeed_apache_settings_tls_enabled(&settings_path))
+    } else {
+        None
+    };
+    let ssl_proxy_directive = if librespeed_tls == Some(true) {
+        "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+    } else {
+        ""
+    };
+    let http_scheme = if librespeed_tls == Some(true) {
+        "https"
+    } else {
+        "http"
+    };
+    let ws_scheme = if librespeed_tls == Some(true) {
+        "wss"
+    } else {
+        "ws"
+    };
 
     let mut backups: Vec<(PathBuf, Option<String>)> = Vec::new();
     let mut modified_any = false;
@@ -1432,7 +1457,7 @@ pub fn sync_apache_app_vhost(
     if !internal_domain.trim().is_empty() {
         let int_dom = validate_dns_domain(internal_domain)?;
         let default_vhost = format!(
-            "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
+            "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
         );
         let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
         let prev_int = fs::read_to_string(&conf_file).ok();
@@ -1441,6 +1466,7 @@ pub fn sync_apache_app_vhost(
             &default_vhost,
             Some(&int_dom),
             listen_port,
+            librespeed_tls,
             &preserved_blocks,
         );
         if prev_int.as_deref() != Some(vhost.as_str()) {
@@ -1469,7 +1495,7 @@ pub fn sync_apache_app_vhost(
     if external_access && !public_domain.trim().is_empty() {
         let pub_dom = validate_dns_domain(public_domain)?;
         let default_ext_vhost = format!(
-            "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
+            "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
         );
         let prev_ext = fs::read_to_string(&ext_conf_file).ok();
         let ext_vhost = render_or_update_apache_vhost(
@@ -1477,6 +1503,7 @@ pub fn sync_apache_app_vhost(
             &default_ext_vhost,
             Some(&pub_dom),
             listen_port,
+            librespeed_tls,
             &preserved_blocks,
         );
         if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
@@ -1539,6 +1566,7 @@ pub fn sync_apache_app_vhost(
                     &prev_raw,
                     None,
                     listen_port,
+                    librespeed_tls,
                     &preserved_blocks,
                 );
                 if prev_raw != updated && write_file_atomic(&path, updated.as_bytes()).is_ok() {
@@ -1575,9 +1603,24 @@ pub fn sync_apache_app_vhost(
     Ok(wrote_any)
 }
 
-fn rewrite_apache_proxy_url_port(token: &str, listen_port: i32) -> Option<String> {
+fn librespeed_apache_settings_tls_enabled(settings_path: &Path) -> bool {
+    af_runner::package_executor::librespeed_runner_settings_tls_enabled(settings_path)
+}
+
+fn rewrite_apache_proxy_url_port(
+    token: &str,
+    listen_port: i32,
+    upstream_tls: Option<bool>,
+) -> Option<String> {
     for scheme in ["http://", "https://", "ws://", "wss://"] {
         if let Some(rest) = token.strip_prefix(scheme) {
+            let out_scheme = match (scheme, upstream_tls) {
+                ("http://" | "https://", Some(true)) => "https://",
+                ("http://" | "https://", Some(false)) => "http://",
+                ("ws://" | "wss://", Some(true)) => "wss://",
+                ("ws://" | "wss://", Some(false)) => "ws://",
+                _ => scheme,
+            };
             for host in ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"] {
                 if let Some(after_host) = rest.strip_prefix(host) {
                     let digit_len = after_host
@@ -1586,7 +1629,7 @@ fn rewrite_apache_proxy_url_port(token: &str, listen_port: i32) -> Option<String
                         .count();
                     if digit_len > 0 {
                         let suffix = &after_host[digit_len..];
-                        return Some(format!("{scheme}{host}{listen_port}{suffix}"));
+                        return Some(format!("{out_scheme}{host}{listen_port}{suffix}"));
                     }
                 }
             }
@@ -1650,6 +1693,7 @@ fn render_or_update_apache_vhost(
     default_template: &str,
     desired_server_name: Option<&str>,
     listen_port: i32,
+    upstream_tls: Option<bool>,
     preserved_blocks: &[String],
 ) -> String {
     let base = match existing_raw {
@@ -1659,6 +1703,20 @@ fn render_or_update_apache_vhost(
                 let trimmed = line.trim_start();
                 let indent = &line[..line.len() - trimmed.len()];
                 let lower = trimmed.to_ascii_lowercase();
+                if upstream_tls == Some(false)
+                    && (lower.starts_with("sslproxyengine ")
+                        || lower.starts_with("sslproxyengine\t")
+                        || lower.starts_with("sslproxyverify ")
+                        || lower.starts_with("sslproxyverify\t")
+                        || lower.starts_with("sslproxycheckpeercn ")
+                        || lower.starts_with("sslproxycheckpeercn\t")
+                        || lower.starts_with("sslproxycheckpeername ")
+                        || lower.starts_with("sslproxycheckpeername\t")
+                        || lower.starts_with("sslproxycheckpeerexpire ")
+                        || lower.starts_with("sslproxycheckpeerexpire\t"))
+                {
+                    continue;
+                }
                 if let Some(dom) = desired_server_name {
                     if lower.starts_with("servername ") || lower.starts_with("servername\t") {
                         out_lines.push(format!("{indent}ServerName {dom}"));
@@ -1675,7 +1733,7 @@ fn render_or_update_apache_vhost(
                     let tokens: Vec<String> = trimmed
                         .split_whitespace()
                         .map(|tok| {
-                            rewrite_apache_proxy_url_port(tok, listen_port)
+                            rewrite_apache_proxy_url_port(tok, listen_port, upstream_tls)
                                 .unwrap_or_else(|| tok.to_string())
                         })
                         .collect();
@@ -1683,6 +1741,33 @@ fn render_or_update_apache_vhost(
                 } else {
                     out_lines.push(line.to_string());
                 }
+            }
+            if upstream_tls == Some(true)
+                && !out_lines
+                    .iter()
+                    .any(|l| l.trim().to_ascii_lowercase().starts_with("sslproxyengine "))
+            {
+                let insert_pos = out_lines
+                    .iter()
+                    .position(|l| {
+                        l.trim()
+                            .to_ascii_lowercase()
+                            .starts_with("proxypreservehost ")
+                    })
+                    .or_else(|| {
+                        out_lines
+                            .iter()
+                            .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
+                    })
+                    .unwrap_or(out_lines.len());
+                let ssl_lines = [
+                    "    SSLProxyEngine On".to_string(),
+                    "    SSLProxyVerify none".to_string(),
+                    "    SSLProxyCheckPeerCN off".to_string(),
+                    "    SSLProxyCheckPeerName off".to_string(),
+                    "    SSLProxyCheckPeerExpire off".to_string(),
+                ];
+                out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
             joined.push('\n');

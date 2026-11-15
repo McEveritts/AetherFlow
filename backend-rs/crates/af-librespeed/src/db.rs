@@ -73,9 +73,58 @@ pub struct TelemetryVault {
     max_rows: usize,
 }
 
+const TELEMETRY_SCHEMA_SQL: &str = "
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE IF NOT EXISTS telemetry_meta (
+        key TEXT PRIMARY KEY,
+        value BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS telemetry_bolt_migrations (
+        source_name TEXT PRIMARY KEY,
+        imported_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS telemetry_legacy_raw_ids (
+        uuid TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS speedtest_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        timestamp TEXT NOT NULL,
+        ip TEXT NOT NULL DEFAULT '',
+        ispinfo TEXT NOT NULL DEFAULT '',
+        extra TEXT NOT NULL DEFAULT '',
+        ua TEXT NOT NULL DEFAULT '',
+        lang TEXT NOT NULL DEFAULT '',
+        dl TEXT NOT NULL DEFAULT '',
+        ul TEXT NOT NULL DEFAULT '',
+        ping TEXT NOT NULL DEFAULT '',
+        jitter TEXT NOT NULL DEFAULT '',
+        log TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_speedtest_users_ts_uuid
+        ON speedtest_users (timestamp DESC, uuid DESC);
+";
+
 impl TelemetryVault {
     pub fn open(db_path: &Path) -> Result<Self> {
         Self::open_with_max_rows(db_path, crate::config::DEFAULT_MAX_TELEMETRY_ROWS)
+    }
+
+    pub fn open_in_memory(max_rows: usize) -> Result<Self> {
+        if max_rows == 0 {
+            bail!("max_telemetry_rows must be greater than 0");
+        }
+        let conn = Connection::open_in_memory()
+            .context("failed to open in-memory SQLite telemetry database")?;
+        conn.execute_batch(TELEMETRY_SCHEMA_SQL)
+            .context("failed to initialize in-memory telemetry schema")?;
+        let obfuscation_key = init_or_load_obfuscation_key(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path: PathBuf::from(":memory:"),
+            obfuscation_key,
+            max_rows,
+        })
     }
 
     pub fn open_with_max_rows(db_path: &Path, max_rows: usize) -> Result<Self> {
@@ -90,6 +139,16 @@ impl TelemetryVault {
         ensure_parent_dirs(db_path)?;
         verify_parent_dir_not_world_writable(db_path)?;
         let legacy_backup = guard_and_backup_legacy_boltdb(db_path)?;
+        let sibling_bolt_backup = if let Some(parent) = db_path.parent() {
+            let sibling_bolt = parent.join("speedtest.bolt");
+            if sibling_bolt != db_path {
+                guard_and_backup_legacy_boltdb(&sibling_bolt).ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         verify_and_harden_sidecars(db_path)?;
 
         // Create/verify leaf file with O_NOFOLLOW and enforce 0600 permissions on the opened fd
@@ -127,66 +186,23 @@ impl TelemetryVault {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS telemetry_meta (
-                 key TEXT PRIMARY KEY,
-                 value BLOB NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS speedtest_users (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 uuid TEXT NOT NULL UNIQUE,
-                 timestamp TEXT NOT NULL,
-                 ip TEXT NOT NULL DEFAULT '',
-                 ispinfo TEXT NOT NULL DEFAULT '',
-                 extra TEXT NOT NULL DEFAULT '',
-                 ua TEXT NOT NULL DEFAULT '',
-                 lang TEXT NOT NULL DEFAULT '',
-                 dl TEXT NOT NULL DEFAULT '',
-                 ul TEXT NOT NULL DEFAULT '',
-                 ping TEXT NOT NULL DEFAULT '',
-                 jitter TEXT NOT NULL DEFAULT '',
-                 log TEXT NOT NULL DEFAULT ''
-             );
-             CREATE INDEX IF NOT EXISTS idx_speedtest_users_ts_uuid
-                 ON speedtest_users (timestamp DESC, uuid DESC);",
+             PRAGMA busy_timeout = 5000;",
         )
-        .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
+        .with_context(|| format!("failed to configure WAL pragmas at {}", db_path.display()))?;
+        conn.execute_batch(TELEMETRY_SCHEMA_SQL)
+            .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
 
         verify_and_harden_sidecars(db_path)?;
 
-        if let Some(ref backup_path) = legacy_backup {
-            import_legacy_boltdb_if_valid(backup_path, &mut conn, max_rows);
-        }
+        discover_and_import_legacy_bolt_backups(
+            db_path,
+            legacy_backup.as_deref(),
+            sibling_bolt_backup.as_deref(),
+            &mut conn,
+            max_rows,
+        );
 
-        let mut candidate_key = [0u8; 32];
-        OsRng.fill_bytes(&mut candidate_key);
-        conn.execute(
-            "INSERT OR IGNORE INTO telemetry_meta (key, value) VALUES ('obfuscation_key', ?1)",
-            params![candidate_key.as_slice()],
-        )
-        .context("failed to seed telemetry obfuscation_key")?;
-
-        let stored_blob: Vec<u8> = conn
-            .query_row(
-                "SELECT value FROM telemetry_meta WHERE key = 'obfuscation_key'",
-                [],
-                |row| row.get(0),
-            )
-            .context("failed to load telemetry obfuscation_key")?;
-
-        let obfuscation_key = if stored_blob.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&stored_blob);
-            arr
-        } else {
-            conn.execute(
-                "UPDATE telemetry_meta SET value = ?1 WHERE key = 'obfuscation_key'",
-                params![candidate_key.as_slice()],
-            )
-            .context("failed to repair telemetry obfuscation_key")?;
-            candidate_key
-        };
+        let obfuscation_key = init_or_load_obfuscation_key(&conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -204,13 +220,42 @@ impl TelemetryVault {
         &self.obfuscation_key
     }
 
+    pub async fn is_legacy_raw_id(&self, uuid: String) -> Result<bool> {
+        let conn_arc = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn_arc
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SQLite vault mutex poisoned"))?;
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM telemetry_legacy_raw_ids WHERE uuid = ?1 LIMIT 1",
+                    params![uuid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("failed querying telemetry_legacy_raw_ids")?;
+            Ok(found.is_some())
+        })
+        .await
+        .context("legacy raw id lookup panicked")?
+    }
+
     pub async fn insert(&self, record: NewTelemetryRecord) -> Result<()> {
+        self.insert_with_mode(record, false).await
+    }
+
+    pub async fn insert_with_mode(
+        &self,
+        record: NewTelemetryRecord,
+        issued_raw_id: bool,
+    ) -> Result<()> {
         let conn_arc = Arc::clone(&self.conn);
         let max_rows = self.max_rows;
         task::spawn_blocking(move || {
             let conn = conn_arc
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SQLite vault mutex poisoned"))?;
+            let uuid_copy = record.uuid.clone();
             conn.execute(
                 "INSERT INTO speedtest_users
                  (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
@@ -232,6 +277,14 @@ impl TelemetryVault {
             )
             .context("failed to insert telemetry record")?;
 
+            if issued_raw_id {
+                conn.execute(
+                    "INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid) VALUES (?1)",
+                    params![uuid_copy],
+                )
+                .context("failed to record unobfuscated share ID")?;
+            }
+
             let keep = i64::try_from(max_rows).unwrap_or(100_000);
             conn.execute(
                 "DELETE FROM speedtest_users
@@ -242,6 +295,12 @@ impl TelemetryVault {
                 params![keep],
             )
             .context("failed to enforce telemetry retention cap")?;
+            conn.execute(
+                "DELETE FROM telemetry_legacy_raw_ids
+                 WHERE uuid NOT IN (SELECT uuid FROM speedtest_users)",
+                [],
+            )
+            .context("failed to prune telemetry_legacy_raw_ids")?;
             Ok(())
         })
         .await
@@ -715,7 +774,18 @@ fn decode_bolt_telemetry_leaf(key_bytes: &[u8], val_bytes: &[u8]) -> Option<NewT
             raw_uuid = key_str.trim().to_string();
         }
     }
-    let uuid = canonicalize_ulid(&raw_uuid)?;
+    let trimmed_uuid = raw_uuid.trim();
+    let uuid = if let Some(canon) = canonicalize_ulid(trimmed_uuid) {
+        canon
+    } else if (8..=64).contains(&trimmed_uuid.len())
+        && trimmed_uuid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        trimmed_uuid.to_string()
+    } else {
+        return None;
+    };
 
     let dl = clamp_imported_utf8(extract_json_field_ci(&map, &["dl", "download"]).trim(), 24);
     let ul = clamp_imported_utf8(extract_json_field_ci(&map, &["ul", "upload"]).trim(), 24);
@@ -920,7 +990,144 @@ pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecor
     Ok(records)
 }
 
-fn import_legacy_boltdb_if_valid(backup_path: &Path, conn: &mut Connection, max_rows: usize) {
+fn init_or_load_obfuscation_key(conn: &Connection) -> Result<[u8; 32]> {
+    let had_obfuscation_key: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM telemetry_meta WHERE key = 'obfuscation_key' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed probing telemetry obfuscation_key")?;
+    if had_obfuscation_key.is_none() {
+        conn.execute(
+            "INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid) SELECT uuid FROM speedtest_users",
+            [],
+        )
+        .context("failed preserving pre-obfuscation SQLite share IDs")?;
+    }
+
+    let mut candidate_key = [0u8; 32];
+    OsRng.fill_bytes(&mut candidate_key);
+    conn.execute(
+        "INSERT OR IGNORE INTO telemetry_meta (key, value) VALUES ('obfuscation_key', ?1)",
+        params![candidate_key.as_slice()],
+    )
+    .context("failed to seed telemetry obfuscation_key")?;
+
+    let stored_blob: Vec<u8> = conn
+        .query_row(
+            "SELECT value FROM telemetry_meta WHERE key = 'obfuscation_key'",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to load telemetry obfuscation_key")?;
+
+    if stored_blob.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&stored_blob);
+        Ok(arr)
+    } else {
+        conn.execute(
+            "UPDATE telemetry_meta SET value = ?1 WHERE key = 'obfuscation_key'",
+            params![candidate_key.as_slice()],
+        )
+        .context("failed to repair telemetry obfuscation_key")?;
+        Ok(candidate_key)
+    }
+}
+
+fn discover_and_import_legacy_bolt_backups(
+    db_path: &Path,
+    primary_backup: Option<&Path>,
+    sibling_backup: Option<&Path>,
+    conn: &mut Connection,
+    max_rows: usize,
+) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = primary_backup {
+        candidates.push(p.to_path_buf());
+    }
+    if let Some(s) = sibling_backup {
+        if !candidates.iter().any(|c| c == s) {
+            candidates.push(s.to_path_buf());
+        }
+    }
+    if let (Some(parent), Some(db_fname)) = (
+        db_path.parent(),
+        db_path.file_name().and_then(|s| s.to_str()),
+    ) {
+        if let Ok(entries) = fs::read_dir(parent) {
+            let bolt_bak_exact = format!("{db_fname}.bolt.bak");
+            let bolt_bak_prefix = format!("{db_fname}.bolt.bak.");
+            let pre_migrate_prefix = format!("{db_fname}.pre-migrate.");
+            let mut extra: Vec<PathBuf> = Vec::new();
+            for entry in entries.flatten() {
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if !ft.is_file() {
+                    continue;
+                }
+                let fname_os = entry.file_name();
+                let Some(fname) = fname_os.to_str() else {
+                    continue;
+                };
+                let is_bolt_backup = fname == bolt_bak_exact
+                    || fname.starts_with(&bolt_bak_prefix)
+                    || fname == "speedtest.bolt.bak"
+                    || fname.starts_with("speedtest.bolt.bak.")
+                    || (fname.starts_with(&pre_migrate_prefix) && fname.ends_with(".bak"));
+                if is_bolt_backup {
+                    let path = entry.path();
+                    if !candidates.iter().any(|c| c == &path) {
+                        extra.push(path);
+                    }
+                }
+            }
+            extra.sort();
+            candidates.extend(extra);
+        }
+    }
+
+    for cand in candidates {
+        let Some(source_name) = cand.file_name().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let already_migrated: bool = conn
+            .query_row(
+                "SELECT 1 FROM telemetry_bolt_migrations WHERE source_name = ?1 LIMIT 1",
+                params![&source_name],
+                |_| Ok(true),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if already_migrated {
+            continue;
+        }
+        import_legacy_boltdb_if_valid(&cand, &source_name, conn, max_rows);
+    }
+}
+
+fn mark_bolt_source_migrated(conn: &Connection, source_name: &str) {
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO telemetry_bolt_migrations (source_name, imported_at) VALUES (?1, ?2)",
+        params![source_name, now_ts],
+    );
+}
+
+fn import_legacy_boltdb_if_valid(
+    backup_path: &Path,
+    source_name: &str,
+    conn: &mut Connection,
+    max_rows: usize,
+) {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -971,16 +1178,23 @@ fn import_legacy_boltdb_if_valid(backup_path: &Path, conn: &mut Connection, max_
                 reason = %err,
                 "Legacy non-SQLite backup is not an importable BoltDB v2 archive; starting fresh SQLite vault"
             );
+            mark_bolt_source_migrated(conn, source_name);
             return;
         }
     };
     if records.is_empty() {
+        mark_bolt_source_migrated(conn, source_name);
         return;
     }
     if records.len() > max_rows {
         let drop_count = records.len() - max_rows;
         records.drain(0..drop_count);
     }
+
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
     let imported = (|| -> Result<usize> {
         let tx = conn.transaction()?;
@@ -991,6 +1205,8 @@ fn import_legacy_boltdb_if_valid(backup_path: &Path, conn: &mut Connection, max_
                  (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
+            let mut legacy_id_stmt =
+                tx.prepare("INSERT OR IGNORE INTO telemetry_legacy_raw_ids (uuid) VALUES (?1)")?;
             for rec in &records {
                 inserted += stmt.execute(params![
                     rec.uuid,
@@ -1006,8 +1222,13 @@ fn import_legacy_boltdb_if_valid(backup_path: &Path, conn: &mut Connection, max_
                     rec.jitter,
                     rec.log,
                 ])?;
+                legacy_id_stmt.execute(params![rec.uuid])?;
             }
         }
+        tx.execute(
+            "INSERT OR IGNORE INTO telemetry_bolt_migrations (source_name, imported_at) VALUES (?1, ?2)",
+            params![source_name, now_ts],
+        )?;
         tx.commit()?;
         Ok(inserted)
     })();
@@ -1333,5 +1554,23 @@ mod tests {
         let self_off = page_size * 3 + BBOLT_PAGE_HEADER_BYTES + 8;
         cyclic[self_off..self_off + 8].copy_from_slice(&3u64.to_le_bytes());
         assert!(parse_boltdb_telemetry_bytes(&cyclic).is_err());
+
+        // Crash-resumable migration: simulate process crash right after BoltDB was renamed to
+        // `speedtest.db.bolt.bak` (before SQLite imported rows), and confirm next startup
+        // discovers `.bolt.bak`, imports records once, and records legacy raw IDs.
+        let crash_tmp = TempDirGuard::new("bolt-crash-resume");
+        let crash_db = crash_tmp.0.join("speedtest.db");
+        let crash_bak = crash_tmp.0.join("speedtest.db.bolt.bak");
+        fs::write(&crash_bak, &archive).unwrap();
+        let resumed = TelemetryVault::open(&crash_db).expect("resume interrupted bolt migration");
+        assert_eq!(resumed.list_recent(10).await.unwrap().len(), 2);
+        assert!(resumed
+            .is_legacy_raw_id("01JABCDEFGHJKMNPQRSTVWXYZ1".to_string())
+            .await
+            .unwrap());
+
+        // In-memory vault supports full telemetry lifecycle without touching disk
+        let mem_vault = TelemetryVault::open_in_memory(10).expect("in-memory vault");
+        assert_eq!(mem_vault.path(), Path::new(":memory:"));
     }
 }
