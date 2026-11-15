@@ -1158,6 +1158,32 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             )
             self.assertNotEqual(rel_res.returncode, 0, "Relative AF_INSTALL_ROOT must fail closed")
 
+            # Non-root `updateAetherFlow --check` succeeds on confined `.version` and rejects symlinked `.version`
+            check_root = Path(tmp) / "check-only-root"
+            (check_root / "current").mkdir(parents=True)
+            (check_root / "current" / ".version").write_text("v4.0.0\n", encoding="utf-8")
+            check_ok = subprocess.run(
+                ["bash", str(update_shim), "--check"],
+                env={**env, "AF_INSTALL_ROOT": str(check_root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(check_ok.returncode, 0, check_ok.stderr)
+            self.assertIn("current_version=v4.0.0", check_ok.stdout)
+
+            outside_secret = Path(tmp) / "outside-secret.txt"
+            outside_secret.write_text("TOP_SECRET_HOST_LINE\n", encoding="utf-8")
+            (check_root / "current" / ".version").unlink()
+            (check_root / "current" / ".version").symlink_to(outside_secret)
+            check_sym = subprocess.run(
+                ["bash", str(update_shim), "--check"],
+                env={**env, "AF_INSTALL_ROOT": str(check_root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(check_sym.returncode, 0, "Symlinked .version must fail closed")
+            self.assertNotIn("TOP_SECRET_HOST_LINE", check_sym.stdout + check_sym.stderr)
+
         ls_install = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
         ls_remove = (ROOT / "packages/package/remove/removepackage-librespeed").read_text(encoding="utf-8")
         self.assertIn("/etc/systemd/system/librespeed.socket", ls_install)

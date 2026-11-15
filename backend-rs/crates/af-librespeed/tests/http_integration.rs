@@ -2485,6 +2485,7 @@ async fn migrated_unredacted_records_are_scrubbed_on_results_json_png_and_stats_
         .to_string();
 
     let detail_resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/stats?op=id&id={migrated_uuid}"))
@@ -2505,4 +2506,53 @@ async fn migrated_unredacted_records_are_scrubbed_on_results_json_png_and_stats_
         "stats detail leaked migrated loc: {stats_html}"
     );
     assert!(stats_html.contains("0.0.0.0"));
+
+    // 3. Deeply nested stringified ISP JSON (`outer.level.more.rawIspInfo`) submitted over POST /results/telemetry.php
+    // must never leak geolocation (`loc`) via public `/results/json` when redaction is enabled.
+    let nested_isp = serde_json::json!({
+        "outer": {
+            "level": {
+                "more": {
+                    "rawIspInfo": r#"{"ip":"198.51.100.44","loc":"52.5200,13.4050","city":"Berlin","org":"AS64500 DeepISP"}"#
+                }
+            }
+        }
+    })
+    .to_string();
+    let encoded_isp: String = nested_isp.bytes().map(|b| format!("%{b:02X}")).collect();
+    let form_body = format!("dl=512.0&ul=256.0&ping=4.1&jitter=0.4&ispinfo={encoded_isp}");
+    let post_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/results/telemetry.php")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post_resp.status(), StatusCode::OK);
+    let post_text = String::from_utf8(body_bytes(post_resp).await).unwrap();
+    let new_id = post_text.strip_prefix("id ").unwrap().trim();
+    let check_json_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={new_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(check_json_resp.status(), StatusCode::OK);
+    let check_json_body = String::from_utf8(body_bytes(check_json_resp).await).unwrap();
+    assert!(
+        !check_json_body.contains("52.5200,13.4050"),
+        "deeply nested stringified loc leaked: {check_json_body}"
+    );
+    assert!(
+        !check_json_body.contains("Berlin"),
+        "deeply nested stringified city leaked: {check_json_body}"
+    );
 }

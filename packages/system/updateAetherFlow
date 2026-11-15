@@ -45,8 +45,8 @@ if [[ "${OFFLINE}" == "true" && "${DRY_RUN}" != "true" ]]; then
     exit 1
 fi
 
-if [[ "${DRY_RUN}" != "true" && "${EUID}" -ne 0 ]]; then
-    echo "[ERROR] updateAetherFlow must run as root (re-run with sudo, or pass --help / --dry-run)." >&2
+if [[ "${DRY_RUN}" != "true" && "${CHECK_ONLY}" != "true" && "${EUID}" -ne 0 ]]; then
+    echo "[ERROR] updateAetherFlow must run as root (re-run with sudo, or pass --check / --help / --dry-run)." >&2
     exit 1
 fi
 
@@ -135,13 +135,22 @@ if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
     RM_GLOBAL_ARGS+=(--root "${AF_ROOT}")
 fi
 
+read_confined_version_file() {
+    local cand="$1" cand_real
+    [[ ! -L "${cand}" && -f "${cand}" ]] || return 1
+    cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+    [[ -n "${cand_real}" && -f "${cand_real}" ]] || return 1
+    is_confined_to_install_root "${cand_real}" || return 1
+    head -n 1 -- "${cand_real}"
+}
+
 if [[ "${CHECK_ONLY}" == "true" ]]; then
     [[ "${DRY_RUN}" == "true" ]] && { echo "[DRY-RUN] Would check release status under ${AF_ROOT}"; exit 0; }
     [[ -n "${AF_BIN}" ]] && exec "${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release status
-    if [[ -f "${AF_ROOT}/current/.version" ]]; then
-        printf 'current_version=%s\n' "$(head -n 1 "${AF_ROOT}/current/.version")"; exit 0
-    elif [[ -f "${AF_ROOT}/opt/AetherFlow/current/.version" ]]; then
-        printf 'current_version=%s\n' "$(head -n 1 "${AF_ROOT}/opt/AetherFlow/current/.version")"; exit 0
+    if ver_out="$(read_confined_version_file "${AF_ROOT}/current/.version")"; then
+        printf 'current_version=%s\n' "${ver_out}"; exit 0
+    elif ver_out="$(read_confined_version_file "${AF_ROOT}/opt/AetherFlow/current/.version")"; then
+        printf 'current_version=%s\n' "${ver_out}"; exit 0
     fi
     echo "[ERROR] No native af CLI or active release slot found under ${AF_ROOT}" >&2
     exit 1

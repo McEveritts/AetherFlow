@@ -253,18 +253,22 @@ where
             self.lifecycle.query_unit_environment("aetherflow-api")
         };
         let resolved_db = try_resolve_db_path(&self.base_config, unit_env.as_deref())?;
-        let current_release = read_current_link_target(&self.base_config.current_link);
+        let current_release =
+            read_current_link_target(&self.base_config.current_link).filter(|dir| {
+                is_confined_to_isolated_root(dir, self.base_config.isolated_root.as_deref())
+            });
         let current_version = current_release
             .as_ref()
-            .and_then(|dir| fs::read_to_string(dir.join(".version")).ok())
+            .and_then(|dir| read_small_regular_file_nofollow(&dir.join(".version")))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let previous_release =
-            fs::read_to_string(self.base_config.releases_dir.join(".previous_release"))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from);
+        let previous_release = read_small_regular_file_nofollow(
+            &self.base_config.releases_dir.join(".previous_release"),
+        )
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|dir| is_confined_to_isolated_root(dir, self.base_config.isolated_root.as_deref()));
 
         let mut available_releases = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_config.releases_dir) {
@@ -1294,4 +1298,36 @@ fn resolve_confined_legacy_current_slots(cfg: &ReleaseConfig) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn is_confined_to_isolated_root(candidate: &Path, isolated_root: Option<&Path>) -> bool {
+    let Some(root) = isolated_root else {
+        return true;
+    };
+    let Ok(canon_root) = fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(canon_cand) = fs::canonicalize(candidate) else {
+        return false;
+    };
+    canon_cand == canon_root || canon_cand.starts_with(&canon_root)
+}
+
+fn read_small_regular_file_nofollow(path: &Path) -> Option<String> {
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    let file = opts.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    let mut buf = String::new();
+    file.take(4096).read_to_string(&mut buf).ok()?;
+    Some(buf)
 }

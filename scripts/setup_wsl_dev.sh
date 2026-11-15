@@ -47,7 +47,9 @@ if [[ "${NEED_RUST_INSTALL}" -eq 1 ]]; then
                 exit 1
                 ;;
         esac
-        RUSTUP_BIN="$(mktemp /tmp/af-rustup-init.XXXXXX)"
+        RUSTUP_STAGE_DIR="${AF_RUSTUP_TMPDIR:-${HOME}/.cache/aetherflow-rustup}"
+        mkdir -p -m 0700 "${RUSTUP_STAGE_DIR}"
+        RUSTUP_BIN="$(mktemp "${RUSTUP_STAGE_DIR}/af-rustup-init.XXXXXX")"
         trap 'rm -f "${RUSTUP_BIN:-}" "${NODE_TAR:-}"' EXIT
         curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
             "https://static.rust-lang.org/rustup/archive/${AF_RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" \

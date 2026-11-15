@@ -26,14 +26,36 @@ static IPV6_CANDIDATE_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid IPv6 candidate regex")
 });
 
-static HOSTNAME_JSON_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#""hostname"\s*:\s*"(?:[^"\\]|\\.)*""#).expect("valid hostname regex")
+static SENSITIVE_JSON_STR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng)"\s*:\s*"(?:[^"\\]|\\.)*""#,
+    )
+    .expect("valid sensitive JSON string regex")
 });
 
-static HOSTNAME_ESCAPED_JSON_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\\"hostname\\"\s*:\s*\\"(?:[^"\\]|\\[^"])*?\\""#)
-        .expect("valid escaped hostname regex")
+static SENSITIVE_ESCAPED_JSON_STR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\\"(hostname|city|region|postal|loc|latitude|longitude|lat|lon|lng)\\"\s*:\s*\\"(?:[^"\\]|\\[^"])*?\\""#,
+    )
+    .expect("valid escaped sensitive JSON string regex")
 });
+
+static SENSITIVE_JSON_NUM_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)"(latitude|longitude|lat|lon|lng)"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
+    )
+    .expect("valid sensitive JSON numeric regex")
+});
+
+static SENSITIVE_ESCAPED_JSON_NUM_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)\\"(latitude|longitude|lat|lon|lng)\\"\s*:\s*-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"#,
+    )
+    .expect("valid escaped sensitive JSON numeric regex")
+});
+
+const MAX_JSON_TREE_DEPTH: usize = 32;
+const MAX_JSON_STR_DEPTH: usize = 8;
 
 pub fn parse_ip_token(raw: &str) -> Option<IpAddr> {
     let trimmed = raw.trim();
@@ -401,27 +423,40 @@ pub fn redact_freeform_text(input: &str) -> String {
     // 2. Replace IPv4 addresses.
     let after_v4 = IPV4_RE.replace_all(&after_v6, "0.0.0.0");
 
-    // 3. Replace `"hostname":"..."` in both top-level JSON and stringified `rawIspInfo` JSON.
-    let after_unescaped = HOSTNAME_JSON_RE.replace_all(&after_v4, r#""hostname":"REDACTED""#);
-    HOSTNAME_ESCAPED_JSON_RE
-        .replace_all(&after_unescaped, r#"\"hostname\":\"REDACTED\""#)
+    // 3. Scrub sensitive location/hostname JSON fields in both top-level and escaped JSON strings.
+    let after_str = SENSITIVE_JSON_STR_RE.replace_all(&after_v4, r#""$1":"REDACTED""#);
+    let after_esc_str =
+        SENSITIVE_ESCAPED_JSON_STR_RE.replace_all(&after_str, r#"\"$1\":\"REDACTED\""#);
+    let after_num = SENSITIVE_JSON_NUM_RE.replace_all(&after_esc_str, r#""$1":"REDACTED""#);
+    SENSITIVE_ESCAPED_JSON_NUM_RE
+        .replace_all(&after_num, r#"\"$1\":\"REDACTED\""#)
         .into_owned()
 }
 
-fn redact_json_value_in_place_depth(val: &mut serde_json::Value, depth: usize) {
+fn redact_json_value_in_place_depth(
+    val: &mut serde_json::Value,
+    tree_depth: usize,
+    str_depth: usize,
+) {
+    if tree_depth >= MAX_JSON_TREE_DEPTH {
+        *val = serde_json::Value::String("REDACTED".to_string());
+        return;
+    }
     match val {
         serde_json::Value::String(s) => {
-            if depth < 4 {
-                let trimmed = s.trim();
-                if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                    || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-                {
-                    if let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        redact_json_value_in_place_depth(&mut nested, depth + 1);
-                        if let Ok(serialized) = serde_json::to_string(&nested) {
-                            *s = redact_freeform_text(&serialized);
-                            return;
-                        }
+            let trimmed = s.trim();
+            let looks_json_container = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+            if looks_json_container {
+                if str_depth >= MAX_JSON_STR_DEPTH {
+                    *s = "REDACTED".to_string();
+                    return;
+                }
+                if let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    redact_json_value_in_place_depth(&mut nested, tree_depth + 1, str_depth + 1);
+                    if let Ok(serialized) = serde_json::to_string(&nested) {
+                        *s = redact_freeform_text(&serialized);
+                        return;
                     }
                 }
             }
@@ -429,7 +464,7 @@ fn redact_json_value_in_place_depth(val: &mut serde_json::Value, depth: usize) {
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                redact_json_value_in_place_depth(item, depth + 1);
+                redact_json_value_in_place_depth(item, tree_depth + 1, str_depth);
             }
         }
         serde_json::Value::Object(obj) => {
@@ -456,7 +491,7 @@ fn redact_json_value_in_place_depth(val: &mut serde_json::Value, depth: usize) {
                         .unwrap_or_else(|| "0.0.0.0".to_string());
                     *v = serde_json::Value::String(scrubbed);
                 } else {
-                    redact_json_value_in_place_depth(v, depth + 1);
+                    redact_json_value_in_place_depth(v, tree_depth + 1, str_depth);
                 }
             }
         }
@@ -465,7 +500,7 @@ fn redact_json_value_in_place_depth(val: &mut serde_json::Value, depth: usize) {
 }
 
 pub fn redact_json_value_in_place(val: &mut serde_json::Value) {
-    redact_json_value_in_place_depth(val, 0);
+    redact_json_value_in_place_depth(val, 0, 0);
 }
 
 pub fn sanitize_ispinfo_for_redaction(raw: &str) -> String {
@@ -678,6 +713,44 @@ mod tests {
         assert_eq!(
             out,
             "peer::: id::: addr::: [::]:8443 peer::: map::: mac=aa:bb:cc:dd:ee:ff ts=1731638400000: ok"
+        );
+    }
+
+    #[test]
+    fn redacts_deeply_nested_stringified_ispinfo_and_fails_closed_at_max_depth() {
+        // Depth-4 JSON tree wrapping stringified rawIspInfo with coordinates (Sol SEC-PRIVACY-02 probe)
+        let deep_tree = serde_json::json!({
+            "outer": {
+                "level": {
+                    "more": {
+                        "rawIspInfo": r#"{"ip":"203.0.113.42","hostname":"cpe.example.net","city":"Berlin","region":"BE","postal":"10115","loc":"52.5200,13.4050","latitude":52.52,"longitude":13.405,"org":"AS64500 FiberCo"}"#
+                    }
+                }
+            }
+        });
+        let sanitized = sanitize_ispinfo_for_redaction(&deep_tree.to_string());
+        assert!(!sanitized.contains("52.5200,13.4050"), "got: {sanitized}");
+        assert!(!sanitized.contains("52.52"), "got: {sanitized}");
+        assert!(!sanitized.contains("13.405"), "got: {sanitized}");
+        assert!(!sanitized.contains("Berlin"), "got: {sanitized}");
+        assert!(!sanitized.contains("10115"), "got: {sanitized}");
+        assert!(!sanitized.contains("203.0.113.42"), "got: {sanitized}");
+        assert!(!sanitized.contains("cpe.example.net"), "got: {sanitized}");
+        assert!(sanitized.contains("AS64500 FiberCo"), "got: {sanitized}");
+
+        // Exceeding MAX_JSON_STR_DEPTH (10 nested JSON-in-string layers) fails closed with REDACTED
+        let mut onion = r#"{"loc":"48.8566,2.3522","secretField":"unkeyed"}"#.to_string();
+        for _ in 0..10 {
+            onion = serde_json::json!({ "nested": onion }).to_string();
+        }
+        let onion_sanitized = sanitize_ispinfo_for_redaction(&onion);
+        assert!(
+            !onion_sanitized.contains("48.8566,2.3522"),
+            "got: {onion_sanitized}"
+        );
+        assert!(
+            !onion_sanitized.contains("unkeyed"),
+            "got: {onion_sanitized}"
         );
     }
 }

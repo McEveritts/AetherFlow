@@ -11510,6 +11510,16 @@ pub fn librespeed_runner_settings_tls_config(
     settings_path: &Path,
     fs_root: Option<&Path>,
 ) -> LibreSpeedUpstreamTlsConfig {
+    try_librespeed_runner_settings_tls_config(settings_path, fs_root).unwrap_or_default()
+}
+
+/// Reads `/opt/librespeed/settings.toml` safely (`O_NOFOLLOW` + non-symlink ancestors).
+/// Returns `None` when `PermissionDenied` prevents an unprivileged caller from inspecting
+/// `settings.toml`, allowing callers with an existing vhost to preserve current TLS directives.
+pub fn try_librespeed_runner_settings_tls_config(
+    settings_path: &Path,
+    fs_root: Option<&Path>,
+) -> Option<LibreSpeedUpstreamTlsConfig> {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -11519,11 +11529,13 @@ pub fn librespeed_runner_settings_tls_config(
         if dir.as_os_str().is_empty() || dir == Path::new("/") {
             break;
         }
-        if fs::symlink_metadata(dir)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return LibreSpeedUpstreamTlsConfig::default();
+        match fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Some(LibreSpeedUpstreamTlsConfig::default());
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(_) => return Some(LibreSpeedUpstreamTlsConfig::default()),
         }
         cur = dir.parent();
     }
@@ -11532,18 +11544,20 @@ pub fn librespeed_runner_settings_tls_config(
     opts.read(true);
     #[cfg(unix)]
     opts.custom_flags(libc::O_NOFOLLOW);
-    let Ok(file) = opts.open(settings_path) else {
-        return LibreSpeedUpstreamTlsConfig::default();
+    let file = match opts.open(settings_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(_) => return Some(LibreSpeedUpstreamTlsConfig::default()),
     };
     let Ok(meta) = file.metadata() else {
-        return LibreSpeedUpstreamTlsConfig::default();
+        return Some(LibreSpeedUpstreamTlsConfig::default());
     };
     if !meta.is_file() || meta.len() > 1_048_576 {
-        return LibreSpeedUpstreamTlsConfig::default();
+        return Some(LibreSpeedUpstreamTlsConfig::default());
     }
     let mut raw = String::new();
     if file.take(1_048_576).read_to_string(&mut raw).is_err() {
-        return LibreSpeedUpstreamTlsConfig::default();
+        return Some(LibreSpeedUpstreamTlsConfig::default());
     }
     let (enabled, raw_cert) = parse_librespeed_root_tls_config(&raw);
     let ca_cert_file = if enabled {
@@ -11551,10 +11565,10 @@ pub fn librespeed_runner_settings_tls_config(
     } else {
         None
     };
-    LibreSpeedUpstreamTlsConfig {
+    Some(LibreSpeedUpstreamTlsConfig {
         enabled,
         ca_cert_file,
-    }
+    })
 }
 
 fn validate_librespeed_apache_ca_cert(cert_str: &str, fs_root: Option<&Path>) -> Option<String> {

@@ -574,14 +574,30 @@ _build_modern_stack_from_source() {
             esac
             if [[ "${bootstrapped_via_rustup}" -eq 0 && -n "${rustup_arch}" ]]; then
                 local rustup_ver="${AF_RUSTUP_VERSION:-1.28.1}"
+                local rustup_stage_dir="${AF_RUSTUP_TMPDIR:-}"
+                if [[ -z "${rustup_stage_dir}" ]]; then
+                    if [[ -d "${af_root}" && -w "${af_root}" ]]; then
+                        rustup_stage_dir="${af_root}/.staging-rustup"
+                        mkdir -p -m 0700 "${rustup_stage_dir}"
+                    elif [[ -d "/var/tmp" && -w "/var/tmp" ]]; then
+                        rustup_stage_dir="/var/tmp"
+                    else
+                        rustup_stage_dir="${HOME:-/root}/.cache/aetherflow-rustup"
+                        mkdir -p -m 0700 "${rustup_stage_dir}"
+                    fi
+                else
+                    mkdir -p -m 0700 "${rustup_stage_dir}"
+                fi
                 local rustup_bin
-                rustup_bin="$(mktemp /tmp/af-rustup-init.XXXXXX)"
+                rustup_bin="$(mktemp "${rustup_stage_dir}/af-rustup-init.XXXXXX")"
                 if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
                     "https://static.rust-lang.org/rustup/archive/${rustup_ver}/${rustup_arch}/rustup-init" \
                     -o "${rustup_bin}" \
                     && printf '%s  %s\n' "${AF_RUSTUP_SHA256:-${rustup_sha256}}" "${rustup_bin}" | sha256sum -c - >/dev/null 2>&1; then
                     chmod 0700 "${rustup_bin}"
-                    "${rustup_bin}" -y --profile minimal --default-toolchain "${rust_tc}" || true
+                    if ! "${rustup_bin}" -y --profile minimal --default-toolchain "${rust_tc}"; then
+                        echo "[WARN] rustup-init exited non-zero from ${rustup_stage_dir} (check mount noexec or network connectivity)." >&2
+                    fi
                 else
                     echo "[WARN] Pinned rustup-init download or SHA-256 verification failed; skipping automatic Rust bootstrap." >&2
                 fi
