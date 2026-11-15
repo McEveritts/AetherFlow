@@ -11,15 +11,52 @@ use std::path::Path;
 #[folder = "../../../web/dist"]
 struct EmbeddedNeutralDist;
 
+fn read_static_dir_file(root_dir: &Path, rel_path: &str) -> Option<Vec<u8>> {
+    let canon_root = fs::canonicalize(root_dir).ok()?;
+    let mut cursor = canon_root.clone();
+    for seg in rel_path.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if seg == ".." {
+            return None;
+        }
+        cursor.push(seg);
+        let meta = fs::symlink_metadata(&cursor).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+    }
+    let meta = fs::symlink_metadata(&cursor).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let canon_target = fs::canonicalize(&cursor).ok()?;
+    if !canon_target.starts_with(&canon_root) {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&canon_target)
+            .ok()?;
+        let mut buf = Vec::with_capacity(meta.len() as usize);
+        f.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read(&canon_target).ok()
+    }
+}
+
 fn read_asset(rel_path: &str) -> Option<Vec<u8>> {
     if let Ok(custom_dir) = env::var("STATIC_DIR") {
         let trimmed = custom_dir.trim();
         if !trimmed.is_empty() {
-            let fs_path = Path::new(trimmed).join(rel_path);
-            if fs_path.is_file() {
-                if let Ok(bytes) = fs::read(&fs_path) {
-                    return Some(bytes);
-                }
+            if let Some(bytes) = read_static_dir_file(Path::new(trimmed), rel_path) {
+                return Some(bytes);
             }
         }
     }

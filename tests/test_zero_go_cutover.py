@@ -8,10 +8,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 import yaml
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11 (e.g. Ubuntu 22.04 Python 3.10)
+    tomllib = None  # type: ignore[assignment]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import common_functions, replace_paths_once
@@ -62,6 +66,74 @@ def _extract_router_routes(code: str) -> list[tuple[str, list[str]]]:
         methods = sorted(set(re.findall(r"\b(get|post|put|delete|patch|head)\s*\(", call)))
         out.append((p, methods))
     return out
+
+
+def _parse_gitleaks_toml_fallback(raw: str) -> dict:
+    """Minimal TOML subset parser for .gitleaks.toml so Python 3.10 (no stdlib tomllib) runs cleanly."""
+
+    def decode_str(token: str) -> str:
+        token = token.strip()
+        if token.startswith("'''") and token.endswith("'''"):
+            body = token[3:-3]
+            return body[1:] if body.startswith("\n") else body
+        if token.startswith('"""') and token.endswith('"""'):
+            body = token[3:-3]
+            return body[1:] if body.startswith("\n") else body
+        if token.startswith("'") and token.endswith("'"):
+            return token[1:-1]
+        if token.startswith('"') and token.endswith('"'):
+            return json.loads(token)
+        if token == "true":
+            return True  # type: ignore[return-value]
+        if token == "false":
+            return False  # type: ignore[return-value]
+        raise ValueError(f"Unsupported TOML scalar in .gitleaks.toml: {token!r}")
+
+    def parse_array(expr: str) -> list[str]:
+        inner = expr.strip()[1:-1]
+        items: list[str] = []
+        token_re = re.compile(r"'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\"|'[^']*'|\"(?:\\.|[^\"\\])*\"")
+        for m in token_re.finditer(inner):
+            items.append(decode_str(m.group(0)))
+        return items
+
+    root_doc: dict = {}
+    current_target: dict = root_doc
+    lines = raw.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        i += 1
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "[[rules]]":
+            rule: dict = {}
+            root_doc.setdefault("rules", []).append(rule)
+            current_target = rule
+            continue
+        if stripped == "[[rules.allowlists]]":
+            allow: dict = {}
+            root_doc["rules"][-1].setdefault("allowlists", []).append(allow)
+            current_target = allow
+            continue
+        if stripped.startswith("[") and stripped.endswith("]") and not stripped.startswith("[["):
+            section = stripped[1:-1].strip()
+            current_target = root_doc.setdefault(section, {})
+            continue
+        if "=" in stripped:
+            key, val = stripped.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if val.startswith("["):
+                while not val.rstrip().endswith("]") and i < len(lines):
+                    line_part = lines[i].strip()
+                    i += 1
+                    if line_part and not line_part.startswith("#"):
+                        val += "\n" + line_part
+                current_target[key] = parse_array(val)
+            else:
+                current_target[key] = decode_str(val)
+    return root_doc
 
 
 class TestZeroGoCutoverInvariants(unittest.TestCase):
@@ -218,7 +290,13 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         self.assertIn('${extra_tar}.sigstore.json', rel_text)
 
     def test_gitleaks_go_allowlists_are_commit_pinned(self) -> None:
-        cfg = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        raw = (ROOT / ".gitleaks.toml").read_text(encoding="utf-8")
+        fallback_cfg = _parse_gitleaks_toml_fallback(raw)
+        if tomllib is not None:
+            cfg = tomllib.loads(raw)
+            self.assertEqual(fallback_cfg, cfg)
+        else:
+            cfg = fallback_cfg
         for rule in cfg.get("rules", []):
             for allow in rule.get("allowlists", []):
                 paths = allow.get("paths", [])
@@ -339,7 +417,7 @@ print_error() { printf '%s\\n' "$*" >&2; }
 print_warn() { printf '%s\\n' "$*" >&2; }
 report_progress() { :; }
 github_latest_tag() { printf '4.1.0\\n'; }
-write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; }
+write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; [[ -z "${AF_ARCHIVE_BACKUP:-}" ]] || rm -f -- "$AF_ARCHIVE_BACKUP/.af-archive-pending"; }
 """
             rebased_helpers = replace_paths_once(
                 helpers,
@@ -413,11 +491,98 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertIn(f'statistics_password="{expected_derived}"', settings_text)
             self.assertIn("redact_ip_addresses=true", settings_text)
             self.assertIn("enable_id_obfuscation=true", settings_text)
-            self.assertIn('trusted_proxies=""', settings_text)
+            self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', settings_text)
 
             unit_text = (root / "etc/systemd/system/librespeed.service").read_text(encoding="utf-8")
-            for directive in ("UMask=0077", "NoNewPrivileges=yes", "ProtectSystem=strict", "ReadWritePaths="):
+            for directive in (
+                "UMask=0077",
+                "NoNewPrivileges=yes",
+                "ProtectSystem=strict",
+                "ReadWritePaths=",
+                "ReadOnlyPaths=",
+            ):
                 self.assertIn(directive, unit_text)
+
+            # 3. Existing settings.toml upgrade migrates bolt->sqlite, backfills missing keys, and probes HTTPS with -k
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'statistics_password="custom-stats-password"\n'
+                'database_type="bolt"\n'
+                'enable_tls=true\n'
+                'tls_cert_file="/etc/ssl/mycert.pem"\n'
+                'tls_key_file="/etc/ssl/mykey.pem"\n',
+                encoding="utf-8",
+            )
+            (root / "commands.jsonl").unlink(missing_ok=True)
+            tls_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(tls_res.returncode, 0, tls_res.stdout + tls_res.stderr)
+            upgraded_text = settings_path.read_text(encoding="utf-8")
+            self.assertIn("listen_port=18988", upgraded_text)
+            self.assertIn('database_type="sqlite"', upgraded_text)
+            self.assertNotIn('database_type="bolt"', upgraded_text)
+            self.assertIn("redact_ip_addresses=true", upgraded_text)
+            self.assertIn("enable_id_obfuscation=true", upgraded_text)
+            self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', upgraded_text)
+            logged_cmds = [
+                json.loads(line)
+                for line in (root / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(
+                any(
+                    cmd[0] == "curl"
+                    and "-k" in cmd
+                    and "https://127.0.0.1:18988/" in cmd
+                    for cmd in logged_cmds
+                ),
+                f"Expected HTTPS readiness probe with -k in commands: {logged_cmds}",
+            )
+
+    def test_af_certbot_sync_v4_sqlite_and_hosts_reconcile(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory(prefix="af-certbot-cutover-") as tmp:
+            root = Path(tmp)
+            for rel in ("bin", "etc", "install", "var/lib/aetherflow", "etc/aetherflow"):
+                (root / rel).mkdir(parents=True, exist_ok=True)
+            (root / "etc/hosts").write_text("127.0.0.1\tlocalhost\n", encoding="utf-8")
+            (root / "install/.librespeed.lock").write_text("installed\n", encoding="utf-8")
+            (root / "install/.core.lock").write_text("installed\n", encoding="utf-8")
+
+            db_path = root / "var/lib/aetherflow/aetherflow.sqlite"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT)")
+            conn.execute("INSERT INTO settings (id, base_domain) VALUES (1, 'box.example.com')")
+            conn.commit()
+            conn.close()
+
+            src = (ROOT / "packages/system/af-certbot-sync").read_text(encoding="utf-8")
+            rebased = replace_paths_once(
+                src,
+                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/var/", "/install", "/srv/")],
+            )
+            script = root / "af-certbot-sync.sh"
+            script.write_text(rebased, encoding="utf-8")
+            script.chmod(0o755)
+
+            # Without certbot in PATH, /etc/hosts internal DNS block must still be reconciled cleanly
+            res = subprocess.run(
+                ["bash", str(script)],
+                env={**os.environ, "PATH": f"{root}/bin:/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            hosts_after = (root / "etc/hosts").read_text(encoding="utf-8")
+            self.assertIn("aetherflow.aether.local", hosts_after)
+            self.assertIn("librespeed.aether.local", hosts_after)
+            self.assertNotIn("core.aether.local", hosts_after)
 
     def test_scripts_and_sdk_scaffolder_are_zero_go(self) -> None:
         sdk_script = (ROOT / "scripts/create-plugin-sdk.sh").read_text(encoding="utf-8")
@@ -432,6 +597,21 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 text=True,
             )
             self.assertNotEqual(bad.returncode, 0)
+
+            for idx, bad_name in enumerate(("Bad'Quote", "Bad<script>", "Bad/Slash", "Bad{Brace}")):
+                bad_res = subprocess.run(
+                    [
+                        "bash",
+                        str(ROOT / "scripts/create-plugin-sdk.sh"),
+                        "sample-plugin",
+                        bad_name,
+                        f"{tmp}/bad-name-{idx}",
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(bad_res.returncode, 0, f"Expected rejection for {bad_name!r}")
 
             out_dir = Path(tmp) / "sample-plugin"
             ok = subprocess.run(

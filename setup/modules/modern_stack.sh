@@ -529,10 +529,28 @@ _build_modern_stack_from_source() {
     local release_dir="${af_root}/releases/${epoch}"
     mkdir -p "${release_dir}"
 
+    export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:/usr/local/cargo/bin:${PATH}"
+    if [ -d "${af_root}/backend-rs" ] && ! command -v cargo >/dev/null 2>&1; then
+        if [[ "${EUID:-$(id -u)}" -eq 0 && "${AF_OFFLINE:-0}" != "1" ]]; then
+            echo "Rust toolchain (cargo) not found; bootstrapping rustup and linker prerequisites for --from-source..."
+            if command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang mold >/dev/null 2>&1 || true
+            fi
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable || true
+            export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:${PATH}"
+        fi
+    fi
+
     if [ -d "${af_root}/backend-rs" ] && command -v cargo >/dev/null 2>&1; then
         have_backend=true
         (
             cd "${af_root}/backend-rs" || exit 1
+            if ! command -v mold >/dev/null 2>&1; then
+                export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            fi
             local -a locked_args=(--locked)
             if [[ ! -f "${af_root}/backend-rs/Cargo.lock" ]]; then
                 if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then

@@ -527,14 +527,30 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
     assert!(!detail_html.contains("<img src=x onerror=alert(1)>"));
     assert!(detail_html.contains("&lt;img src=x onerror=alert(1)&gt;"));
 
-    // Logout clears cookie
-    let logout_res = app
+    // GET logout is rejected (405) to block cross-site <img>/<link> logout CSRF; POST logout clears cookie
+    let get_logout_res = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri("/speedtest/stats?op=logout")
                 .header(COOKIE, &cookie_pair)
                 .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_logout_res.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(get_logout_res.headers().get(SET_COOKIE).is_none());
+
+    let logout_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/speedtest/stats")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(COOKIE, &cookie_pair)
+                .body(Body::from("op=logout"))
                 .unwrap(),
         )
         .await
@@ -606,7 +622,7 @@ async fn telemetry_empty_rejection_retention_rate_limit_and_garbage_concurrency_
     cfg.max_telemetry_rows = 3;
     let app = build_router(cfg, Some(vault.clone()));
 
-    // 1. Empty measurement payload is rejected with 400
+    // 1. Empty or non-numeric / PII measurement payload is rejected with 400
     let empty_meas = app
         .clone()
         .oneshot(with_peer(
@@ -621,6 +637,32 @@ async fn telemetry_empty_rejection_retention_rate_limit_and_garbage_concurrency_
         .await
         .unwrap();
     assert_eq!(empty_meas.status(), StatusCode::BAD_REQUEST);
+
+    for bad_metric in [
+        "dl=203.0.113.42",
+        "ul=%3Cscript%3E",
+        "ping=-4.2",
+        "jitter=NaN",
+    ] {
+        let bad_res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/results/telemetry")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(bad_metric))
+                    .unwrap(),
+                "198.51.100.20:40000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            bad_res.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {bad_metric}"
+        );
+    }
 
     // 2. Retention cap keeps at most 3 newest telemetry rows
     for idx in 1..=5 {
@@ -705,6 +747,7 @@ async fn telemetry_empty_rejection_retention_rate_limit_and_garbage_concurrency_
     assert_eq!(over_cap.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(held_responses);
     let recovered = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/garbage?ckSize=1")
@@ -714,6 +757,50 @@ async fn telemetry_empty_rejection_retention_rate_limit_and_garbage_concurrency_
         .await
         .unwrap();
     assert_eq!(recovered.status(), StatusCode::OK);
+    drop(recovered);
+
+    // 5. Per-client-IP /garbage stream cap blocks single-IP starvation while leaving other IPs unblocked
+    let mut per_ip_held = Vec::new();
+    for _ in 0..af_librespeed::routes::MAX_GARBAGE_STREAMS_PER_IP {
+        let res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .uri("/garbage?ckSize=2")
+                    .body(Body::empty())
+                    .unwrap(),
+                "198.51.100.55:41000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        per_ip_held.push(res);
+    }
+    let ip_capped = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/garbage?ckSize=2")
+                .body(Body::empty())
+                .unwrap(),
+            "198.51.100.55:41001",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ip_capped.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other_ip_ok = app
+        .oneshot(with_peer(
+            Request::builder()
+                .uri("/garbage?ckSize=1")
+                .body(Body::empty())
+                .unwrap(),
+            "198.51.100.77:41000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(other_ip_ok.status(), StatusCode::OK);
+    drop(per_ip_held);
 }
 
 #[tokio::test]

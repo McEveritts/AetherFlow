@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use axum::extract::{ConnectInfo, Request};
 use axum::Router;
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
@@ -15,11 +15,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{debug, warn};
 
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const TLS_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_TLS_CONNECTIONS: usize = 512;
 
 pub fn build_tls_acceptor(config: &Config) -> Result<TlsAcceptor> {
@@ -97,6 +100,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TLS_CONNECTIONS));
+    let mut tasks = JoinSet::new();
     tokio::pin!(shutdown);
 
     loop {
@@ -104,6 +108,7 @@ where
             _ = &mut shutdown => {
                 break;
             }
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             accepted = listener.accept() => {
                 let (tcp_stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
@@ -118,7 +123,7 @@ where
                 };
                 let acceptor = acceptor.clone();
                 let router = app.clone();
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _permit = permit;
                     let _ = tcp_stream.set_nodelay(true);
                     let tls_stream = match tokio::time::timeout(
@@ -149,7 +154,11 @@ where
                     });
 
                     let io = TokioIo::new(tls_stream);
-                    let builder = AutoConnBuilder::new(TokioExecutor::new());
+                    let mut builder = AutoConnBuilder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(HTTP_HEADER_READ_TIMEOUT);
                     if let Err(err) = builder.serve_connection_with_upgrades(io, service).await {
                         debug!(peer = %peer_addr, error = %err, "TLS HTTP connection closed with error");
                     }
@@ -157,6 +166,13 @@ where
             }
         }
     }
+
+    drop(listener);
+    let _ = tokio::time::timeout(TLS_SHUTDOWN_DRAIN_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    tasks.abort_all();
 
     Ok(())
 }

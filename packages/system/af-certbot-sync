@@ -3,13 +3,57 @@
 # app subdomains resolve in DNS and are registered in AetherFlow.
 set -euo pipefail
 
-DB="/opt/AetherFlow/backend/data/aetherflow.sqlite"
-if [[ ! -f "$DB" ]] || ! command -v certbot >/dev/null 2>&1; then
+# Reconcile /etc/hosts internal .aether.local loopback entries FIRST (even before certbot/public TLS).
+# Never write public domains into /etc/hosts, or getent ahosts will self-poison to 127.0.0.1.
+HOSTS_DOMAINS=("aetherflow.aether.local")
+for lock in /install/.*.lock; do
+    [[ -e "$lock" ]] || continue
+    app="$(basename "$lock")"
+    app="${app#.}"
+    app="${app%.lock}"
+    [[ "$app" == "core" ]] && continue
+    if [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]]; then
+        HOSTS_DOMAINS+=("${app}.aether.local")
+    fi
+done
+
+if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
+    mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
+    TMP_HOSTS="$(mktemp)"
+    awk '
+        /^# --- AETHERFLOW INTERNAL DNS ---$/ { skip=1; next }
+        /^# --- END AETHERFLOW INTERNAL DNS ---$/ { skip=0; next }
+        !skip { print }
+    ' /etc/hosts > "$TMP_HOSTS"
+    {
+        echo "# --- AETHERFLOW INTERNAL DNS ---"
+        for h in "${UNIQUE_HOSTS[@]}"; do
+            printf "127.0.0.1\t%s\n" "$h"
+        done
+        echo "# --- END AETHERFLOW INTERNAL DNS ---"
+    } >> "$TMP_HOSTS"
+    cat "$TMP_HOSTS" > /etc/hosts
+    rm -f "$TMP_HOSTS"
+fi
+
+if ! command -v certbot >/dev/null 2>&1; then
     exit 0
 fi
 
+ENV_DB=""
+if [[ -f /etc/aetherflow/aetherflow.env ]]; then
+    ENV_DB="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+fi
+DB=""
+for cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$ENV_DB" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+    if [[ -n "$cand" && -f "$cand" ]]; then
+        DB="$cand"
+        break
+    fi
+done
+
 BASE_DOMAIN=""
-if command -v sqlite3 >/dev/null 2>&1; then
+if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
     BASE_DOMAIN="$(sqlite3 "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
 fi
 if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
@@ -38,39 +82,6 @@ public_dns_resolves() {
     getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qvE '^(127\.|::1$)'
 }
 
-# Reconcile /etc/hosts internal .aether.local loopback entries ONLY.
-# Never write public domains into /etc/hosts, or getent ahosts will self-poison to 127.0.0.1.
-HOSTS_DOMAINS=("aetherflow.aether.local")
-for lock in /install/.*.lock; do
-    [[ -e "$lock" ]] || continue
-    app="$(basename "$lock")"
-    app="${app#.}"
-    app="${app%.lock}"
-    [[ "$app" == "core" ]] && continue
-    if [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]]; then
-        HOSTS_DOMAINS+=("${app}.aether.local")
-    fi
-done
-
-if [[ -w /etc/hosts ]]; then
-    mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
-    TMP_HOSTS="$(mktemp)"
-    awk '
-        /^# --- AETHERFLOW INTERNAL DNS ---$/ { skip=1; next }
-        /^# --- END AETHERFLOW INTERNAL DNS ---$/ { skip=0; next }
-        !skip { print }
-    ' /etc/hosts > "$TMP_HOSTS"
-    {
-        echo "# --- AETHERFLOW INTERNAL DNS ---"
-        for h in "${UNIQUE_HOSTS[@]}"; do
-            printf "127.0.0.1\t%s\n" "$h"
-        done
-        echo "# --- END AETHERFLOW INTERNAL DNS ---"
-    } >> "$TMP_HOSTS"
-    cat "$TMP_HOSTS" > /etc/hosts
-    rm -f "$TMP_HOSTS"
-fi
-
 CERT_FILE="/etc/letsencrypt/live/${BASE_DOMAIN}/fullchain.pem"
 if [[ ! -f "$CERT_FILE" ]]; then
     exit 0
@@ -90,13 +101,15 @@ for sub in "www.${BASE_DOMAIN}" "direct.${BASE_DOMAIN}"; do
     fi
 done
 
-while IFS= read -r dom; do
-    dom="$(echo "$dom" | tr -d '[:space:]')"
-    [[ -z "$dom" ]] && continue
-    if [[ "$dom" =~ $DOMAIN_REGEX ]] && public_dns_resolves "$dom"; then
-        DOMAINS+=("$dom")
-    fi
-done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
+if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    while IFS= read -r dom; do
+        dom="$(echo "$dom" | tr -d '[:space:]')"
+        [[ -z "$dom" ]] && continue
+        if [[ "$dom" =~ $DOMAIN_REGEX ]] && public_dns_resolves "$dom"; then
+            DOMAINS+=("$dom")
+        fi
+    done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
+fi
 
 for lock in /install/.*.lock; do
     [[ -e "$lock" ]] || continue
@@ -105,7 +118,10 @@ for lock in /install/.*.lock; do
     app="${app%.lock}"
     [[ "$app" == "core" ]] && continue
     [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]] || continue
-    ext_disabled="$(sqlite3 "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
+    ext_disabled=""
+    if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        ext_disabled="$(sqlite3 "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
+    fi
     [[ -n "$ext_disabled" ]] && continue
     cand="${app}.${BASE_DOMAIN}"
     if public_dns_resolves "$cand"; then

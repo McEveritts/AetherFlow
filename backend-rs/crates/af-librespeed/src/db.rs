@@ -2,8 +2,10 @@ use anyhow::{bail, Context, Result};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,8 +71,9 @@ impl TelemetryVault {
 
         verify_no_symlinks_on_db_path(db_path)?;
         ensure_parent_dirs(db_path)?;
+        verify_parent_dir_not_world_writable(db_path)?;
         guard_and_backup_legacy_boltdb(db_path)?;
-        verify_sidecar_symlinks(db_path)?;
+        verify_and_harden_sidecars(db_path)?;
 
         // Create/verify leaf file with O_NOFOLLOW and enforce 0600 permissions on the opened fd
         // so pre-existing database files with looser permissions are hardened atomically.
@@ -98,7 +101,9 @@ impl TelemetryVault {
 
         let conn = Connection::open_with_flags(
             db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .with_context(|| format!("failed to open SQLite database {}", db_path.display()))?;
 
@@ -130,6 +135,8 @@ impl TelemetryVault {
                  ON speedtest_users (timestamp DESC, uuid DESC);",
         )
         .with_context(|| format!("failed to initialize schema at {}", db_path.display()))?;
+
+        verify_and_harden_sidecars(db_path)?;
 
         let mut candidate_key = [0u8; 32];
         OsRng.fill_bytes(&mut candidate_key);
@@ -332,14 +339,91 @@ fn verify_sidecar_symlinks(db_path: &Path) -> Result<()> {
     let wal_path = sidecar_path(db_path, "-wal");
     let shm_path = sidecar_path(db_path, "-shm");
     if let Some(meta) = check_not_symlink(&wal_path, "SQLite WAL sidecar")? {
-        if meta.is_dir() {
-            bail!("SQLite WAL sidecar is a directory: {}", wal_path.display());
+        if !meta.is_file() {
+            bail!(
+                "SQLite WAL sidecar is not a regular file: {}",
+                wal_path.display()
+            );
         }
     }
     if let Some(meta) = check_not_symlink(&shm_path, "SQLite SHM sidecar")? {
-        if meta.is_dir() {
-            bail!("SQLite SHM sidecar is a directory: {}", shm_path.display());
+        if !meta.is_file() {
+            bail!(
+                "SQLite SHM sidecar is not a regular file: {}",
+                shm_path.display()
+            );
         }
+    }
+    Ok(())
+}
+
+fn verify_and_harden_sidecars(db_path: &Path) -> Result<()> {
+    verify_sidecar_symlinks(db_path)?;
+    for suffix in ["-wal", "-shm"] {
+        let sc_path = sidecar_path(db_path, suffix);
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&sc_path)
+        {
+            Ok(sc_file) => {
+                let meta = sc_file.metadata().with_context(|| {
+                    format!("failed to fstat SQLite sidecar {}", sc_path.display())
+                })?;
+                if !meta.is_file() {
+                    bail!(
+                        "SQLite sidecar is not a regular file: {}",
+                        sc_path.display()
+                    );
+                }
+                sc_file
+                    .set_permissions(fs::Permissions::from_mode(0o600))
+                    .with_context(|| {
+                        format!(
+                            "failed to tighten permissions to 0600 on SQLite sidecar {}",
+                            sc_path.display()
+                        )
+                    })?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed secure O_NOFOLLOW open on SQLite sidecar {}",
+                        sc_path.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_parent_dir_not_world_writable(db_path: &Path) -> Result<()> {
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let meta = fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "failed to inspect telemetry database directory {}",
+            parent.display()
+        )
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        bail!(
+            "telemetry database parent is not a regular directory: {}",
+            parent.display()
+        );
+    }
+    let mode = meta.permissions().mode();
+    if (mode & 0o002) != 0 && (mode & 0o1000) == 0 {
+        bail!(
+            "refusing world-writable non-sticky parent directory (mode {:04o}) for telemetry database: {}",
+            mode & 0o7777,
+            parent.display()
+        );
     }
     Ok(())
 }
@@ -362,6 +446,58 @@ fn ensure_parent_dirs(db_path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn move_file_noreplace(src: &Path, dst: &Path) -> Result<bool> {
+    check_not_symlink(dst, "BoltDB backup path")?;
+    let src_c = CString::new(src.as_os_str().as_bytes())
+        .with_context(|| format!("invalid NUL in source path {}", src.display()))?;
+    let dst_c = CString::new(dst.as_os_str().as_bytes())
+        .with_context(|| format!("invalid NUL in backup path {}", dst.display()))?;
+
+    // SAFETY: src_c and dst_c are valid NUL-terminated C strings; AT_FDCWD resolves relative paths safely.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            src_c.as_ptr(),
+            libc::AT_FDCWD,
+            dst_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => Ok(false),
+        Some(libc::ENOSYS) | Some(libc::EINVAL) => match fs::hard_link(src, dst) {
+            Ok(()) => {
+                fs::remove_file(src).with_context(|| {
+                    format!(
+                        "failed to unlink migrated database source {} after hard_link",
+                        src.display()
+                    )
+                })?;
+                Ok(true)
+            }
+            Err(link_err) if link_err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(link_err) => Err(link_err).with_context(|| {
+                format!(
+                    "failed non-overwriting hard_link backup {} -> {}",
+                    src.display(),
+                    dst.display()
+                )
+            }),
+        },
+        _ => Err(err).with_context(|| {
+            format!(
+                "failed atomic RENAME_NOREPLACE backup {} -> {}",
+                src.display(),
+                dst.display()
+            )
+        }),
+    }
 }
 
 fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
@@ -389,23 +525,31 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let mut backup_path = sidecar_path(db_path, ".bolt.bak");
-    if check_not_symlink(&backup_path, "BoltDB backup path")?.is_some() {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        backup_path = sidecar_path(db_path, &format!(".bolt.bak.{ts}"));
-        check_not_symlink(&backup_path, "timestamped BoltDB backup path")?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut candidates = Vec::with_capacity(66);
+    candidates.push(sidecar_path(db_path, ".bolt.bak"));
+    candidates.push(sidecar_path(db_path, &format!(".bolt.bak.{ts}")));
+    for seq in 1..=64u32 {
+        candidates.push(sidecar_path(db_path, &format!(".bolt.bak.{ts}.{seq}")));
     }
 
-    fs::rename(db_path, &backup_path).with_context(|| {
-        format!(
-            "failed to back up non-SQLite database {} to {}",
-            db_path.display(),
-            backup_path.display()
-        )
-    })?;
+    let mut chosen_backup = None;
+    for candidate in candidates {
+        if move_file_noreplace(db_path, &candidate)? {
+            chosen_backup = Some(candidate);
+            break;
+        }
+    }
+    let Some(backup_path) = chosen_backup else {
+        bail!(
+            "exhausted non-overwriting BoltDB backup slots for {}",
+            db_path.display()
+        );
+    };
     let bak_file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -530,6 +674,37 @@ mod tests {
 
         let header = &fs::read(&db_path).unwrap()[..16];
         assert_eq!(header, SQLITE_MAGIC);
+
+        // Second non-SQLite migration never overwrites existing .bolt.bak (nor a pre-existing .bolt.bak.<ts>)
+        let mut second_bolt = vec![0xA5u8; 64];
+        second_bolt[12..16].copy_from_slice(&[0xED, 0xDA, 0x0C, 0xED]);
+        fs::write(&db_path, &second_bolt).unwrap();
+        let _vault2 = TelemetryVault::open(&db_path).expect("open second migrated vault");
+        assert_eq!(fs::read(&bak_path).unwrap(), fake_bolt);
+        let extra_baks: Vec<_> = fs::read_dir(&tmp.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p != &bak_path
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("speedtest.db.bolt.bak."))
+            })
+            .collect();
+        assert_eq!(extra_baks.len(), 1);
+        assert_eq!(fs::read(&extra_baks[0]).unwrap(), second_bolt);
+    }
+
+    #[test]
+    fn rejects_world_writable_non_sticky_parent_dir() {
+        let tmp = TempDirGuard::new("world-writable");
+        let insecure_dir = tmp.0.join("insecure");
+        fs::create_dir_all(&insecure_dir).unwrap();
+        fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let res = TelemetryVault::open(&insecure_dir.join("speedtest.db"));
+        fs::set_permissions(&insecure_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(res.is_err());
     }
 
     #[test]

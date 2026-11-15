@@ -57,7 +57,8 @@ impl StatsAuth {
     }
 
     pub fn verify_password(&self, configured: &str, candidate: &str) -> bool {
-        if configured.trim().is_empty() || configured == "PASSWORD" {
+        let trimmed = configured.trim();
+        if trimmed.is_empty() || trimmed == "PASSWORD" {
             return false;
         }
         let expected_tag = compute_hmac(&self.auth_key, configured.as_bytes());
@@ -243,6 +244,54 @@ fn bump_bucket(map: &mut HashMap<String, (usize, i64)>, key: &str, now_unix: i64
     }
 }
 
+const MAX_GARBAGE_TRACKED_IPS: usize = 4096;
+
+#[derive(Clone, Default)]
+pub struct GarbageIpTracker {
+    active: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+pub struct GarbageStreamGuard {
+    active: Arc<Mutex<HashMap<String, usize>>>,
+    ip: String,
+}
+
+impl Drop for GarbageStreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.active.lock() {
+            if let Some(count) = map.get_mut(&self.ip) {
+                if *count <= 1 {
+                    map.remove(&self.ip);
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+}
+
+impl GarbageIpTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn try_acquire(&self, ip: &str, max_per_ip: usize) -> Option<GarbageStreamGuard> {
+        let mut map = self.active.lock().ok()?;
+        let current = map.get(ip).copied().unwrap_or(0);
+        if current >= max_per_ip {
+            return None;
+        }
+        if map.len() >= MAX_GARBAGE_TRACKED_IPS && !map.contains_key(ip) {
+            return None;
+        }
+        *map.entry(ip.to_string()).or_insert(0) = current + 1;
+        Some(GarbageStreamGuard {
+            active: Arc::clone(&self.active),
+            ip: ip.to_string(),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -250,6 +299,7 @@ pub struct AppState {
     pub stats_auth: StatsAuth,
     pub obfuscation_key: [u8; 32],
     pub garbage_semaphore: Arc<Semaphore>,
+    pub garbage_ip_tracker: GarbageIpTracker,
     pub telemetry_limiter: TelemetryRateLimiter,
 }
 
@@ -336,6 +386,16 @@ pub async fn handle_stats(
         .unwrap_or_default();
 
     if op == "logout" {
+        if method != Method::POST {
+            return (StatusCode::METHOD_NOT_ALLOWED, "POST required for logout").into_response();
+        }
+        let now_logout = Utc::now().timestamp();
+        let has_valid_session = extract_cookie(&headers, COOKIE_NAME)
+            .map(|tok| state.stats_auth.verify_cookie_token(&tok, now_logout))
+            .unwrap_or(false);
+        if !has_valid_session {
+            return stats_html_response(StatusCode::OK, render_login_page(&cookie_path, None));
+        }
         return redirect_with_cookie(
             &cookie_path,
             &format!(
@@ -609,7 +669,10 @@ fn render_toolbar(out: &mut String, stats_path: &str, lookup_id: &str) {
             </form>
             <div class="obs-toolbar-actions">
                 <a class="obs-btn" href="{escaped_path}?op=id&amp;id=L100">Last 100 Tests</a>
-                <a class="obs-btn obs-btn-danger" href="{escaped_path}?op=logout">Logout</a>
+                <form method="POST" action="{escaped_path}" class="obs-inline-form">
+                    <input type="hidden" name="op" value="logout">
+                    <button type="submit" class="obs-btn obs-btn-danger">Logout</button>
+                </form>
             </div>
         </div>"#
     );
@@ -798,6 +861,7 @@ body {{
     flex-wrap: wrap;
     align-items: center;
 }}
+.obs-inline-form {{ margin: 0; display: inline-flex; }}
 .obs-form-stack {{ display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }}
 input[type="text"], input[type="password"] {{
     background: var(--surface);

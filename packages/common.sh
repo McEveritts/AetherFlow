@@ -2435,9 +2435,17 @@ write_lock() {
 }
 
 get_base_domain() {
-    local dom=""
-    if command -v sqlite3 >/dev/null 2>&1 && [[ -f /opt/AetherFlow/backend/data/aetherflow.sqlite ]]; then
-        dom="$(sqlite3 /opt/AetherFlow/backend/data/aetherflow.sqlite "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+    local dom="" db_cand="" env_db=""
+    if [[ -f /etc/aetherflow/aetherflow.env ]]; then
+        env_db="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+    fi
+    if command -v sqlite3 >/dev/null 2>&1; then
+        for db_cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$env_db" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+            if [[ -n "$db_cand" && -f "$db_cand" ]]; then
+                dom="$(sqlite3 "$db_cand" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+                [[ -n "$dom" ]] && break
+            fi
+        done
     fi
     if [[ -z "$dom" && -f /etc/aetherflow/aetherflow.env ]]; then
         dom="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
@@ -4549,15 +4557,17 @@ wait_for_service_ready() {
     [[ "$credentials" != *$'\n'* && "$credentials" != *$'\r'* ]] || return 1
     [[ "$port" =~ ^[0-9]{1,5}$ && "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
     (( 10#$port > 0 && 10#$port <= 65535 )) || return 1
+    local -a curl_tls_args=()
     case "$readiness_path" in
         http://*) ready_url="$readiness_path" ;;
+        https://*) ready_url="$readiness_path"; curl_tls_args=(-k) ;;
         /*) ready_url="http://127.0.0.1:${port}${readiness_path}" ;;
         *) return 1 ;;
     esac
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet "$unit"; then
             if [[ -n "$credentials" ]]; then
-                if printf 'user = "%s"\n' "$credentials" | curl -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+                if printf 'user = "%s"\n' "$credentials" | curl "${curl_tls_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
                     return 0
                 fi
                 if [[ "$app_name" == transmission* && "$readiness_path" == /transmission/rpc ]]; then
@@ -4565,10 +4575,10 @@ wait_for_service_ready() {
                         case "$http_status" in 200|401|409) return 0 ;; esac
                     fi
                 fi
-            elif curl -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+            elif curl "${curl_tls_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
                 return 0
             elif [[ "$app_name" =~ ^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr)$ ]]; then
-                if http_status="$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
+                if http_status="$(curl "${curl_tls_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
                     case "$http_status" in 200|204|401|403) return 0 ;; esac
                 fi
             fi
@@ -4804,8 +4814,17 @@ PYEOF
     if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
         u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
     fi
-    if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1 && [[ -f /opt/AetherFlow/backend/data/aetherflow.sqlite ]]; then
-        u="$(sqlite3 /opt/AetherFlow/backend/data/aetherflow.sqlite "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        local db_cand="" env_db=""
+        if [[ -f /etc/aetherflow/aetherflow.env ]]; then
+            env_db="$(grep -E '^(AETHERFLOW_DB_PATH|DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+        fi
+        for db_cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "$env_db" /var/lib/aetherflow/aetherflow.sqlite /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+            if [[ -n "$db_cand" && -f "$db_cand" ]]; then
+                u="$(sqlite3 "$db_cand" "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
+                [[ -n "$u" ]] && break
+            fi
+        done
     fi
     if [[ -z "$p" && -n "$u" && -f "/root/${u}.info.db" ]]; then
         p="$(cut -d: -f2- "/root/${u}.info.db" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"

@@ -26,8 +26,9 @@ if [[ ! "${PLUGIN_ID}" =~ ^[a-z0-9][a-z0-9_-]{1,62}$ ]]; then
     exit 1
 fi
 
-if [[ -z "${PLUGIN_NAME}" || "${PLUGIN_NAME}" =~ [\"\\] || "${PLUGIN_NAME}" == *$'\n'* || "${PLUGIN_NAME}" == *$'\r'* ]]; then
-    echo "Invalid plugin-name: must be non-empty and must not contain quotes, backslashes, or newlines" >&2
+UNSAFE_NAME_RE='["'\''\\/<>{}]'
+if [[ -z "${PLUGIN_NAME}" || "${PLUGIN_NAME}" =~ ${UNSAFE_NAME_RE} || "${PLUGIN_NAME}" == *$'\n'* || "${PLUGIN_NAME}" == *$'\r'* ]]; then
+    echo "Invalid plugin-name: must be non-empty and must not contain quotes, backslashes, angle brackets, braces, slashes, or newlines" >&2
     exit 1
 fi
 

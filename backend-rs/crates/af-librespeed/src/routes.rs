@@ -5,7 +5,9 @@ use crate::png_card::render_badge_png;
 use crate::redact::{
     format_getip_display, peer_ip_key, redact_freeform_text, redact_single_ip, resolve_client_ip,
 };
-use crate::stats::{handle_stats, parse_urlencoded_map, AppState, StatsAuth, TelemetryRateLimiter};
+use crate::stats::{
+    handle_stats, parse_urlencoded_map, AppState, GarbageIpTracker, StatsAuth, TelemetryRateLimiter,
+};
 use crate::ulid::{generate_ulid, obfuscate_ulid, resolve_id};
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
@@ -29,12 +31,15 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 pub const MAX_EMPTY_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TELEMETRY_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_STATS_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_CONCURRENT_GARBAGE_STREAMS: usize = 32;
+pub const MAX_GARBAGE_STREAMS_PER_IP: usize = 8;
+const MAX_GARBAGE_STREAM_DURATION: Duration = Duration::from_secs(60);
 const GARBAGE_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const MIN_GARBAGE_CHUNKS: usize = 1;
 const MAX_GARBAGE_CHUNKS: usize = 1024;
@@ -61,6 +66,7 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
         stats_auth: StatsAuth::new(),
         obfuscation_key,
         garbage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_GARBAGE_STREAMS)),
+        garbage_ip_tracker: GarbageIpTracker::new(),
         telemetry_limiter: TelemetryRateLimiter::new(),
     };
 
@@ -209,9 +215,31 @@ struct GarbageQuery {
 
 async fn handle_garbage(
     State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     method: Method,
     Query(q): Query<GarbageQuery>,
 ) -> Response {
+    let ip_guard = if let Some(ConnectInfo(addr)) = peer {
+        let client_ip = resolve_client_ip(Some(addr), &headers, &state.config.trusted_proxies);
+        match state
+            .garbage_ip_tracker
+            .try_acquire(&client_ip, MAX_GARBAGE_STREAMS_PER_IP)
+        {
+            Some(guard) => Some(guard),
+            None => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(RETRY_AFTER, HeaderValue::from_static("5"))],
+                    "Too many concurrent download streams from this client IP",
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let Ok(permit) = state.garbage_semaphore.clone().try_acquire_owned() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -230,50 +258,54 @@ async fn handle_garbage(
 
     let total_bytes = chunks * GARBAGE_CHUNK_BYTES;
 
-    let mut headers = HeaderMap::new();
-    headers.insert(
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
         HeaderName::from_static("content-description"),
         HeaderValue::from_static("File Transfer"),
     );
-    headers.insert(
+    resp_headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    headers.insert(
+    resp_headers.insert(
         CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment; filename=random.dat"),
     );
-    headers.insert(
+    resp_headers.insert(
         HeaderName::from_static("content-transfer-encoding"),
         HeaderValue::from_static("binary"),
     );
-    headers.insert(
+    resp_headers.insert(
         CACHE_CONTROL,
         HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
     );
-    headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    resp_headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
     if let Ok(len_hv) = HeaderValue::from_str(&total_bytes.to_string()) {
-        headers.insert(CONTENT_LENGTH, len_hv);
+        resp_headers.insert(CONTENT_LENGTH, len_hv);
     }
 
     if method == Method::HEAD {
         drop(permit);
-        return (StatusCode::OK, headers, Body::empty()).into_response();
+        drop(ip_guard);
+        return (StatusCode::OK, resp_headers, Body::empty()).into_response();
     }
 
-    let stream =
-        futures::stream::unfold((0usize, chunks, permit), |(idx, max, permit)| async move {
-            if idx >= max {
+    let started = Instant::now();
+    let stream = futures::stream::unfold(
+        (0usize, chunks, started, permit, ip_guard),
+        |(idx, max, started, permit, ip_guard)| async move {
+            if idx >= max || started.elapsed() >= MAX_GARBAGE_STREAM_DURATION {
                 None
             } else {
                 Some((
                     Ok::<Bytes, Infallible>(RANDOM_CHUNK_1MIB.clone()),
-                    (idx + 1, max, permit),
+                    (idx + 1, max, started, permit, ip_guard),
                 ))
             }
-        });
+        },
+    );
 
-    (StatusCode::OK, headers, Body::from_stream(stream)).into_response()
+    (StatusCode::OK, resp_headers, Body::from_stream(stream)).into_response()
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -345,6 +377,43 @@ fn clamp_utf8(input: &str, max_bytes: usize) -> String {
     input[..end].to_string()
 }
 
+fn validate_telemetry_metric(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.eq_ignore_ascii_case("fail") {
+        return Ok("Fail".to_string());
+    }
+    if trimmed.len() > 24 {
+        return Err("telemetry measurement field exceeds maximum numeric length");
+    }
+    let mut dot_count = 0usize;
+    let mut digit_count = 0usize;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            digit_count += 1;
+        } else if ch == '.' {
+            dot_count += 1;
+            if dot_count > 1 {
+                return Err("telemetry measurement fields (dl, ul, ping, jitter) must be valid non-negative numbers");
+            }
+        } else {
+            return Err("telemetry measurement fields (dl, ul, ping, jitter) must be valid non-negative numbers");
+        }
+    }
+    if digit_count == 0 || trimmed.starts_with('.') || trimmed.ends_with('.') {
+        return Err("telemetry measurement fields (dl, ul, ping, jitter) must be valid non-negative numbers");
+    }
+    let parsed: f64 = trimmed.parse().map_err(|_| {
+        "telemetry measurement fields (dl, ul, ping, jitter) must be valid non-negative numbers"
+    })?;
+    if !parsed.is_finite() || !(0.0..=1_000_000.0).contains(&parsed) {
+        return Err("telemetry measurement fields must be between 0 and 1000000");
+    }
+    Ok(trimmed.to_string())
+}
+
 async fn handle_telemetry(
     State(state): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
@@ -404,17 +473,27 @@ async fn handle_telemetry(
         8192,
     );
     let mut extra = clamp_utf8(fields.get("extra").map(String::as_str).unwrap_or(""), 8192);
-    let dl = clamp_utf8(fields.get("dl").map(String::as_str).unwrap_or(""), 64);
-    let ul = clamp_utf8(fields.get("ul").map(String::as_str).unwrap_or(""), 64);
-    let ping = clamp_utf8(fields.get("ping").map(String::as_str).unwrap_or(""), 64);
-    let jitter = clamp_utf8(fields.get("jitter").map(String::as_str).unwrap_or(""), 64);
+    let dl = match validate_telemetry_metric(fields.get("dl").map(String::as_str).unwrap_or("")) {
+        Ok(v) => v,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let ul = match validate_telemetry_metric(fields.get("ul").map(String::as_str).unwrap_or("")) {
+        Ok(v) => v,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let ping = match validate_telemetry_metric(fields.get("ping").map(String::as_str).unwrap_or(""))
+    {
+        Ok(v) => v,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let jitter =
+        match validate_telemetry_metric(fields.get("jitter").map(String::as_str).unwrap_or("")) {
+            Ok(v) => v,
+            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        };
     let mut log = clamp_utf8(fields.get("log").map(String::as_str).unwrap_or(""), 65_536);
 
-    if dl.trim().is_empty()
-        && ul.trim().is_empty()
-        && ping.trim().is_empty()
-        && jitter.trim().is_empty()
-    {
+    if dl.is_empty() && ul.is_empty() && ping.is_empty() && jitter.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             "telemetry requires at least one measurement field (dl, ul, ping, or jitter)",

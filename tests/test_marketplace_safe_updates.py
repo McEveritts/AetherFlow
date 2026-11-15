@@ -862,7 +862,8 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             'statistics_password="custom-stats-password"\n'
             'enable_tls=true\n'
             'tls_cert_file="/etc/ssl/mycert.pem"\n'
-            'database_type="postgresql"\n'
+            'tls_key_file="/etc/ssl/mykey.pem"\n'
+            'database_type="bolt"\n'
         )
 
         result = self.run_script("librespeed", AF_APP_PORT="8999")
@@ -872,7 +873,13 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
         self.assertIn("listen_port=8999", toml_after)
         self.assertIn('statistics_password="custom-stats-password"', toml_after)
         self.assertIn("enable_tls=true", toml_after)
-        self.assertIn('database_type="postgresql"', toml_after)
+        self.assertIn('tls_cert_file="/etc/ssl/mycert.pem"', toml_after)
+        self.assertIn('tls_key_file="/etc/ssl/mykey.pem"', toml_after)
+        self.assertIn('database_type="sqlite"', toml_after)
+        self.assertNotIn('database_type="bolt"', toml_after)
+        self.assertIn("redact_ip_addresses=true", toml_after)
+        self.assertIn("enable_id_obfuscation=true", toml_after)
+        self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', toml_after)
 
     def test_kasmvnc_update_preserves_custom_yaml(self):
         yaml_file = self.root / "var/lib/kasmvnc/.vnc/kasmvnc.yaml"

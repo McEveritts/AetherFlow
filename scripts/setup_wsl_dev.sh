@@ -8,7 +8,7 @@ echo "==> Updating APT repositories..."
 sudo apt-get update
 
 echo "==> Installing build dependencies..."
-sudo apt-get install -y build-essential curl git bash jq pkg-config libssl-dev sqlite3
+sudo apt-get install -y build-essential clang mold curl git bash jq pkg-config libssl-dev sqlite3
 
 echo "==> Installing Rust toolchain (rustup / cargo)..."
 if ! command -v cargo >/dev/null 2>&1; then

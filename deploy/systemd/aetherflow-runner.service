@@ -22,8 +22,8 @@ LogsDirectoryPreserve=yes
 
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 ExecStart=/opt/AetherFlow/current/aetherflow-api runner
 

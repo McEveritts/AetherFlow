@@ -61,10 +61,22 @@ impl Config {
 
     pub fn stats_locked(&self) -> bool {
         let trimmed = self.statistics_password.trim();
-        trimmed.is_empty() || self.statistics_password == "PASSWORD"
+        trimmed.is_empty() || trimmed == "PASSWORD"
     }
 
     pub fn validate_listener_security(&self) -> Result<()> {
+        let db_type = self.database_type.trim().to_ascii_lowercase();
+        match db_type.as_str() {
+            "" | "none" | "sqlite" | "bolt" => {}
+            other => bail!(
+                "unsupported database_type {other:?} in settings.toml; speedtest-backend supports only \"sqlite\" (or \"none\" to disable telemetry)"
+            ),
+        }
+        if db_type != "none" && self.database_file.as_os_str().is_empty() {
+            bail!(
+                "database_file must be non-empty in settings.toml unless database_type = \"none\""
+            );
+        }
         if self.enable_tls
             && (self.tls_cert_file.as_os_str().is_empty()
                 || self.tls_key_file.as_os_str().is_empty())
@@ -571,6 +583,14 @@ custom_tuning = "keep-me"
         assert!(Config::parse_toml_str("proxyprotocol_port = 8990\n").is_err());
         assert!(Config::parse_toml_str("max_telemetry_rows = 0\n").is_err());
         assert!(Config::parse_toml_str("trusted_proxies = \"not-an-ip\"\n").is_err());
+        assert!(Config::parse_toml_str("database_type = \"postgresql\"\n").is_err());
+        assert!(Config::parse_toml_str("database_type = \"mysql\"\n").is_err());
+        assert!(
+            Config::parse_toml_str("database_type = \"sqlite\"\ndatabase_file = \"\"\n").is_err()
+        );
+        let padded_pw =
+            Config::parse_toml_str("statistics_password = \" PASSWORD \"\n").expect("padded pw");
+        assert!(padded_pw.stats_locked());
 
         let ok = Config::parse_toml_str(
             "enable_tls = true\n\

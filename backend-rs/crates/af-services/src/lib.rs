@@ -157,10 +157,10 @@ pub fn authorize_service_control_target(
 }
 
 fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::metadata(path)?;
+    let metadata = fs::symlink_metadata(path)?;
     anyhow::ensure!(
-        metadata.is_file(),
-        "catalog is not a regular file: {}",
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "catalog is not a regular non-symlink file: {}",
         path.display()
     );
     fs::read_to_string(path)
@@ -200,7 +200,10 @@ fn load_config_file_or_embedded(
     }
     for c in config_search_candidates(filename) {
         match fs::symlink_metadata(&c) {
-            Ok(_) => return read_catalog_file(&c),
+            Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {
+                return read_catalog_file(&c);
+            }
+            Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

@@ -145,6 +145,10 @@ build_target() {
     export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
+    if ! command -v mold >/dev/null 2>&1; then
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+    fi
     cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
     if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
       cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_CLI_BIN_NAME}"
@@ -225,6 +229,10 @@ if [[ "${RUN_TESTS}" == "1" ]]; then
     export JWT_SECRET="${JWT_SECRET:-ci-test-secret-exactly-32bytes!!}"
     export AES_MASTER_KEY="${AES_MASTER_KEY:-ci-test-aes-key-exactly-32bytes!}"
     export ALLOWED_HOSTS="${ALLOWED_HOSTS:-localhost:8080,127.0.0.1:8080}"
+    if ! command -v mold >/dev/null 2>&1; then
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+    fi
     cargo test "${CARGO_LOCKED_ARGS[@]}" --workspace
   )
 fi

@@ -174,8 +174,10 @@ else
         LS_SHA256="$(sha256sum "$TMP_TAR" | awk '{print $1}')"
         TMP_BUNDLE="$(mktemp /tmp/librespeed-bundle-XXXXXX.sigstore.json)"
         BUNDLE_ARGS=()
-        if af_logged curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 "${LS_URL}.sigstore.json" -o "$TMP_BUNDLE" && [[ -s "$TMP_BUNDLE" ]]; then
+        if af_logged curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 "${LS_URL}.sigstore.json" -o "$TMP_BUNDLE" && [[ -s "$TMP_BUNDLE" ]]; then
             BUNDLE_ARGS=(--bundle-file "$TMP_BUNDLE")
+        else
+            log_warn "Sidecar .sigstore.json unavailable for ${LS_ARCHIVE_NAME}; falling back to GitHub Attestations API verification"
         fi
         if ! af_logged python3 "$VERIFY_PROVENANCE_PY" \
             --repo "McEveritts/AetherFlow" \
@@ -212,8 +214,6 @@ LS_VERSION="${BIN_VERSION:-${LS_VERSION:-4.0.0}}"
 queue_app_version /opt/librespeed/.af-version "${LS_VERSION#v}"
 
 report_progress 72 "Applying Obsidian V2 theme assets to LibreSpeed..."
-mkdir -p /opt/librespeed/assets
-
 OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
 if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/current/packages/package/assets/librespeed" ]]; then
     OBSIDIAN_ASSET_DIR="/opt/AetherFlow/current/packages/package/assets/librespeed"
@@ -221,7 +221,13 @@ elif [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/asset
     OBSIDIAN_ASSET_DIR="/opt/AetherFlow/packages/package/assets/librespeed"
 fi
 if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
-    cp -rf "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets/
+    rm -rf -- /opt/librespeed/assets.new
+    mkdir -p /opt/librespeed/assets.new
+    cp -R --no-preserve=ownership "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets.new/
+    rm -rf -- /opt/librespeed/assets
+    mv -fT /opt/librespeed/assets.new /opt/librespeed/assets
+else
+    mkdir -p /opt/librespeed/assets
 fi
 
 if [[ -f /opt/librespeed/settings.toml ]]; then
@@ -229,10 +235,25 @@ if [[ -f /opt/librespeed/settings.toml ]]; then
 import re, sys
 cfg_path, port = sys.argv[1], sys.argv[2]
 text = safe_read_text(cfg_path)
-if re.search(r"^listen_port\s*=", text, re.MULTILINE):
-    text = re.sub(r"^listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
+if re.search(r"^[ \t]*listen_port\s*=", text, re.MULTILINE):
+    text = re.sub(r"^[ \t]*listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
 else:
-    text += f"\nlisten_port={port}\n"
+    text = text.rstrip("\n") + f"\nlisten_port={port}\n"
+text = re.sub(
+    r'^([ \t]*database_type\s*=\s*)(["\'])bolt\2([ \t]*(?:#.*)?)$',
+    r'\1"sqlite"\3',
+    text,
+    flags=re.MULTILINE | re.IGNORECASE,
+)
+if not re.search(r"^[ \t]*redact_ip_addresses\s*=", text, re.MULTILINE):
+    text = text.rstrip("\n") + "\nredact_ip_addresses=true\n"
+if not re.search(r"^[ \t]*enable_id_obfuscation\s*=", text, re.MULTILINE):
+    text = text.rstrip("\n") + "\nenable_id_obfuscation=true\n"
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
+bind_val = bind_m.group(2).strip() if bind_m else None
+if not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
+    if bind_val is None or bind_val in ("127.0.0.1", "::1", "[::1]", "localhost"):
+        text = text.rstrip("\n") + '\ntrusted_proxies=["127.0.0.1", "::1"]\n'
 safe_write_text(cfg_path, text)
 PYEOF
 else
@@ -258,7 +279,7 @@ bind_address="127.0.0.1"
 listen_port=${APP_PORT}
 url_base=""
 proxyprotocol_port=0
-trusted_proxies=""
+trusted_proxies=["127.0.0.1", "::1"]
 server_lat=0
 server_lng=0
 ipinfo_api_key=""
@@ -314,6 +335,7 @@ MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/opt/librespeed
+ReadOnlyPaths=-/opt/librespeed/speedtest-backend -/opt/librespeed/assets -/opt/librespeed/settings.toml
 
 [Install]
 WantedBy=multi-user.target
@@ -323,7 +345,18 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable --now librespeed
 systemctl is-active --quiet librespeed
 
-finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+LS_READINESS_TARGET="/"
+if [[ -f /opt/librespeed/settings.toml ]] && python3 - /opt/librespeed/settings.toml <<'PYEOF'
+import re, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fh:
+    txt = fh.read()
+m = re.search(r"^[ \t]*enable_tls\s*=\s*(true|false)\b", txt, flags=re.MULTILINE | re.IGNORECASE)
+sys.exit(0 if (m and m.group(1).lower() == "true") else 1)
+PYEOF
+then
+    LS_READINESS_TARGET="https://127.0.0.1:${APP_PORT}/"
+fi
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$LS_READINESS_TARGET"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
