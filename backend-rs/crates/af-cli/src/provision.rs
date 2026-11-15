@@ -1779,6 +1779,7 @@ fn execute_single_rust_step(
                      AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock\n\
                      PRIVILEGED_RUNNER_ENABLED=true\n\
                      COOKIE_SECURE=false\n\
+                     AETHERFLOW_ENV=production\n\
                      GIN_MODE=release\n"
                 );
 

@@ -1315,18 +1315,84 @@ fn is_confined_to_isolated_root(candidate: &Path, isolated_root: Option<&Path>) 
 
 fn read_small_regular_file_nofollow(path: &Path) -> Option<String> {
     use std::io::Read;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
 
-    let mut opts = fs::OpenOptions::new();
-    opts.read(true);
     #[cfg(unix)]
-    opts.custom_flags(libc::O_NOFOLLOW);
-    let file = opts.open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > 4096 {
-        return None;
-    }
+    let file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+        use std::path::Component;
+
+        let leaf_os = path.file_name()?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut cur_dir: Option<OwnedFd> = None;
+
+        for comp in parent.components() {
+            let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+            match comp {
+                Component::Prefix(_) | Component::ParentDir => return None,
+                Component::CurDir => {}
+                Component::RootDir => {
+                    let c_root = CString::new("/").ok()?;
+                    let fd = unsafe {
+                        libc::open(
+                            c_root.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return None;
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+                Component::Normal(seg) => {
+                    let c_seg = CString::new(seg.as_bytes()).ok()?;
+                    let fd = unsafe {
+                        libc::openat(
+                            dirfd,
+                            c_seg.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return None;
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+            }
+        }
+
+        let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        let c_leaf = CString::new(leaf_os.as_bytes()).ok()?;
+        let leaf_fd = unsafe {
+            libc::openat(
+                dirfd,
+                c_leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if leaf_fd < 0 {
+            return None;
+        }
+        let f = fs::File::from(unsafe { OwnedFd::from_raw_fd(leaf_fd) });
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 4096 || (meta.permissions().mode() & 0o002) != 0 {
+            return None;
+        }
+        f
+    };
+
+    #[cfg(not(unix))]
+    let file = {
+        let f = fs::OpenOptions::new().read(true).open(path).ok()?;
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 4096 {
+            return None;
+        }
+        f
+    };
+
     let mut buf = String::new();
     file.take(4096).read_to_string(&mut buf).ok()?;
     Some(buf)

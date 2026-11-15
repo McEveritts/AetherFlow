@@ -218,10 +218,14 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         }
     }
     if raw.is_empty() {
-        let mode = env::var("GIN_MODE").unwrap_or_default();
-        if mode == "release" {
+        let af_env = env::var("AETHERFLOW_ENV").unwrap_or_default();
+        let gin_mode = env::var("GIN_MODE").unwrap_or_default();
+        let is_production = af_env.trim().eq_ignore_ascii_case("production")
+            || af_env.trim().eq_ignore_ascii_case("release")
+            || gin_mode.trim().eq_ignore_ascii_case("release");
+        if is_production {
             anyhow::bail!(
-                "FATAL: AES_MASTER_KEY is required in production (GIN_MODE=release). \
+                "FATAL: AES_MASTER_KEY is required in production (AETHERFLOW_ENV=production or GIN_MODE=release). \
                  Set a 32-byte key (raw or base64-encoded) to enable API key encryption."
             );
         }
@@ -2643,5 +2647,45 @@ pub(crate) mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(remaining_codes, vec!["live-used-tombstone".to_string()]);
+    }
+
+    #[test]
+    fn test_init_aes_key_requires_key_when_aetherflow_env_production() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_aes = env::var("AES_MASTER_KEY").ok();
+        let prev_af_env = env::var("AETHERFLOW_ENV").ok();
+        let prev_gin = env::var("GIN_MODE").ok();
+        let prev_skip = env::var("AETHERFLOW_SKIP_ENV_FILES").ok();
+
+        env::remove_var("AES_MASTER_KEY");
+        env::remove_var("GIN_MODE");
+        env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+        env::set_var("AETHERFLOW_ENV", "production");
+
+        let err = init_aes_key()
+            .expect_err("AETHERFLOW_ENV=production without AES_MASTER_KEY must fail closed");
+        assert!(err
+            .to_string()
+            .contains("AES_MASTER_KEY is required in production"));
+
+        env::set_var("AETHERFLOW_ENV", "disposable-guest-lifecycle-drill");
+        init_aes_key().expect("explicit non-production drill environment may omit AES_MASTER_KEY");
+
+        match prev_aes {
+            Some(v) => env::set_var("AES_MASTER_KEY", v),
+            None => env::remove_var("AES_MASTER_KEY"),
+        }
+        match prev_af_env {
+            Some(v) => env::set_var("AETHERFLOW_ENV", v),
+            None => env::remove_var("AETHERFLOW_ENV"),
+        }
+        match prev_gin {
+            Some(v) => env::set_var("GIN_MODE", v),
+            None => env::remove_var("GIN_MODE"),
+        }
+        match prev_skip {
+            Some(v) => env::set_var("AETHERFLOW_SKIP_ENV_FILES", v),
+            None => env::remove_var("AETHERFLOW_SKIP_ENV_FILES"),
+        }
     }
 }

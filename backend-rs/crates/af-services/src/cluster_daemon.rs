@@ -267,8 +267,8 @@ fn verify_master_control_plane_psk(candidate_psk: &str) -> bool {
 }
 
 /// Verifies a worker's pre-shared key against `CLUSTER_PSK` (if configured on the master)
-/// or against a previously enrolled node's stored `psk_hash` using constant-time comparison
-/// (including legacy Go `$2a$`/`$2b$`/`$2y$` bcrypt hashes).
+/// or against a previously enrolled node's stored `psk_hash` (`sha256:<hex>` or legacy Go
+/// `$2a$`/`$2b$`/`$2y$` bcrypt hashes; Argon2id is reserved for user passwords in `af-auth`).
 pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'static str> {
     let candidate = candidate_psk.trim();
     if candidate.is_empty() {
@@ -369,62 +369,47 @@ pub fn issue_cluster_enrollment_token() -> anyhow::Result<String> {
     Ok(token)
 }
 
-fn try_consume_enrollment_token(node_id: &str, candidate_psk: &str) -> bool {
-    let candidate = candidate_psk.trim();
-    if candidate.is_empty() || node_id.trim().is_empty() {
-        return false;
-    }
-    ensure_cluster_schema();
-    let Ok(conn) = af_db::get_conn() else {
-        return false;
-    };
-    let token_hash = hash_psk_sha256(candidate);
-    let now_ts = Utc::now().timestamp();
-    conn.execute(
-        "UPDATE cluster_enrollment_tokens \
-         SET consumed_by = ?1 \
-         WHERE token_hash = ?2 AND consumed_by IS NULL AND expires_at >= ?3",
-        params![node_id.trim(), token_hash, now_ts],
-    )
-    .map(|affected| affected == 1)
-    .unwrap_or(false)
-}
-
-fn is_cert_enrolled_as_worker(cert_sha256: &str) -> bool {
+fn check_cert_not_enrolled_as_worker(cert_sha256: &str) -> Result<(), &'static str> {
     let fp = cert_sha256.trim();
     if fp.is_empty() {
-        return false;
+        return Err("empty mTLS client certificate fingerprint");
     }
-    let Ok(conn) = af_db::get_conn() else {
-        return false;
-    };
-    conn.query_row(
-        "SELECT COUNT(*) FROM cluster_nodes WHERE peer_cert_sha256 = ?1 AND COALESCE(role, 'worker') = 'worker'",
-        params![fp],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|cnt| cnt > 0)
-    .unwrap_or(false)
+    ensure_cluster_schema();
+    let conn = af_db::get_conn().map_err(|_| "cluster database unavailable")?;
+    let cnt: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cluster_nodes WHERE peer_cert_sha256 = ?1 AND COALESCE(role, 'worker') = 'worker'",
+            params![fp],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|_| "cluster database query failed")?;
+    if cnt > 0 {
+        return Err("enrolled worker certificates are prohibited from cluster control-plane RPCs");
+    }
+    Ok(())
 }
 
 fn authorize_cluster_control_plane(
     header_psk: &str,
     peer_auth: &PeerTransportAuth,
 ) -> Result<(), &'static str> {
+    if let PeerTransportAuth::Mtls { cert_sha256, .. } = peer_auth {
+        check_cert_not_enrolled_as_worker(cert_sha256)?;
+    }
+    match peer_auth {
+        PeerTransportAuth::InternalCall => return Ok(()),
+        PeerTransportAuth::Mtls {
+            is_admin_cert: true,
+            ..
+        } => return Ok(()),
+        _ => {}
+    }
     if verify_master_control_plane_psk(header_psk) {
         return Ok(());
     }
-    match peer_auth {
-        PeerTransportAuth::Mtls {
-            cert_sha256,
-            is_admin_cert: true,
-            ..
-        } if !is_cert_enrolled_as_worker(cert_sha256) => Ok(()),
-        PeerTransportAuth::InternalCall => Ok(()),
-        _ => Err(
-            "control-plane authentication required (master CLUSTER_PSK or control-plane client certificate)",
-        ),
-    }
+    Err(
+        "control-plane authentication required (master CLUSTER_PSK or control-plane client certificate)",
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -565,42 +550,69 @@ pub fn register_worker_node_with_peer(
 
     ensure_cluster_schema();
     let incoming_cert_fp = peer_auth.mtls_cert_sha256();
-    let existing_record: Option<(String, String)> = af_db::get_conn().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT COALESCE(psk_hash, ''), COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
-            params![node_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )
-        .ok()
-    });
+    let mut conn = af_db::get_conn().context("cluster database unavailable")?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("failed starting immediate cluster enrollment transaction")?;
+
+    let existing_record: Option<(String, String)> = match tx.query_row(
+        "SELECT COALESCE(psk_hash, ''), COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+        params![node_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ) {
+        Ok(row) => Some(row),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e).context("failed querying existing cluster node state"),
+    };
+
+    if let Some((_, ref existing_cert)) = existing_record {
+        let pinned_fp = existing_cert.trim();
+        if !pinned_fp.is_empty() && !matches!(peer_auth, PeerTransportAuth::InternalCall) {
+            let matches_pin = incoming_cert_fp
+                .is_some_and(|fp| constant_time_eq(fp.as_bytes(), pinned_fp.as_bytes()));
+            if !matches_pin {
+                return Ok(RegisterWorkerResponse {
+                    node_id: String::new(),
+                    accepted: false,
+                    message: "peer certificate does not match enrolled worker certificate"
+                        .to_string(),
+                });
+            }
+        }
+    }
 
     let is_master_psk = verify_master_control_plane_psk(psk);
     if !is_master_psk {
-        let mut authorized = false;
-        if let Some((ref existing_hash, ref existing_cert)) = existing_record {
-            if verify_enrolled_cluster_psk(psk, existing_hash).is_ok() {
-                if !existing_cert.trim().is_empty()
-                    && incoming_cert_fp != Some(existing_cert.trim())
-                {
-                    return Ok(RegisterWorkerResponse {
-                        node_id: String::new(),
-                        accepted: false,
-                        message: "peer certificate does not match enrolled worker certificate"
-                            .to_string(),
-                    });
-                }
-                authorized = true;
+        let existing_psk_hash = existing_record
+            .as_ref()
+            .map(|(h, _)| h.trim())
+            .unwrap_or("");
+        if !existing_psk_hash.is_empty() {
+            if let Err(err_msg) = verify_enrolled_cluster_psk(psk, existing_psk_hash) {
+                return Ok(RegisterWorkerResponse {
+                    node_id: String::new(),
+                    accepted: false,
+                    message: err_msg.to_string(),
+                });
             }
-        }
-        if !authorized && !try_consume_enrollment_token(&node_id, psk) {
-            let err_msg = verify_cluster_psk(&node_id, psk)
-                .err()
-                .unwrap_or("invalid or expired cluster enrollment token");
-            return Ok(RegisterWorkerResponse {
-                node_id: String::new(),
-                accepted: false,
-                message: err_msg.to_string(),
-            });
+        } else {
+            let token_hash = hash_psk_sha256(psk);
+            let now_ts = Utc::now().timestamp();
+            let consumed = tx
+                .execute(
+                    "UPDATE cluster_enrollment_tokens \
+                     SET consumed_by = ?1 \
+                     WHERE token_hash = ?2 AND consumed_by IS NULL AND expires_at >= ?3",
+                    params![node_id, token_hash, now_ts],
+                )
+                .context("failed consuming cluster enrollment token")?;
+            if consumed != 1 {
+                return Ok(RegisterWorkerResponse {
+                    node_id: String::new(),
+                    accepted: false,
+                    message: "invalid or expired cluster enrollment token".to_string(),
+                });
+            }
         }
     }
 
@@ -608,22 +620,23 @@ pub fn register_worker_node_with_peer(
     let cert_fp_to_store = incoming_cert_fp.unwrap_or("");
     let now_rfc3339 = Utc::now().to_rfc3339();
 
-    if let Ok(conn) = af_db::get_conn() {
-        conn.execute(
-            "INSERT INTO cluster_nodes (id, hostname, address, psk_hash, peer_cert_sha256, role, status, last_heartbeat, last_seen, enrolled_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'worker', 'online', ?6, ?6, ?6) \
-             ON CONFLICT(id) DO UPDATE SET \
-                 hostname = excluded.hostname, \
-                 address = excluded.address, \
-                 psk_hash = excluded.psk_hash, \
-                 peer_cert_sha256 = CASE WHEN excluded.peer_cert_sha256 != '' THEN excluded.peer_cert_sha256 ELSE COALESCE(cluster_nodes.peer_cert_sha256, '') END, \
-                 role = 'worker', \
-                 status = 'online', \
-                 last_heartbeat = excluded.last_heartbeat, \
-                 last_seen = excluded.last_seen",
-            params![node_id, hostname, address, psk_hash, cert_fp_to_store, now_rfc3339],
-        )?;
-    }
+    tx.execute(
+        "INSERT INTO cluster_nodes (id, hostname, address, psk_hash, peer_cert_sha256, role, status, last_heartbeat, last_seen, enrolled_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'worker', 'online', ?6, ?6, ?6) \
+         ON CONFLICT(id) DO UPDATE SET \
+             hostname = excluded.hostname, \
+             address = excluded.address, \
+             psk_hash = excluded.psk_hash, \
+             peer_cert_sha256 = CASE WHEN excluded.peer_cert_sha256 != '' THEN excluded.peer_cert_sha256 ELSE COALESCE(cluster_nodes.peer_cert_sha256, '') END, \
+             role = 'worker', \
+             status = 'online', \
+             last_heartbeat = excluded.last_heartbeat, \
+             last_seen = excluded.last_seen",
+        params![node_id, hostname, address, psk_hash, cert_fp_to_store, now_rfc3339],
+    )
+    .context("failed upserting enrolled cluster worker")?;
+    tx.commit()
+        .context("failed committing cluster worker enrollment")?;
 
     let version = if req.version.trim().is_empty() {
         "4.0.0"
@@ -728,17 +741,24 @@ pub fn process_worker_heartbeat_with_peer(
         if let Err(msg) = verify_cluster_psk(&node_id, &req.psk) {
             anyhow::bail!("{}", msg);
         }
-        if let Some(cert_fp) = incoming_cert_fp {
-            if let Ok(conn) = af_db::get_conn() {
-                if let Ok(stored_cert) = conn.query_row(
-                    "SELECT COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
-                    params![node_id],
-                    |r| r.get::<_, String>(0),
-                ) {
-                    let stored_trimmed = stored_cert.trim();
-                    if !stored_trimmed.is_empty()
-                        && !constant_time_eq(stored_trimmed.as_bytes(), cert_fp.as_bytes())
-                    {
+        if !matches!(peer_auth, PeerTransportAuth::InternalCall) {
+            let conn = af_db::get_conn().context("cluster database unavailable")?;
+            let stored_cert: Option<String> = match conn.query_row(
+                "SELECT COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+                params![node_id],
+                |r| r.get::<_, String>(0),
+            ) {
+                Ok(val) => Some(val),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e).context("failed querying enrolled worker certificate pin"),
+            };
+            if let Some(stored) = stored_cert {
+                let stored_trimmed = stored.trim();
+                if !stored_trimmed.is_empty() {
+                    let matches_pin = incoming_cert_fp.is_some_and(|fp| {
+                        constant_time_eq(stored_trimmed.as_bytes(), fp.as_bytes())
+                    });
+                    if !matches_pin {
                         anyhow::bail!(
                             "peer certificate does not match enrolled worker certificate"
                         );
@@ -1056,20 +1076,92 @@ fn read_tls_pem_nofollow(path: &Path, label: &str) -> anyhow::Result<Vec<u8>> {
 
     #[cfg(unix)]
     let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+        use std::path::Component;
 
-        let opened = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)
-            .with_context(|| {
+        let Some(leaf_os) = path.file_name() else {
+            anyhow::bail!(
+                "{} at {} must include a regular filename",
+                label,
+                path.display()
+            );
+        };
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut cur_dir: Option<OwnedFd> = None;
+
+        for comp in parent.components() {
+            let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+            match comp {
+                Component::Prefix(_) | Component::ParentDir => {
+                    anyhow::bail!(
+                        "{} at {} must not contain parent-directory traversal",
+                        label,
+                        path.display()
+                    );
+                }
+                Component::CurDir => {}
+                Component::RootDir => {
+                    let c_root = CString::new("/").context("invalid root path")?;
+                    let fd = unsafe {
+                        libc::open(
+                            c_root.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error()).with_context(|| {
+                            format!("failed opening root directory for {}", label)
+                        });
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+                Component::Normal(seg) => {
+                    let c_seg = CString::new(seg.as_bytes()).with_context(|| {
+                        format!("invalid path segment in {} at {}", label, path.display())
+                    })?;
+                    let fd = unsafe {
+                        libc::openat(
+                            dirfd,
+                            c_seg.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error()).with_context(|| {
+                            format!(
+                                "failed opening ancestor directory for {} at {} (symlinked directories forbidden)",
+                                label,
+                                path.display()
+                            )
+                        });
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+            }
+        }
+
+        let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        let c_leaf = CString::new(leaf_os.as_bytes())
+            .with_context(|| format!("invalid filename for {} at {}", label, path.display()))?;
+        let leaf_fd = unsafe {
+            libc::openat(
+                dirfd,
+                c_leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if leaf_fd < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
                 format!(
                     "failed opening {} at {} (symlinks forbidden)",
                     label,
                     path.display()
                 )
-            })?;
+            });
+        }
+        let opened = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(leaf_fd) });
 
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::fstat(opened.as_raw_fd(), &mut st) };
@@ -1079,6 +1171,9 @@ fn read_tls_pem_nofollow(path: &Path, label: &str) -> anyhow::Result<Vec<u8>> {
         }
         if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
             anyhow::bail!("{} at {} must be a regular file", label, path.display());
+        }
+        if (st.st_mode & 0o002) != 0 {
+            anyhow::bail!("{} at {} must not be world-writable", label, path.display());
         }
         if st.st_size <= 0 {
             anyhow::bail!("{} at {} is empty", label, path.display());
@@ -1243,11 +1338,38 @@ pub fn build_worker_mtls_connector(
 
 #[derive(Clone)]
 pub enum MasterTransportSecurity {
-    Mtls(TlsAcceptor),
+    Mtls {
+        acceptor: TlsAcceptor,
+        admin_cert_sha256: Option<String>,
+    },
     InsecureLoopback,
 }
 
-/// Evaluates `CLUSTER_CA_CERT`, `CLUSTER_SERVER_CERT`, and `CLUSTER_SERVER_KEY`.
+fn load_pinned_admin_client_cert_sha256() -> anyhow::Result<Option<String>> {
+    let Some(admin_cert_path) = non_empty_env("CLUSTER_ADMIN_CLIENT_CERT") else {
+        return Ok(None);
+    };
+    let pem_bytes =
+        read_tls_pem_nofollow(Path::new(&admin_cert_path), "CLUSTER_ADMIN_CLIENT_CERT")?;
+    let mut certs = CertificateDer::pem_slice_iter(&pem_bytes)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!(
+                "failed parsing CLUSTER_ADMIN_CLIENT_CERT PEM at {}",
+                admin_cert_path
+            )
+        })?;
+    let Some(leaf) = certs.drain(..).next() else {
+        anyhow::bail!(
+            "no PEM certificate found in CLUSTER_ADMIN_CLIENT_CERT at {}",
+            admin_cert_path
+        );
+    };
+    Ok(Some(hex::encode(Sha256::digest(leaf.as_ref()))))
+}
+
+/// Evaluates `CLUSTER_CA_CERT`, `CLUSTER_SERVER_CERT`, and `CLUSTER_SERVER_KEY` (plus optional
+/// exclusive `CLUSTER_ADMIN_CLIENT_CERT` pin).
 /// Enforces mandatory TLS 1.3 mTLS in production; only allows unencrypted loopback when all three
 /// cert variables are unset, `CLUSTER_ALLOW_INSECURE_LOOPBACK=true`, and `bind_host` is loopback.
 pub fn load_master_transport_security(bind_host: &str) -> anyhow::Result<MasterTransportSecurity> {
@@ -1262,7 +1384,11 @@ pub fn load_master_transport_security(bind_host: &str) -> anyhow::Result<MasterT
                 Path::new(&cert_path),
                 Path::new(&key_path),
             )?;
-            Ok(MasterTransportSecurity::Mtls(acceptor))
+            let admin_cert_sha256 = load_pinned_admin_client_cert_sha256()?;
+            Ok(MasterTransportSecurity::Mtls {
+                acceptor,
+                admin_cert_sha256,
+            })
         }
         (None, None, None) => {
             if env_flag_true("CLUSTER_ALLOW_INSECURE_LOOPBACK") && is_loopback_host(bind_host) {
@@ -2196,16 +2322,9 @@ fn extract_x509_subject_cn(cert_der: &[u8]) -> Option<String> {
     last_cn
 }
 
-fn configured_admin_client_cert_sha256() -> Option<String> {
-    let admin_cert_path = non_empty_env("CLUSTER_ADMIN_CLIENT_CERT")?;
-    let pem_bytes =
-        read_tls_pem_nofollow(Path::new(&admin_cert_path), "CLUSTER_ADMIN_CLIENT_CERT").ok()?;
-    let leaf = CertificateDer::pem_slice_iter(&pem_bytes).next()?.ok()?;
-    Some(hex::encode(Sha256::digest(leaf.as_ref())))
-}
-
 fn inspect_mtls_peer(
     tls_stream: &tokio_rustls::server::TlsStream<TcpStream>,
+    pinned_admin_sha256: Option<&str>,
 ) -> anyhow::Result<PeerTransportAuth> {
     let (_, server_conn) = tls_stream.get_ref();
     let certs = server_conn
@@ -2217,18 +2336,20 @@ fn inspect_mtls_peer(
     let cert_sha256 = hex::encode(Sha256::digest(leaf.as_ref()));
     let subject_cn = extract_x509_subject_cn(leaf.as_ref());
 
-    let matches_pinned_admin = configured_admin_client_cert_sha256()
-        .is_some_and(|expected| constant_time_eq(cert_sha256.as_bytes(), expected.as_bytes()));
-    let matches_admin_cn = subject_cn.as_deref().is_some_and(|cn| {
-        cn.eq_ignore_ascii_case("aetherflow-master")
-            || cn.eq_ignore_ascii_case("aetherflow-control-plane")
-            || cn.eq_ignore_ascii_case("aetherflow-admin")
-    });
+    let is_admin_cert = if let Some(expected) = pinned_admin_sha256 {
+        constant_time_eq(cert_sha256.as_bytes(), expected.as_bytes())
+    } else {
+        subject_cn.as_deref().is_some_and(|cn| {
+            cn.eq_ignore_ascii_case("aetherflow-master")
+                || cn.eq_ignore_ascii_case("aetherflow-control-plane")
+                || cn.eq_ignore_ascii_case("aetherflow-admin")
+        })
+    };
 
     Ok(PeerTransportAuth::Mtls {
         cert_sha256,
         subject_cn,
-        is_admin_cert: matches_pinned_admin || matches_admin_cn,
+        is_admin_cert,
     })
 }
 
@@ -2535,12 +2656,15 @@ pub async fn serve_cluster_master_connection(
     security: MasterTransportSecurity,
 ) -> anyhow::Result<()> {
     match security {
-        MasterTransportSecurity::Mtls(acceptor) => {
+        MasterTransportSecurity::Mtls {
+            acceptor,
+            admin_cert_sha256,
+        } => {
             let tls_stream = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream))
                 .await
                 .context("cluster mTLS handshake timed out")?
                 .context("cluster mTLS handshake failed")?;
-            let peer_auth = inspect_mtls_peer(&tls_stream)?;
+            let peer_auth = inspect_mtls_peer(&tls_stream, admin_cert_sha256.as_deref())?;
             let builder = build_cluster_auto_conn_builder();
             let svc = service_fn(move |req| {
                 let auth = peer_auth.clone();
@@ -3721,10 +3845,28 @@ mod tests {
                 .success());
         }
 
-        // Symlinked certificate paths MUST be rejected by O_NOFOLLOW
+        // Symlinked leaf, symlinked ancestor dir, and world-writable PEM files MUST be rejected
         let symlink_ca = cert_dir.join("symlink-ca.crt");
         std::os::unix::fs::symlink(&ca_crt, &symlink_ca).unwrap();
         assert!(build_master_mtls_acceptor(&symlink_ca, &srv_crt, &srv_key).is_err());
+
+        let symlink_dir = fixture.root.join("certs-symlink-dir");
+        std::os::unix::fs::symlink(&cert_dir, &symlink_dir).unwrap();
+        assert!(
+            build_master_mtls_acceptor(&symlink_dir.join("ca.crt"), &srv_crt, &srv_key).is_err(),
+            "symlinked ancestor directory must be rejected by openat O_NOFOLLOW"
+        );
+
+        let ww_ca = cert_dir.join("world-writable-ca.crt");
+        std::fs::copy(&ca_crt, &ww_ca).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ww_ca, std::fs::Permissions::from_mode(0o666)).unwrap();
+        }
+        assert!(
+            build_master_mtls_acceptor(&ww_ca, &srv_crt, &srv_key).is_err(),
+            "world-writable PEM file must be rejected"
+        );
 
         let psk = "cluster-mtls-shared-secret-at-least-32-chars!!";
         env::set_var("CLUSTER_PSK", psk);
@@ -3733,6 +3875,26 @@ mod tests {
         env::set_var("CLUSTER_SERVER_KEY", &srv_key);
         env::set_var("CLUSTER_CLIENT_CERT", &cli_crt);
         env::set_var("CLUSTER_CLIENT_KEY", &cli_key);
+
+        // Missing or unreadable CLUSTER_ADMIN_CLIENT_CERT MUST fail closed at startup
+        env::set_var(
+            "CLUSTER_ADMIN_CLIENT_CERT",
+            cert_dir.join("missing-admin.crt"),
+        );
+        assert!(
+            load_master_transport_security("127.0.0.1").is_err(),
+            "invalid CLUSTER_ADMIN_CLIENT_CERT must fail closed at startup"
+        );
+        env::set_var("CLUSTER_ADMIN_CLIENT_CERT", &admin_crt);
+        let pinned_sec = load_master_transport_security("127.0.0.1").unwrap();
+        assert!(matches!(
+            pinned_sec,
+            MasterTransportSecurity::Mtls {
+                admin_cert_sha256: Some(_),
+                ..
+            }
+        ));
+        env::remove_var("CLUSTER_ADMIN_CLIENT_CERT");
 
         // Plaintext http:// master addr MUST be rejected when worker mTLS certs are configured
         assert!(resolve_worker_transport("http://127.0.0.1:50051").is_err());
@@ -3868,7 +4030,7 @@ mod tests {
             assert!(got_accepted);
             assert_eq!(got_node_id, "node-legacy-go-worker");
 
-            // 5b. Worker cert WITHOUT master CLUSTER_PSK MUST be rejected on ExecuteCommand & GetMetrics
+            // 5b. Enrolled worker cert MUST be rejected on ExecuteCommand BOTH without and WITH master CLUSTER_PSK
             let mut param_entry = Vec::new();
             pb_encode_string(&mut param_entry, 1, "service");
             pb_encode_string(&mut param_entry, 2, "radarr");
@@ -3901,8 +4063,7 @@ mod tests {
                 "worker certificate without master CLUSTER_PSK must be rejected on ExecuteCommand"
             );
 
-            // Queue remote command via gRPC ExecuteCommand authenticated with master x-cluster-psk
-            let cmd_req = Request::builder()
+            let worker_psk_cmd_req = Request::builder()
                 .method("POST")
                 .uri(format!(
                     "https://{}/cluster.ClusterService/ExecuteCommand",
@@ -3915,7 +4076,51 @@ mod tests {
                     &cmd_pb,
                 ))))
                 .unwrap();
-            let cmd_resp = h2_sender.send_request(cmd_req).await.unwrap();
+            let worker_psk_cmd_resp = h2_sender.send_request(worker_psk_cmd_req).await.unwrap();
+            let worker_psk_cmd_collected = worker_psk_cmd_resp.into_body().collect().await.unwrap();
+            assert_eq!(
+                worker_psk_cmd_collected
+                    .trailers()
+                    .and_then(|t| t.get("grpc-status"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("16"),
+                "enrolled worker certificate MUST be prohibited from ExecuteCommand even with shared CLUSTER_PSK"
+            );
+
+            // Dedicated control-plane certificate (CN=aetherflow-master, not enrolled as worker) queues ExecuteCommand
+            let admin_connector =
+                build_worker_mtls_connector(&ca_crt, &admin_crt, &admin_key).unwrap();
+            let admin_tcp = TcpStream::connect(bound_addr).await.unwrap();
+            let admin_tls = admin_connector
+                .connect(
+                    ServerName::try_from("127.0.0.1".to_string()).unwrap(),
+                    admin_tcp,
+                )
+                .await
+                .unwrap();
+            let (mut admin_h2, admin_conn) = hyper::client::conn::http2::handshake(
+                TokioExecutor::new(),
+                TokioIo::new(admin_tls),
+            )
+            .await
+            .unwrap();
+            tokio::spawn(async move {
+                let _ = admin_conn.await;
+            });
+
+            let cmd_req = Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "https://{}/cluster.ClusterService/ExecuteCommand",
+                    worker_ep.authority
+                ))
+                .header("content-type", "application/grpc")
+                .header("te", "trailers")
+                .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(
+                    &cmd_pb,
+                ))))
+                .unwrap();
+            let cmd_resp = admin_h2.send_request(cmd_req).await.unwrap();
             let cmd_collected = cmd_resp.into_body().collect().await.unwrap();
             assert_eq!(
                 cmd_collected
@@ -4013,7 +4218,7 @@ mod tests {
                 Some("0")
             );
 
-            // Verify GetMetrics rejects unauthenticated worker cert, then succeeds with master PSK and admin cert
+            // Verify GetMetrics rejects enrolled worker cert (both without and WITH master PSK), then succeeds with admin cert
             let mut gm_pb = Vec::new();
             pb_encode_string(&mut gm_pb, 1, &got_node_id);
             let unauth_gm_req = Request::builder()
@@ -4037,7 +4242,7 @@ mod tests {
                 "worker certificate without master CLUSTER_PSK must be rejected on GetMetrics"
             );
 
-            let gm_req = Request::builder()
+            let worker_psk_gm_req = Request::builder()
                 .method("POST")
                 .uri(format!(
                     "https://{}/cluster.ClusterService/GetMetrics",
@@ -4048,37 +4253,18 @@ mod tests {
                 .header("x-cluster-psk", psk)
                 .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(&gm_pb))))
                 .unwrap();
-            let gm_resp = h2_sender.send_request(gm_req).await.unwrap();
-            let gm_collected = gm_resp.into_body().collect().await.unwrap();
+            let worker_psk_gm_resp = h2_sender.send_request(worker_psk_gm_req).await.unwrap();
+            let worker_psk_gm_collected = worker_psk_gm_resp.into_body().collect().await.unwrap();
             assert_eq!(
-                gm_collected
+                worker_psk_gm_collected
                     .trailers()
                     .and_then(|t| t.get("grpc-status"))
                     .and_then(|v| v.to_str().ok()),
-                Some("0")
+                Some("16"),
+                "enrolled worker certificate MUST be prohibited from GetMetrics even with shared CLUSTER_PSK"
             );
-            assert!(gm_collected.to_bytes().len() > 15);
 
             // Dedicated control-plane certificate (CN=aetherflow-master) succeeds on GetMetrics WITHOUT PSK header
-            let admin_connector =
-                build_worker_mtls_connector(&ca_crt, &admin_crt, &admin_key).unwrap();
-            let admin_tcp = TcpStream::connect(bound_addr).await.unwrap();
-            let admin_tls = admin_connector
-                .connect(
-                    ServerName::try_from("127.0.0.1".to_string()).unwrap(),
-                    admin_tcp,
-                )
-                .await
-                .unwrap();
-            let (mut admin_h2, admin_conn) = hyper::client::conn::http2::handshake(
-                TokioExecutor::new(),
-                TokioIo::new(admin_tls),
-            )
-            .await
-            .unwrap();
-            tokio::spawn(async move {
-                let _ = admin_conn.await;
-            });
             let admin_gm_req = Request::builder()
                 .method("POST")
                 .uri(format!(
@@ -4098,6 +4284,7 @@ mod tests {
                     .and_then(|v| v.to_str().ok()),
                 Some("0")
             );
+            assert!(admin_gm_collected.to_bytes().len() > 15);
 
             // 6. Single-use enrollment token + second worker cert (`cli2_crt`) + cross-node spoofing rejection
             let worker2_sec = WorkerTransportSecurity::Mtls(
@@ -4152,6 +4339,78 @@ mod tests {
                 replay_st,
                 StatusCode::UNAUTHORIZED,
                 "consumed single-use enrollment token must reject replay by another node"
+            );
+
+            // Worker-2 (`cli2_crt`) attempting to overwrite already-enrolled `node-legacy-go-worker` (`cli_crt`)
+            // MUST fail closed (401) BOTH with master PSK and with a fresh unconsumed enrollment token!
+            let original_pin: String = af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT peer_cert_sha256 FROM cluster_nodes WHERE id = ?1",
+                    params![got_node_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(!original_pin.is_empty());
+
+            let hijack_reg = RegisterWorkerRequest {
+                node_id: got_node_id.clone(),
+                hostname: "legacy-go-worker".to_string(),
+                address: "10.10.0.99:8080".to_string(),
+                psk: String::new(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            };
+            let (hijack_psk_st, _) = send_worker_json_post(
+                &worker_ep,
+                &worker2_sec,
+                "/cluster/v1/register",
+                psk,
+                serde_json::to_vec(&hijack_reg).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                hijack_psk_st,
+                StatusCode::UNAUTHORIZED,
+                "mismatched peer certificate must not overwrite enrolled worker pin via shared CLUSTER_PSK"
+            );
+
+            let fresh_tok = issue_cluster_enrollment_token().unwrap();
+            let (hijack_tok_st, _) = send_worker_json_post(
+                &worker_ep,
+                &worker2_sec,
+                "/cluster/v1/register",
+                &fresh_tok,
+                serde_json::to_vec(&hijack_reg).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                hijack_tok_st,
+                StatusCode::UNAUTHORIZED,
+                "fresh single-use enrollment token must not overwrite an already-enrolled node"
+            );
+            let pin_after: String = af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT peer_cert_sha256 FROM cluster_nodes WHERE id = ?1",
+                    params![got_node_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pin_after, original_pin);
+            let fresh_consumed: Option<String> = af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT consumed_by FROM cluster_enrollment_tokens WHERE token_hash = ?1",
+                    params![hash_psk_sha256(&fresh_tok)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                fresh_consumed.is_none(),
+                "rejected re-enrollment attempt must not consume unrelated enrollment token"
             );
 
             // Enrolled worker-2 can heartbeat for itself using its enrolled token...
