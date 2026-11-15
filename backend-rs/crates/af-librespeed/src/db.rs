@@ -202,7 +202,12 @@ fn init_telemetry_schema(conn: &Connection) -> Result<()> {
         let mut stmt =
             conn.prepare("SELECT id, timestamp FROM speedtest_users WHERE ts_epoch_ms IS NULL")?;
         let pending: Vec<(i64, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if !pending.is_empty() {
             let mut upd =
@@ -564,20 +569,23 @@ impl TelemetryVault {
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TelemetryRecord> {
+    let opt_str = |idx: usize| -> rusqlite::Result<String> {
+        Ok(row.get::<_, Option<String>>(idx)?.unwrap_or_default())
+    };
     Ok(TelemetryRecord {
         id: row.get(0)?,
-        uuid: row.get(1)?,
-        timestamp: row.get(2)?,
-        ip: row.get(3)?,
-        ispinfo: row.get(4)?,
-        extra: row.get(5)?,
-        ua: row.get(6)?,
-        lang: row.get(7)?,
-        dl: row.get(8)?,
-        ul: row.get(9)?,
-        ping: row.get(10)?,
-        jitter: row.get(11)?,
-        log: row.get(12)?,
+        uuid: opt_str(1)?,
+        timestamp: opt_str(2)?,
+        ip: opt_str(3)?,
+        ispinfo: opt_str(4)?,
+        extra: opt_str(5)?,
+        ua: opt_str(6)?,
+        lang: opt_str(7)?,
+        dl: opt_str(8)?,
+        ul: opt_str(9)?,
+        ping: opt_str(10)?,
+        jitter: opt_str(11)?,
+        log: opt_str(12)?,
     })
 }
 
@@ -2506,5 +2514,57 @@ mod tests {
             err.is_err(),
             "corrupt committed BoltDB v2 archive must fail closed instead of returning an empty vault"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_sqlite_rows_with_null_columns_reopen_and_query_cleanly() {
+        let tmp = TempDirGuard::new("null-legacy-sqlite-cols");
+        let db_path = tmp.0.join("speedtest.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE speedtest_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT,
+                    timestamp TEXT,
+                    ip TEXT,
+                    ispinfo TEXT,
+                    extra TEXT,
+                    ua TEXT,
+                    lang TEXT,
+                    dl TEXT,
+                    ul TEXT,
+                    ping TEXT,
+                    jitter TEXT,
+                    log TEXT
+                );
+                INSERT INTO speedtest_users (uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log)
+                VALUES ('01JNULLTEST000000000000001', NULL, '192.0.2.55', NULL, NULL, NULL, NULL, '250.4', NULL, '4.1', NULL, NULL);",
+            )
+            .unwrap();
+        }
+
+        let vault = TelemetryVault::open_with_max_rows(&db_path, 100)
+            .expect("reopen pre-existing SQLite DB with NULL text columns");
+        let recent = vault
+            .list_recent(10)
+            .await
+            .expect("list_recent with NULL columns");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].uuid, "01JNULLTEST000000000000001");
+        assert_eq!(recent[0].ip, "192.0.2.55");
+        assert_eq!(recent[0].dl, "250.4");
+        assert_eq!(recent[0].ispinfo, "");
+        assert_eq!(recent[0].extra, "");
+        assert_eq!(recent[0].log, "");
+
+        let by_id = vault
+            .get_by_uuid("01JNULLTEST000000000000001".to_string())
+            .await
+            .expect("get_by_uuid with NULL columns")
+            .expect("row must exist");
+        assert_eq!(by_id.uuid, "01JNULLTEST000000000000001");
+        assert_eq!(by_id.ping, "4.1");
+        assert_eq!(by_id.ul, "");
     }
 }

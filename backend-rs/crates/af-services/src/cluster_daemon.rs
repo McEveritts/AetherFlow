@@ -17,6 +17,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use once_cell::sync::Lazy;
+use rand::RngCore;
 use rusqlite::params;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -227,21 +228,55 @@ fn hash_psk_sha256(psk: &str) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// Verified transport identity of the caller on a cluster listener connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerTransportAuth {
+    /// Direct in-process library call (e.g., unit tests).
+    InternalCall,
+    /// Opt-in `CLUSTER_ALLOW_INSECURE_LOOPBACK=true` plaintext loopback connection.
+    InsecureLoopback,
+    /// Verified TLS 1.3 mutual-TLS client certificate identity.
+    Mtls {
+        cert_sha256: String,
+        subject_cn: Option<String>,
+        is_admin_cert: bool,
+    },
+}
+
+impl PeerTransportAuth {
+    fn mtls_cert_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Mtls { cert_sha256, .. } => Some(cert_sha256.as_str()),
+            _ => None,
+        }
+    }
+}
+
+fn verify_master_control_plane_psk(candidate_psk: &str) -> bool {
+    let candidate = candidate_psk.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    if let Ok(master_psk) = env::var("CLUSTER_PSK") {
+        let master_trimmed = master_psk.trim();
+        if !master_trimmed.is_empty() {
+            return constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes());
+        }
+    }
+    false
+}
+
 /// Verifies a worker's pre-shared key against `CLUSTER_PSK` (if configured on the master)
-/// or against a previously enrolled node's stored `psk_hash` using constant-time comparison.
+/// or against a previously enrolled node's stored `psk_hash` using constant-time comparison
+/// (including legacy Go `$2a$`/`$2b$`/`$2y$` bcrypt hashes).
 pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'static str> {
     let candidate = candidate_psk.trim();
     if candidate.is_empty() {
         return Err("psk is required");
     }
 
-    if let Ok(master_psk) = env::var("CLUSTER_PSK") {
-        let master_trimmed = master_psk.trim();
-        if !master_trimmed.is_empty()
-            && constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes())
-        {
-            return Ok(());
-        }
+    if verify_master_control_plane_psk(candidate) {
+        return Ok(());
     }
 
     // Check if this node is already enrolled in `cluster_nodes` with a matching hash
@@ -264,6 +299,16 @@ fn verify_enrolled_cluster_psk(candidate: &str, stored_hash: &str) -> Result<(),
     if candidate.is_empty() || stored_hash.is_empty() {
         return Err("cluster PSK is not configured and node is not enrolled");
     }
+    if stored_hash.starts_with("$2a$")
+        || stored_hash.starts_with("$2b$")
+        || stored_hash.starts_with("$2y$")
+    {
+        return if bcrypt::verify(candidate, stored_hash).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err("invalid cluster PSK for enrolled node")
+        };
+    }
     let candidate_hash = hash_psk_sha256(candidate);
     if constant_time_eq(candidate_hash.as_bytes(), stored_hash.as_bytes())
         || (!stored_hash.starts_with("sha256:")
@@ -274,8 +319,8 @@ fn verify_enrolled_cluster_psk(candidate: &str, stored_hash: &str) -> Result<(),
     Err("invalid cluster PSK for enrolled node")
 }
 
-/// Ensures `cluster_nodes` has `last_seen`, `cpu_usage`, `ram_usage`, and `disk_usage` columns
-/// alongside the core schema columns (`last_heartbeat`, `status`, etc.).
+/// Ensures `cluster_nodes` has `last_seen`, `cpu_usage`, `ram_usage`, `disk_usage`, and
+/// `peer_cert_sha256` columns plus the single-use `cluster_enrollment_tokens` table.
 pub fn ensure_cluster_schema() {
     let Ok(conn) = af_db::get_conn() else {
         return;
@@ -285,9 +330,100 @@ pub fn ensure_cluster_schema() {
         "ALTER TABLE cluster_nodes ADD COLUMN cpu_usage REAL DEFAULT 0.0;",
         "ALTER TABLE cluster_nodes ADD COLUMN ram_usage REAL DEFAULT 0.0;",
         "ALTER TABLE cluster_nodes ADD COLUMN disk_usage REAL DEFAULT 0.0;",
+        "ALTER TABLE cluster_nodes ADD COLUMN peer_cert_sha256 TEXT DEFAULT '';",
+        "CREATE TABLE IF NOT EXISTS cluster_enrollment_tokens (
+            token_hash TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            consumed_by TEXT
+        );",
     ];
     for sql in migrations {
         let _ = conn.execute_batch(sql);
+    }
+}
+
+/// Mints a 256-bit CSPRNG single-use worker enrollment token (24-hour TTL), persists its
+/// SHA-256 digest in `cluster_enrollment_tokens`, and returns the 64-char hex token.
+pub fn issue_cluster_enrollment_token() -> anyhow::Result<String> {
+    ensure_cluster_schema();
+    let mut token_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+    let token = hex::encode(token_bytes);
+    let token_hash = hash_psk_sha256(&token);
+    let now = Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+    let expires_at = now.timestamp() + 86_400;
+
+    let conn = af_db::get_conn().context("failed opening database for cluster enrollment token")?;
+    let _ = conn.execute(
+        "DELETE FROM cluster_enrollment_tokens WHERE expires_at < ?1",
+        params![now.timestamp()],
+    );
+    conn.execute(
+        "INSERT INTO cluster_enrollment_tokens (token_hash, created_at, expires_at, consumed_by) \
+         VALUES (?1, ?2, ?3, NULL)",
+        params![token_hash, now_rfc3339, expires_at],
+    )
+    .context("failed persisting cluster enrollment token")?;
+    Ok(token)
+}
+
+fn try_consume_enrollment_token(node_id: &str, candidate_psk: &str) -> bool {
+    let candidate = candidate_psk.trim();
+    if candidate.is_empty() || node_id.trim().is_empty() {
+        return false;
+    }
+    ensure_cluster_schema();
+    let Ok(conn) = af_db::get_conn() else {
+        return false;
+    };
+    let token_hash = hash_psk_sha256(candidate);
+    let now_ts = Utc::now().timestamp();
+    conn.execute(
+        "UPDATE cluster_enrollment_tokens \
+         SET consumed_by = ?1 \
+         WHERE token_hash = ?2 AND consumed_by IS NULL AND expires_at >= ?3",
+        params![node_id.trim(), token_hash, now_ts],
+    )
+    .map(|affected| affected == 1)
+    .unwrap_or(false)
+}
+
+fn is_cert_enrolled_as_worker(cert_sha256: &str) -> bool {
+    let fp = cert_sha256.trim();
+    if fp.is_empty() {
+        return false;
+    }
+    let Ok(conn) = af_db::get_conn() else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM cluster_nodes WHERE peer_cert_sha256 = ?1 AND COALESCE(role, 'worker') = 'worker'",
+        params![fp],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|cnt| cnt > 0)
+    .unwrap_or(false)
+}
+
+fn authorize_cluster_control_plane(
+    header_psk: &str,
+    peer_auth: &PeerTransportAuth,
+) -> Result<(), &'static str> {
+    if verify_master_control_plane_psk(header_psk) {
+        return Ok(());
+    }
+    match peer_auth {
+        PeerTransportAuth::Mtls {
+            cert_sha256,
+            is_admin_cert: true,
+            ..
+        } if !is_cert_enrolled_as_worker(cert_sha256) => Ok(()),
+        PeerTransportAuth::InternalCall => Ok(()),
+        _ => Err(
+            "control-plane authentication required (master CLUSTER_PSK or control-plane client certificate)",
+        ),
     }
 }
 
@@ -393,6 +529,14 @@ fn is_enrolled_cluster_node(node_id: &str) -> bool {
 
 /// Validates and registers a worker node in `cluster_nodes` and initializes its in-memory state.
 pub fn register_worker_node(req: &RegisterWorkerRequest) -> anyhow::Result<RegisterWorkerResponse> {
+    register_worker_node_with_peer(req, &PeerTransportAuth::InternalCall)
+}
+
+/// Validates and registers a worker node with transport-layer peer certificate binding.
+pub fn register_worker_node_with_peer(
+    req: &RegisterWorkerRequest,
+    peer_auth: &PeerTransportAuth,
+) -> anyhow::Result<RegisterWorkerResponse> {
     let hostname = req.hostname.trim();
     let address = req.address.trim();
     let psk = req.psk.trim();
@@ -419,31 +563,65 @@ pub fn register_worker_node(req: &RegisterWorkerRequest) -> anyhow::Result<Regis
         format!("node-{}", hostname)
     };
 
-    if let Err(msg) = verify_cluster_psk(&node_id, psk) {
-        return Ok(RegisterWorkerResponse {
-            node_id: String::new(),
-            accepted: false,
-            message: msg.to_string(),
-        });
+    ensure_cluster_schema();
+    let incoming_cert_fp = peer_auth.mtls_cert_sha256();
+    let existing_record: Option<(String, String)> = af_db::get_conn().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT COALESCE(psk_hash, ''), COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+            params![node_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok()
+    });
+
+    let is_master_psk = verify_master_control_plane_psk(psk);
+    if !is_master_psk {
+        let mut authorized = false;
+        if let Some((ref existing_hash, ref existing_cert)) = existing_record {
+            if verify_enrolled_cluster_psk(psk, existing_hash).is_ok() {
+                if !existing_cert.trim().is_empty()
+                    && incoming_cert_fp != Some(existing_cert.trim())
+                {
+                    return Ok(RegisterWorkerResponse {
+                        node_id: String::new(),
+                        accepted: false,
+                        message: "peer certificate does not match enrolled worker certificate"
+                            .to_string(),
+                    });
+                }
+                authorized = true;
+            }
+        }
+        if !authorized && !try_consume_enrollment_token(&node_id, psk) {
+            let err_msg = verify_cluster_psk(&node_id, psk)
+                .err()
+                .unwrap_or("invalid or expired cluster enrollment token");
+            return Ok(RegisterWorkerResponse {
+                node_id: String::new(),
+                accepted: false,
+                message: err_msg.to_string(),
+            });
+        }
     }
 
-    ensure_cluster_schema();
     let psk_hash = hash_psk_sha256(psk);
+    let cert_fp_to_store = incoming_cert_fp.unwrap_or("");
     let now_rfc3339 = Utc::now().to_rfc3339();
 
     if let Ok(conn) = af_db::get_conn() {
         conn.execute(
-            "INSERT INTO cluster_nodes (id, hostname, address, psk_hash, role, status, last_heartbeat, last_seen, enrolled_at) \
-             VALUES (?1, ?2, ?3, ?4, 'worker', 'online', ?5, ?5, ?5) \
+            "INSERT INTO cluster_nodes (id, hostname, address, psk_hash, peer_cert_sha256, role, status, last_heartbeat, last_seen, enrolled_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'worker', 'online', ?6, ?6, ?6) \
              ON CONFLICT(id) DO UPDATE SET \
                  hostname = excluded.hostname, \
                  address = excluded.address, \
                  psk_hash = excluded.psk_hash, \
+                 peer_cert_sha256 = CASE WHEN excluded.peer_cert_sha256 != '' THEN excluded.peer_cert_sha256 ELSE COALESCE(cluster_nodes.peer_cert_sha256, '') END, \
                  role = 'worker', \
                  status = 'online', \
                  last_heartbeat = excluded.last_heartbeat, \
                  last_seen = excluded.last_seen",
-            params![node_id, hostname, address, psk_hash, now_rfc3339],
+            params![node_id, hostname, address, psk_hash, cert_fp_to_store, now_rfc3339],
         )?;
     }
 
@@ -493,12 +671,13 @@ pub fn register_worker_node(req: &RegisterWorkerRequest) -> anyhow::Result<Regis
 pub fn process_worker_heartbeat(
     req: &WorkerHeartbeatRequest,
 ) -> anyhow::Result<WorkerHeartbeatResponse> {
-    process_worker_heartbeat_internal(req, false)
+    process_worker_heartbeat_with_peer(req, &PeerTransportAuth::InternalCall)
 }
 
-fn process_worker_heartbeat_internal(
+/// Processes a worker metric heartbeat while enforcing per-node mTLS peer certificate pinning.
+pub fn process_worker_heartbeat_with_peer(
     req: &WorkerHeartbeatRequest,
-    allow_mtls_enrolled_without_psk: bool,
+    peer_auth: &PeerTransportAuth,
 ) -> anyhow::Result<WorkerHeartbeatResponse> {
     let node_id = if !req.node_id.trim().is_empty() {
         req.node_id.trim().to_string()
@@ -508,12 +687,65 @@ fn process_worker_heartbeat_internal(
         anyhow::bail!("node_id is required");
     };
 
-    if req.psk.trim().is_empty() && allow_mtls_enrolled_without_psk {
-        if !is_enrolled_cluster_node(&node_id) {
+    ensure_cluster_schema();
+    let incoming_cert_fp = peer_auth.mtls_cert_sha256();
+
+    if req.psk.trim().is_empty() {
+        let Some(cert_fp) = incoming_cert_fp else {
+            anyhow::bail!("psk is required");
+        };
+        let Ok(conn) = af_db::get_conn() else {
+            anyhow::bail!("cluster database unavailable");
+        };
+        let Ok((stored_hash, stored_cert)) = conn.query_row(
+            "SELECT COALESCE(psk_hash, ''), COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+            params![node_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ) else {
+            anyhow::bail!("unauthenticated cluster worker: node is not enrolled");
+        };
+        if stored_hash.trim().is_empty() {
             anyhow::bail!("unauthenticated cluster worker: node is not enrolled");
         }
-    } else if let Err(msg) = verify_cluster_psk(&node_id, &req.psk) {
-        anyhow::bail!("{}", msg);
+        if stored_cert.trim().is_empty()
+            || !constant_time_eq(stored_cert.trim().as_bytes(), cert_fp.as_bytes())
+        {
+            anyhow::bail!("peer certificate does not match enrolled worker certificate");
+        }
+        let shared_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_nodes WHERE peer_cert_sha256 = ?1",
+                params![cert_fp],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if shared_count != 1 {
+            anyhow::bail!(
+                "shared worker client certificate requires x-cluster-psk header to disambiguate node identity"
+            );
+        }
+    } else {
+        if let Err(msg) = verify_cluster_psk(&node_id, &req.psk) {
+            anyhow::bail!("{}", msg);
+        }
+        if let Some(cert_fp) = incoming_cert_fp {
+            if let Ok(conn) = af_db::get_conn() {
+                if let Ok(stored_cert) = conn.query_row(
+                    "SELECT COALESCE(peer_cert_sha256, '') FROM cluster_nodes WHERE id = ?1",
+                    params![node_id],
+                    |r| r.get::<_, String>(0),
+                ) {
+                    let stored_trimmed = stored_cert.trim();
+                    if !stored_trimmed.is_empty()
+                        && !constant_time_eq(stored_trimmed.as_bytes(), cert_fp.as_bytes())
+                    {
+                        anyhow::bail!(
+                            "peer certificate does not match enrolled worker certificate"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let (cpu_usage, ram_usage, disk_usage) = extract_usage_Rollups(req);
@@ -526,6 +758,7 @@ fn process_worker_heartbeat_internal(
     };
 
     if let Ok(conn) = af_db::get_conn() {
+        let cert_fp_str = incoming_cert_fp.unwrap_or("");
         let updated = conn
             .execute(
                 "UPDATE cluster_nodes \
@@ -534,9 +767,10 @@ fn process_worker_heartbeat_internal(
                      last_seen = ?1, \
                      cpu_usage = ?2, \
                      ram_usage = ?3, \
-                     disk_usage = ?4 \
-                 WHERE id = ?5",
-                params![now_rfc3339, cpu_usage, ram_usage, disk_usage, node_id],
+                     disk_usage = ?4, \
+                     peer_cert_sha256 = CASE WHEN COALESCE(peer_cert_sha256, '') = '' AND ?5 != '' THEN ?5 ELSE COALESCE(peer_cert_sha256, '') END \
+                 WHERE id = ?6",
+                params![now_rfc3339, cpu_usage, ram_usage, disk_usage, cert_fp_str, node_id],
             )
             .unwrap_or(0);
 
@@ -558,13 +792,14 @@ fn process_worker_heartbeat_internal(
             };
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO cluster_nodes \
-                 (id, hostname, address, psk_hash, role, status, last_heartbeat, last_seen, cpu_usage, ram_usage, disk_usage, enrolled_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'worker', 'online', ?5, ?5, ?6, ?7, ?8, ?5)",
+                 (id, hostname, address, psk_hash, peer_cert_sha256, role, status, last_heartbeat, last_seen, cpu_usage, ram_usage, disk_usage, enrolled_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'worker', 'online', ?6, ?6, ?7, ?8, ?9, ?6)",
                 params![
                     node_id,
                     hostname,
                     address,
                     psk_hash,
+                    cert_fp_str,
                     now_rfc3339,
                     cpu_usage,
                     ram_usage,
@@ -599,6 +834,13 @@ fn process_worker_heartbeat_internal(
     let (services, services_status, services_observed_at) =
         merge_worker_service_inventory(req, previous.as_ref(), ts);
 
+    let version_val = previous
+        .as_ref()
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("4.0.0");
+
     let snapshot = serde_json::json!({
         "node_id": node_id,
         "hostname": if !req.hostname.is_empty() {
@@ -606,6 +848,7 @@ fn process_worker_heartbeat_internal(
         } else {
             previous.as_ref().and_then(|p| p.get("hostname")).cloned().unwrap_or(serde_json::Value::String(node_id.clone()))
         },
+        "version": version_val,
         "status": "online",
         "timestamp": ts,
         "last_seen": now_rfc3339,
@@ -1850,11 +2093,150 @@ fn cached_snapshot_to_proto_metrics(
     (proto_metrics, services)
 }
 
+fn der_read_tlv<'a>(input: &'a [u8], pos: &mut usize) -> Option<(u8, &'a [u8])> {
+    if *pos >= input.len() {
+        return None;
+    }
+    let tag = input[*pos];
+    *pos += 1;
+    if (tag & 0x1f) == 0x1f {
+        // High-tag-number form is never used in X.509 TBSCertificate / Subject Name headers
+        return None;
+    }
+    if *pos >= input.len() {
+        return None;
+    }
+    let first_len = input[*pos];
+    *pos += 1;
+    let len = if (first_len & 0x80) == 0 {
+        first_len as usize
+    } else {
+        let num_octets = (first_len & 0x7f) as usize;
+        if num_octets == 0 || num_octets > 4 || *pos + num_octets > input.len() {
+            return None;
+        }
+        let mut acc = 0usize;
+        for &b in &input[*pos..*pos + num_octets] {
+            acc = (acc << 8) | (b as usize);
+        }
+        *pos += num_octets;
+        acc
+    };
+    let end = pos.checked_add(len)?;
+    if end > input.len() {
+        return None;
+    }
+    let val = &input[*pos..end];
+    *pos = end;
+    Some((tag, val))
+}
+
+/// Extracts the leaf certificate's X.509 `TBSCertificate.subject` CommonName (`OID 2.5.4.3`),
+/// strictly skipping `issuer` and `extensions` so neither CA CNs nor SANs can be confused for Subject CN.
+fn extract_x509_subject_cn(cert_der: &[u8]) -> Option<String> {
+    let mut top_pos = 0usize;
+    let (cert_tag, cert_body) = der_read_tlv(cert_der, &mut top_pos)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let mut cert_pos = 0usize;
+    let (tbs_tag, tbs_body) = der_read_tlv(cert_body, &mut cert_pos)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    let mut tbs_pos = 0usize;
+    let (first_tag, _) = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    if first_tag == 0xa0 {
+        // Explicit v3 [0] version present; next 4 elements are serialNumber, signature, issuer, validity
+        let _serial = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    }
+    // Skip signature, issuer, validity
+    let _sig = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    let _issuer = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    let _validity = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    let (subj_tag, subj_body) = der_read_tlv(tbs_body, &mut tbs_pos)?;
+    if subj_tag != 0x30 {
+        return None;
+    }
+
+    let mut rdn_pos = 0usize;
+    let mut last_cn: Option<String> = None;
+    while rdn_pos < subj_body.len() {
+        let (set_tag, set_body) = der_read_tlv(subj_body, &mut rdn_pos)?;
+        if set_tag != 0x31 {
+            continue;
+        }
+        let mut attr_pos = 0usize;
+        while attr_pos < set_body.len() {
+            let (seq_tag, seq_body) = der_read_tlv(set_body, &mut attr_pos)?;
+            if seq_tag != 0x30 {
+                continue;
+            }
+            let mut kv_pos = 0usize;
+            let Some((oid_tag, oid_bytes)) = der_read_tlv(seq_body, &mut kv_pos) else {
+                continue;
+            };
+            let Some((val_tag, val_bytes)) = der_read_tlv(seq_body, &mut kv_pos) else {
+                continue;
+            };
+            // OID 2.5.4.3 (id-at-commonName) == 55 04 03
+            if oid_tag == 0x06
+                && oid_bytes == [0x55, 0x04, 0x03]
+                && matches!(val_tag, 0x0c | 0x13 | 0x14 | 0x16)
+            {
+                if let Ok(s) = std::str::from_utf8(val_bytes) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        last_cn = Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    last_cn
+}
+
+fn configured_admin_client_cert_sha256() -> Option<String> {
+    let admin_cert_path = non_empty_env("CLUSTER_ADMIN_CLIENT_CERT")?;
+    let pem_bytes =
+        read_tls_pem_nofollow(Path::new(&admin_cert_path), "CLUSTER_ADMIN_CLIENT_CERT").ok()?;
+    let leaf = CertificateDer::pem_slice_iter(&pem_bytes).next()?.ok()?;
+    Some(hex::encode(Sha256::digest(leaf.as_ref())))
+}
+
+fn inspect_mtls_peer(
+    tls_stream: &tokio_rustls::server::TlsStream<TcpStream>,
+) -> anyhow::Result<PeerTransportAuth> {
+    let (_, server_conn) = tls_stream.get_ref();
+    let certs = server_conn
+        .peer_certificates()
+        .ok_or_else(|| anyhow::anyhow!("missing peer certificate chain after mTLS handshake"))?;
+    let leaf = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("empty peer certificate chain after mTLS handshake"))?;
+    let cert_sha256 = hex::encode(Sha256::digest(leaf.as_ref()));
+    let subject_cn = extract_x509_subject_cn(leaf.as_ref());
+
+    let matches_pinned_admin = configured_admin_client_cert_sha256()
+        .is_some_and(|expected| constant_time_eq(cert_sha256.as_bytes(), expected.as_bytes()));
+    let matches_admin_cn = subject_cn.as_deref().is_some_and(|cn| {
+        cn.eq_ignore_ascii_case("aetherflow-master")
+            || cn.eq_ignore_ascii_case("aetherflow-control-plane")
+            || cn.eq_ignore_ascii_case("aetherflow-admin")
+    });
+
+    Ok(PeerTransportAuth::Mtls {
+        cert_sha256,
+        subject_cn,
+        is_admin_cert: matches_pinned_admin || matches_admin_cn,
+    })
+}
+
 async fn handle_grpc_request(
     path: &str,
     header_psk: String,
     incoming: Incoming,
-    is_mtls: bool,
+    peer_auth: PeerTransportAuth,
 ) -> Response<ClusterBody> {
     match path {
         "/cluster.ClusterService/RegisterWorker" => {
@@ -1875,7 +2257,7 @@ async fn handle_grpc_request(
             if req.psk.is_empty() && !header_psk.is_empty() {
                 req.psk = header_psk;
             }
-            match register_worker_node(&req) {
+            match register_worker_node_with_peer(&req, &peer_auth) {
                 Ok(resp) => {
                     let encoded = encode_proto_register_response(&resp);
                     grpc_unary_ok_response(&encoded)
@@ -1905,7 +2287,7 @@ async fn handle_grpc_request(
                                 }
                             };
                             let hb_req = heartbeat_request_from_proto(ping, &header_psk);
-                            match process_worker_heartbeat_internal(&hb_req, is_mtls) {
+                            match process_worker_heartbeat_with_peer(&hb_req, &peer_auth) {
                                 Ok(pong) => {
                                     let encoded = encode_proto_heartbeat_pong(&pong);
                                     if tx
@@ -1962,10 +2344,8 @@ async fn handle_grpc_request(
                 Ok(parsed) => parsed,
                 Err(e) => return grpc_error_response(GrpcError::invalid_argument(e.to_string())),
             };
-            if !is_mtls && verify_cluster_psk(&req.node_id, &header_psk).is_err() {
-                return grpc_error_response(GrpcError::unauthenticated(
-                    "cluster authentication required",
-                ));
+            if let Err(msg) = authorize_cluster_control_plane(&header_psk, &peer_auth) {
+                return grpc_error_response(GrpcError::unauthenticated(msg));
             }
             let encoded = if let Some(snapshot) = get_cached_worker_metrics(&req.node_id) {
                 let (m, svcs) = cached_snapshot_to_proto_metrics(&snapshot);
@@ -1990,10 +2370,8 @@ async fn handle_grpc_request(
                 Ok(parsed) => parsed,
                 Err(e) => return grpc_error_response(GrpcError::invalid_argument(e.to_string())),
             };
-            if !is_mtls && verify_cluster_psk(&req.node_id, &header_psk).is_err() {
-                return grpc_error_response(GrpcError::unauthenticated(
-                    "cluster authentication required",
-                ));
+            if let Err(msg) = authorize_cluster_control_plane(&header_psk, &peer_auth) {
+                return grpc_error_response(GrpcError::unauthenticated(msg));
             }
             let known_worker = is_enrolled_cluster_node(&req.node_id)
                 || get_cached_worker_metrics(&req.node_id).is_some();
@@ -2047,7 +2425,7 @@ async fn read_bounded_http_body(
 
 async fn handle_hyper_cluster_request(
     req: Request<Incoming>,
-    is_mtls: bool,
+    peer_auth: PeerTransportAuth,
 ) -> Result<Response<ClusterBody>, Infallible> {
     let method = req.method().as_str().to_uppercase();
     let path = req.uri().path().to_string();
@@ -2066,7 +2444,7 @@ async fn handle_hyper_cluster_request(
 
     if content_type.starts_with("application/grpc") || path.starts_with("/cluster.ClusterService/")
     {
-        return Ok(handle_grpc_request(&path, header_psk, req.into_body(), is_mtls).await);
+        return Ok(handle_grpc_request(&path, header_psk, req.into_body(), peer_auth).await);
     }
 
     let body_bytes = match read_bounded_http_body(req.into_body(), MAX_JSON_BODY_BYTES).await {
@@ -2084,8 +2462,14 @@ async fn handle_hyper_cluster_request(
         }
     };
 
-    let (status_code, _status_text, response_json) =
-        route_cluster_http_request(&method, &path, &raw_target, &header_psk, &body_bytes);
+    let (status_code, _status_text, response_json) = route_cluster_http_request(
+        &method,
+        &path,
+        &raw_target,
+        &header_psk,
+        &body_bytes,
+        &peer_auth,
+    );
     let payload_bytes = serde_json::to_vec(&response_json).unwrap_or_default();
     let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     Ok(Response::builder()
@@ -2156,8 +2540,12 @@ pub async fn serve_cluster_master_connection(
                 .await
                 .context("cluster mTLS handshake timed out")?
                 .context("cluster mTLS handshake failed")?;
+            let peer_auth = inspect_mtls_peer(&tls_stream)?;
             let builder = build_cluster_auto_conn_builder();
-            let svc = service_fn(|req| handle_hyper_cluster_request(req, true));
+            let svc = service_fn(move |req| {
+                let auth = peer_auth.clone();
+                handle_hyper_cluster_request(req, auth)
+            });
             builder
                 .serve_connection(TokioIo::new(tls_stream), svc)
                 .await
@@ -2192,7 +2580,9 @@ pub async fn serve_cluster_master_connection(
                 return Ok(());
             }
             let builder = build_cluster_auto_conn_builder();
-            let svc = service_fn(|req| handle_hyper_cluster_request(req, false));
+            let svc = service_fn(|req| {
+                handle_hyper_cluster_request(req, PeerTransportAuth::InsecureLoopback)
+            });
             builder
                 .serve_connection(TokioIo::new(stream), svc)
                 .await
@@ -2208,6 +2598,7 @@ fn route_cluster_http_request(
     raw_target: &str,
     header_psk: &str,
     body_bytes: &[u8],
+    peer_auth: &PeerTransportAuth,
 ) -> (u16, &'static str, serde_json::Value) {
     match (method, path) {
         ("POST", "/cluster/v1/register") | ("POST", "/api/v1/admin/cluster/enroll") => {
@@ -2216,7 +2607,7 @@ fn route_cluster_http_request(
             if req.psk.is_empty() && !header_psk.is_empty() {
                 req.psk = header_psk.to_string();
             }
-            match register_worker_node(&req) {
+            match register_worker_node_with_peer(&req, peer_auth) {
                 Ok(resp) if resp.accepted => {
                     (200, "OK", serde_json::to_value(resp).unwrap_or_default())
                 }
@@ -2241,7 +2632,7 @@ fn route_cluster_http_request(
             if req.psk.is_empty() && !header_psk.is_empty() {
                 req.psk = header_psk.to_string();
             }
-            match process_worker_heartbeat(&req) {
+            match process_worker_heartbeat_with_peer(&req, peer_auth) {
                 Ok(resp) => (200, "OK", serde_json::to_value(resp).unwrap_or_default()),
                 Err(e) => (
                     401,
@@ -2269,7 +2660,7 @@ fn route_cluster_http_request(
                     serde_json::json!({ "error": "node_id is required" }),
                 );
             }
-            if let Err(msg) = verify_cluster_psk(&node_id, header_psk) {
+            if let Err(msg) = authorize_cluster_control_plane(header_psk, peer_auth) {
                 return (
                     401,
                     "Unauthorized",
@@ -2304,11 +2695,12 @@ fn handle_raw_json_rpc(raw_line: &str) -> serde_json::Value {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let params_val = val.get("params").cloned().unwrap_or_else(|| val.clone());
+    let peer_auth = PeerTransportAuth::InsecureLoopback;
 
     match method {
         "register" | "/cluster/v1/register" | "RegisterWorker" => {
             let req: RegisterWorkerRequest = serde_json::from_value(params_val).unwrap_or_default();
-            match register_worker_node(&req) {
+            match register_worker_node_with_peer(&req, &peer_auth) {
                 Ok(resp) => serde_json::to_value(resp).unwrap_or_default(),
                 Err(e) => serde_json::json!({ "accepted": false, "message": e.to_string() }),
             }
@@ -2316,7 +2708,7 @@ fn handle_raw_json_rpc(raw_line: &str) -> serde_json::Value {
         "heartbeat" | "/cluster/v1/heartbeat" | "Heartbeat" => {
             let req: WorkerHeartbeatRequest =
                 serde_json::from_value(params_val).unwrap_or_default();
-            match process_worker_heartbeat(&req) {
+            match process_worker_heartbeat_with_peer(&req, &peer_auth) {
                 Ok(resp) => serde_json::to_value(resp).unwrap_or_default(),
                 Err(e) => serde_json::json!({ "acknowledged": false, "error": e.to_string() }),
             }
@@ -2324,13 +2716,13 @@ fn handle_raw_json_rpc(raw_line: &str) -> serde_json::Value {
         _ => {
             if val.get("metrics").is_some() || val.get("cpu_usage").is_some() {
                 let req: WorkerHeartbeatRequest = serde_json::from_value(val).unwrap_or_default();
-                match process_worker_heartbeat(&req) {
+                match process_worker_heartbeat_with_peer(&req, &peer_auth) {
                     Ok(resp) => serde_json::to_value(resp).unwrap_or_default(),
                     Err(e) => serde_json::json!({ "acknowledged": false, "error": e.to_string() }),
                 }
             } else {
                 let req: RegisterWorkerRequest = serde_json::from_value(val).unwrap_or_default();
-                match register_worker_node(&req) {
+                match register_worker_node_with_peer(&req, &peer_auth) {
                     Ok(resp) => serde_json::to_value(resp).unwrap_or_default(),
                     Err(e) => serde_json::json!({ "accepted": false, "message": e.to_string() }),
                 }
@@ -3131,6 +3523,15 @@ mod tests {
         let stored_hash = hash_psk_sha256(candidate);
         assert!(verify_enrolled_cluster_psk(&stored_hash, &stored_hash).is_err());
         assert!(verify_enrolled_cluster_psk(candidate, candidate).is_ok());
+
+        // Legacy Go cluster manager stored bcrypt ($2a$/$2b$) hashes in cluster_nodes.psk_hash
+        let legacy_bcrypt = bcrypt::hash(candidate, 4).unwrap();
+        let legacy_2a = legacy_bcrypt.replacen("$2b$", "$2a$", 1);
+        assert!(verify_enrolled_cluster_psk(candidate, &legacy_bcrypt).is_ok());
+        assert!(verify_enrolled_cluster_psk(candidate, &legacy_2a).is_ok());
+        assert!(
+            verify_enrolled_cluster_psk("wrong-secret-with-32-characters!!", &legacy_2a).is_err()
+        );
     }
 
     #[test]
@@ -3221,6 +3622,12 @@ mod tests {
         let cli_csr = cert_dir.join("client.csr");
         let cli_crt = cert_dir.join("client.crt");
         let cli_ext = cert_dir.join("client.ext");
+        let cli2_key = cert_dir.join("client2.key");
+        let cli2_csr = cert_dir.join("client2.csr");
+        let cli2_crt = cert_dir.join("client2.crt");
+        let admin_key = cert_dir.join("admin.key");
+        let admin_csr = cert_dir.join("admin.csr");
+        let admin_crt = cert_dir.join("admin.crt");
 
         std::fs::write(
             &srv_ext,
@@ -3258,6 +3665,20 @@ mod tests {
         for (key, csr, crt, ext, cn) in [
             (&srv_key, &srv_csr, &srv_crt, &srv_ext, "/CN=127.0.0.1"),
             (&cli_key, &cli_csr, &cli_crt, &cli_ext, "/CN=worker-node"),
+            (
+                &cli2_key,
+                &cli2_csr,
+                &cli2_crt,
+                &cli_ext,
+                "/CN=worker-node-2",
+            ),
+            (
+                &admin_key,
+                &admin_csr,
+                &admin_crt,
+                &cli_ext,
+                "/CN=aetherflow-master",
+            ),
         ] {
             assert!(StdCommand::new("openssl")
                 .args([
@@ -3447,7 +3868,7 @@ mod tests {
             assert!(got_accepted);
             assert_eq!(got_node_id, "node-legacy-go-worker");
 
-            // 5b. Queue remote command via gRPC ExecuteCommand
+            // 5b. Worker cert WITHOUT master CLUSTER_PSK MUST be rejected on ExecuteCommand & GetMetrics
             let mut param_entry = Vec::new();
             pb_encode_string(&mut param_entry, 1, "service");
             pb_encode_string(&mut param_entry, 2, "radarr");
@@ -3457,6 +3878,30 @@ mod tests {
             pb_encode_string(&mut cmd_pb, 3, "restart_service");
             pb_encode_message_field(&mut cmd_pb, 4, &param_entry);
 
+            let unauth_cmd_req = Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "https://{}/cluster.ClusterService/ExecuteCommand",
+                    worker_ep.authority
+                ))
+                .header("content-type", "application/grpc")
+                .header("te", "trailers")
+                .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(
+                    &cmd_pb,
+                ))))
+                .unwrap();
+            let unauth_cmd_resp = h2_sender.send_request(unauth_cmd_req).await.unwrap();
+            let unauth_cmd_collected = unauth_cmd_resp.into_body().collect().await.unwrap();
+            assert_eq!(
+                unauth_cmd_collected
+                    .trailers()
+                    .and_then(|t| t.get("grpc-status"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("16"),
+                "worker certificate without master CLUSTER_PSK must be rejected on ExecuteCommand"
+            );
+
+            // Queue remote command via gRPC ExecuteCommand authenticated with master x-cluster-psk
             let cmd_req = Request::builder()
                 .method("POST")
                 .uri(format!(
@@ -3465,6 +3910,7 @@ mod tests {
                 ))
                 .header("content-type", "application/grpc")
                 .header("te", "trailers")
+                .header("x-cluster-psk", psk)
                 .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(
                     &cmd_pb,
                 ))))
@@ -3567,9 +4013,30 @@ mod tests {
                 Some("0")
             );
 
-            // Verify GetMetrics returns cached metrics populated by legacy gRPC Heartbeat
+            // Verify GetMetrics rejects unauthenticated worker cert, then succeeds with master PSK and admin cert
             let mut gm_pb = Vec::new();
             pb_encode_string(&mut gm_pb, 1, &got_node_id);
+            let unauth_gm_req = Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "https://{}/cluster.ClusterService/GetMetrics",
+                    worker_ep.authority
+                ))
+                .header("content-type", "application/grpc")
+                .header("te", "trailers")
+                .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(&gm_pb))))
+                .unwrap();
+            let unauth_gm_resp = h2_sender.send_request(unauth_gm_req).await.unwrap();
+            let unauth_gm_collected = unauth_gm_resp.into_body().collect().await.unwrap();
+            assert_eq!(
+                unauth_gm_collected
+                    .trailers()
+                    .and_then(|t| t.get("grpc-status"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("16"),
+                "worker certificate without master CLUSTER_PSK must be rejected on GetMetrics"
+            );
+
             let gm_req = Request::builder()
                 .method("POST")
                 .uri(format!(
@@ -3578,6 +4045,7 @@ mod tests {
                 ))
                 .header("content-type", "application/grpc")
                 .header("te", "trailers")
+                .header("x-cluster-psk", psk)
                 .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(&gm_pb))))
                 .unwrap();
             let gm_resp = h2_sender.send_request(gm_req).await.unwrap();
@@ -3591,7 +4059,53 @@ mod tests {
             );
             assert!(gm_collected.to_bytes().len() > 15);
 
-            // 6. Rust worker JSON registration + heartbeat over the same mTLS listener (with empty psk in JSON body)
+            // Dedicated control-plane certificate (CN=aetherflow-master) succeeds on GetMetrics WITHOUT PSK header
+            let admin_connector =
+                build_worker_mtls_connector(&ca_crt, &admin_crt, &admin_key).unwrap();
+            let admin_tcp = TcpStream::connect(bound_addr).await.unwrap();
+            let admin_tls = admin_connector
+                .connect(
+                    ServerName::try_from("127.0.0.1".to_string()).unwrap(),
+                    admin_tcp,
+                )
+                .await
+                .unwrap();
+            let (mut admin_h2, admin_conn) = hyper::client::conn::http2::handshake(
+                TokioExecutor::new(),
+                TokioIo::new(admin_tls),
+            )
+            .await
+            .unwrap();
+            tokio::spawn(async move {
+                let _ = admin_conn.await;
+            });
+            let admin_gm_req = Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "https://{}/cluster.ClusterService/GetMetrics",
+                    worker_ep.authority
+                ))
+                .header("content-type", "application/grpc")
+                .header("te", "trailers")
+                .body(ClusterBody::Json(Full::new(encode_grpc_data_frame(&gm_pb))))
+                .unwrap();
+            let admin_gm_resp = admin_h2.send_request(admin_gm_req).await.unwrap();
+            let admin_gm_collected = admin_gm_resp.into_body().collect().await.unwrap();
+            assert_eq!(
+                admin_gm_collected
+                    .trailers()
+                    .and_then(|t| t.get("grpc-status"))
+                    .and_then(|v| v.to_str().ok()),
+                Some("0")
+            );
+
+            // 6. Single-use enrollment token + second worker cert (`cli2_crt`) + cross-node spoofing rejection
+            let worker2_sec = WorkerTransportSecurity::Mtls(
+                build_worker_mtls_connector(&ca_crt, &cli2_crt, &cli2_key).unwrap(),
+            );
+            let enrollment_tok = issue_cluster_enrollment_token().unwrap();
+            assert_eq!(enrollment_tok.len(), 64);
+
             let rust_reg = RegisterWorkerRequest {
                 node_id: "node-rust-mtls-worker".to_string(),
                 hostname: "rust-mtls-worker".to_string(),
@@ -3601,12 +4115,12 @@ mod tests {
                 system_info: None,
             };
             let rust_reg_json = serde_json::to_vec(&rust_reg).unwrap();
-            assert!(!String::from_utf8_lossy(&rust_reg_json).contains(psk));
+            assert!(!String::from_utf8_lossy(&rust_reg_json).contains(&enrollment_tok));
             let (st, body) = send_worker_json_post(
                 &worker_ep,
-                &worker_sec,
+                &worker2_sec,
                 "/cluster/v1/register",
-                psk,
+                &enrollment_tok,
                 rust_reg_json,
             )
             .await
@@ -3616,6 +4130,31 @@ mod tests {
             assert!(parsed_reg.accepted);
             assert_eq!(parsed_reg.node_id, "node-rust-mtls-worker");
 
+            // Replay of consumed single-use enrollment token for a different node MUST fail closed (401)
+            let replay_reg = RegisterWorkerRequest {
+                node_id: "node-rogue-replay".to_string(),
+                hostname: "rogue-replay".to_string(),
+                address: "10.10.0.99:8080".to_string(),
+                psk: String::new(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            };
+            let (replay_st, _) = send_worker_json_post(
+                &worker_ep,
+                &worker2_sec,
+                "/cluster/v1/register",
+                &enrollment_tok,
+                serde_json::to_vec(&replay_reg).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                replay_st,
+                StatusCode::UNAUTHORIZED,
+                "consumed single-use enrollment token must reject replay by another node"
+            );
+
+            // Enrolled worker-2 can heartbeat for itself using its enrolled token...
             let (mut rust_hb, _) = build_worker_heartbeat_payload(
                 "node-rust-mtls-worker",
                 "rust-mtls-worker",
@@ -3625,12 +4164,11 @@ mod tests {
             );
             rust_hb.psk.clear();
             let rust_hb_json = serde_json::to_vec(&rust_hb).unwrap();
-            assert!(!String::from_utf8_lossy(&rust_hb_json).contains(psk));
             let (hb_st, hb_body) = send_worker_json_post(
                 &worker_ep,
-                &worker_sec,
+                &worker2_sec,
                 "/cluster/v1/heartbeat",
-                psk,
+                &enrollment_tok,
                 rust_hb_json,
             )
             .await
@@ -3638,6 +4176,24 @@ mod tests {
             assert_eq!(hb_st, StatusCode::OK);
             let parsed_hb: WorkerHeartbeatResponse = serde_json::from_slice(&hb_body).unwrap();
             assert!(parsed_hb.acknowledged);
+
+            // ...but worker-2 (`cli2_crt`) attempting to spoof `node-legacy-go-worker` (`cli_crt`) MUST be rejected EVEN with master PSK!
+            let mut spoof_hb = rust_hb.clone();
+            spoof_hb.node_id = got_node_id.clone();
+            let (spoof_st, _) = send_worker_json_post(
+                &worker_ep,
+                &worker2_sec,
+                "/cluster/v1/heartbeat",
+                psk,
+                serde_json::to_vec(&spoof_hb).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                spoof_st,
+                StatusCode::UNAUTHORIZED,
+                "peer certificate pinning must block cross-worker heartbeat spoofing"
+            );
 
             server_task.abort();
         });

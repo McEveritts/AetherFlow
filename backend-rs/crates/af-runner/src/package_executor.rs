@@ -11621,56 +11621,283 @@ fn parse_librespeed_root_tls_flag(raw: &str) -> bool {
     parse_librespeed_root_tls_config(raw).0
 }
 
+fn scan_librespeed_toml_statements(input: &str) -> Option<Vec<String>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QuoteState {
+        None,
+        Single,
+        Double,
+        TripleSingle,
+        TripleDouble,
+    }
+
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = QuoteState::None;
+    let mut bracket_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+    let bytes = input.as_bytes();
+    let mut i: usize = 0;
+
+    while i < bytes.len() {
+        let ch = input[i..].chars().next()?;
+        let ch_len = ch.len_utf8();
+        match quote {
+            QuoteState::None => {
+                if ch == '#' {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::TripleDouble;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::TripleSingle;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                match ch {
+                    '"' => {
+                        quote = QuoteState::Double;
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        quote = QuoteState::Single;
+                        cur.push(ch);
+                    }
+                    '[' => {
+                        bracket_depth += 1;
+                        cur.push(ch);
+                    }
+                    ']' => {
+                        bracket_depth = bracket_depth.checked_sub(1)?;
+                        cur.push(ch);
+                    }
+                    '{' => {
+                        brace_depth += 1;
+                        cur.push(ch);
+                    }
+                    '}' => {
+                        brace_depth = brace_depth.checked_sub(1)?;
+                        cur.push(ch);
+                    }
+                    '\n' => {
+                        if bracket_depth == 0 && brace_depth == 0 {
+                            let trimmed = cur.trim();
+                            if !trimmed.is_empty() {
+                                out.push(trimmed.to_string());
+                            }
+                            cur.clear();
+                        } else {
+                            cur.push(' ');
+                        }
+                    }
+                    '\r' => {}
+                    _ => cur.push(ch),
+                }
+            }
+            QuoteState::Double => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next()?;
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\n' {
+                    return None;
+                }
+                if ch == '"' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::Single => {
+                if ch == '\n' {
+                    return None;
+                }
+                if ch == '\'' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleDouble => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next()?;
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::None;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleSingle => {
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::None;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                cur.push(ch);
+            }
+        }
+        i += ch_len;
+    }
+
+    if quote != QuoteState::None || bracket_depth > 0 || brace_depth > 0 {
+        return None;
+    }
+    let trimmed = cur.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    Some(out)
+}
+
+fn split_librespeed_toml_kv(stmt: &str) -> Option<(&str, &str)> {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut in_triple_double = false;
+    let mut in_triple_single = false;
+    let mut escaped = false;
+    let mut bracket_depth = 0usize;
+    let bytes = stmt.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = stmt[i..].chars().next()?;
+        let ch_len = ch.len_utf8();
+        if in_triple_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if stmt[i..].starts_with("\"\"\"") {
+                in_triple_double = false;
+                i += 3;
+                continue;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_triple_single {
+            if stmt[i..].starts_with("'''") {
+                in_triple_single = false;
+                i += 3;
+                continue;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            i += ch_len;
+            continue;
+        }
+        if stmt[i..].starts_with("\"\"\"") {
+            in_triple_double = true;
+            i += 3;
+            continue;
+        }
+        if stmt[i..].starts_with("'''") {
+            in_triple_single = true;
+            i += 3;
+            continue;
+        }
+        match ch {
+            '"' => in_double = true,
+            '\'' => in_single = true,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '=' if bracket_depth == 0 => return Some((&stmt[..i], &stmt[i + 1..])),
+            _ => {}
+        }
+        i += ch_len;
+    }
+    None
+}
+
+fn unquote_librespeed_toml_scalar(raw_val: &str) -> String {
+    let trimmed = raw_val.trim();
+    if trimmed.starts_with("\"\"\"") && trimmed.ends_with("\"\"\"") && trimmed.len() >= 6 {
+        let inner = &trimmed[3..trimmed.len() - 3];
+        let inner = inner
+            .strip_prefix("\r\n")
+            .or_else(|| inner.strip_prefix('\n'))
+            .unwrap_or(inner);
+        return inner.to_string();
+    }
+    if trimmed.starts_with("'''") && trimmed.ends_with("'''") && trimmed.len() >= 6 {
+        let inner = &trimmed[3..trimmed.len() - 3];
+        let inner = inner
+            .strip_prefix("\r\n")
+            .or_else(|| inner.strip_prefix('\n'))
+            .unwrap_or(inner);
+        return inner.to_string();
+    }
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        if let Ok(parsed) = serde_json::from_str::<String>(trimmed) {
+            return parsed;
+        }
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    trimmed.to_string()
+}
+
 fn parse_librespeed_root_tls_config(raw: &str) -> (bool, Option<String>) {
     let mut enabled = false;
     let mut cert_file: Option<String> = None;
-    for line in raw.lines() {
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-        let mut comment_idx = line.len();
-        for (idx, ch) in line.char_indices() {
-            if in_double {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    in_double = false;
-                }
-            } else if in_single {
-                if ch == '\'' {
-                    in_single = false;
-                }
-            } else {
-                match ch {
-                    '"' => in_double = true,
-                    '\'' => in_single = true,
-                    '#' => {
-                        comment_idx = idx;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let cleaned = line[..comment_idx].trim();
-        if cleaned.is_empty() {
-            continue;
-        }
-        if cleaned.starts_with('[') && !cleaned.contains('=') {
+    let Some(stmts) = scan_librespeed_toml_statements(raw) else {
+        return (false, None);
+    };
+    for stmt in stmts {
+        if stmt.starts_with('[') && split_librespeed_toml_kv(&stmt).is_none() {
             break;
         }
-        if let Some((k, v)) = cleaned.split_once('=') {
-            let key = k.trim().trim_matches('"').trim_matches('\'');
-            let val = v.trim().trim_matches('"').trim_matches('\'');
+        if let Some((k, v)) = split_librespeed_toml_kv(&stmt) {
+            let key = unquote_librespeed_toml_scalar(k);
+            let val = unquote_librespeed_toml_scalar(v);
             if key == "enable_tls" {
-                enabled = val.eq_ignore_ascii_case("true");
+                enabled = val.trim().eq_ignore_ascii_case("true");
             } else if key == "tls_cert_file" {
-                cert_file = if val.is_empty() {
+                let trimmed = val.trim();
+                cert_file = if trimmed.is_empty() {
                     None
                 } else {
-                    Some(val.to_string())
+                    Some(trimmed.to_string())
                 };
             }
         }
@@ -18479,6 +18706,12 @@ int main(int argc, char** argv) {
         ));
         assert!(!parse_librespeed_root_tls_flag(
             "enable_tls = false\n[extra]\nenable_tls = true\n"
+        ));
+        assert!(parse_librespeed_root_tls_flag(
+            "enable_tls = true\nbanner = \"\"\"\n# example:\nenable_tls = false\n\"\"\"\n"
+        ));
+        assert!(parse_librespeed_root_tls_flag(
+            "enable_tls = true\nnotes = '''\nenable_tls = false\n'''\n"
         ));
 
         let http_default = "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName librespeed.aether.local\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{HTTP:Upgrade} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:8988/$1 [P,L]\n    ProxyPass / http://127.0.0.1:8988/\n    ProxyPassReverse / http://127.0.0.1:8988/\n    RequestHeader set X-Forwarded-Proto \"http\"\n    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n</VirtualHost>\n";

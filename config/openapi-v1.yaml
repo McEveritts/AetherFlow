@@ -432,7 +432,7 @@ paths:
       tags:
         - Backup
       summary: Authorize one browser backup download
-      description: 'Requires an administrator session, CSRF verification, and step-up reauthentication: `X-Reauth-Password` for local-password admins, `X-Reauth-TOTP` (TOTP or Argon2id recovery code) for 2FA-enabled OAuth-only admins, or `X-Reauth-Confirm: DOWNLOAD-BACKUP` with a fresh session (`<= 300s` old) for OAuth-only admins without local password or TOTP. Issues a single-use 60s HttpOnly SameSite=Strict `af_backup_download` cookie scoped to `/api/v1/admin/backup/download/`.'
+      description: 'Requires an administrator session, CSRF verification, and step-up reauthentication: `X-Reauth-Password` for local-password admins, `X-Reauth-TOTP` (TOTP or bcrypt recovery code) for 2FA-enabled OAuth-only admins, or `X-Reauth-Confirm: DOWNLOAD-BACKUP` (or `oauth`) with a fresh session (`<= 300s` old) for OAuth-only admins without local password or TOTP. Issues a single-use 60s HttpOnly SameSite=Strict `af_backup_download` cookie scoped to `/api/v1/admin/backup/download/`.'
       security:
         - cookieAuth: []
       parameters:
@@ -450,7 +450,7 @@ paths:
           schema:
             type: string
             maxLength: 128
-          description: 6-digit TOTP or Argon2id recovery code (required for 2FA-enabled OAuth-only admins)
+          description: 6-digit TOTP or bcrypt recovery code (required for 2FA-enabled OAuth-only admins)
         - in: header
           name: X-Reauth-Confirm
           required: false
@@ -458,6 +458,7 @@ paths:
             type: string
             enum:
               - DOWNLOAD-BACKUP
+              - oauth
           description: Explicit confirmation for fresh-session (<=300s) OAuth-only admins without password or TOTP
       responses:
         '200':
@@ -506,6 +507,7 @@ paths:
             type: string
             enum:
               - DOWNLOAD-BACKUP
+              - oauth
         - in: query
           name: chunk
           required: false

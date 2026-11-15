@@ -529,16 +529,63 @@ if db_type not in ("none", "memory") and db_file_m:
                 flags=re.MULTILINE,
             )
 
-import secrets
+import ipaddress, secrets
+try:
+    import tomllib
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
+
+def _token_has_loopback(tok: str) -> bool:
+    cleaned = tok.strip().strip("\"'")
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    if not cleaned:
+        return False
+    if cleaned.lower() == "localhost":
+        return True
+    try:
+        if "/" in cleaned:
+            net = ipaddress.ip_network(cleaned, strict=False)
+            if net.is_loopback:
+                return True
+            if isinstance(net, ipaddress.IPv6Network) and net.network_address.ipv4_mapped:
+                return net.network_address.ipv4_mapped.is_loopback
+            return False
+        addr = ipaddress.ip_address(cleaned)
+        if addr.is_loopback:
+            return True
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return addr.ipv4_mapped.is_loopback
+    except ValueError:
+        pass
+    return False
+
+def _detect_loopback_trusted_proxy(toml_text: str) -> bool:
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(toml_text)
+            tp = parsed.get("trusted_proxies")
+            if isinstance(tp, str):
+                return any(_token_has_loopback(part) for part in tp.split(","))
+            if isinstance(tp, list):
+                return any(_token_has_loopback(str(part)) for part in tp)
+        except Exception:
+            pass
+    tp_arr = re.search(r"^[ \t]*trusted_proxies\s*=\s*\[([^\]]*)\]", toml_text, re.MULTILINE | re.DOTALL)
+    if tp_arr:
+        return any(_token_has_loopback(part) for part in tp_arr.group(1).split(","))
+    tp_str = re.search(r'^[ \t]*trusted_proxies\s*=\s*(["\'])([^"\']*)\1', toml_text, re.MULTILINE)
+    if tp_str:
+        return any(_token_has_loopback(part) for part in tp_str.group(2).split(","))
+    return False
+
 bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
 bind_val = bind_m.group(2).strip() if bind_m else None
 if not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
-    if bind_val is None or bind_val in ("127.0.0.1", "::1", "[::1]", "localhost"):
+    if bind_val is None or _token_has_loopback(bind_val):
         text = text.rstrip("\n") + '\ntrusted_proxies=["127.0.0.1", "::1"]\n'
-tp_m = re.search(r"^[ \t]*trusted_proxies\s*=\s*\[([^\]]*)\]", text, re.MULTILINE | re.DOTALL)
-has_loopback_proxy = bool(
-    tp_m and re.search(r'(["\'])(?:127\.0\.0\.1|::1|\[::1\])\1', tp_m.group(1))
-)
+candidate_toml = (text.rstrip("\n") + "\n\n" + sections_tail) if sections_tail else text
+has_loopback_proxy = _detect_loopback_trusted_proxy(candidate_toml)
 if has_loopback_proxy and not re.search(r"^[ \t]*trusted_proxy_secret\s*=", text, re.MULTILINE):
     text = text.rstrip("\n") + f'\ntrusted_proxy_secret="{secrets.token_hex(32)}"\n'
 if sections_tail:

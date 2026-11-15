@@ -1021,13 +1021,14 @@ async fn authorize_backup_password(
         .unwrap_or("")
         .trim()
         .to_string();
-    let oauth_confirm = headers
+    let confirm_header = headers
         .get("X-Reauth-Confirm")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
-        .trim()
-        .eq_ignore_ascii_case("oauth");
-    if password.len() > 1024 || totp_code.len() > 64 {
+        .trim();
+    let oauth_confirm = confirm_header.eq_ignore_ascii_case("oauth")
+        || confirm_header.eq_ignore_ascii_case("download-backup");
+    if password.len() > 1024 || totp_code.len() > 128 {
         return false;
     }
     let uid = user.user_id;

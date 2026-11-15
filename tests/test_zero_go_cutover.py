@@ -717,6 +717,29 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                     f"Expected 0600 on {hardened_artifact}",
                 )
 
+            # 4a-cidr. Loopback CIDR / comma-separated string trusted_proxies is preserved intact
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'trusted_proxies="127.0.0.0/8, ::1/128"\n'
+                'statistics_password="custom-stats-password"\n'
+                'redact_ip_addresses=false\n'
+                'database_type="sqlite"\n'
+                f'database_file="{sub_db}"\n'
+                'enable_tls=false\n',
+                encoding="utf-8",
+            )
+            cidr_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(cidr_res.returncode, 0, cidr_res.stdout + cidr_res.stderr)
+            cidr_cfg = settings_path.read_text(encoding="utf-8")
+            self.assertIn('trusted_proxies="127.0.0.0/8, ::1/128"', cidr_cfg)
+            self.assertNotIn('trusted_proxies=["127.0.0.1"', cidr_cfg)
+
             # 4b. Missing external database_file (e.g. unmounted volume) fails closed without rewriting settings.toml
             missing_ext = ext_db_dir / "unmounted-volume.db"
             settings_path.write_text(
@@ -1158,10 +1181,17 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             )
             env_file.write_text(f'DATA_DIR="{custom_data}"\n', encoding="utf-8")
 
+            gbd_env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("AETHERFLOW_SKIP_ENV_FILES", "DATA_DIR", "DB_PATH", "AETHERFLOW_DB_PATH")
+            }
+            gbd_env["AETHERFLOW_ENV_FILE"] = str(env_file)
+
             # Active custom DATA_DIR DB with empty base_domain MUST NOT fall back to stale default DB
             dom_empty = subprocess.check_output(
                 ["bash", "-c", f"{rebased_gbd}\nget_base_domain"],
-                env={**os.environ, "AETHERFLOW_ENV_FILE": str(env_file)},
+                env=gbd_env,
                 text=True,
             ).strip()
             self.assertEqual(dom_empty, "")
@@ -1170,7 +1200,7 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 conn.execute("UPDATE settings SET base_domain = 'live.example.org' WHERE id = 1")
             dom_live = subprocess.check_output(
                 ["bash", "-c", f"{rebased_gbd}\nget_base_domain"],
-                env={**os.environ, "AETHERFLOW_ENV_FILE": str(env_file)},
+                env=gbd_env,
                 text=True,
             ).strip()
             self.assertEqual(dom_live, "live.example.org")

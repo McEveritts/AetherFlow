@@ -5,7 +5,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::{Duration, Utc};
 use once_cell::sync::Lazy;
-use rand::RngCore;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -2104,6 +2103,8 @@ impl Drop for EnricherScanGuard {
     }
 }
 
+const DIR_SCAN_WINDOW_CAP: usize = 1024;
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_files_paged_inner<F>(
     dir: &StdPath,
@@ -2135,109 +2136,170 @@ fn collect_matching_files_paged_inner<F>(
     if !resolved_dir.starts_with(root) {
         return;
     }
-    let Ok(read_dir) = std::fs::read_dir(&resolved_dir) else {
-        return;
-    };
 
-    let mut entries: Vec<(String, std::fs::FileType, PathBuf)> = Vec::new();
-    for entry in read_dir.flatten() {
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name.starts_with('.') {
-            continue;
-        }
-        if skip_mediaflow_trash && file_name == ".mediaflow_trash" {
-            continue;
-        }
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        entries.push((file_name, ft, entry.path()));
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (file_name, ft, path) in entries {
+    let mut window_after: Option<String> = None;
+    loop {
         if out.truncated_by_limit {
+            return;
+        }
+        let Ok(read_dir) = std::fs::read_dir(&resolved_dir) else {
+            return;
+        };
+
+        let mut heap: std::collections::BinaryHeap<(String, bool, PathBuf)> =
+            std::collections::BinaryHeap::with_capacity(DIR_SCAN_WINDOW_CAP.min(256));
+        let mut spilled = false;
+
+        for entry in read_dir.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name.starts_with('.') {
+                continue;
+            }
+            if skip_mediaflow_trash && file_name == ".mediaflow_trash" {
+                continue;
+            }
+            if let Some(ref after_name) = window_after {
+                if file_name <= *after_name {
+                    continue;
+                }
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let is_dir = ft.is_dir();
+            let is_file = ft.is_file();
+            if !is_dir && !is_file {
+                continue;
+            }
+
+            if window_after.is_none() {
+                if let Some(c_parts) = cursor_parts {
+                    if c_parts.len() > rel_parts.len() {
+                        let min_name = c_parts[rel_parts.len()];
+                        if is_dir && file_name.as_str() < min_name {
+                            continue;
+                        }
+                        if is_file && file_name.as_str() <= min_name {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if is_file
+                && !StdPath::new(&file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(ext_matches)
+            {
+                continue;
+            }
+
+            if heap.len() < DIR_SCAN_WINDOW_CAP {
+                heap.push((file_name, is_dir, entry.path()));
+            } else if let Some(max_top) = heap.peek() {
+                spilled = true;
+                if file_name < max_top.0 {
+                    heap.pop();
+                    heap.push((file_name, is_dir, entry.path()));
+                }
+            }
+        }
+
+        if heap.is_empty() {
             break;
         }
-        rel_parts.push(file_name);
-        if ft.is_dir() {
-            let mut next_cursor_slice = cursor_parts;
-            let mut skip_dir = false;
-            if let Some(c_parts) = cursor_parts {
-                let common_len = c_parts.len().min(rel_parts.len());
-                let rel_prefix = &rel_parts[..common_len];
-                let cur_prefix = &c_parts[..common_len];
-                let ord = rel_prefix
-                    .iter()
-                    .map(String::as_str)
-                    .cmp(cur_prefix.iter().copied());
-                match ord {
-                    std::cmp::Ordering::Less => {
-                        skip_dir = true;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        next_cursor_slice = None;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        if c_parts.len() == rel_parts.len() {
+
+        let batch = heap.into_sorted_vec();
+        for (file_name, is_dir, path) in batch {
+            if out.truncated_by_limit {
+                return;
+            }
+            window_after = Some(file_name.clone());
+            rel_parts.push(file_name);
+            if is_dir {
+                let mut next_cursor_slice = cursor_parts;
+                let mut skip_dir = false;
+                if let Some(c_parts) = cursor_parts {
+                    let common_len = c_parts.len().min(rel_parts.len());
+                    let rel_prefix = &rel_parts[..common_len];
+                    let cur_prefix = &c_parts[..common_len];
+                    let ord = rel_prefix
+                        .iter()
+                        .map(String::as_str)
+                        .cmp(cur_prefix.iter().copied());
+                    match ord {
+                        std::cmp::Ordering::Less => {
+                            skip_dir = true;
+                        }
+                        std::cmp::Ordering::Greater => {
                             next_cursor_slice = None;
                         }
-                    }
-                }
-            }
-            if !skip_dir {
-                if depth >= max_depth {
-                    out.truncated = true;
-                    out.truncated_by_depth = true;
-                } else {
-                    collect_matching_files_paged_inner(
-                        &path,
-                        root,
-                        next_cursor_slice,
-                        depth + 1,
-                        max_depth,
-                        max_files,
-                        skip_mediaflow_trash,
-                        ext_matches,
-                        rel_parts,
-                        last_rel_key,
-                        out,
-                    );
-                }
-            }
-        } else if ft.is_file() {
-            let after_cursor = match cursor_parts {
-                None => true,
-                Some(c_parts) => rel_parts
-                    .iter()
-                    .map(String::as_str)
-                    .gt(c_parts.iter().copied()),
-            };
-            if after_cursor {
-                if let Ok(canonical_file) = path.canonicalize() {
-                    if canonical_file.starts_with(root)
-                        && canonical_file
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(ext_matches)
-                    {
-                        if out.files.len() >= max_files {
-                            out.truncated = true;
-                            out.truncated_by_limit = true;
-                            out.next_cursor = last_rel_key.clone();
-                            rel_parts.pop();
-                            return;
+                        std::cmp::Ordering::Equal => {
+                            if c_parts.len() == rel_parts.len() {
+                                next_cursor_slice = None;
+                            }
                         }
-                        *last_rel_key = Some(rel_parts.join("/"));
-                        out.files.push(canonical_file);
+                    }
+                }
+                if !skip_dir {
+                    if depth >= max_depth {
+                        out.truncated = true;
+                        out.truncated_by_depth = true;
+                    } else {
+                        collect_matching_files_paged_inner(
+                            &path,
+                            root,
+                            next_cursor_slice,
+                            depth + 1,
+                            max_depth,
+                            max_files,
+                            skip_mediaflow_trash,
+                            ext_matches,
+                            rel_parts,
+                            last_rel_key,
+                            out,
+                        );
+                    }
+                }
+            } else {
+                let after_cursor = match cursor_parts {
+                    None => true,
+                    Some(c_parts) => rel_parts
+                        .iter()
+                        .map(String::as_str)
+                        .gt(c_parts.iter().copied()),
+                };
+                if after_cursor {
+                    if let Ok(canonical_file) = path.canonicalize() {
+                        if canonical_file.starts_with(root)
+                            && canonical_file
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(ext_matches)
+                        {
+                            if out.files.len() >= max_files {
+                                out.truncated = true;
+                                out.truncated_by_limit = true;
+                                out.next_cursor = last_rel_key.clone();
+                                rel_parts.pop();
+                                return;
+                            }
+                            *last_rel_key = Some(rel_parts.join("/"));
+                            out.files.push(canonical_file);
+                        }
                     }
                 }
             }
+            rel_parts.pop();
         }
-        rel_parts.pop();
+
+        if !spilled {
+            break;
+        }
     }
 }
 
@@ -2282,8 +2344,13 @@ where
     outcome
 }
 
+struct PreparedAutoScan {
+    canonical_root: PathBuf,
+    outcome: PagedScanOutcome,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run_auto_continuing_scan<F>(
+fn prepare_auto_continuing_scan<F>(
     root: &StdPath,
     explicit_cursor: Option<&str>,
     reset_cursor: bool,
@@ -2292,24 +2359,21 @@ fn run_auto_continuing_scan<F>(
     max_depth: usize,
     skip_mediaflow_trash: bool,
     ext_matches: F,
-) -> PagedScanOutcome
+) -> PreparedAutoScan
 where
     F: Fn(&str) -> bool,
 {
     let Ok(canonical_root) = root.canonicalize() else {
-        return PagedScanOutcome::default();
+        return PreparedAutoScan {
+            canonical_root: PathBuf::new(),
+            outcome: PagedScanOutcome::default(),
+        };
     };
     let (effective_cursor, used_stored_cursor) = if reset_cursor {
-        if let Ok(mut map) = cursor_store.lock() {
-            map.remove(&canonical_root);
-        }
         (None, false)
     } else if let Some(exp) = explicit_cursor {
         let trimmed = exp.trim();
         if trimmed.is_empty() {
-            if let Ok(mut map) = cursor_store.lock() {
-                map.remove(&canonical_root);
-            }
             (None, false)
         } else {
             (Some(trimmed.to_string()), false)
@@ -2345,15 +2409,58 @@ where
         );
     }
 
+    PreparedAutoScan {
+        canonical_root,
+        outcome,
+    }
+}
+
+fn commit_auto_continuing_scan(
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    prepared: &PreparedAutoScan,
+) {
+    if prepared.canonical_root.as_os_str().is_empty() {
+        return;
+    }
     if let Ok(mut map) = cursor_store.lock() {
-        if let (true, Some(next_cur)) = (outcome.truncated_by_limit, outcome.next_cursor.as_ref()) {
-            map.insert(canonical_root, next_cur.clone());
+        if let (true, Some(next_cur)) = (
+            prepared.outcome.truncated_by_limit,
+            prepared.outcome.next_cursor.as_ref(),
+        ) {
+            map.insert(prepared.canonical_root.clone(), next_cur.clone());
         } else {
-            map.remove(&canonical_root);
+            map.remove(&prepared.canonical_root);
         }
     }
+}
 
-    outcome
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_auto_continuing_scan<F>(
+    root: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PagedScanOutcome
+where
+    F: Fn(&str) -> bool,
+{
+    let prepared = prepare_auto_continuing_scan(
+        root,
+        explicit_cursor,
+        reset_cursor,
+        cursor_store,
+        max_files,
+        max_depth,
+        skip_mediaflow_trash,
+        ext_matches,
+    );
+    commit_auto_continuing_scan(cursor_store, &prepared);
+    prepared.outcome
 }
 
 fn parse_filename_metadata(filename: &str) -> (String, String, String, String, Vec<String>) {
@@ -2582,7 +2689,7 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
     let scan_root = clean_path.clone();
     let initial_result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(PagedScanOutcome, Vec<serde_json::Value>)> {
-            let scan_outcome = run_auto_continuing_scan(
+            let prepared = prepare_auto_continuing_scan(
                 &scan_root,
                 explicit_cursor.as_deref(),
                 reset_cursor,
@@ -2595,11 +2702,11 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                     MEDIA_EXTENSIONS.contains(&dot_ext.as_str())
                 },
             );
-            let total_files = scan_outcome.files.len();
+            let total_files = prepared.outcome.files.len();
             if let Ok(mut st) = ENRICHER_STATE.lock() {
                 st.total = total_files;
-                st.truncated = scan_outcome.truncated;
-                st.next_cursor = scan_outcome.next_cursor.clone();
+                st.truncated = prepared.outcome.truncated;
+                st.next_cursor = prepared.outcome.next_cursor.clone();
             }
 
             let mut enriched_items = Vec::with_capacity(total_files);
@@ -2607,7 +2714,7 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                 let mut conn = af_db::get_conn()?;
                 let tx = conn.transaction()?;
                 let now_str = Utc::now().to_rfc3339();
-                for path in &scan_outcome.files {
+                for path in &prepared.outcome.files {
                     let file_path_str = path.to_string_lossy().to_string();
                     let filename = path
                         .file_name()
@@ -2617,25 +2724,21 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                     let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
                     let subs_json =
                         serde_json::to_string(&subs).unwrap_or_else(|_| "[]".to_string());
-                    let updated = tx
-                        .execute(
-                            "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
-                            params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
-                        )
-                        .unwrap_or(0);
+                    let updated = tx.execute(
+                        "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
+                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                    )?;
                     if updated == 0 {
-                        let _ = tx.execute(
+                        tx.execute(
                             "INSERT INTO media_metadata (file_path, filename, title, year, language, quality, subtitles_json, enriched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                             params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
-                        );
+                        )?;
                     }
-                    let id = tx
-                        .query_row(
-                            "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
-                            params![file_path_str],
-                            |r| r.get::<_, i64>(0),
-                        )
-                        .unwrap_or(0);
+                    let id = tx.query_row(
+                        "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
+                        params![file_path_str],
+                        |r| r.get::<_, i64>(0),
+                    )?;
                     enriched_items.push(serde_json::json!({
                         "id": id,
                         "file_path": file_path_str,
@@ -2650,7 +2753,8 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                 }
                 tx.commit()?;
             }
-            Ok((scan_outcome, enriched_items))
+            commit_auto_continuing_scan(&METADATA_SCAN_CURSORS, &prepared);
+            Ok((prepared.outcome, enriched_items))
         },
     )
     .await;
@@ -3738,7 +3842,7 @@ fn scan_directory_for_mediaflow(
     explicit_cursor: Option<&str>,
     reset_cursor: bool,
 ) -> anyhow::Result<PagedScanOutcome> {
-    let outcome = run_auto_continuing_scan(
+    let prepared = prepare_auto_continuing_scan(
         root_dir,
         explicit_cursor,
         reset_cursor,
@@ -3748,14 +3852,8 @@ fn scan_directory_for_mediaflow(
         true,
         is_mediaflow_extension,
     );
-    if let Ok(mut st) = MEDIAFLOW_LAST_SCAN.lock() {
-        st.last_directory = root_dir.to_string_lossy().into_owned();
-        st.last_batch_count = outcome.files.len();
-        st.truncated = outcome.truncated;
-        st.next_cursor = outcome.next_cursor.clone();
-    }
 
-    for path in &outcome.files {
+    for path in &prepared.outcome.files {
         let path_str = path.to_string_lossy().to_string();
         if path_str.contains(".mediaflow_trash") {
             continue;
@@ -3785,7 +3883,15 @@ fn scan_directory_for_mediaflow(
             )?;
         }
     }
-    Ok(outcome)
+
+    commit_auto_continuing_scan(&MEDIAFLOW_SCAN_CURSORS, &prepared);
+    if let Ok(mut st) = MEDIAFLOW_LAST_SCAN.lock() {
+        st.last_directory = root_dir.to_string_lossy().into_owned();
+        st.last_batch_count = prepared.outcome.files.len();
+        st.truncated = prepared.outcome.truncated;
+        st.next_cursor = prepared.outcome.next_cursor.clone();
+    }
+    Ok(prepared.outcome)
 }
 
 pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Response {
@@ -3838,10 +3944,14 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         );
     }
     let response_directory = dir_buf.to_string_lossy().into_owned();
-    let pending_cursor = MEDIAFLOW_SCAN_CURSORS
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&dir_buf).cloned());
+    let pending_cursor = if reset_cursor {
+        None
+    } else {
+        MEDIAFLOW_SCAN_CURSORS
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&dir_buf).cloned())
+    };
     let explicit_cursor_for_task = explicit_cursor.clone();
     tokio::task::spawn_blocking(move || {
         let _guard = MediaflowScanGuard;
@@ -4339,6 +4449,7 @@ pub async fn get_bookmarks(req: Request) -> Response {
 }
 
 pub async fn get_cluster_nodes() -> Response {
+    af_services::cluster_daemon::ensure_cluster_schema();
     let Ok(conn) = af_db::get_conn() else {
         return Json(serde_json::json!({
             "nodes": [],
@@ -4346,6 +4457,10 @@ pub async fn get_cluster_nodes() -> Response {
                 "total_nodes": 0,
                 "online": 0,
                 "offline": 0,
+                "online_nodes": 0,
+                "degraded_nodes": 0,
+                "offline_nodes": 0,
+                "healthy": true,
                 "total_cpu_avg": 0.0,
                 "total_mem_used": 0.0,
                 "total_mem_total": 0.0,
@@ -4358,37 +4473,244 @@ pub async fn get_cluster_nodes() -> Response {
 
     let mut nodes = Vec::new();
     let mut online = 0usize;
+    let mut degraded = 0usize;
     let mut offline = 0usize;
+    let mut cpu_sum = 0.0f64;
+    let mut cpu_count = 0usize;
+    let mut total_mem_used = 0.0f64;
+    let mut total_mem_total = 0.0f64;
+    let mut total_disk_used = 0.0f64;
+    let mut total_disk_total = 0.0f64;
+
     if let Ok(mut stmt) = conn.prepare(
         "SELECT id, hostname, address, COALESCE(role, 'worker'), COALESCE(status, 'offline'), \
-         COALESCE(last_heartbeat, ''), COALESCE(enrolled_at, '') FROM cluster_nodes",
+         COALESCE(last_heartbeat, ''), COALESCE(enrolled_at, ''), \
+         COALESCE(cpu_usage, 0.0), COALESCE(ram_usage, 0.0), COALESCE(disk_usage, 0.0) \
+         FROM cluster_nodes",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
-            let status: String = r.get(4)?;
             Ok((
-                status.clone(),
-                serde_json::json!({
-                    "id": r.get::<_, String>(0)?,
-                    "hostname": r.get::<_, String>(1)?,
-                    "address": r.get::<_, String>(2)?,
-                    "role": r.get::<_, String>(3)?,
-                    "status": status,
-                    "version": "4.0.0",
-                    "last_heartbeat": r.get::<_, String>(5)?,
-                    "enrolled_at": r.get::<_, String>(6)?,
-                }),
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, f64>(7).unwrap_or(0.0),
+                r.get::<_, f64>(8).unwrap_or(0.0),
+                r.get::<_, f64>(9).unwrap_or(0.0),
             ))
         }) {
-            for (status, node) in rows.flatten() {
-                if status == "online" {
-                    online += 1;
-                } else {
-                    offline += 1;
+            for (
+                id,
+                hostname,
+                address,
+                role,
+                status,
+                last_heartbeat,
+                enrolled_at,
+                db_cpu,
+                db_ram,
+                db_disk,
+            ) in rows.flatten()
+            {
+                let cached = af_services::cluster_daemon::get_cached_worker_metrics(&id);
+                let version = cached
+                    .as_ref()
+                    .and_then(|c| c.get("version"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("4.0.0")
+                    .to_string();
+
+                let metrics_obj = cached.as_ref().and_then(|c| c.get("metrics"));
+                let sys_info_obj = cached.as_ref().and_then(|c| c.get("system_info"));
+
+                let cpu = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("cpu_usage"))
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            metrics_obj
+                                .and_then(|m| m.get("cpu_usage"))
+                                .and_then(|v| v.as_f64())
+                        })
+                        .unwrap_or(db_cpu),
+                );
+                let ram_pct = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("ram_usage"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(db_ram),
+                );
+                let disk_pct = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("disk_usage"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(db_disk),
+                );
+
+                let mem_total_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("mem_total_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("memory")
+                                    .and_then(|x| x.get("total"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            sys_info_obj
+                                .and_then(|s| s.get("total_memory_bytes"))
+                                .and_then(|v| v.as_f64())
+                                .filter(|&b| b > 0.0)
+                                .map(|b| b / (1024.0 * 1024.0 * 1024.0))
+                        })
+                        .unwrap_or(0.0),
+                );
+                let mem_used_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("mem_used_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("memory")
+                                    .and_then(|x| x.get("used"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            if mem_total_gb > 0.0 && ram_pct > 0.0 {
+                                Some((mem_total_gb * ram_pct / 100.0 * 100.0).round() / 100.0)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0.0),
+                );
+
+                let disk_total_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("disk_total_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("disk_space")
+                                    .and_then(|x| x.get("total"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            sys_info_obj
+                                .and_then(|s| s.get("total_disk_bytes"))
+                                .and_then(|v| v.as_f64())
+                                .filter(|&b| b > 0.0)
+                                .map(|b| b / (1024.0 * 1024.0 * 1024.0))
+                        })
+                        .unwrap_or(0.0),
+                );
+                let disk_used_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("disk_used_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("disk_space")
+                                    .and_then(|x| x.get("used"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            if disk_total_gb > 0.0 && disk_pct > 0.0 {
+                                Some((disk_total_gb * disk_pct / 100.0 * 100.0).round() / 100.0)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0.0),
+                );
+
+                let net_rx_speed = metrics_obj
+                    .and_then(|m| m.get("net_rx_speed"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0 B/s");
+                let net_tx_speed = metrics_obj
+                    .and_then(|m| m.get("net_tx_speed"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0 B/s");
+                let uptime = metrics_obj
+                    .and_then(|m| m.get("uptime"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let load_average = metrics_obj
+                    .and_then(|m| m.get("load_average"))
+                    .filter(|v| v.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+
+                match status.as_str() {
+                    "online" => {
+                        online += 1;
+                        cpu_sum += cpu;
+                        cpu_count += 1;
+                        total_mem_used += mem_used_gb;
+                        total_mem_total += mem_total_gb;
+                        total_disk_used += disk_used_gb;
+                        total_disk_total += disk_total_gb;
+                    }
+                    "degraded" => {
+                        degraded += 1;
+                        cpu_sum += cpu;
+                        cpu_count += 1;
+                        total_mem_used += mem_used_gb;
+                        total_mem_total += mem_total_gb;
+                        total_disk_used += disk_used_gb;
+                        total_disk_total += disk_total_gb;
+                    }
+                    _ => {
+                        offline += 1;
+                    }
                 }
-                nodes.push(node);
+
+                let node_metrics = serde_json::json!({
+                    "cpu_usage": cpu,
+                    "ram_usage": ram_pct,
+                    "disk_usage": disk_pct,
+                    "mem_used_gb": mem_used_gb,
+                    "mem_total_gb": mem_total_gb,
+                    "disk_used_gb": disk_used_gb,
+                    "disk_total_gb": disk_total_gb,
+                    "net_rx_speed": net_rx_speed,
+                    "net_tx_speed": net_tx_speed,
+                    "uptime": uptime,
+                    "load_average": load_average,
+                });
+
+                nodes.push(serde_json::json!({
+                    "id": id,
+                    "hostname": hostname,
+                    "address": address,
+                    "role": role,
+                    "status": status,
+                    "version": version,
+                    "last_heartbeat": last_heartbeat,
+                    "enrolled_at": enrolled_at,
+                    "cpu_usage": cpu,
+                    "ram_usage": ram_pct,
+                    "disk_usage": disk_pct,
+                    "metrics": node_metrics,
+                    "services": cached.as_ref().and_then(|c| c.get("services")).cloned().unwrap_or(serde_json::Value::Null),
+                    "services_status": cached.as_ref().and_then(|c| c.get("services_status")).and_then(|v| v.as_str()).unwrap_or("unknown"),
+                    "services_observed_at": cached.as_ref().and_then(|c| c.get("services_observed_at")).cloned().unwrap_or(serde_json::Value::Null),
+                    "system_info": sys_info_obj.cloned().unwrap_or(serde_json::Value::Null),
+                }));
             }
         }
     }
+
+    let total_cpu_avg = if cpu_count > 0 {
+        af_hardware::sanitize_f64(((cpu_sum / (cpu_count as f64)) * 100.0).round() / 100.0)
+    } else {
+        0.0
+    };
 
     Json(serde_json::json!({
         "nodes": nodes,
@@ -4396,20 +4718,31 @@ pub async fn get_cluster_nodes() -> Response {
             "total_nodes": nodes.len(),
             "online": online,
             "offline": offline,
-            "total_cpu_avg": 0.0,
-            "total_mem_used": 0.0,
-            "total_mem_total": 0.0,
-            "total_disk_used": 0.0,
-            "total_disk_total": 0.0
+            "online_nodes": online,
+            "degraded_nodes": degraded,
+            "offline_nodes": offline,
+            "healthy": offline == 0 && degraded == 0,
+            "total_cpu_avg": total_cpu_avg,
+            "total_mem_used": af_hardware::sanitize_f64((total_mem_used * 100.0).round() / 100.0),
+            "total_mem_total": af_hardware::sanitize_f64((total_mem_total * 100.0).round() / 100.0),
+            "total_disk_used": af_hardware::sanitize_f64((total_disk_used * 100.0).round() / 100.0),
+            "total_disk_total": af_hardware::sanitize_f64((total_disk_total * 100.0).round() / 100.0),
         }
     }))
     .into_response()
 }
 
 pub async fn enroll_worker() -> Response {
-    let mut token_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut token_bytes);
-    let token = hex::encode(token_bytes);
+    let token = match af_services::cluster_daemon::issue_cluster_enrollment_token() {
+        Ok(tok) => tok,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Failed to persist cluster enrollment token: {e}"),
+            );
+        }
+    };
     Json(serde_json::json!({
         "enrollment_token": token,
         "instructions": format!(
@@ -4615,5 +4948,181 @@ mod tests {
         assert!(page2.files[0].ends_with("Season_02/ep_10000.mkv"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bounded_flat_dir_windowing_and_deferred_cursor_commit_on_db_failure() {
+        let tmp = std::env::temp_dir().join(format!("af-flat-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Populate a single flat directory with 2,505 media files (> 2 * DIR_SCAN_WINDOW_CAP = 2048)
+        // plus non-media sidecars to exercise multi-pass BinaryHeap windowing and extension pre-filtering.
+        for idx in (0..2_505usize).rev() {
+            std::fs::write(tmp.join(format!("movie_{:05}.mkv", idx)), b"").unwrap();
+            if idx % 5 == 0 {
+                std::fs::write(tmp.join(format!("movie_{:05}.nfo", idx)), b"meta").unwrap();
+            }
+        }
+
+        let cursor_store: Mutex<HashMap<PathBuf, String>> = Mutex::new(HashMap::new());
+
+        // Simulate a DB write failure after `prepare_auto_continuing_scan` BEFORE `commit_auto_continuing_scan`:
+        // cursor_store MUST remain untouched so retry re-processes from `movie_00000.mkv` without losing batch 1!
+        let prepared_fail = prepare_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(prepared_fail.outcome.files.len(), 2_200);
+        assert!(prepared_fail.outcome.truncated_by_limit);
+        assert_eq!(
+            prepared_fail.outcome.next_cursor.as_deref(),
+            Some("movie_02199.mkv")
+        );
+        assert!(
+            cursor_store.lock().unwrap().is_empty(),
+            "cursor must NOT advance before SQLite persistence commits"
+        );
+
+        // Retry after DB recovers: starts from the very beginning (`movie_00000.mkv`), then commits cursor
+        let prepared_ok = prepare_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert!(prepared_ok.outcome.files[0].ends_with("movie_00000.mkv"));
+        assert!(prepared_ok.outcome.files[2_199].ends_with("movie_02199.mkv"));
+        commit_auto_continuing_scan(&cursor_store, &prepared_ok);
+
+        // Next continuation picks up at `movie_02200.mkv` through `movie_02504.mkv` (305 remaining files)
+        let page2 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page2.files.len(), 305);
+        assert!(!page2.truncated);
+        assert!(page2.files[0].ends_with("movie_02200.mkv"));
+        assert!(page2.files[304].ends_with("movie_02504.mkv"));
+        assert!(cursor_store.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn cluster_nodes_summary_rollups_and_persisted_single_use_enrollment() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        crate::plugins::tests::ensure_shared_test_db();
+
+        let enroll_resp = enroll_worker().await;
+        assert_eq!(enroll_resp.status(), StatusCode::OK);
+        let enroll_bytes = axum::body::to_bytes(enroll_resp.into_body(), 65536)
+            .await
+            .unwrap();
+        let enroll_json: serde_json::Value = serde_json::from_slice(&enroll_bytes).unwrap();
+        let tok = enroll_json["enrollment_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(tok.len(), 64);
+
+        // Enroll worker using the persisted single-use token
+        let reg = af_services::cluster_daemon::register_worker_node(
+            &af_services::cluster_daemon::RegisterWorkerRequest {
+                node_id: "node-rollup-worker".to_string(),
+                hostname: "rollup-worker".to_string(),
+                address: "198.51.100.77:8080".to_string(),
+                psk: tok.clone(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            },
+        )
+        .unwrap();
+        assert!(reg.accepted);
+
+        // Replay of single-use token by another node must fail
+        let replay = af_services::cluster_daemon::register_worker_node(
+            &af_services::cluster_daemon::RegisterWorkerRequest {
+                node_id: "node-rollup-attacker".to_string(),
+                hostname: "rollup-attacker".to_string(),
+                address: "198.51.100.88:8080".to_string(),
+                psk: tok.clone(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            },
+        )
+        .unwrap();
+        assert!(!replay.accepted);
+
+        // Push heartbeat with rich telemetry and verify get_cluster_nodes populates metrics & summary
+        af_services::cluster_daemon::process_worker_heartbeat(
+            &af_services::cluster_daemon::WorkerHeartbeatRequest {
+                node_id: "node-rollup-worker".to_string(),
+                hostname: "rollup-worker".to_string(),
+                address: "198.51.100.77:8080".to_string(),
+                psk: tok,
+                timestamp: Utc::now().timestamp(),
+                cpu_usage: Some(40.0),
+                ram_usage: Some(50.0),
+                disk_usage: Some(25.0),
+                metrics: serde_json::json!({
+                    "cpu_usage": 40.0,
+                    "mem_used_gb": 8.0,
+                    "mem_total_gb": 16.0,
+                    "disk_used_gb": 100.0,
+                    "disk_total_gb": 400.0,
+                    "net_rx_speed": "10 MB/s",
+                    "net_tx_speed": "5 MB/s",
+                    "uptime": "2d",
+                    "load_average": [0.5, 0.4, 0.3]
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let nodes_resp = get_cluster_nodes().await;
+        assert_eq!(nodes_resp.status(), StatusCode::OK);
+        let nodes_bytes = axum::body::to_bytes(nodes_resp.into_body(), 65536)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&nodes_bytes).unwrap();
+        let worker_entry = payload["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "node-rollup-worker")
+            .expect("enrolled worker must appear in /admin/cluster/nodes");
+        assert_eq!(
+            worker_entry["metrics"]["cpu_usage"],
+            serde_json::json!(40.0)
+        );
+        assert_eq!(
+            worker_entry["metrics"]["mem_used_gb"],
+            serde_json::json!(8.0)
+        );
+        assert_eq!(
+            worker_entry["metrics"]["mem_total_gb"],
+            serde_json::json!(16.0)
+        );
+        assert!(payload["summary"]["total_mem_used"].as_f64().unwrap() >= 8.0);
+        assert!(payload["summary"]["total_disk_total"].as_f64().unwrap() >= 400.0);
     }
 }

@@ -281,7 +281,7 @@ function LoginFormContent() {
                                     <div className="relative">
                                         <Input
                                             type="text"
-                                            placeholder="XXXX-XXXX"
+                                            placeholder="XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX"
                                             value={recoveryCode}
                                             onChange={(event) => setRecoveryCode(event.target.value.toUpperCase())}
                                             required
@@ -291,7 +291,7 @@ function LoginFormContent() {
                                         <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                                     </div>
                                     <p className="text-xs text-slate-400 leading-relaxed text-center px-4">
-                                        Enter one of your 8-character recovery codes to unlock your account.
+                                        Enter one of your 28-character recovery codes (or legacy 8-character code) to unlock your account.
                                     </p>
                                 </div>
                             ) : (

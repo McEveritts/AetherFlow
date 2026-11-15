@@ -36,7 +36,7 @@ async function submitCredentials() {
 }
 async function completeMfa() {
     fireEvent.click(await screen.findByText('Lost your device? Use recovery code'));
-    fireEvent.change(screen.getByPlaceholderText('XXXX-XXXX'), { target: { value: 'ABCD1234' } });
+    fireEvent.change(screen.getByPlaceholderText('XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX'), { target: { value: 'ABCDEFG-HIJKLMN-OPQRSTU-VWXYZ23' } });
     fireEvent.click(screen.getByRole('button', { name: /Authorize Action/i }));
 }
 test('password login resumes the API authorization request with native navigation', async () => {
