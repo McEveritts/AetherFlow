@@ -198,6 +198,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "af-librespeed"
+version = "4.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "image",
+ "libc",
+ "mime_guess",
+ "once_cell",
+ "rand 0.8.8",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
 name = "af-models"
 version = "4.0.0"
 dependencies = [

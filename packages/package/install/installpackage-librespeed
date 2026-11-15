@@ -107,15 +107,39 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-report_progress 35 "Resolving latest speedtest-go release..."
-LS_VERSION="$(github_latest_tag "librespeed/speedtest-go" "1.1.6")"
-LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
+LOCAL_SPEEDTEST_BIN=""
+for candidate in \
+    "${AF_SPEEDTEST_BACKEND_BIN:-}" \
+    "/opt/AetherFlow/current/bin/speedtest-backend" \
+    "/opt/AetherFlow/current/speedtest-backend" \
+    "/opt/AetherFlow/bin/speedtest-backend" \
+    "${SELF_DIR}/../../../bin/speedtest-backend" \
+    "${SELF_DIR}/../../../backend-rs/target/release/speedtest-backend"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        LOCAL_SPEEDTEST_BIN="$candidate"
+        break
+    fi
+done
 
-report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
+LS_VERSION="${AF_TARGET_VERSION:-}"
 TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
-af_logged download_file "$LS_URL" "$TMP_TAR"
+if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
+    report_progress 35 "Staging local native LibreSpeed binary..."
+    TMP_STAGE_DIR=$(mktemp -d /tmp/librespeed-stage-XXXXXX)
+    cp -f "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
+    chmod 755 "${TMP_STAGE_DIR}/speedtest-backend"
+    report_progress 60 "Packaging staged LibreSpeed binary..."
+    tar -czf "$TMP_TAR" -C "$TMP_STAGE_DIR" speedtest-backend
+    rm -rf -- "$TMP_STAGE_DIR"
+else
+    report_progress 35 "Resolving latest speedtest-backend release..."
+    LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
+    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VERSION}/speedtest-backend_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
+    report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
+    af_logged download_file "$LS_URL" "$TMP_TAR"
+fi
 stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"
-rm -f "$TMP_TAR"
+rm -f -- "$TMP_TAR"
 
 if [[ -f /opt/librespeed/speedtest-backend ]]; then
     chmod 755 /opt/librespeed/speedtest-backend
@@ -127,21 +151,16 @@ else
     print_error "LibreSpeed binary not found after extracting archive"
     exit 1
 fi
+
+BIN_VERSION=""
+if [[ -x /opt/librespeed/speedtest-backend ]]; then
+    BIN_VERSION="$(/opt/librespeed/speedtest-backend --version 2>/dev/null | sed -n 's/^speedtest-backend[[:space:]]\{1,\}\([0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n1 || true)"
+fi
+LS_VERSION="${BIN_VERSION:-${LS_VERSION:-4.0.0}}"
 queue_app_version /opt/librespeed/.af-version "${LS_VERSION#v}"
 
 report_progress 72 "Applying Obsidian V2 theme assets to LibreSpeed..."
 mkdir -p /opt/librespeed/assets
-TMP_SRC_DIR=$(mktemp -d /tmp/librespeed-src-XXXXXX)
-TMP_SRC_TAR=$(mktemp /tmp/librespeed-src-XXXXXX.tar.gz)
-LS_SOURCE_URL="https://github.com/librespeed/speedtest-go/archive/refs/tags/v${LS_VERSION}.tar.gz"
-if af_logged download_file "$LS_SOURCE_URL" "$TMP_SRC_TAR" && \
-    af_logged verify_download_sha256 "$TMP_SRC_TAR" "$PACKAGE_NAME" "$LS_SOURCE_URL" && \
-    af_logged tar -xzf "$TMP_SRC_TAR" -C "$TMP_SRC_DIR" --strip-components=1; then
-    if [[ -d "${TMP_SRC_DIR}/web/assets" ]]; then
-        cp -rf "${TMP_SRC_DIR}/web/assets/." /opt/librespeed/assets/
-    fi
-fi
-rm -f -- "$TMP_SRC_TAR" "$TMP_SRC_TAR.sha256" "$TMP_SRC_TAR.sha256sum"
 
 OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
 if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/current/packages/package/assets/librespeed" ]]; then
@@ -151,19 +170,7 @@ elif [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/asset
 fi
 if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
     cp -rf "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets/
-    rm -rf /opt/librespeed/assets/backend-patches
-    if [[ -d "${TMP_SRC_DIR}/web/assets" && -x /usr/local/go/bin/go ]]; then
-        cp -rf /opt/librespeed/assets/. "${TMP_SRC_DIR}/web/assets/"
-        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" ]]; then
-            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" "${TMP_SRC_DIR}/results/stats.go"
-        fi
-        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" ]]; then
-            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" "${TMP_SRC_DIR}/results/telemetry.go"
-        fi
-        af_logged bash -euc 'cd "$1" && /usr/local/go/bin/go build -ldflags "-w -s" -trimpath -o /opt/librespeed/speedtest-backend main.go' _ "$TMP_SRC_DIR" || true
-    fi
 fi
-rm -rf "$TMP_SRC_DIR"
 
 if [[ -f /opt/librespeed/settings.toml ]]; then
     safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
@@ -193,12 +200,13 @@ ipinfo_api_key=""
 assets_path="/opt/librespeed/assets"
 statistics_password=${LS_STATS_PASS}
 redact_ip_addresses=false
-database_type="bolt"
+database_type="sqlite"
 database_hostname=""
 database_name=""
 database_username=""
 database_password=""
 database_file="/opt/librespeed/speedtest.db"
+enable_id_obfuscation=false
 enable_tls=false
 tls_cert_file=""
 tls_key_file=""
@@ -212,7 +220,7 @@ chmod 640 /opt/librespeed/settings.toml
 report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service
 [Unit]
-Description=LibreSpeed Speedtest Daemon (speedtest-go)
+Description=LibreSpeed Speedtest Daemon (native Rust)
 After=network.target
 
 [Service]

@@ -12,6 +12,7 @@ members = [
     "crates/af-services",
     "crates/af-api",
     "crates/af-streaming-tests",
+    "crates/af-librespeed",
 ]
 
 [workspace.package]
