@@ -147,32 +147,84 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+func sanitizeServiceEntryMap(entry map[string]interface{}) gin.H {
+	clean := make(gin.H, len(entry))
+	for k, v := range entry {
+		if k == "api_key" {
+			continue
+		}
+		switch nested := v.(type) {
+		case gin.H:
+			clean[k] = sanitizeServiceEntryMap(nested)
+		case map[string]interface{}:
+			clean[k] = sanitizeServiceEntryMap(nested)
+		default:
+			clean[k] = v
+		}
+	}
+	if errStr, ok := clean["update_error"].(string); ok && errStr != "" {
+		clean["update_error"] = "Update check failed"
+	}
+	if logLine, ok := clean["log_line"].(string); ok && logLine != "" {
+		clean["log_line"] = "Package operation in progress"
+	}
+	return clean
+}
+
 func SanitizeServicesForViewer(raw interface{}, isAdmin bool) interface{} {
 	if isAdmin || raw == nil {
 		return raw
 	}
-	typed, ok := raw.(map[string]gin.H)
-	if !ok {
-		return raw
-	}
-	sanitized := make(map[string]gin.H, len(typed))
-	for svcKey, entry := range typed {
-		clean := make(gin.H, len(entry))
-		for k, v := range entry {
-			if k == "api_key" {
-				continue
+	switch typed := raw.(type) {
+	case map[string]gin.H:
+		sanitized := make(map[string]gin.H, len(typed))
+		for svcKey, entry := range typed {
+			sanitized[svcKey] = sanitizeServiceEntryMap(entry)
+		}
+		return sanitized
+	case map[string]interface{}:
+		sanitized := make(map[string]interface{}, len(typed))
+		for svcKey, val := range typed {
+			switch entry := val.(type) {
+			case gin.H:
+				sanitized[svcKey] = sanitizeServiceEntryMap(entry)
+			case map[string]interface{}:
+				sanitized[svcKey] = sanitizeServiceEntryMap(entry)
+			default:
+				encoded, err := json.Marshal(val)
+				if err != nil {
+					continue
+				}
+				var decoded map[string]interface{}
+				if err := json.Unmarshal(encoded, &decoded); err != nil {
+					continue
+				}
+				sanitized[svcKey] = sanitizeServiceEntryMap(decoded)
 			}
-			clean[k] = v
 		}
-		if errStr, ok := clean["update_error"].(string); ok && errStr != "" {
-			clean["update_error"] = "Update check failed"
+		return sanitized
+	case gin.H:
+		sanitized := make(gin.H, len(typed))
+		for svcKey, val := range typed {
+			switch entry := val.(type) {
+			case gin.H:
+				sanitized[svcKey] = sanitizeServiceEntryMap(entry)
+			case map[string]interface{}:
+				sanitized[svcKey] = sanitizeServiceEntryMap(entry)
+			}
 		}
-		if logLine, ok := clean["log_line"].(string); ok && logLine != "" {
-			clean["log_line"] = "Package operation in progress"
+		return sanitized
+	default:
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return map[string]interface{}{}
 		}
-		sanitized[svcKey] = clean
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return map[string]interface{}{}
+		}
+		return SanitizeServicesForViewer(decoded, false)
 	}
-	return sanitized
 }
 
 type Client struct {
@@ -688,7 +740,8 @@ func broadcastMetricsLoop() {
 		}
 		userMsg, uErr := json.Marshal(userPayload)
 		if uErr != nil {
-			userMsg = adminMsg
+			slog.Error("Failed to marshal viewer metrics payload for WebSocket broadcast", "error", uErr)
+			continue
 		}
 		// Non-blocking viewer-scoped dispatch
 		select {

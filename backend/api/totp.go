@@ -500,16 +500,6 @@ func Disable2FA(c *gin.Context) {
 	}
 
 	normalizedRecovery, isRecovery := normalizeRecoveryCodeInput(code)
-	var decryptedSecret string
-	if !isRecovery {
-		var decErr error
-		decryptedSecret, decErr = DecryptKey(encryptedSecret)
-		if decErr != nil {
-			slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", decErr)
-			InternalError(c, "Failed to verify TOTP secret")
-			return
-		}
-	}
 
 	tx, release, txErr := db.BeginWriteTx()
 	if txErr != nil {
@@ -517,6 +507,34 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 	defer release()
+
+	var txSecret, txPasswordHash string
+	var txTotpEnabled bool
+	if err := tx.QueryRow(
+		"SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?", userID,
+	).Scan(&txSecret, &txTotpEnabled, &txPasswordHash); err != nil {
+		InternalError(c, "Failed to query user")
+		return
+	}
+	if !txTotpEnabled || txSecret == "" {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Two-factor authentication is not enabled")
+		return
+	}
+	if txPasswordHash != passwordHash || (password != "" && txPasswordHash != "" && bcrypt.CompareHashAndPassword([]byte(txPasswordHash), []byte(password)) != nil) {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid verification factor")
+		return
+	}
+
+	var decryptedSecret string
+	if !isRecovery {
+		var decErr error
+		decryptedSecret, decErr = DecryptKey(txSecret)
+		if decErr != nil {
+			slog.Error("failed to decrypt TOTP secret", "user_id", userID, "error", decErr)
+			InternalError(c, "Failed to verify TOTP secret")
+			return
+		}
+	}
 
 	var verified bool
 	if isRecovery {
@@ -802,6 +820,28 @@ func Regenerate2FARecoveryCodes(c *gin.Context) {
 		return
 	}
 	defer release()
+
+	var txSecret string
+	var txTotpEnabled bool
+	if err := tx.QueryRow(
+		"SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?", userID,
+	).Scan(&txSecret, &txTotpEnabled); err != nil {
+		InternalError(c, "Failed to query user")
+		return
+	}
+	if !txTotpEnabled || txSecret == "" {
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Two-factor authentication is not enabled")
+		return
+	}
+	if !isRecovery && txSecret != encryptedSecret {
+		var decErr error
+		secret, decErr = DecryptKey(txSecret)
+		if decErr != nil {
+			slog.Error("failed to decrypt TOTP secret for recovery regen", "user_id", userID, "error", decErr)
+			InternalError(c, "Failed to verify credentials")
+			return
+		}
+	}
 
 	var verified bool
 	if isRecovery {

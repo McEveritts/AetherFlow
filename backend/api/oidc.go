@@ -61,19 +61,27 @@ func loadOrGenerateOIDCKey() {
 	}
 
 	keyPath = filepath.Clean(keyPath)
+	keyDir := filepath.Dir(keyPath)
+	keyBase := filepath.Base(keyPath)
 
-	// Try to load existing key
-	keyBytes, err := os.ReadFile(keyPath) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
-	if err == nil {
-		block, _ := pem.Decode(keyBytes)
-		if block != nil {
-			key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-			if err == nil {
-				oidcPrivateKey = key
-				oidcKeyID = computeKeyID(key)
-				slog.Info("OIDC key loaded", "path", keyPath, "kid", oidcKeyID)
-				return
+	// Try to load existing key via confined os.Root (blocks symlinks & traversal)
+	if dirInfo, dErr := os.Lstat(keyDir); dErr == nil && dirInfo.Mode()&os.ModeSymlink == 0 && dirInfo.IsDir() { // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
+		if root, rErr := os.OpenRoot(keyDir); rErr == nil { // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
+			if fInfo, fErr := root.Lstat(keyBase); fErr == nil && fInfo.Mode()&os.ModeSymlink == 0 && fInfo.Mode().IsRegular() {
+				if keyBytes, readErr := root.ReadFile(keyBase); readErr == nil {
+					block, _ := pem.Decode(keyBytes)
+					if block != nil {
+						if parsedKey, pErr := x509.ParsePKCS1PrivateKey(block.Bytes); pErr == nil {
+							_ = root.Close()
+							oidcPrivateKey = parsedKey
+							oidcKeyID = computeKeyID(parsedKey)
+							slog.Info("OIDC key loaded", "path", keyPath, "kid", oidcKeyID)
+							return
+						}
+					}
+				}
 			}
+			_ = root.Close()
 		}
 	}
 
@@ -87,16 +95,56 @@ func loadOrGenerateOIDCKey() {
 	oidcPrivateKey = key
 	oidcKeyID = computeKeyID(key)
 
-	// Persist to disk — create parent directory if needed
-	keyDir := filepath.Dir(keyPath)
+	// Persist atomically to disk inside confined 0700 parent directory
 	_ = os.MkdirAll(keyDir, 0700) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil { // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
-		slog.Warn("OIDC: failed to persist RSA key", "error", err)
+	persistErr := func() error {
+		dInfo, dErr := os.Lstat(keyDir) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
+		if dErr != nil {
+			return dErr
+		}
+		if dInfo.Mode()&os.ModeSymlink != 0 || !dInfo.IsDir() {
+			return errors.New("OIDC key directory must be a non-symlink directory")
+		}
+		root, rErr := os.OpenRoot(keyDir) // #nosec G703 -- trusted operator OIDC_KEY_PATH environment variable
+		if rErr != nil {
+			return rErr
+		}
+		defer root.Close()
+		if fInfo, fErr := root.Lstat(keyBase); fErr == nil && (fInfo.Mode()&os.ModeSymlink != 0 || fInfo.IsDir()) {
+			return errors.New("refusing to overwrite symlink or directory for OIDC key")
+		}
+		tmpName := fmt.Sprintf(".tmp-%s-%d", keyBase, time.Now().UnixNano())
+		tf, oErr := root.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0600)
+		if oErr != nil {
+			return oErr
+		}
+		if _, wErr := tf.Write(keyPEM); wErr != nil {
+			_ = tf.Close()
+			_ = root.Remove(tmpName)
+			return wErr
+		}
+		if sErr := tf.Sync(); sErr != nil {
+			_ = tf.Close()
+			_ = root.Remove(tmpName)
+			return sErr
+		}
+		if cErr := tf.Close(); cErr != nil {
+			_ = root.Remove(tmpName)
+			return cErr
+		}
+		if renErr := root.Rename(tmpName, keyBase); renErr != nil {
+			_ = root.Remove(tmpName)
+			return renErr
+		}
+		return nil
+	}()
+	if persistErr != nil {
+		slog.Warn("OIDC: failed to persist RSA key", "error", persistErr)
 	} else {
 		slog.Info("OIDC key generated", "path", keyPath, "kid", oidcKeyID)
 	}

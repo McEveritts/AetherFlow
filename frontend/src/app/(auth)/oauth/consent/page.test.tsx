@@ -161,6 +161,10 @@ describe('ConsentPage (/oauth/consent)', () => {
         ['redirect_uri', 'https://client.example.com/\ncallback'],
         ['redirect_uri', 'about:blank'],
         ['redirect_uri', 'com.example.app:'],
+        ['redirect_uri', 'com.example.app:/oauth/callback'],
+        ['redirect_uri', 'myapp://callback'],
+        ['redirect_uri', 'ftp://client.example.com/callback'],
+        ['redirect_uri', 'http://client.example.com/callback'],
         ['response_type', 'token'],
         ['client_id', '   '],
     ])('rejects malformed %s=%s before presenting either consent action', (parameter, value) => {
@@ -172,7 +176,7 @@ describe('ConsentPage (/oauth/consent)', () => {
         expect(apiFetch).not.toHaveBeenCalled();
     });
 
-    it.each(['http://127.0.0.1:4311/callback', 'http://[::1]:4311/callback', 'com.example.app:/oauth/callback', 'myapp://callback', 'com.example.app:callback', 'https://client.example.com/callback?label=operator%40example.com', 'https://client.example.com/callback?path=raw\\callback'])('preserves absolute loopback and native callback support for %s', (redirectUri) => {
+    it.each(['http://localhost:4311/callback', 'http://127.0.0.1:4311/callback', 'http://[::1]:4311/callback', 'https://client.example.com/callback?label=operator%40example.com', 'https://client.example.com/callback?path=raw\\callback'])('preserves absolute loopback and HTTPS callback support for %s', (redirectUri) => {
         currentSearchParams.set('redirect_uri', redirectUri);
         render(<ConsentPage />);
         expect(screen.getByRole('button', { name: 'Grant Authorization' })).toBeEnabled();

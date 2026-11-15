@@ -1360,7 +1360,8 @@ pub fn prune_expired_data() {
     };
     let now = Utc::now().to_rfc3339();
     let param_queries = [
-        "DELETE FROM oidc_auth_codes WHERE expires_at < ?1 OR used = 1",
+        // Retain used = 1 authorization-code tombstones until expires_at for RFC 6749 §4.1.2 reuse detection.
+        "DELETE FROM oidc_auth_codes WHERE expires_at < ?1",
         "DELETE FROM oidc_device_codes WHERE expires_at < ?1",
         "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1",
         "DELETE FROM active_sessions WHERE expires_at < ?1",
@@ -2621,5 +2622,26 @@ pub(crate) mod tests {
             .query_row("SELECT COUNT(*) FROM metrics_history", [], |r| r.get(0))
             .unwrap();
         assert_eq!(metrics_cnt, 1);
+
+        let future_exp = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let past_exp = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, expires_at, used) \
+             VALUES ('live-used-tombstone', 'cid', 1, 'https://app.example/cb', 'openid', ?1, 1), \
+                    ('expired-used-code', 'cid', 1, 'https://app.example/cb', 'openid', ?2, 1)",
+            params![future_exp, past_exp],
+        )
+        .unwrap();
+        drop(conn);
+        prune_expired_data();
+        let conn = get_conn().unwrap();
+        let remaining_codes: Vec<String> = conn
+            .prepare("SELECT code FROM oidc_auth_codes")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(remaining_codes, vec!["live-used-tombstone".to_string()]);
     }
 }

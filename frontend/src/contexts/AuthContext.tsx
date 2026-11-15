@@ -188,8 +188,22 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         for (let attempt = 0; attempt < 2 && !revoked; attempt++) {
             try {
                 const res = await apiFetch('/api/v1/auth/logout', { method: 'POST' });
-                if (res.ok || res.status === 401) {
+                if (res.ok) {
                     revoked = true;
+                } else if (res.status === 401) {
+                    // Confirm the server session is truly unrefreshable rather than an expired
+                    // cookie still inside its refresh grace window. apiFetch('/api/v1/auth/session')
+                    // triggers silent refresh when a refreshable session cookie remains.
+                    const sessionProbe = await apiFetch('/api/v1/auth/session');
+                    if (sessionProbe.status === 401) {
+                        revoked = true;
+                    } else if (sessionProbe.ok) {
+                        const retryRes = await apiFetch('/api/v1/auth/logout', { method: 'POST' });
+                        if (retryRes.ok) {
+                            revoked = true;
+                        }
+                    }
+                    break;
                 }
             } catch (err) {
                 console.error("Logout attempt failed:", err);

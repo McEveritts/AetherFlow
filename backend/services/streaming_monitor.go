@@ -427,15 +427,29 @@ func isForbiddenStreamingAddr(addr netip.Addr) bool {
 	}
 	if u.Is4() {
 		b := u.As4()
-		// 0.0.0.0/8, 169.254.0.0/16 (IMDS / link-local), 168.63.129.16 (Azure WireServer), 240.0.0.0/4 + broadcast
-		if b[0] == 0 || (b[0] == 169 && b[1] == 254) || b == [4]byte{168, 63, 129, 16} || b[0] >= 240 {
+		// 0.0.0.0/8, 169.254.0.0/16 (IMDS / link-local), 168.63.129.16 (Azure WireServer), 224.0.0.0/4+ (multicast / reserved / broadcast)
+		if b[0] == 0 || (b[0] == 169 && b[1] == 254) || b == [4]byte{168, 63, 129, 16} || b[0] >= 224 {
 			return true
 		}
 		return false
 	}
+	if u.IsLoopback() {
+		return false
+	}
 	b := u.As16()
-	// fd00:ec2::/32 AWS IPv6 IMDS
-	if b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2 {
+	// ULA fc00::/7 is allowed for self-hosted LAN/Tailscale EXCEPT fd00:ec2::/32 AWS IPv6 IMDS
+	if (b[0] & 0xfe) == 0xfc {
+		return b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2
+	}
+	// Only Global Unicast 2000::/3 is permitted outside loopback/ULA (blocks NAT64 64:ff9b::/96 &
+	// 64:ff9b:1::/48, discard 100::/64, IPv4-compatible ::/96, link-local fe80::/10, multicast ff00::/8).
+	if (b[0] & 0xe0) != 0x20 {
+		return true
+	}
+	// Block 2001::/23 (Teredo/benchmarking/ORCHID), 2001:db8::/32, 2002::/16 (6to4), and 3fff::/20 (documentation)
+	if (b[0] == 0x20 && b[1] == 0x01 && (b[2] < 0x02 || (b[2] == 0x0d && b[3] == 0xb8))) ||
+		(b[0] == 0x20 && b[1] == 0x02) ||
+		(b[0] == 0x3f && b[1] == 0xff && (b[2]&0xf0) == 0x00) {
 		return true
 	}
 	return false

@@ -105,6 +105,14 @@ id = "generic-api-key"
   paths = ['''^setup/configs/headphones/config\.ini$''']
   regexes = ['''^nd1We7dFW2RqxPw8$''']
 
+  [[rules.allowlists]]
+  description = "RFC 4648 Base32 alphabet string in legacy 2017 ruTorrent util.php base32decode helper"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = ['''d19530cf9d5ab281dbd04ba8378febf47a04ab4e''']
+  paths = ['''^rutorrent/php/util\.php$''']
+  regexes = ['''^ABCDEFGHIJKLMNOPQRSTUVWXYZ234567=$''']
+
 [[rules]]
 id = "jwt"
 

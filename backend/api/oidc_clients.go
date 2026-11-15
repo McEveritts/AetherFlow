@@ -158,10 +158,17 @@ func DeleteOIDCClient(c *gin.Context) {
 		return
 	}
 
-	_, _ = tx.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ?", clientID)
-	_, _ = tx.Exec("DELETE FROM oidc_auth_codes WHERE client_id = ?", clientID)
-	_, _ = tx.Exec("DELETE FROM oidc_device_codes WHERE client_id = ?", clientID)
-	_, _ = tx.Exec("DELETE FROM oidc_consents WHERE client_id = ?", clientID)
+	for _, cascadeSQL := range []string{
+		"UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ?",
+		"DELETE FROM oidc_auth_codes WHERE client_id = ?",
+		"DELETE FROM oidc_device_codes WHERE client_id = ?",
+		"DELETE FROM oidc_consents WHERE client_id = ?",
+	} {
+		if _, cErr := tx.Exec(cascadeSQL, clientID); cErr != nil {
+			InternalError(c, "Failed to revoke client artifacts")
+			return
+		}
+	}
 
 	if err := db.CommitWriteTx(tx, release); err != nil {
 		InternalError(c, "Failed to commit client deletion")

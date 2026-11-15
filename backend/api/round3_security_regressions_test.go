@@ -563,7 +563,9 @@ func TestRound3_WebSocketTicketTTLRoleScopingAndRevocationDisconnect(t *testing.
 	}
 	hub.register <- adminClient
 	hub.register <- userClient
-	time.Sleep(10 * time.Millisecond)
+	defer func() {
+		hub.unregister <- userClient
+	}()
 
 	targetAdmin := 981
 	hub.dispatch <- hubEnvelope{
@@ -574,7 +576,9 @@ func TestRound3_WebSocketTicketTTLRoleScopingAndRevocationDisconnect(t *testing.
 		raw:          []byte(`{"type":"NOTIFICATION","data":{"user_id":981,"title":"for-admin"}}`),
 		targetUserID: &targetAdmin,
 	}
-	time.Sleep(15 * time.Millisecond)
+	for deadline := time.Now().Add(500 * time.Millisecond); len(adminClient.send) < 2 && time.Now().Before(deadline); {
+		time.Sleep(2 * time.Millisecond)
+	}
 
 	if len(adminClient.send) != 2 {
 		t.Fatalf("expected adminClient to receive 2 messages, got %d", len(adminClient.send))
@@ -592,10 +596,20 @@ func TestRound3_WebSocketTicketTTLRoleScopingAndRevocationDisconnect(t *testing.
 		<-adminClient.send
 	}
 	hub.broadcast <- []byte(`{"type":"SYSTEM_METRICS","payload":{}}`)
-	time.Sleep(15 * time.Millisecond)
+	for deadline := time.Now().Add(500 * time.Millisecond); len(hub.dispatch) > 0 || len(hub.broadcast) > 0; {
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 
-	if _, open := <-adminClient.send; open {
-		t.Fatalf("expected revoked adminClient channel to be closed")
+	select {
+	case _, open := <-adminClient.send:
+		if open {
+			t.Fatalf("expected revoked adminClient channel to be closed")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for revoked adminClient channel to close")
 	}
 }
 

@@ -67,7 +67,11 @@ func NewAnthropicProvider(cfg ProviderConfig) (*AnthropicProvider, error) {
 
 	endpoint := anthropicDefaultEndpoint
 	if cfg.Endpoint != "" {
-		endpoint = cfg.Endpoint
+		validated, err := ValidateProviderEndpointURL(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+		endpoint = validated
 	}
 
 	// Map frontend model ID to Anthropic API model
@@ -80,7 +84,7 @@ func NewAnthropicProvider(cfg ProviderConfig) (*AnthropicProvider, error) {
 		apiKey:   cfg.APIKey,
 		endpoint: endpoint,
 		model:    model,
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   newSafeProviderHTTPClient(120*time.Second, cfg.Transport),
 	}, nil
 }
 
@@ -150,9 +154,11 @@ func (a *AnthropicProvider) doRequest(ctx context.Context, systemPrompt string, 
 	if resp.StatusCode != http.StatusOK {
 		var errResp anthropicResponse
 		if json.Unmarshal(respBytes, &errResp) == nil && errResp.Error != nil {
-			return nil, fmt.Errorf("anthropic API error (%d): %s", resp.StatusCode, errResp.Error.Message)
+			if clean := sanitizeUpstreamProviderMessage(errResp.Error.Message); clean != "" {
+				return nil, fmt.Errorf("anthropic API error (%d): %s", resp.StatusCode, clean)
+			}
 		}
-		return nil, fmt.Errorf("anthropic API error: %d %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("anthropic API returned HTTP %d", resp.StatusCode)
 	}
 
 	var anthropicResp anthropicResponse

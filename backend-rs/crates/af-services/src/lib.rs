@@ -2612,14 +2612,37 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
 
 pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
     match address {
-        std::net::IpAddr::V4(address) => address.is_unspecified() || address.is_link_local(),
+        std::net::IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_unspecified()
+                || address.is_link_local()
+                || octets[0] == 0
+                || octets == [168, 63, 129, 16]
+                || octets[0] >= 224
+        }
         std::net::IpAddr::V6(address) => address
             .to_ipv4_mapped()
             .map(|mapped| forbidden_streaming_ip(mapped.into()))
             .unwrap_or_else(|| {
-                address.is_unspecified()
+                if address.is_loopback() {
+                    return false;
+                }
+                if address.is_unspecified()
+                    || address.is_multicast()
                     || address.is_unicast_link_local()
-                    || address.segments()[..2] == [0xfd00, 0x0ec2]
+                {
+                    return true;
+                }
+                let segments = address.segments();
+                if (segments[0] & 0xfe00) == 0xfc00 {
+                    return segments[..2] == [0xfd00, 0x0ec2];
+                }
+                if (segments[0] & 0xe000) != 0x2000 {
+                    return true;
+                }
+                (segments[0] == 0x2001 && (segments[1] < 0x0200 || segments[1] == 0x0db8))
+                    || segments[0] == 0x2002
+                    || (segments[0] == 0x3fff && segments[1] < 0x1000)
             }),
     }
 }
@@ -2955,6 +2978,11 @@ mod tests {
     fn test_validate_server_url_blocks_ssrf() {
         assert!(validate_server_url("http://127.0.0.1:8096").is_ok());
         assert!(validate_server_url("http://169.254.169.254/latest/meta-data").is_err());
+        assert!(validate_server_url("http://168.63.129.16/machine").is_err());
+        assert!(validate_server_url("http://[64:ff9b::a9fe:a9fe]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[64:ff9b:1::a9fe:a9fe]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[2002:a9fe:a9fe::1]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[100::1]:8096").is_err());
         assert!(validate_server_url("http://metadata.google.internal").is_err());
     }
 

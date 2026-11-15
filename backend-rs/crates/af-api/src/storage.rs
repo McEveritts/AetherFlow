@@ -430,6 +430,75 @@ struct BackupUploadSessionMeta {
     upload_id: String,
 }
 
+fn ensure_private_backup_dir(dir: &StdPath) -> anyhow::Result<()> {
+    use std::path::Component;
+    let mut acc = std::path::PathBuf::new();
+    for comp in dir.components() {
+        match comp {
+            Component::Prefix(p) => acc.push(p.as_os_str()),
+            Component::RootDir => acc.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "parent traversal rejected in backup directory {}",
+                    dir.display()
+                );
+            }
+            Component::Normal(part) => {
+                acc.push(part);
+                match fs::symlink_metadata(&acc) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            anyhow::bail!("symlink rejected in backup directory {}", acc.display());
+                        }
+                        if !meta.is_dir() {
+                            anyhow::bail!(
+                                "non-directory component in backup path {}",
+                                acc.display()
+                            );
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::DirBuilderExt;
+                            let mut builder = fs::DirBuilder::new();
+                            builder.mode(0o700);
+                            if let Err(mk_err) = builder.create(&acc) {
+                                if mk_err.kind() != std::io::ErrorKind::AlreadyExists {
+                                    return Err(mk_err.into());
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            fs::create_dir(&acc)?;
+                        }
+                        let meta = fs::symlink_metadata(&acc)?;
+                        if meta.file_type().is_symlink() || !meta.is_dir() {
+                            anyhow::bail!("invalid backup directory created at {}", acc.display());
+                        }
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    if !acc.as_os_str().is_empty() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = fs::symlink_metadata(&acc)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            anyhow::bail!("symlink or non-directory at backup root {}", acc.display());
+        }
+        let euid = unsafe { libc::geteuid() };
+        if (meta.mode() & 0o777) != 0o700 && (euid == 0 || meta.uid() == euid) {
+            fs::set_permissions(&acc, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 struct CrossProcessUploadLock {
     file: fs::File,
 }
@@ -437,17 +506,27 @@ struct CrossProcessUploadLock {
 impl CrossProcessUploadLock {
     fn acquire(lock_path: &StdPath) -> anyhow::Result<Self> {
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_private_backup_dir(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).read(true).write(true).truncate(false);
         #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = opts.open(lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
             use std::os::unix::io::AsRawFd;
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.nlink() != 1 {
+                anyhow::bail!(
+                    "upload lock {} must be a single-link regular file",
+                    lock_path.display()
+                );
+            }
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
             if rc != 0 {
                 return Err(anyhow::anyhow!(
@@ -1306,7 +1385,7 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
     };
     let session_key = format!("u{}-{}-{}", user_id, session_jti, upload_id);
 
-    if fs::create_dir_all(backup_dir).is_err() {
+    if ensure_private_backup_dir(backup_dir).is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -3972,7 +4051,7 @@ fn deploy_sse_session_still_authorized(
     if auth_user.plugin_id.is_some() || auth_user.role != "admin" {
         return false;
     }
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return false;
     };
     if !crate::auth::table_exists(&conn, "users").unwrap_or(false) {
@@ -4001,6 +4080,18 @@ fn deploy_sse_session_still_authorized(
     true
 }
 
+async fn deploy_sse_session_still_authorized_async(
+    auth_user: &AuthUser,
+    initial_revoked_after: Option<i64>,
+) -> bool {
+    let cloned = auth_user.clone();
+    crate::auth::blocking_auth_work(move || {
+        deploy_sse_session_still_authorized(&cloned, initial_revoked_after)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 pub async fn handle_deploy_stream(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(q): Query<HashMap<String, String>>,
@@ -4008,11 +4099,17 @@ pub async fn handle_deploy_stream(
     if let Err(resp) = require_admin(&auth_user) {
         return resp;
     }
-    let initial_revoked_after = af_db::get_conn()
-        .ok()
-        .and_then(|c| crate::auth::load_active_human_subject(&c, auth_user.user_id).ok())
-        .map(|s| s.sessions_revoked_after);
-    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+    let uid = auth_user.user_id;
+    let initial_revoked_after = crate::auth::blocking_auth_work(move || {
+        af_db::get_read_conn()
+            .ok()
+            .and_then(|c| crate::auth::load_active_human_subject(&c, uid).ok())
+            .map(|s| s.sessions_revoked_after)
+    })
+    .await
+    .ok()
+    .flatten();
+    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
@@ -4049,7 +4146,7 @@ pub async fn handle_deploy_stream(
         loop {
             tokio::select! {
                 _ = revalidate_tick.tick() => {
-                    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
                         break;
                     }
                 }
@@ -4057,7 +4154,7 @@ pub async fn handle_deploy_stream(
                     let Ok(msg) = recv_res else {
                         break;
                     };
-                    if !deploy_sse_session_still_authorized(&auth_user, initial_revoked_after) {
+                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
                         break;
                     }
                     let safe_msg = af_common::redact::redact_secrets(&msg);

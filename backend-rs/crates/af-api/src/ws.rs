@@ -1513,7 +1513,36 @@ fn websocket_origin_matches_host(
         return false;
     };
 
-    origin_scheme == expected_scheme && origin_host == expected_host && origin_port == expected_port
+    if origin_scheme == expected_scheme
+        && origin_host == expected_host
+        && origin_port == expected_port
+    {
+        return true;
+    }
+
+    if let Ok(allowed_cors) = std::env::var("ALLOWED_CORS_ORIGIN") {
+        for candidate in allowed_cors
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "*")
+        {
+            if let Ok(allowed_url) = url::Url::parse(candidate) {
+                let allowed_scheme = allowed_url.scheme();
+                let allowed_host = allowed_url
+                    .host_str()
+                    .map(|h| h.trim_end_matches('.').to_ascii_lowercase());
+                let allowed_port = allowed_url.port_or_known_default();
+                if allowed_scheme == origin_scheme
+                    && allowed_host.as_deref() == Some(origin_host.as_str())
+                    && allowed_port == Some(origin_port)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 pub async fn handle_log_websocket(

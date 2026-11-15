@@ -79,8 +79,10 @@ func PruneOldBackups() {
 			slog.Error("failed to remove backup", "name", backups[i].name, "error", err)
 			continue
 		}
-		// Also remove checksum file if exists
+		// Also remove checksum and manifest sidecar files if they exist
 		_ = root.Remove(backups[i].name + ".sha256")
+		_ = root.Remove(backups[i].name + ".manifest.json")
+		_ = root.Remove(backups[i].name + ".manifest.json.sha256")
 
 		slog.Info("pruned old backup", "name", backups[i].name,
 			"age", time.Since(backups[i].modTime).Truncate(time.Hour))

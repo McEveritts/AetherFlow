@@ -65,7 +65,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
 }
 
 const INLINE_TOKEN_REGEX =
-    /(`[^`\n]+`)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*|#[^\s)]*)\))|(\*\*\*((?:`[^`\n]*`|(?!\*\*\*)[^\n])+?)\*\*\*)|(\*\*((?:`[^`\n]*`|(?!\*\*)[^\n])+?)\*\*)|(__(?:`[^`\n]*`|(?!__)[^\n])+?__)|(~~((?:`[^`\n]*`|(?!~~)[^\n])+?)~~)|(\*((?:`[^`\n]*`|[^*\n])+?)\*)|((?:^|(?<=[\s(]))_((?:`[^`\n]*`|[^_\n])+?)_(?=$|[\s.,!?:;)]))|(https?:\/\/[^\s<>()]+?(?=[.,!?:;)]*(?:\s|$)))/g;
+    /(`[^`\n]+`)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/(?![\/\\])[^\s)]*|#[^\s)]*)\))|(\*\*\*((?:`[^`\n]*`|(?!\*\*\*)[^\n])+?)\*\*\*)|(\*\*((?:`[^`\n]*`|(?!\*\*)[^\n])+?)\*\*)|(__(?:`[^`\n]*`|(?!__)[^\n])+?__)|(~~((?:`[^`\n]*`|(?!~~)[^\n])+?)~~)|(\*((?:`[^`\n]*`|[^*\n])+?)\*)|((?:^|(?<=[\s(]))_((?:`[^`\n]*`|[^_\n])+?)_(?=$|[\s.,!?:;)]))|(https?:\/\/[^\s<>()]+?(?=[.,!?:;)]*(?:\s|$)))/g;
 
 export function renderInlineMarkdown(text: string, keyPrefix = 'inl'): React.ReactNode[] {
     if (!text) return [];
@@ -98,12 +98,18 @@ export function renderInlineMarkdown(text: string, keyPrefix = 'inl'): React.Rea
             // Link: [label](url)
             const label = match[3];
             const url = match[4];
+            if (url.startsWith('//') || url.startsWith('/\\')) {
+                nodes.push(match[2]);
+                lastIndex = regex.lastIndex;
+                continue;
+            }
+            const isExternalHttp = /^https?:\/\//i.test(url);
             nodes.push(
                 <a
                     key={key}
                     href={url}
-                    target={url.startsWith('http') ? '_blank' : undefined}
-                    rel={url.startsWith('http') ? 'noopener noreferrer' : undefined}
+                    target={isExternalHttp ? '_blank' : undefined}
+                    rel={isExternalHttp ? 'noopener noreferrer' : undefined}
                     className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 font-medium transition-colors"
                 >
                     {renderInlineMarkdown(label, `${key}-lnk`)}

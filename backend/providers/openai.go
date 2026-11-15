@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -54,30 +55,37 @@ func NewOpenAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
 
 	endpoint := openaiDefaultEndpoint
 	if cfg.Endpoint != "" {
-		endpoint = cfg.Endpoint
+		validated, err := ValidateProviderEndpointURL(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+		endpoint = validated
 	}
 
 	return &OpenAIProvider{
 		apiKey:   cfg.APIKey,
 		endpoint: endpoint,
 		model:    cfg.Model,
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   newSafeProviderHTTPClient(120*time.Second, cfg.Transport),
 	}, nil
 }
 
 // NewLocalAIProvider creates a provider for OpenAI-compatible local endpoints
 // (LM Studio, Ollama). API key requirement is relaxed.
 func NewLocalAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
+	if strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, fmt.Errorf("local AI endpoint not configured. Set it in Settings → FlowAI Engine → Local AI Engines")
+	}
+	endpoint, err := ValidateProviderEndpointURL(cfg.Endpoint)
+	if err != nil {
+		return nil, err
 	}
 
 	return &OpenAIProvider{
 		apiKey:   cfg.APIKey, // may be empty for local endpoints
 		endpoint: endpoint,
 		model:    cfg.Model,
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   newSafeProviderHTTPClient(120*time.Second, cfg.Transport),
 	}, nil
 }
 
@@ -146,9 +154,11 @@ func (o *OpenAIProvider) doRequest(ctx context.Context, messages []openaiMessage
 	if resp.StatusCode != http.StatusOK {
 		var errResp openaiResponse
 		if json.Unmarshal(respBytes, &errResp) == nil && errResp.Error != nil {
-			return nil, fmt.Errorf("openai API error (%d): %s", resp.StatusCode, errResp.Error.Message)
+			if clean := sanitizeUpstreamProviderMessage(errResp.Error.Message); clean != "" {
+				return nil, fmt.Errorf("openai API error (%d): %s", resp.StatusCode, clean)
+			}
 		}
-		return nil, fmt.Errorf("openai API error: %d %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("openai API returned HTTP %d", resp.StatusCode)
 	}
 
 	var chatResp openaiResponse

@@ -8,6 +8,7 @@ import (
 
 	"aetherflow/db"
 	"aetherflow/providers"
+	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -111,6 +112,14 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, p
 
 	// 3. Build provider config with decrypted credentials
 	cfg := buildProviderConfig(ps, providerType, aiModel)
+	if cfg.Endpoint != "" {
+		validatedEndpoint, vErr := services.ValidateServerURL(cfg.Endpoint)
+		if vErr != nil {
+			BadRequest(c, fmt.Sprintf("Invalid AI endpoint configuration: %v", vErr))
+			return
+		}
+		cfg.Endpoint = validatedEndpoint
+	}
 
 	// Use system prompt from settings if none provided
 	prompt := systemPrompt
@@ -294,10 +303,13 @@ func TestAiConnection(c *gin.Context) {
 		Endpoint     string `json:"endpoint"`
 	}
 
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil && c.Request.ContentLength > 0 {
+		BadRequest(c, "Invalid request payload")
+		return
+	}
 
 	// Determine which provider to test
-	providerType := req.Provider
+	providerType := strings.ToLower(strings.TrimSpace(req.Provider))
 	if providerType == "" {
 		providerType = "gemini"
 	}
@@ -319,10 +331,17 @@ func TestAiConnection(c *gin.Context) {
 	if req.AnthropicKey != "" && !strings.HasPrefix(req.AnthropicKey, "****") {
 		ps.AnthropicAPIKey = req.AnthropicKey
 	}
-	if req.Endpoint != "" {
-		// Override the relevant endpoint for localai testing
-		ps.LMStudioEndpoint = req.Endpoint
-		ps.OllamaEndpoint = req.Endpoint
+	if strings.TrimSpace(req.Endpoint) != "" {
+		cleanEndpoint, vErr := services.ValidateServerURL(req.Endpoint)
+		if vErr != nil {
+			RespondError(c, http.StatusBadRequest, "INVALID_ENDPOINT", vErr.Error())
+			return
+		}
+		ps.LMStudioEndpoint = cleanEndpoint
+		ps.OllamaEndpoint = cleanEndpoint
+		if providerType == "anthropic" {
+			ps.AnthropicEndpoint = cleanEndpoint
+		}
 	}
 
 	// Select an appropriate test model per provider
@@ -337,8 +356,16 @@ func TestAiConnection(c *gin.Context) {
 	}
 
 	cfg := buildProviderConfig(ps, providerType, testModel)
+	if cfg.Endpoint != "" {
+		cleanEndpoint, vErr := services.ValidateServerURL(cfg.Endpoint)
+		if vErr != nil {
+			RespondError(c, http.StatusBadRequest, "INVALID_ENDPOINT", vErr.Error())
+			return
+		}
+		cfg.Endpoint = cleanEndpoint
+	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	provider, err := providers.NewProvider(providerType, cfg)
 	if err != nil {
 		BadRequest(c, fmt.Sprintf("Provider initialization failed: %v", err))
@@ -347,7 +374,7 @@ func TestAiConnection(c *gin.Context) {
 	defer provider.Close()
 
 	if err := provider.TestConnection(ctx); err != nil {
-		Unauthorized(c, fmt.Sprintf("Connection test failed: %v", err))
+		RespondError(c, http.StatusBadGateway, "UPSTREAM_AI_ERROR", fmt.Sprintf("Connection test failed: %v", err))
 		return
 	}
 

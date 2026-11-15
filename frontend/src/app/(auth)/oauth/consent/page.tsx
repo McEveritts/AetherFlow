@@ -11,6 +11,35 @@ import { apiFetch } from '@/lib/fetcher';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 
+function isSafeOidcRedirectUri(rawUri: string): boolean {
+    if (!rawUri || rawUri !== rawUri.trim() || /[\u0000-\u0020\u007f]/.test(rawUri) || rawUri.includes('#')) {
+        return false;
+    }
+    if (rawUri.split('?')[0].includes('\\')) {
+        return false;
+    }
+    const authority = rawUri.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i)?.[1];
+    if (!authority || authority.includes('@')) {
+        return false;
+    }
+    try {
+        const target = new URL(rawUri);
+        if (!target.hostname || target.username || target.password) {
+            return false;
+        }
+        if (target.protocol === 'https:') {
+            return true;
+        }
+        if (target.protocol === 'http:') {
+            const host = target.hostname.toLowerCase();
+            return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+        }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
 function getConsentRequestError(clientId: string | null, redirectUri: string | null, responseType: string | null): string {
     if (!clientId?.trim() || !redirectUri?.trim() || !responseType?.trim()) {
         return 'This link is missing information required to identify the application and its authorization request.';
@@ -18,21 +47,8 @@ function getConsentRequestError(clientId: string | null, redirectUri: string | n
     if (responseType !== 'code') {
         return 'This authorization request uses an unsupported response type. AetherFlow requires the authorization code flow.';
     }
-    try {
-        const target = new URL(redirectUri);
-        const authority = redirectUri.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i)?.[1];
-        const specialScheme = ['http:', 'https:', 'ws:', 'wss:', 'ftp:'].includes(target.protocol);
-        if (['javascript:', 'data:', 'vbscript:', 'file:', 'blob:', 'about:'].includes(target.protocol)
-            || /[\u0000-\u0020\u007f]/.test(redirectUri)
-            || redirectUri.includes('#')
-            || authority?.includes('@')
-            || target.username || target.password
-            || (specialScheme && (!authority || redirectUri.split('?')[0].includes('\\')))
-            || (!target.hostname && !target.pathname)) {
-            return 'This authorization request has an invalid callback URI. Use an absolute application callback URI without credentials or a fragment.';
-        }
-    } catch {
-        return 'This authorization request has an invalid callback URI. Use an absolute application callback URI.';
+    if (!isSafeOidcRedirectUri(redirectUri)) {
+        return 'This authorization request has an invalid callback URI. Use an HTTPS callback URI (or HTTP on localhost/loopback) without credentials or a fragment.';
     }
     return '';
 }
@@ -93,18 +109,12 @@ export default function ConsentPage() {
             const data = await res.json();
             const redirectTarget = data.redirect_uri || data.redirect_url;
             if (res.ok && redirectTarget) {
-                try {
-                    const parsedRedirect = new URL(redirectTarget);
-                    if (parsedRedirect.protocol !== 'https:' && parsedRedirect.protocol !== 'http:') {
-                        setError('Blocked unsafe redirect URI protocol.');
-                        setIsSubmitting(false);
-                        return;
-                    }
-                    window.location.assign(parsedRedirect.toString());
-                } catch {
-                    setError('Invalid authorization redirect target returned by server.');
+                if (!isSafeOidcRedirectUri(String(redirectTarget))) {
+                    setError('Blocked unsafe redirect URI protocol.');
                     setIsSubmitting(false);
+                    return;
                 }
+                window.location.assign(new URL(String(redirectTarget)).toString());
             } else {
                 setError(data.message || data.error || 'Authorization sequence refused by operator core.');
                 setIsSubmitting(false);

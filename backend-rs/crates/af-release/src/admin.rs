@@ -534,14 +534,46 @@ pub fn ensure_no_active_package_lifecycle_jobs(
     command: ReleaseCommand,
 ) -> ReleaseResult<()> {
     let path = crate::config::try_resolve_db_path(cfg, None)?.path;
-    if !path.exists() {
-        return Ok(());
+    crate::fs_security::ensure_no_symlink_ancestors(&path)?;
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(ReleaseError::io(
+                "inspecting lifecycle database metadata",
+                err,
+            ))
+        }
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(ReleaseError::PathValidation {
+            path: path.clone(),
+            reason: "lifecycle database path must be a regular non-symlink file".to_string(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Err(ReleaseError::PathValidation {
+                path: path.clone(),
+                reason: "lifecycle database path must not have multiple hardlinks".to_string(),
+            });
+        }
     }
     // Reject a corrupt header before opening SQLite: even a read-only WAL
     // connection can rebuild -shm. Explicit recovery must preserve those files
     // until the rollback engine validates its snapshot and quiesces writers.
     let mut header = [0u8; 16];
-    let mut file = std::fs::File::open(&path)
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = open_opts
+        .open(&path)
         .map_err(|e| ReleaseError::io("reading lifecycle database header", e))?;
     use std::io::Read;
     let count = file

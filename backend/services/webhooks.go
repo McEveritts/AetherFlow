@@ -54,8 +54,8 @@ func IsPublicWebhookAddr(addr netip.Addr) bool {
 		if b == [4]byte{168, 63, 129, 16} {
 			return false
 		}
-		// 192.0.0.0/24 and 192.0.2.0/24 (IETF / TEST-NET-1)
-		if b[0] == 192 && b[1] == 0 && (b[2] == 0 || b[2] == 2) {
+		// 192.0.0.0/24, 192.0.2.0/24 (IETF / TEST-NET-1), and 192.88.99.0/24 (6to4 relay anycast)
+		if b[0] == 192 && ((b[1] == 0 && (b[2] == 0 || b[2] == 2)) || (b[1] == 88 && b[2] == 99)) {
 			return false
 		}
 		// 198.18.0.0/15 (Benchmarking)
@@ -70,28 +70,33 @@ func IsPublicWebhookAddr(addr netip.Addr) bool {
 		if b[0] == 203 && b[1] == 0 && b[2] == 113 {
 			return false
 		}
-		// 240.0.0.0/4 reserved + 255.255.255.255 broadcast
-		if b[0] >= 240 {
+		// 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + 255.255.255.255 broadcast
+		if b[0] >= 224 {
 			return false
 		}
 		return true
 	}
 
 	b := u.As16()
-	// 2001:db8::/32 documentation
-	if b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8 {
+	// Allow only Global Unicast 2000::/3 (rejects NAT64 64:ff9b::/96 & 64:ff9b:1::/48,
+	// discard 100::/64, ULA fc00::/7, link-local fe80::/10, multicast ff00::/8, ::/128, ::1/128).
+	if (b[0] & 0xe0) != 0x20 {
 		return false
 	}
-	// 2001:0000::/32 Teredo
-	if b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00 {
+	// 2001::/23 IETF protocol assignments (Teredo 2001::/32, benchmarking 2001:2::/48, ORCHID)
+	if b[0] == 0x20 && b[1] == 0x01 && b[2] < 0x02 {
+		return false
+	}
+	// 2001:db8::/32 documentation
+	if b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8 {
 		return false
 	}
 	// 2002::/16 6to4
 	if b[0] == 0x20 && b[1] == 0x02 {
 		return false
 	}
-	// fd00:ec2::/32 AWS IPv6 IMDS (also covered by IsPrivate fc00::/7, explicit defense-in-depth)
-	if b[0] == 0xfd && b[1] == 0x00 && b[2] == 0x0e && b[3] == 0xc2 {
+	// 3fff::/20 RFC 9637 documentation
+	if b[0] == 0x3f && b[1] == 0xff && (b[2]&0xf0) == 0x00 {
 		return false
 	}
 	return true

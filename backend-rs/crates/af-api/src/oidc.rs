@@ -2752,7 +2752,7 @@ fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
         .unwrap_or("")
         .to_string();
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -2760,29 +2760,52 @@ fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
         );
     };
 
-    let affected = conn
-        .execute("DELETE FROM oidc_clients WHERE id = ?1", params![client_id])
-        .unwrap_or(0);
+    let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to delete client",
+            );
+        }
+    };
+
+    let affected = match tx.execute("DELETE FROM oidc_clients WHERE id = ?1", params![client_id]) {
+        Ok(n) => n,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to delete client",
+            );
+        }
+    };
     if affected == 0 {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Client not found");
     }
 
-    let _ = conn.execute(
+    for stmt in [
         "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE client_id = ?1",
-        params![client_id],
-    );
-    let _ = conn.execute(
         "DELETE FROM oidc_auth_codes WHERE client_id = ?1",
-        params![client_id],
-    );
-    let _ = conn.execute(
         "DELETE FROM oidc_device_codes WHERE client_id = ?1",
-        params![client_id],
-    );
-    let _ = conn.execute(
         "DELETE FROM oidc_consents WHERE client_id = ?1",
-        params![client_id],
-    );
+    ] {
+        if tx.execute(stmt, params![client_id]).is_err() {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke client artifacts",
+            );
+        }
+    }
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to commit client deletion",
+        );
+    }
 
     drop(conn);
     if let Some(u) = actor {

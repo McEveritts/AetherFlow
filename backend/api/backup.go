@@ -3,9 +3,11 @@ package api
 import (
 	"aetherflow/db"
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +32,44 @@ import (
 // underscore, hyphen, and dot, ending with .sqlite extension. Blocks leading dots,
 // path traversal, double extensions, and null bytes.
 var validBackupFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.sqlite$`)
+var validBackupUploadIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+type backupReauthWindow struct {
+	count   int
+	resetAt time.Time
+}
+
+var (
+	backupReauthMu      sync.Mutex
+	backupReauthWindows = make(map[int]backupReauthWindow)
+)
+
+func allowBackupDownloadReauth(userID int) bool {
+	now := time.Now()
+	backupReauthMu.Lock()
+	defer backupReauthMu.Unlock()
+	if len(backupReauthWindows) > 1024 {
+		for uid, w := range backupReauthWindows {
+			if now.After(w.resetAt) {
+				delete(backupReauthWindows, uid)
+			}
+		}
+	}
+	win, exists := backupReauthWindows[userID]
+	if !exists || now.After(win.resetAt) {
+		backupReauthWindows[userID] = backupReauthWindow{
+			count:   1,
+			resetAt: now.Add(time.Minute),
+		}
+		return true
+	}
+	if win.count >= 10 {
+		return false
+	}
+	win.count++
+	backupReauthWindows[userID] = win
+	return true
+}
 
 // isValidBackupFilename checks that a filename matches the strict whitelist pattern.
 func isValidBackupFilename(name string) bool {
@@ -126,12 +167,20 @@ func computeFileSHA256(filePath string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+func parseChecksumField(raw []byte) string {
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 func readStoredChecksum(filePath string) (string, error) {
 	data, err := os.ReadFile(checksumFilePath(filePath))
 	if err != nil {
 		return "", err
 	}
-	sum := strings.TrimSpace(string(data))
+	sum := parseChecksumField(data)
 	if sum == "" {
 		return "", errors.New("checksum file is empty")
 	}
@@ -139,7 +188,8 @@ func readStoredChecksum(filePath string) (string, error) {
 }
 
 func writeStoredChecksum(filePath, checksum string) error {
-	return os.WriteFile(checksumFilePath(filePath), []byte(checksum+"\n"), 0644)
+	payload := fmt.Sprintf("%s  %s\n", strings.ToLower(strings.TrimSpace(checksum)), filepath.Base(filePath))
+	return os.WriteFile(checksumFilePath(filePath), []byte(payload), 0600)
 }
 
 func ensureStoredChecksum(filePath string) (string, error) {
@@ -165,11 +215,175 @@ type BackupFile struct {
 	Checksum  string `json:"checksum,omitempty"`
 }
 
-func PerformSystemBackup() (BackupFile, error) {
-	backupDir := getBackupDir()
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return BackupFile{}, errors.New("failed to create backup directory")
+type backupManifestEntry struct {
+	RelativePath      string `json:"relative_path"`
+	LogicalTargetPath string `json:"logical_target_path,omitempty"`
+	Kind              string `json:"kind"`
+	SHA256            string `json:"sha256"`
+	SizeBytes         uint64 `json:"size_bytes"`
+	UnixMode          uint32 `json:"unix_mode,omitempty"`
+	Required          bool   `json:"required"`
+}
+
+type sqliteSnapshotMetadata struct {
+	SnapshotRelativePath string `json:"snapshot_relative_path"`
+	CaptureMethod        string `json:"capture_method"`
+	SQLiteUserVersion    int64  `json:"sqlite_user_version"`
+	JournalMode          string `json:"journal_mode"`
+	IntegrityCheck       string `json:"integrity_check"`
+	SizeBytes            uint64 `json:"size_bytes"`
+	SHA256               string `json:"sha256"`
+}
+
+type afHostBackupManifest struct {
+	Format                  string                  `json:"format"`
+	SchemaVersion           uint32                  `json:"schema_version"`
+	BackupID                string                  `json:"backup_id"`
+	CreatedAt               string                  `json:"created_at"`
+	AppVersion              string                  `json:"app_version"`
+	MinCompatibleAppVersion string                  `json:"min_compatible_app_version"`
+	HostPlatform            string                  `json:"host_platform"`
+	PrimaryArtifact         string                  `json:"primary_artifact"`
+	SQLiteSnapshot          *sqliteSnapshotMetadata `json:"sqlite_snapshot,omitempty"`
+	Entries                 []backupManifestEntry   `json:"entries"`
+	ChunkCount              int                     `json:"chunk_count"`
+}
+
+func newManifestUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("af-%d", time.Now().UnixNano())
 	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func rustCompatibleHostPlatform() string {
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x86_64"
+	case "arm64":
+		arch = "aarch64"
+	}
+	return runtime.GOOS + "/" + arch
+}
+
+func inspectSQLiteBackupFile(absCandidate string) (int64, string, string, error) {
+	verifyDB, err := sql.Open("sqlite", absCandidate+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(3000)")
+	if err != nil {
+		return 0, "", "", errors.New("failed to open SQLite backup database for verification")
+	}
+	defer verifyDB.Close()
+
+	var quickCheck string
+	if err := verifyDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil || strings.ToLower(strings.TrimSpace(quickCheck)) != "ok" {
+		return 0, "", "", errors.New("SQLite backup database failed integrity verification")
+	}
+	var userVersion int64
+	_ = verifyDB.QueryRow("PRAGMA user_version").Scan(&userVersion)
+	if userVersion < 0 {
+		userVersion = 0
+	}
+	var journalMode string
+	if err := verifyDB.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil || strings.TrimSpace(journalMode) == "" {
+		journalMode = "delete"
+	}
+	return userVersion, strings.ToLower(strings.TrimSpace(journalMode)), "ok", nil
+}
+
+func writeRootFileAtomic(root *os.Root, relName string, payload []byte, perm fs.FileMode) error {
+	if linfo, lErr := root.Lstat(relName); lErr == nil && (linfo.Mode()&os.ModeSymlink != 0 || linfo.IsDir()) {
+		return errors.New("refusing to overwrite symlink or directory in backup root")
+	}
+	tmpName := fmt.Sprintf(".tmp-%s-%d", filepath.Base(relName), time.Now().UnixNano())
+	f, err := root.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, wErr := f.Write(payload); wErr != nil {
+		_ = f.Close()
+		_ = root.Remove(tmpName)
+		return wErr
+	}
+	if sErr := f.Sync(); sErr != nil {
+		_ = f.Close()
+		_ = root.Remove(tmpName)
+		return sErr
+	}
+	if cErr := f.Close(); cErr != nil {
+		_ = root.Remove(tmpName)
+		return cErr
+	}
+	if rErr := root.Rename(tmpName, relName); rErr != nil {
+		_ = root.Remove(tmpName)
+		return rErr
+	}
+	return nil
+}
+
+func persistRootBackupManifestAndSidecars(root *os.Root, filename, checksum string, sizeBytes int64, userVersion int64, journalMode string) error {
+	lowerSum := strings.ToLower(strings.TrimSpace(checksum))
+	shaPayload := []byte(fmt.Sprintf("%s  %s\n", lowerSum, filename))
+	if err := writeRootFileAtomic(root, filename+".sha256", shaPayload, 0600); err != nil {
+		return err
+	}
+	uSize := uint64(0)
+	if sizeBytes > 0 {
+		uSize = uint64(sizeBytes)
+	}
+	manifest := afHostBackupManifest{
+		Format:                  "af-host.backup-manifest.v1",
+		SchemaVersion:           1,
+		BackupID:                newManifestUUID(),
+		CreatedAt:               time.Now().UTC().Format(time.RFC3339),
+		AppVersion:              "v4.0.0",
+		MinCompatibleAppVersion: "4.0.0",
+		HostPlatform:            rustCompatibleHostPlatform(),
+		PrimaryArtifact:         filename,
+		SQLiteSnapshot: &sqliteSnapshotMetadata{
+			SnapshotRelativePath: filename,
+			CaptureMethod:        "vacuum_into",
+			SQLiteUserVersion:    userVersion,
+			JournalMode:          journalMode,
+			IntegrityCheck:       "ok",
+			SizeBytes:            uSize,
+			SHA256:               lowerSum,
+		},
+		Entries: []backupManifestEntry{
+			{
+				RelativePath:      filename,
+				LogicalTargetPath: getActiveDbPath(),
+				Kind:              "sqlite_snapshot",
+				SHA256:            lowerSum,
+				SizeBytes:         uSize,
+				UnixMode:          0600,
+				Required:          true,
+			},
+		},
+		ChunkCount: 0,
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	manifestName := filename + ".manifest.json"
+	if err := writeRootFileAtomic(root, manifestName, manifestBytes, 0600); err != nil {
+		return err
+	}
+	mHash := sha256.Sum256(manifestBytes)
+	mHex := hex.EncodeToString(mHash[:])
+	manifestShaPayload := []byte(fmt.Sprintf("%s  %s\n", mHex, manifestName))
+	return writeRootFileAtomic(root, manifestName+".sha256", manifestShaPayload, 0600)
+}
+
+func PerformSystemBackup() (BackupFile, error) {
+	root, backupDir, err := openConfinedBackupRoot(true)
+	if err != nil {
+		return BackupFile{}, errors.New("failed to open confined backup directory")
+	}
+	defer root.Close()
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	filename := fmt.Sprintf("aetherflow_%s.sqlite", timestamp)
@@ -179,37 +393,57 @@ func PerformSystemBackup() (BackupFile, error) {
 		return BackupFile{}, errors.New("invalid backup filename")
 	}
 
-	backupFile, err := safeBackupPath(backupDir, filename)
+	if linfo, lErr := root.Lstat(filename); lErr == nil && (linfo.Mode()&os.ModeSymlink != 0 || linfo.IsDir()) {
+		return BackupFile{}, errors.New("refusing to overwrite symlink or directory in backup root")
+	}
+
+	stageName := fmt.Sprintf(".stage-%s-%d", filename, time.Now().UnixNano())
+	backupStageFile, err := safeBackupPath(backupDir, stageName)
 	if err != nil {
 		return BackupFile{}, err
 	}
+	defer func() {
+		_ = root.Remove(stageName)
+	}()
 
 	// Escape single quotes in the path for VACUUM INTO.
-	safePath := strings.ReplaceAll(backupFile, "'", "''")
+	safePath := strings.ReplaceAll(backupStageFile, "'", "''")
 	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
 		slog.Info("Backup VACUUM INTO failed", "error", err)
 		return BackupFile{}, errors.New("backup failed: " + err.Error())
 	}
 
-	info, err := os.Stat(backupFile)
+	_ = root.Chmod(stageName, 0600)
+	userVersion, journalMode, _, inspErr := inspectSQLiteBackupFile(backupStageFile)
+	if inspErr != nil {
+		return BackupFile{}, inspErr
+	}
+
+	checksum, err := computeRootFileSHA256(root, stageName)
+	if err != nil {
+		return BackupFile{}, errors.New("backup created but checksum failed: " + err.Error())
+	}
+
+	if err := root.Rename(stageName, filename); err != nil {
+		return BackupFile{}, errors.New("backup created but activation failed: " + err.Error())
+	}
+	_ = root.Chmod(filename, 0600)
+
+	info, err := root.Stat(filename)
 	if err != nil {
 		return BackupFile{}, errors.New("backup created but file metadata is unavailable")
 	}
 
-	checksum, err := computeFileSHA256(backupFile)
-	if err != nil {
-		return BackupFile{}, errors.New("Backup created but checksum failed: " + err.Error())
-	}
-	if err := writeStoredChecksum(backupFile, checksum); err != nil {
-		return BackupFile{}, errors.New("Backup created but checksum write failed: " + err.Error())
+	if err := persistRootBackupManifestAndSidecars(root, filename, checksum, info.Size(), userVersion, journalMode); err != nil {
+		return BackupFile{}, errors.New("backup created but sidecar write failed: " + err.Error())
 	}
 
 	// Phase 15: Enforce retention policy after successful backup
 	go PruneOldBackups()
 
 	return BackupFile{
-		Filename:  filepath.Base(backupFile),
+		Filename:  filename,
 		Size:      info.Size(),
 		Timestamp: time.Now().Format(time.RFC3339),
 		Checksum:  checksum,
@@ -237,7 +471,7 @@ func openConfinedBackupRoot(createDir bool) (*os.Root, string, error) {
 		return nil, "", err
 	}
 	if createDir {
-		if err := os.MkdirAll(backupDir, 0750); err != nil {
+		if err := os.MkdirAll(backupDir, 0700); err != nil {
 			return nil, "", err
 		}
 	}
@@ -247,6 +481,9 @@ func openConfinedBackupRoot(createDir bool) (*os.Root, string, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return nil, backupDir, errors.New("backup directory must not be a symlink")
+	}
+	if createDir && info.Mode().Perm() != 0700 {
+		_ = os.Chmod(backupDir, 0700)
 	}
 	root, err := os.OpenRoot(backupDir)
 	if err != nil {
@@ -279,7 +516,7 @@ func ensureRootStoredChecksum(root *os.Root, relName string) (string, error) {
 	sumName := relName + ".sha256"
 	if linfo, lErr := root.Lstat(sumName); lErr == nil && linfo.Mode()&os.ModeSymlink == 0 && !linfo.IsDir() {
 		if data, rErr := root.ReadFile(sumName); rErr == nil {
-			if sum := strings.TrimSpace(string(data)); sum != "" {
+			if sum := parseChecksumField(data); sum != "" {
 				return sum, nil
 			}
 		}
@@ -288,43 +525,35 @@ func ensureRootStoredChecksum(root *os.Root, relName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if linfo, lErr := root.Lstat(sumName); lErr == nil && linfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("refusing to write symlinked checksum file")
-	}
-	if err := root.WriteFile(sumName, []byte(sum+"\n"), 0640); err != nil {
+	payload := []byte(fmt.Sprintf("%s  %s\n", strings.ToLower(sum), filepath.Base(relName)))
+	if err := writeRootFileAtomic(root, sumName, payload, 0600); err != nil {
 		return "", err
 	}
 	return sum, nil
 }
 
-func validateUploadedSQLiteBackup(root *os.Root, backupDir, relTempName string) error {
+func validateUploadedSQLiteBackup(root *os.Root, backupDir, relTempName string) (int64, string, error) {
 	linfo, err := root.Lstat(relTempName)
 	if err != nil || linfo.Mode()&os.ModeSymlink != 0 || linfo.IsDir() {
-		return errors.New("invalid assembled backup file")
+		return 0, "", errors.New("invalid assembled backup file")
 	}
 	f, err := root.Open(relTempName)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	header := make([]byte, 16)
 	n, readErr := io.ReadFull(f, header)
 	_ = f.Close()
 	if readErr != nil || n != 16 || !bytes.Equal(header, []byte("SQLite format 3\x00")) {
-		return errors.New("uploaded file is not a valid SQLite 3 database")
+		return 0, "", errors.New("uploaded file is not a valid SQLite 3 database")
 	}
 
 	absCandidate := filepath.Join(backupDir, relTempName)
-	verifyDB, err := sql.Open("sqlite", absCandidate+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(3000)")
-	if err != nil {
-		return errors.New("failed to open uploaded SQLite database for verification")
+	uv, jm, _, inspErr := inspectSQLiteBackupFile(absCandidate)
+	if inspErr != nil {
+		return 0, "", errors.New("uploaded SQLite database failed integrity verification")
 	}
-	defer verifyDB.Close()
-
-	var quickCheck string
-	if err := verifyDB.QueryRow("PRAGMA quick_check").Scan(&quickCheck); err != nil || strings.ToLower(strings.TrimSpace(quickCheck)) != "ok" {
-		return errors.New("uploaded SQLite database failed integrity verification")
-	}
-	return nil
+	return uv, jm, nil
 }
 
 func GetBackupsList(c *gin.Context) {
@@ -381,6 +610,10 @@ func DownloadBackup(c *gin.Context) {
 	userID, ok := rawUserID.(int)
 	if !ok {
 		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid session")
+		return
+	}
+	if !allowBackupDownloadReauth(userID) {
+		RespondError(c, http.StatusTooManyRequests, "RATE_LIMITED", "Too many backup download re-authentication attempts. Please wait a minute.")
 		return
 	}
 	var passwordHash string
@@ -547,12 +780,26 @@ func UploadBackupChunk(c *gin.Context) {
 		return
 	}
 
-	stageRelDir := ".upload-" + filename
+	uploadID := strings.TrimSpace(c.Query("upload_id"))
+	if uploadID == "" {
+		uploadID = "default"
+	} else if !validBackupUploadIDRe.MatchString(uploadID) {
+		BadRequest(c, "Invalid upload_id parameter")
+		return
+	}
+	userID := 0
+	if rawUID, exists := c.Get("user_id"); exists {
+		if uid, ok := rawUID.(int); ok && uid > 0 {
+			userID = uid
+		}
+	}
+
+	stageRelDir := fmt.Sprintf(".upload-u%d-%s-%s", userID, uploadID, filename)
 	if linfo, lErr := root.Lstat(stageRelDir); lErr == nil && linfo.Mode()&os.ModeSymlink != 0 {
 		BadRequest(c, "Refusing symlinked staging directory")
 		return
 	}
-	if err := root.MkdirAll(stageRelDir, 0750); err != nil {
+	if err := root.MkdirAll(stageRelDir, 0700); err != nil {
 		InternalError(c, "Failed to prepare upload staging directory")
 		return
 	}
@@ -562,7 +809,7 @@ func UploadBackupChunk(c *gin.Context) {
 		BadRequest(c, "Refusing symlinked chunk file")
 		return
 	}
-	chunkFile, err := root.OpenFile(chunkRelPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+	chunkFile, err := root.OpenFile(chunkRelPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		InternalError(c, "Failed to create chunk file")
 		return
@@ -613,12 +860,12 @@ func UploadBackupChunk(c *gin.Context) {
 		return
 	}
 
-	tempFinalName := filename + ".uploading"
+	tempFinalName := fmt.Sprintf(".uploading-u%d-%s-%s", userID, uploadID, filename)
 	if linfo, lErr := root.Lstat(tempFinalName); lErr == nil && linfo.Mode()&os.ModeSymlink != 0 {
 		BadRequest(c, "Refusing symlinked temporary backup file")
 		return
 	}
-	out, err := root.OpenFile(tempFinalName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+	out, err := root.OpenFile(tempFinalName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		InternalError(c, "Failed to build final backup file")
 		return
@@ -667,7 +914,8 @@ func UploadBackupChunk(c *gin.Context) {
 		return
 	}
 
-	if valErr := validateUploadedSQLiteBackup(root, backupDir, tempFinalName); valErr != nil {
+	userVersion, journalMode, valErr := validateUploadedSQLiteBackup(root, backupDir, tempFinalName)
+	if valErr != nil {
 		_ = root.Remove(tempFinalName)
 		_ = root.RemoveAll(stageRelDir)
 		BadRequest(c, valErr.Error())
@@ -679,16 +927,17 @@ func UploadBackupChunk(c *gin.Context) {
 		InternalError(c, "Failed to activate assembled backup file")
 		return
 	}
-
-	if err := root.WriteFile(filename+".sha256", []byte(checksum+"\n"), 0640); err != nil {
-		InternalError(c, "Backup uploaded but checksum persistence failed")
-		return
-	}
+	_ = root.Chmod(filename, 0600)
 
 	_ = root.RemoveAll(stageRelDir)
 	info, statErr := root.Stat(filename)
 	if statErr != nil {
 		InternalError(c, "Upload completed but file metadata lookup failed")
+		return
+	}
+
+	if err := persistRootBackupManifestAndSidecars(root, filename, checksum, info.Size(), userVersion, journalMode); err != nil {
+		InternalError(c, "Backup uploaded but checksum persistence failed")
 		return
 	}
 

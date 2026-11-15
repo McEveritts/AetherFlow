@@ -988,7 +988,8 @@ func PruneExpiredData() {
 		table string
 		query string
 	}{
-		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ? OR used = 1"},
+		// Retain used = 1 authorization-code tombstones until expires_at for RFC 6749 §4.1.2 reuse detection.
+		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ?"},
 		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
 		// Retain revoked = 1 refresh-token tombstones until expires_at for RFC 9700 reuse detection.
 		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?"},

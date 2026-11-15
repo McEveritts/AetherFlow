@@ -64,6 +64,9 @@ if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.ends
 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
 fd = os.open(target, flags, 0o640)
 try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
     fcntl.flock(fd, fcntl.LOCK_SH)
     try:
         st = os.fstat(fd)
@@ -109,6 +112,9 @@ except OSError:
     sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
     raise SystemExit(1)
 try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
     fcntl.flock(fd, fcntl.LOCK_SH)
     try:
         st = os.fstat(fd)
@@ -163,6 +169,9 @@ except OSError:
     sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
     raise SystemExit(1)
 try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
     fcntl.flock(fd, fcntl.LOCK_SH)
     try:
         st = os.fstat(fd)
@@ -245,6 +254,9 @@ except OSError:
     sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
     raise SystemExit(1)
 try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
     fcntl.flock(fd, fcntl.LOCK_SH)
     try:
         st = os.fstat(fd)

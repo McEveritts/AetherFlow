@@ -106,6 +106,37 @@ func updateSettings(c *gin.Context) {
 		req.UpdateChannel = "stable"
 	}
 
+	if raw := strings.TrimSpace(req.LmStudioEndpoint); raw != "" {
+		clean, vErr := services.ValidateServerURL(raw)
+		if vErr != nil {
+			RespondError(c, http.StatusBadRequest, "INVALID_ENDPOINT", vErr.Error())
+			return
+		}
+		req.LmStudioEndpoint = clean
+	} else {
+		req.LmStudioEndpoint = ""
+	}
+	if raw := strings.TrimSpace(req.OllamaEndpoint); raw != "" {
+		clean, vErr := services.ValidateServerURL(raw)
+		if vErr != nil {
+			RespondError(c, http.StatusBadRequest, "INVALID_ENDPOINT", vErr.Error())
+			return
+		}
+		req.OllamaEndpoint = clean
+	} else {
+		req.OllamaEndpoint = ""
+	}
+	if raw := strings.TrimSpace(req.AnthropicEndpoint); raw != "" {
+		clean, vErr := services.ValidateServerURL(raw)
+		if vErr != nil {
+			RespondError(c, http.StatusBadRequest, "INVALID_ENDPOINT", vErr.Error())
+			return
+		}
+		req.AnthropicEndpoint = clean
+	} else {
+		req.AnthropicEndpoint = ""
+	}
+
 	// Fail-closed encryption of third-party API keys using parameterized SQL.
 	updateGeminiKey := 0
 	geminiEncrypted := ""

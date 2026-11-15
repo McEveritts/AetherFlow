@@ -336,6 +336,25 @@ fn is_refresh_path(path: &str) -> bool {
     )
 }
 
+fn is_logout_path(path: &str) -> bool {
+    matches!(path, "/api/v1/auth/logout" | "/api/auth/logout" | "/logout")
+}
+
+fn attach_logout_clear_cookie(mut resp: Response) -> Response {
+    let clear_cookie = build_set_cookie(
+        "aetherflow_session",
+        "",
+        -1,
+        "Lax",
+        secure_cookie_enabled(),
+        true,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, hv);
+    }
+    resp
+}
+
 fn session_auth_time(claims: &SessionClaims) -> i64 {
     if claims.auth_time > 0 {
         claims.auth_time
@@ -527,16 +546,13 @@ pub fn mint_plugin_jwt(
 }
 
 pub fn resolve_raw_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth_hdr) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(bearer) = auth_hdr.strip_prefix("Bearer ") {
-            let trimmed = bearer.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+    if let Some(raw_auth) = headers.get(header::AUTHORIZATION) {
+        let auth_hdr = raw_auth.to_str().ok()?;
+        let bearer = auth_hdr.strip_prefix("Bearer ")?.trim();
+        if !bearer.is_empty() {
+            return Some(bearer.to_string());
         }
+        return None;
     }
     extract_cookie(headers, "aetherflow_session")
 }
@@ -825,6 +841,7 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
     }
 
     let method = req.method().clone();
+    let is_logout = method == Method::POST && is_logout_path(&path);
     let headers = req.headers();
     let bearer_token = headers
         .get(header::AUTHORIZATION)
@@ -834,7 +851,12 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         .filter(|b| !b.is_empty());
 
     let Some(token) = resolve_raw_token(headers) else {
-        return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+        let resp = api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+        return if is_logout {
+            attach_logout_clear_cookie(resp)
+        } else {
+            resp
+        };
     };
 
     // Check if the caller presented a scoped short-lived plugin Bearer token
@@ -869,6 +891,70 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
             req.extensions_mut().insert(plugin_claims);
             return next.run(req).await;
         }
+    }
+
+    if is_logout {
+        if crate::plugins::decode_and_verify_plugin_token(&token).is_ok() {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                "Plugin tokens cannot revoke operator sessions",
+            );
+        }
+        let Ok(claims) = decode_session_claims(&token, true) else {
+            return attach_logout_clear_cookie(api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Unauthorized",
+            ));
+        };
+        if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                "Plugin-scoped tokens cannot revoke operator sessions",
+            );
+        }
+        let now = Utc::now().timestamp();
+        if claims.user_id <= 0
+            || claims.jti.trim().is_empty()
+            || now.saturating_sub(claims.exp) > 7200
+        {
+            return attach_logout_clear_cookie(api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Unauthorized",
+            ));
+        }
+        let req_peer_ip = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+        let req_ua = req
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let peer_derived_ip = crate::ws::extract_client_ip_for_peer(req.headers(), req_peer_ip);
+        let hdr_ip = extract_client_ip(req.headers());
+        if !matches_client_fingerprint(&claims.cfp, &peer_derived_ip, req_ua)
+            && !matches_client_fingerprint(&claims.cfp, &hdr_ip, req_ua)
+        {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "SESSION_HIJACKED",
+                "Session bound to a different client",
+            );
+        }
+        req.extensions_mut().insert(AuthUser {
+            user_id: claims.user_id,
+            username: claims.sub,
+            role: "user".to_string(),
+            jti: claims.jti,
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        return next.run(req).await;
     }
 
     let Ok(claims) = decode_session_claims(&token, false) else {
@@ -4227,5 +4313,111 @@ mod tests {
         let resp_mismatch = refresh_session(h_mismatch).await;
         assert_eq!(resp_mismatch.status(), StatusCode::UNAUTHORIZED);
         assert!(af_db::is_token_revoked(&s1_claims.jti));
+    }
+
+    #[tokio::test]
+    async fn expired_within_grace_logout_revokes_family_and_authoritative_bearer_blocks_cookie_fallback(
+    ) {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use axum::{routing::post, Router};
+        use tower::ServiceExt;
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO users (id, username, password_hash, role, totp_enabled, sessions_revoked_after) \
+                 VALUES (998, 'grace-logout-user', 'hash', 'admin', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut base_headers = HeaderMap::new();
+        base_headers.insert(header::USER_AGENT, HeaderValue::from_static("grace-ua"));
+
+        // 1. Authoritative Authorization header never falls back to aetherflow_session cookie
+        let (valid_cookie_tok, _) = create_standard_jwt(998, &base_headers).unwrap();
+        let mut mixed_headers = HeaderMap::new();
+        mixed_headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer   "));
+        mixed_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={valid_cookie_tok}")
+                .parse()
+                .unwrap(),
+        );
+        assert!(resolve_raw_token(&mixed_headers).is_none());
+
+        // 2. Access JWT expired 10 minutes ago (within 2h refresh grace window) MUST be accepted
+        //    by auth_middleware + csrf_middleware + logout, revoking the family so subsequent
+        //    refresh fails with 401.
+        let now = Utc::now().timestamp();
+        let expired_jti = format!("grace-exp-jti-{}", uuid::Uuid::new_v4());
+        let ip = extract_client_ip(&base_headers);
+        let expired_claims = SessionClaims {
+            user_id: 998,
+            sub: "998".to_string(),
+            jti: expired_jti.clone(),
+            cfp: client_fingerprint("grace-ua"),
+            iss: "aetherflow".to_string(),
+            iat: now - 2400,
+            auth_time: now - 2400,
+            exp: now - 600,
+            ver: 0,
+            plugin_id: String::new(),
+            plugin_scopes: Vec::new(),
+        };
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO active_sessions (jti, family_id, user_id, ip_address, user_agent, expires_at, last_active) \
+                 VALUES (?1, ?1, 998, ?2, 'grace-ua', ?3, ?4)",
+                params![
+                    expired_jti,
+                    ip,
+                    (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+        let expired_jwt = encode(
+            &Header::new(Algorithm::HS256),
+            &expired_claims,
+            &EncodingKey::from_secret(&jwt_secret_bytes()),
+        )
+        .unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/auth/logout", post(logout))
+            .layer(axum::middleware::from_fn(csrf_middleware))
+            .layer(axum::middleware::from_fn(auth_middleware));
+
+        let logout_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/logout")
+            .header(header::USER_AGENT, "grace-ua")
+            .header(
+                header::COOKIE,
+                format!("aetherflow_session={expired_jwt}; csrf_token=csrf-grace"),
+            )
+            .header("X-CSRF-Token", "csrf-grace")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let logout_resp = app.oneshot(logout_req).await.unwrap();
+        assert_eq!(logout_resp.status(), StatusCode::OK);
+        assert!(af_db::is_token_revoked(&expired_jti));
+
+        let mut refresh_headers = HeaderMap::new();
+        refresh_headers.insert(header::USER_AGENT, HeaderValue::from_static("grace-ua"));
+        refresh_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={expired_jwt}").parse().unwrap(),
+        );
+        let refresh_resp = refresh_session(refresh_headers).await;
+        assert_eq!(refresh_resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

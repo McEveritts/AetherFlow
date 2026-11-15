@@ -1443,9 +1443,40 @@ func isAllowedHost(host string) bool {
 }
 
 var (
-	errSessionRevoked  = errors.New("session revoked")
-	errSessionHijacked = errors.New("session hijacked")
+	errSessionRevoked        = errors.New("session revoked")
+	errSessionHijacked       = errors.New("session hijacked")
+	errPluginLogoutForbidden = errors.New("plugin token cannot revoke user session")
 )
+
+func hasNonEmptyBearerHeader(c *gin.Context) bool {
+	raw := strings.TrimSpace(c.GetHeader("Authorization"))
+	if !strings.HasPrefix(raw, "Bearer ") {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(raw, "Bearer ")) != ""
+}
+
+func extractAuthoritativeRawToken(c *gin.Context) (string, bool) {
+	if rawAuth := c.GetHeader("Authorization"); rawAuth != "" {
+		trimmed := strings.TrimSpace(rawAuth)
+		if strings.HasPrefix(trimmed, "Bearer ") {
+			tok := strings.TrimSpace(strings.TrimPrefix(trimmed, "Bearer "))
+			if tok != "" {
+				return tok, true
+			}
+		}
+		return "", false
+	}
+	cookie, err := c.Cookie("aetherflow_session")
+	if err != nil {
+		return "", false
+	}
+	tok := strings.TrimSpace(cookie)
+	if tok == "" {
+		return "", false
+	}
+	return tok, true
+}
 
 func validateSessionToken(tokenString string) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -1512,41 +1543,67 @@ func validateResolvedSessionClaimsStatus(c *gin.Context, claims jwt.MapClaims) (
 }
 
 func resolveSessionTokenWithSubject(c *gin.Context) (string, jwt.MapClaims, activeHumanSubject, error) {
-	var lastSpecificErr error
-	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil {
-				subj, vErr := validateResolvedSessionClaimsStatus(c, claims)
-				if vErr == nil {
-					return tokenString, claims, subj, nil
-				}
-				lastSpecificErr = vErr
-			}
+	tokenString, ok := extractAuthoritativeRawToken(c)
+	if !ok {
+		return "", nil, activeHumanSubject{}, errUnauthorizedSession
+	}
+	claims, err := validateSessionToken(tokenString)
+	if err != nil {
+		return "", nil, activeHumanSubject{}, errUnauthorizedSession
+	}
+	subj, vErr := validateResolvedSessionClaimsStatus(c, claims)
+	if vErr != nil {
+		return "", nil, activeHumanSubject{}, vErr
+	}
+	return tokenString, claims, subj, nil
+}
+
+func resolveLogoutSessionClaims(c *gin.Context) (jwt.MapClaims, error) {
+	tokenStr, ok := extractAuthoritativeRawToken(c)
+	if !ok {
+		return nil, errUnauthorizedSession
+	}
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return getJWTSecret(), nil
+	})
+	if err != nil && !errors.Is(err, jwt.ErrTokenExpired) {
+		return nil, errUnauthorizedSession
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errUnauthorizedSession
+	}
+	if isPluginClaims(claims) {
+		return nil, errPluginLogoutForbidden
+	}
+	if isForeignOrPluginSessionClaims(claims) {
+		return nil, errUnauthorizedSession
+	}
+	nowUnix := time.Now().Unix()
+	if !sessionWithinAbsoluteLifetime(claims, nowUnix) {
+		return nil, errUnauthorizedSession
+	}
+	expUnix, hasExp := claimInt64(claims, "exp")
+	if !hasExp || nowUnix-expUnix > 7200 {
+		return nil, errUnauthorizedSession
+	}
+	uid64, ok := claimInt64(claims, "user_id")
+	if !ok || uid64 <= 0 {
+		return nil, errUnauthorizedSession
+	}
+	jti, _ := claims["jti"].(string)
+	if strings.TrimSpace(jti) == "" {
+		return nil, errUnauthorizedSession
+	}
+	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
+		if !matchesClientFingerprint(cfp, c) {
+			return nil, errSessionHijacked
 		}
 	}
-
-	cookie, err := c.Cookie("aetherflow_session")
-	if err == nil {
-		tokenString := strings.TrimSpace(cookie)
-		if tokenString != "" {
-			if claims, err := validateSessionToken(tokenString); err == nil {
-				subj, vErr := validateResolvedSessionClaimsStatus(c, claims)
-				if vErr == nil {
-					return tokenString, claims, subj, nil
-				}
-				if lastSpecificErr == nil {
-					lastSpecificErr = vErr
-				}
-			}
-		}
-	}
-
-	if lastSpecificErr != nil {
-		return "", nil, activeHumanSubject{}, lastSpecificErr
-	}
-	return "", nil, activeHumanSubject{}, errUnauthorizedSession
+	return claims, nil
 }
 
 func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
@@ -1615,7 +1672,17 @@ func Logout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", "", -1, "/", "", secureCookie(), true)
 
-	if _, claims, err := resolveSessionToken(c); err == nil {
+	var claims jwt.MapClaims
+	var err error
+	if cachedClaims, exists := c.Get("logout_claims"); exists {
+		if mapped, ok := cachedClaims.(jwt.MapClaims); ok {
+			claims = mapped
+		}
+	}
+	if claims == nil {
+		claims, err = resolveLogoutSessionClaims(c)
+	}
+	if err == nil && claims != nil {
 		uid64, _ := claimInt64(claims, "user_id")
 		userID := int(uid64)
 		jti, _ := claims["jti"].(string)
@@ -1734,17 +1801,8 @@ func Logout(c *gin.Context) {
 // @Failure      401  {object}  map[string]interface{}
 // @Router       /auth/refresh [post]
 func RefreshSession(c *gin.Context) {
-	var tokenStr string
-	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		tokenStr = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-	}
-	if tokenStr == "" {
-		if cookie, err := c.Cookie("aetherflow_session"); err == nil {
-			tokenStr = strings.TrimSpace(cookie)
-		}
-	}
-	if tokenStr == "" {
+	tokenStr, ok := extractAuthoritativeRawToken(c)
+	if !ok {
 		Unauthorized(c, "No session token provided")
 		return
 	}
@@ -2051,6 +2109,12 @@ func isSessionRefreshRoute(path string) bool {
 		path == "/api/public/auth/refresh"
 }
 
+func isSessionLogoutRoute(path string) bool {
+	return path == "/api/v1/auth/logout" ||
+		path == "/api/auth/logout" ||
+		path == "/logout"
+}
+
 // AuthMiddleware validates the JWT session via Bearer token with cookie fallback
 // and sets "user_id" in the Gin context for downstream handlers.
 func AuthMiddleware() gin.HandlerFunc {
@@ -2063,6 +2127,38 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		if db.DB == nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
+			return
+		}
+
+		if c.Request.Method == http.MethodPost && isSessionLogoutRoute(c.Request.URL.Path) {
+			claims, lErr := resolveLogoutSessionClaims(c)
+			if lErr != nil {
+				switch {
+				case errors.Is(lErr, errPluginLogoutForbidden):
+					c.AbortWithStatusJSON(http.StatusForbidden, APIError{Code: ErrCodeForbidden, Message: "Plugin-scoped tokens cannot revoke user sessions"})
+				case errors.Is(lErr, errSessionHijacked):
+					c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionHijacked, Message: "Session bound to a different client"})
+				default:
+					c.SetSameSite(http.SameSiteLaxMode)
+					c.SetCookie("aetherflow_session", "", -1, "/", "", secureCookie(), true)
+					c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
+				}
+				return
+			}
+			uid64, _ := claimInt64(claims, "user_id")
+			c.Set("user_id", int(uid64))
+			if uname, _ := claims["username"].(string); uname != "" {
+				c.Set("username", uname)
+			}
+			if role, _ := claims["role"].(string); role != "" {
+				c.Set("user_role", role)
+			}
+			if jti, _ := claims["jti"].(string); jti != "" {
+				c.Set("session_jti", jti)
+			}
+			c.Set("session_ver", claimVersion(claims))
+			c.Set("logout_claims", claims)
+			c.Next()
 			return
 		}
 
@@ -2297,8 +2393,8 @@ func HostValidationMiddleware() gin.HandlerFunc {
 // Enabled by default on cookie-authenticated routes; set CSRF_DISABLED=true for local dev opt-out only.
 func CSRFMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Silent refresh requests and Bearer-token requests are exempt from CSRF
-		if isSessionRefreshRoute(c.Request.URL.Path) || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
+		// Silent refresh requests and Bearer-token requests with a non-empty token are exempt from CSRF
+		if isSessionRefreshRoute(c.Request.URL.Path) || hasNonEmptyBearerHeader(c) {
 			c.Next()
 			return
 		}
