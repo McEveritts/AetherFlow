@@ -107,6 +107,9 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
+TARGET_VER_CLEAN="${AF_TARGET_VERSION:-}"
+TARGET_VER_CLEAN="${TARGET_VER_CLEAN#v}"
+
 LOCAL_SPEEDTEST_BIN=""
 for candidate in \
     "${AF_SPEEDTEST_BACKEND_BIN:-}" \
@@ -115,6 +118,13 @@ for candidate in \
     "/opt/AetherFlow/bin/speedtest-backend" \
     "/opt/AetherFlow/backend-rs/target/release/speedtest-backend"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
+        if [[ -n "$TARGET_VER_CLEAN" ]]; then
+            CANDIDATE_VER="$("$candidate" --version 2>/dev/null | sed -n 's/^speedtest-backend[[:space:]]\{1,\}\([0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n1 || true)"
+            CANDIDATE_VER="${CANDIDATE_VER#v}"
+            if [[ "$CANDIDATE_VER" != "$TARGET_VER_CLEAN" ]]; then
+                continue
+            fi
+        fi
         LOCAL_SPEEDTEST_BIN="$candidate"
         break
     fi
@@ -131,12 +141,54 @@ if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
     tar -czf "$TMP_TAR" -C "$TMP_STAGE_DIR" speedtest-backend
     rm -rf -- "$TMP_STAGE_DIR"
 else
-    report_progress 35 "Resolving latest speedtest-backend release..."
-    LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
-    LS_VER_CLEAN="${LS_VERSION#v}"
-    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VER_CLEAN}/speedtest-backend_${LS_VER_CLEAN}_linux_${LS_ARCH}.tar.gz"
-    report_progress 60 "Downloading and extracting LibreSpeed ${LS_VER_CLEAN}..."
+    report_progress 35 "Resolving speedtest-backend release..."
+    if [[ -n "$TARGET_VER_CLEAN" ]]; then
+        LS_VERSION="v${TARGET_VER_CLEAN}"
+        LS_VER_CLEAN="$TARGET_VER_CLEAN"
+    else
+        LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
+        LS_VER_CLEAN="${LS_VERSION#v}"
+    fi
+    LS_ARCHIVE_NAME="speedtest-backend_${LS_VER_CLEAN}_linux_${LS_ARCH}.tar.gz"
+    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VER_CLEAN}/${LS_ARCHIVE_NAME}"
+    report_progress 60 "Downloading and verifying LibreSpeed ${LS_VER_CLEAN}..."
     af_logged download_file "$LS_URL" "$TMP_TAR"
+
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        VERIFY_PROVENANCE_PY=""
+        for vp_candidate in \
+            "${AF_VERIFY_PROVENANCE_PY:-}" \
+            "${SELF_DIR}/../../../deploy/verify-provenance.py" \
+            "/opt/AetherFlow/current/deploy/verify-provenance.py" \
+            "/opt/AetherFlow/deploy/verify-provenance.py"; do
+            if [[ -n "$vp_candidate" && -f "$vp_candidate" ]]; then
+                VERIFY_PROVENANCE_PY="$vp_candidate"
+                break
+            fi
+        done
+        if [[ -z "$VERIFY_PROVENANCE_PY" ]]; then
+            rm -f -- "$TMP_TAR"
+            print_error "Refusing unverified speedtest-backend archive: deploy/verify-provenance.py not found"
+            exit 1
+        fi
+        LS_SHA256="$(sha256sum "$TMP_TAR" | awk '{print $1}')"
+        TMP_BUNDLE="$(mktemp /tmp/librespeed-bundle-XXXXXX.sigstore.json)"
+        BUNDLE_ARGS=()
+        if af_logged curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 "${LS_URL}.sigstore.json" -o "$TMP_BUNDLE" && [[ -s "$TMP_BUNDLE" ]]; then
+            BUNDLE_ARGS=(--bundle-file "$TMP_BUNDLE")
+        fi
+        if ! af_logged python3 "$VERIFY_PROVENANCE_PY" \
+            --repo "McEveritts/AetherFlow" \
+            --digest "$LS_SHA256" \
+            --artifact-name "$LS_ARCHIVE_NAME" \
+            --tag "v${LS_VER_CLEAN}" \
+            "${BUNDLE_ARGS[@]}"; then
+            rm -f -- "$TMP_TAR" "$TMP_BUNDLE"
+            print_error "Sigstore SLSA provenance verification failed for ${LS_ARCHIVE_NAME}"
+            exit 1
+        fi
+        rm -f -- "$TMP_BUNDLE"
+    fi
 fi
 stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"
 rm -f -- "$TMP_TAR"
@@ -184,9 +236,21 @@ else:
 safe_write_text(cfg_path, text)
 PYEOF
 else
-    LS_STATS_PASS="$(AF_SEED_PASS="$MASTER_PASS" python3 - <<'PYEOF'
+    if declare -F derive_app_password >/dev/null 2>&1; then
+        LS_DERIVED_PASS="$(derive_app_password "${PACKAGE_NAME}")"
+    else
+        LS_DERIVED_PASS="$(AF_DERIVE_APP="${PACKAGE_NAME}" AF_DERIVE_SECRET="${MASTER_PASS:?MASTER_PASS is required}" python3 - <<'PYEOF'
+import hashlib, hmac, os
+app_id = os.environ["AF_DERIVE_APP"].strip().lower()
+secret = os.environ["AF_DERIVE_SECRET"].encode("utf-8")
+msg = f"aetherflow:{app_id}:webui:v1".encode("utf-8")
+print(hmac.new(secret, msg, hashlib.sha256).hexdigest()[:32])
+PYEOF
+)"
+    fi
+    LS_STATS_PASS="$(AF_DERIVED_PASS="$LS_DERIVED_PASS" python3 - <<'PYEOF'
 import json, os
-print(json.dumps(os.environ["AF_SEED_PASS"]))
+print(json.dumps(os.environ["AF_DERIVED_PASS"]))
 PYEOF
 )"
     write_config_file /opt/librespeed/settings.toml <<EOF
@@ -194,19 +258,20 @@ bind_address="127.0.0.1"
 listen_port=${APP_PORT}
 url_base=""
 proxyprotocol_port=0
+trusted_proxies=""
 server_lat=0
 server_lng=0
 ipinfo_api_key=""
 assets_path="/opt/librespeed/assets"
 statistics_password=${LS_STATS_PASS}
-redact_ip_addresses=false
+redact_ip_addresses=true
 database_type="sqlite"
 database_hostname=""
 database_name=""
 database_username=""
 database_password=""
 database_file="/opt/librespeed/speedtest.db"
-enable_id_obfuscation=false
+enable_id_obfuscation=true
 enable_tls=false
 tls_cert_file=""
 tls_key_file=""
@@ -214,8 +279,8 @@ EOF
 fi
 
 chown -hRP librespeed:librespeed /opt/librespeed
-chmod 755 /opt/librespeed
-chmod 640 /opt/librespeed/settings.toml
+chmod 750 /opt/librespeed
+chmod 600 /opt/librespeed/settings.toml
 
 report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service
@@ -228,9 +293,27 @@ User=librespeed
 Group=librespeed
 Type=simple
 WorkingDirectory=/opt/librespeed
+UMask=0077
 ExecStart=/opt/librespeed/speedtest-backend -c /opt/librespeed/settings.toml
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/opt/librespeed
 
 [Install]
 WantedBy=multi-user.target

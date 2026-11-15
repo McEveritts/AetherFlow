@@ -1965,4 +1965,51 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "standalone rollback must restore snapshot from outgoing current release (`broken/data-snapshot`)"
         );
     }
+
+    #[test]
+    fn stage0_migrates_legacy_v3_slot_current_backend_db_and_env() {
+        let sb = TempSandbox::new("v3-slot-migration");
+        let cfg = ReleaseConfig::for_root(sb.path());
+        fs::create_dir_all(&cfg.releases_dir).unwrap();
+
+        let v3_slot = cfg.releases_dir.join("v3.2.0");
+        fs::create_dir_all(v3_slot.join("backend/data")).unwrap();
+        seed_valid_sqlite_db(
+            &v3_slot.join("backend/data").join(&cfg.sqlite_db),
+            "v3-slot-marker",
+        );
+        fs::write(
+            v3_slot.join("backend/.env"),
+            "JWT_SECRET=from-v3-slot-secret\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&v3_slot, &cfg.current_link).unwrap();
+
+        let provider = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: PathBuf::new(),
+            manifest_content: String::new(),
+        };
+        let engine = ReleaseEngine::new(
+            cfg.clone(),
+            provider,
+            MockLifecycle::default(),
+            MockHealthProber::new(vec![]),
+        );
+
+        let resolved = engine.ensure_fhs_layout(&cfg, false).unwrap();
+        let fhs_db = cfg.host_data_dir.join(&cfg.sqlite_db);
+        assert_eq!(resolved.path, fhs_db);
+        assert!(fhs_db.is_file(), "v3 slot SQLite DB must migrate to FHS");
+
+        let conn = Connection::open(&fhs_db).unwrap();
+        let marker: String = conn
+            .query_row("SELECT marker FROM test_state LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marker, "v3-slot-marker");
+
+        let env_contents = fs::read_to_string(&cfg.host_env_file).unwrap();
+        assert_eq!(env_contents, "JWT_SECRET=from-v3-slot-secret\n");
+    }
 }

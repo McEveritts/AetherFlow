@@ -174,7 +174,7 @@ impl NvmlRuntime {
 static NVML_RUNTIME: Lazy<Option<NvmlRuntime>> = Lazy::new(NvmlRuntime::try_load);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GPU Transcode Flags (`backend/services/hardware_detector.go`)
+// GPU Transcode Flags
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1101,7 +1101,7 @@ fn update_gpu_metrics(state: &mut TelemetryState) {
     }
 }
 
-/// Returns detailed hardware report matching `GetDetailedHardware()` in `hardware.go`.
+/// Returns detailed hardware report for the host hardware inventory.
 pub fn get_detailed_hardware() -> HardwareReport {
     let mut sys = System::new_all();
     sys.refresh_all();

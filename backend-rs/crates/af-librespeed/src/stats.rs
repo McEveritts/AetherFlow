@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::db::{TelemetryRecord, TelemetryVault};
-use crate::redact::resolve_client_ip;
+use crate::redact::{is_trusted_proxy_peer, peer_ip_key, resolve_client_ip};
 use crate::ulid::{canonicalize_ulid, obfuscate_ulid, resolve_id};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, OriginalUri, Query, State};
@@ -17,8 +17,9 @@ use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -152,12 +153,104 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+const TELEMETRY_WINDOW_SECS: i64 = 60;
+const MAX_TELEMETRY_PER_CLIENT_IP: usize = 30;
+const MAX_TELEMETRY_PER_PEER_IP: usize = 60;
+const MAX_TELEMETRY_GLOBAL_PER_WINDOW: usize = 300;
+const MAX_TRACKED_TELEMETRY_IPS: usize = 4096;
+
+#[derive(Default)]
+struct TelemetryRateWindow {
+    global_count: usize,
+    global_window_start: i64,
+    by_peer: HashMap<String, (usize, i64)>,
+    by_client: HashMap<String, (usize, i64)>,
+}
+
+#[derive(Clone, Default)]
+pub struct TelemetryRateLimiter {
+    inner: Arc<Mutex<TelemetryRateWindow>>,
+}
+
+impl TelemetryRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn try_acquire(&self, peer_ip: &str, client_ip: &str, now_unix: i64) -> bool {
+        let Ok(mut state) = self.inner.lock() else {
+            return false;
+        };
+
+        if now_unix.saturating_sub(state.global_window_start) >= TELEMETRY_WINDOW_SECS {
+            state.global_count = 0;
+            state.global_window_start = now_unix;
+        }
+
+        let client_used = current_bucket_count(&mut state.by_client, client_ip, now_unix);
+        if client_used >= MAX_TELEMETRY_PER_CLIENT_IP {
+            return false;
+        }
+
+        let peer_used = current_bucket_count(&mut state.by_peer, peer_ip, now_unix);
+        if peer_used >= MAX_TELEMETRY_PER_PEER_IP {
+            return false;
+        }
+
+        if state.global_count >= MAX_TELEMETRY_GLOBAL_PER_WINDOW {
+            return false;
+        }
+
+        bump_bucket(&mut state.by_client, client_ip, now_unix);
+        bump_bucket(&mut state.by_peer, peer_ip, now_unix);
+        state.global_count = state.global_count.saturating_add(1);
+        true
+    }
+}
+
+fn current_bucket_count(
+    map: &mut HashMap<String, (usize, i64)>,
+    key: &str,
+    now_unix: i64,
+) -> usize {
+    if let Some(&(count, ws)) = map.get(key) {
+        if now_unix.saturating_sub(ws) < TELEMETRY_WINDOW_SECS {
+            return count;
+        }
+        map.remove(key);
+    }
+    0
+}
+
+fn bump_bucket(map: &mut HashMap<String, (usize, i64)>, key: &str, now_unix: i64) {
+    if map.len() >= MAX_TRACKED_TELEMETRY_IPS && !map.contains_key(key) {
+        map.retain(|_, (_, ws)| now_unix.saturating_sub(*ws) < TELEMETRY_WINDOW_SECS);
+        if map.len() >= MAX_TRACKED_TELEMETRY_IPS {
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, (_, ws))| *ws)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest);
+            }
+        }
+    }
+    let entry = map.entry(key.to_string()).or_insert((0, now_unix));
+    if now_unix.saturating_sub(entry.1) >= TELEMETRY_WINDOW_SECS {
+        *entry = (1, now_unix);
+    } else {
+        entry.0 = entry.0.saturating_add(1);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub vault: Option<TelemetryVault>,
     pub stats_auth: StatsAuth,
     pub obfuscation_key: [u8; 32],
+    pub garbage_semaphore: Arc<Semaphore>,
+    pub telemetry_limiter: TelemetryRateLimiter,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -180,16 +273,18 @@ fn stats_html_response(status: StatusCode, html_body: String) -> Response {
         .into_response()
 }
 
-fn is_https_via_trusted_proxy(peer_addr: Option<SocketAddr>, headers: &HeaderMap) -> bool {
-    let trusted_peer = match peer_addr {
-        Some(addr) => crate::redact::canonicalize_ip_addr(addr.ip()).is_loopback(),
-        None => false,
-    };
-    if !trusted_peer {
+fn is_https_via_trusted_proxy(
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> bool {
+    if !is_trusted_proxy_peer(peer_addr, trusted_proxies) {
         return false;
     }
     headers
-        .get("x-forwarded-proto")
+        .get_all("x-forwarded-proto")
+        .iter()
+        .next_back()
         .and_then(|v| v.to_str().ok())
         .and_then(|raw| raw.rsplit(',').next())
         .map(|proto| proto.trim().eq_ignore_ascii_case("https"))
@@ -207,7 +302,9 @@ pub async fn handle_stats(
 ) -> Response {
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
     let cookie_path = resolve_stats_cookie_path(&state.config.url_base, orig_uri.path());
-    let secure_attr = if is_https_via_trusted_proxy(peer_addr, &headers) {
+    let secure_attr = if state.config.enable_tls
+        || is_https_via_trusted_proxy(peer_addr, &headers, &state.config.trusted_proxies)
+    {
         "; Secure"
     } else {
         ""
@@ -263,8 +360,12 @@ pub async fn handle_stats(
     let now_unix = Utc::now().timestamp();
 
     if method == Method::POST && op == "login" {
-        let client_ip = resolve_client_ip(peer_addr, &headers);
-        if !state.stats_auth.check_login_allowed(&client_ip, now_unix) {
+        let client_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
+        let peer_key = format!("peer:{}", peer_ip_key(peer_addr));
+        let client_key = format!("client:{client_ip}");
+        if !state.stats_auth.check_login_allowed(&peer_key, now_unix)
+            || !state.stats_auth.check_login_allowed(&client_key, now_unix)
+        {
             let mut resp = stats_html_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 render_login_page(
@@ -282,14 +383,16 @@ pub async fn handle_stats(
             .stats_auth
             .verify_password(&state.config.statistics_password, candidate)
         {
-            state.stats_auth.clear_login_failures(&client_ip);
+            state.stats_auth.clear_login_failures(&client_key);
+            state.stats_auth.clear_login_failures(&peer_key);
             let token = state.stats_auth.issue_cookie_token(now_unix);
             let set_cookie = format!(
                 "{COOKIE_NAME}={token}; Path={cookie_path}; Max-Age={SESSION_TTL_SECS}; HttpOnly; SameSite=Strict{secure_attr}"
             );
             return redirect_with_cookie(&cookie_path, &set_cookie);
         }
-        state.stats_auth.record_login_failure(&client_ip, now_unix);
+        state.stats_auth.record_login_failure(&peer_key, now_unix);
+        state.stats_auth.record_login_failure(&client_key, now_unix);
         return stats_html_response(
             StatusCode::UNAUTHORIZED,
             render_login_page(&cookie_path, Some("Invalid statistics password.")),

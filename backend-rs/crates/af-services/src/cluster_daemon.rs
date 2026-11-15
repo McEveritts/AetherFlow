@@ -1,4 +1,4 @@
-//! Cluster Master/Worker Heartbeat & Registration Daemon (`backend/cluster/cluster.go`, `server.go`, `client.go`).
+//! Cluster Master/Worker Heartbeat & Registration Daemon.
 //!
 //! Provides:
 //! - `start_cluster_runtime()`: Spawns the 30-second node health-sweep loop and, depending on
@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Data Structures (`backend/cluster/cluster.go`)
+// Data Structures
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Static hardware/OS summary sent by a worker during registration.
@@ -948,7 +948,7 @@ fn handle_raw_json_rpc(raw_line: &str) -> serde_json::Value {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Worker Registration & 5-Second Telemetry Heartbeat Loop (`client.go`)
+// Worker Registration & 5-Second Telemetry Heartbeat Loop
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn normalize_master_base_url(raw_addr: &str) -> String {

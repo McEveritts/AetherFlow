@@ -52,7 +52,7 @@ impl rsa::rand_core::TryRng for OsCryptoRng {
 impl rsa::rand_core::TryCryptoRng for OsCryptoRng {}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OIDC RSA-2048 Key Management (`backend/api/oidc.go`)
+// OIDC RSA-2048 Key Management
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct OidcKeyMaterial {
@@ -2571,7 +2571,7 @@ fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Resp
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OIDC Clients Admin CRUD (`backend/api/oidc_clients.go`)
+// OIDC Clients Admin CRUD
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn get_oidc_clients() -> Response {
@@ -2825,7 +2825,7 @@ fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Google OAuth2 Login & Callback (`backend/api/auth.go`)
+// Google OAuth2 Login & Callback
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn safe_login_return_to(raw: &str) -> Option<String> {

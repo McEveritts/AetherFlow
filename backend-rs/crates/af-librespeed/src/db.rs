@@ -51,12 +51,20 @@ pub struct TelemetryVault {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
     obfuscation_key: [u8; 32],
+    max_rows: usize,
 }
 
 impl TelemetryVault {
     pub fn open(db_path: &Path) -> Result<Self> {
+        Self::open_with_max_rows(db_path, crate::config::DEFAULT_MAX_TELEMETRY_ROWS)
+    }
+
+    pub fn open_with_max_rows(db_path: &Path, max_rows: usize) -> Result<Self> {
         if db_path.as_os_str().is_empty() {
             bail!("database_file path is empty");
+        }
+        if max_rows == 0 {
+            bail!("max_telemetry_rows must be greater than 0");
         }
 
         verify_no_symlinks_on_db_path(db_path)?;
@@ -156,6 +164,7 @@ impl TelemetryVault {
             conn: Arc::new(Mutex::new(conn)),
             path: db_path.to_path_buf(),
             obfuscation_key,
+            max_rows,
         })
     }
 
@@ -169,6 +178,7 @@ impl TelemetryVault {
 
     pub async fn insert(&self, record: NewTelemetryRecord) -> Result<()> {
         let conn_arc = Arc::clone(&self.conn);
+        let max_rows = self.max_rows;
         task::spawn_blocking(move || {
             let conn = conn_arc
                 .lock()
@@ -193,6 +203,17 @@ impl TelemetryVault {
                 ],
             )
             .context("failed to insert telemetry record")?;
+
+            let keep = i64::try_from(max_rows).unwrap_or(100_000);
+            conn.execute(
+                "DELETE FROM speedtest_users
+                 WHERE id <= COALESCE(
+                     (SELECT id FROM speedtest_users ORDER BY id DESC LIMIT 1 OFFSET ?1),
+                     -1
+                 )",
+                params![keep],
+            )
+            .context("failed to enforce telemetry retention cap")?;
             Ok(())
         })
         .await
@@ -231,7 +252,7 @@ impl TelemetryVault {
                 .prepare(
                     "SELECT id, uuid, timestamp, ip, ispinfo, extra, ua, lang, dl, ul, ping, jitter, log
                      FROM speedtest_users
-                     ORDER BY timestamp DESC, uuid DESC
+                     ORDER BY id DESC
                      LIMIT ?1",
                 )
                 .context("failed to prepare recent telemetry query")?;
@@ -385,10 +406,29 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<()> {
             backup_path.display()
         )
     })?;
+    let bak_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&backup_path)
+        .with_context(|| {
+            format!(
+                "failed secure O_NOFOLLOW open on BoltDB backup {}",
+                backup_path.display()
+            )
+        })?;
+    bak_file
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .with_context(|| {
+            format!(
+                "failed to tighten permissions to 0600 on BoltDB backup {}",
+                backup_path.display()
+            )
+        })?;
+    drop(bak_file);
     warn!(
         old_path = %db_path.display(),
         backup_path = %backup_path.display(),
-        "Detected non-SQLite/legacy BoltDB database file; moved aside before initializing SQLite WAL telemetry"
+        "Detected non-SQLite/legacy BoltDB database file; moved aside (0600) before initializing SQLite WAL telemetry"
     );
     info!("SQLite telemetry initialized cleanly after legacy backup");
     Ok(())
@@ -479,11 +519,14 @@ mod tests {
         let mut fake_bolt = vec![0u8; 64];
         fake_bolt[12..16].copy_from_slice(&[0xED, 0xDA, 0x0C, 0xED]);
         fs::write(&db_path, &fake_bolt).unwrap();
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let _vault = TelemetryVault::open(&db_path).expect("open migrated vault");
         let bak_path = tmp.0.join("speedtest.db.bolt.bak");
         assert!(bak_path.exists());
         assert_eq!(fs::read(&bak_path).unwrap(), fake_bolt);
+        let bak_mode = fs::metadata(&bak_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(bak_mode, 0o600);
 
         let header = &fs::read(&db_path).unwrap()[..16];
         assert_eq!(header, SQLITE_MAGIC);

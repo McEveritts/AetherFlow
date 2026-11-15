@@ -4693,7 +4693,7 @@ async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Privileged Application Runtime Metadata Extraction (`app_credentials.go`)
+// Privileged Application Runtime Metadata Extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -6680,7 +6680,7 @@ pub async fn probe_package_version_via_runner(package_id: &str) -> anyhow::Resul
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UNIX Domain Socket Client Dispatchers (`backend/services/privileged_runner.go`)
+// UNIX Domain Socket Client Dispatchers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Retryable lifecycle exclusion, kept typed across runner and API boundaries.

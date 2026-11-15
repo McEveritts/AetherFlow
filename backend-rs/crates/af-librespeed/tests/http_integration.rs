@@ -80,6 +80,11 @@ fn make_test_config(tmp: &TempDirGuard) -> (Config, TelemetryVault) {
         database_type: "sqlite".to_string(),
         database_file: db_path,
         enable_id_obfuscation: false,
+        enable_tls: false,
+        tls_cert_file: PathBuf::new(),
+        tls_key_file: PathBuf::new(),
+        trusted_proxies: Vec::new(),
+        max_telemetry_rows: 100_000,
     };
     (cfg, vault)
 }
@@ -159,13 +164,33 @@ async fn empty_garbage_and_cors_endpoints_behave_correctly() {
 async fn getip_proxy_trust_classification_isp_and_redaction() {
     let tmp = TempDirGuard::new("getip");
     let (mut cfg, vault) = make_test_config(&tmp);
+
+    // 1. Default empty trusted_proxies ignores loopback X-Forwarded-For spoofing
+    let untrusted_app = build_router(cfg.clone(), Some(vault.clone()));
+    let req_untrusted_loop = with_peer(
+        Request::builder()
+            .uri("/backend/getIP.php?isp=true")
+            .header("x-forwarded-for", "203.0.113.42")
+            .body(Body::empty())
+            .unwrap(),
+        "127.0.0.1:50000",
+    );
+    let res_untrusted_loop = untrusted_app.oneshot(req_untrusted_loop).await.unwrap();
+    let json_untrusted: Value =
+        serde_json::from_slice(&body_bytes(res_untrusted_loop).await).unwrap();
+    assert_eq!(
+        json_untrusted["processedString"],
+        "127.0.0.1 - localhost IPv4 access"
+    );
+
+    // 2. Explicitly configured trusted_proxies trusts strictly the single rightmost hop
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
     let app = build_router(cfg.clone(), Some(vault.clone()));
 
-    // Loopback proxy trusts rightmost non-loopback X-Forwarded-For (defeating leftmost spoofing)
     let req_loop = with_peer(
         Request::builder()
             .uri("/backend/getIP.php?isp=true")
-            .header("x-forwarded-for", "10.0.0.1, 203.0.113.42, 127.0.0.1")
+            .header("x-forwarded-for", "10.0.0.1, 203.0.113.42")
             .body(Body::empty())
             .unwrap(),
         "127.0.0.1:50000",
@@ -216,6 +241,7 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
     let (mut cfg, vault) = make_test_config(&tmp);
     cfg.redact_ip_addresses = true;
     cfg.enable_id_obfuscation = true;
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
     let app = build_router(cfg, Some(vault.clone()));
 
     // 1. Multipart form-data submission under /<url_base>/results/telemetry.php
@@ -227,7 +253,7 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
          --{b}\r\nContent-Disposition: form-data; name=\"jitter\"\r\n\r\n0.55\r\n\
          --{b}\r\nContent-Disposition: form-data; name=\"ispinfo\"\r\n\r\n{{\"processedString\":\"203.0.113.5 - ISP\",\"rawIspInfo\":\"{{\\\"ip\\\":\\\"203.0.113.5\\\",\\\"hostname\\\":\\\"edge1.isp.example\\\",\\\"org\\\":\\\"AS64500 FiberCo\\\"}}\"}}\r\n\
          --{b}\r\nContent-Disposition: form-data; name=\"log\"\r\n\r\n1731638400000: peer 203.0.113.5 v6 2001:db8::1234\r\n\
-         --{b}\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\n<script>alert(1)</script>\r\n\
+         --{b}\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\n<script>alert(1)</script> from 198.51.100.88\r\n\
          --{b}--\r\n",
         b = boundary
     );
@@ -240,7 +266,8 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={boundary}"),
             )
-            .header(USER_AGENT, "LibreTest/1.0")
+            .header(USER_AGENT, "LibreTest/1.0 (client 203.0.113.5)")
+            .header("accept-language", "en-US,203.0.113.5")
             .header("x-forwarded-for", "203.0.113.5")
             .body(Body::from(mp_body))
             .unwrap(),
@@ -253,7 +280,7 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
     let obf_id = resp_str.strip_prefix("id ").unwrap().trim().to_string();
     assert_eq!(obf_id.len(), 26);
 
-    // Raw DB record has redacted IP/ispinfo/log while preserving timestamp and AS org
+    // Raw DB record has redacted IP/ispinfo/log/extra/ua/lang while preserving timestamp and AS org
     let recent = vault.list_recent(10).await.unwrap();
     assert_eq!(recent.len(), 1);
     let saved = &recent[0];
@@ -263,6 +290,9 @@ async fn telemetry_urlencoded_multipart_obfuscation_redaction_and_png_badge() {
     assert!(!saved.ispinfo.contains("edge1.isp.example"));
     assert!(saved.ispinfo.contains("AS64500 FiberCo"));
     assert_eq!(saved.log, "1731638400000: peer 0.0.0.0 v6 ::");
+    assert!(!saved.extra.contains("198.51.100.88"));
+    assert!(!saved.ua.contains("203.0.113.5"));
+    assert!(!saved.lang.contains("203.0.113.5"));
 
     // Unobfuscated raw DB UUID MUST NOT fetch /results when enable_id_obfuscation=true
     let raw_png_res = app
@@ -371,8 +401,9 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .unwrap();
     assert!(locked_login.headers().get(SET_COOKIE).is_none());
 
-    // Unlocked instance
+    // Unlocked instance with explicit trusted loopback proxy
     cfg.statistics_password = "StrongAdminPassword!42".to_string();
+    cfg.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
     let app = build_router(cfg, Some(vault));
 
     // Seed record with XSS payload
@@ -517,7 +548,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .unwrap();
     assert!(clear_cookie.contains("Max-Age=0"));
 
-    // Brute-force login rate limiter triggers 429 after 10 failures even when rotating spoofed leftmost XFF behind loopback proxy
+    // Brute-force login rate limiter triggers 429 after 10 failures even when rotating BOTH leftmost AND rightmost XFF behind loopback proxy (peer bucket enforced!)
     for attempt in 0..10 {
         let fail_res = app
             .clone()
@@ -528,7 +559,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(
                         "x-forwarded-for",
-                        format!("192.0.2.{attempt}, 198.51.100.99"),
+                        format!("192.0.2.{attempt}, 198.51.100.{attempt}"),
                     )
                     .body(Body::from("op=login&password=bad"))
                     .unwrap(),
@@ -548,7 +579,7 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
                 .method(Method::POST)
                 .uri("/stats.php")
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("x-forwarded-for", "192.0.2.250, 198.51.100.99")
+                .header("x-forwarded-for", "192.0.2.250, 198.51.100.250")
                 .body(Body::from("op=login&password=bad"))
                 .unwrap(),
             "127.0.0.1:50000",
@@ -563,6 +594,229 @@ async fn stats_auth_locked_cookies_xss_escaping_and_logout() {
         .to_str()
         .unwrap()
         .contains("default-src 'none'"));
+}
+
+#[tokio::test]
+async fn telemetry_empty_rejection_retention_rate_limit_and_garbage_concurrency_cap() {
+    let tmp = TempDirGuard::new("dos-hardening");
+    let db_path = tmp.0.join("capped.db");
+    let vault = TelemetryVault::open_with_max_rows(&db_path, 3).unwrap();
+    let (mut cfg, _) = make_test_config(&tmp);
+    cfg.database_file = db_path;
+    cfg.max_telemetry_rows = 3;
+    let app = build_router(cfg, Some(vault.clone()));
+
+    // 1. Empty measurement payload is rejected with 400
+    let empty_meas = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/results/telemetry")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("extra=spam-only&log=nometrics"))
+                .unwrap(),
+            "198.51.100.20:40000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(empty_meas.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Retention cap keeps at most 3 newest telemetry rows
+    for idx in 1..=5 {
+        let res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/results/telemetry")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("dl={idx}00.0")))
+                    .unwrap(),
+                "198.51.100.21:40000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let kept = vault.list_recent(10).await.unwrap();
+    assert_eq!(kept.len(), 3);
+    assert_eq!(kept[0].dl, "500.0");
+    assert_eq!(kept[2].dl, "300.0");
+
+    // 3. Per-client telemetry write rate limit triggers 429 after 30 writes in 60s
+    for _ in 0..30 {
+        let res = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/results/telemetry")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("dl=99.9"))
+                    .unwrap(),
+                "198.51.100.99:40000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let limited = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/results/telemetry")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("dl=99.9"))
+                .unwrap(),
+            "198.51.100.99:40000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // 4. Concurrent /garbage stream cap returns 503 when 32 active streams are held open
+    let mut held_responses = Vec::new();
+    for _ in 0..af_librespeed::routes::MAX_CONCURRENT_GARBAGE_STREAMS {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/garbage?ckSize=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        held_responses.push(res);
+    }
+    let over_cap = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/garbage?ckSize=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(over_cap.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(held_responses);
+    let recovered = app
+        .oneshot(
+            Request::builder()
+                .uri("/garbage?ckSize=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_tls_listener_serves_https_and_fails_closed_on_missing_cert() {
+    use af_librespeed::tls::{build_tls_acceptor, serve_tls};
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use std::process::Command;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    use tokio_rustls::TlsConnector;
+
+    let tmp = TempDirGuard::new("tls");
+    let (mut bad_cfg, _) = make_test_config(&tmp);
+    bad_cfg.enable_tls = true;
+    bad_cfg.tls_cert_file = tmp.0.join("missing-cert.pem");
+    bad_cfg.tls_key_file = tmp.0.join("missing-key.pem");
+    assert!(build_tls_acceptor(&bad_cfg).is_err());
+
+    let cert_path = tmp.0.join("localhost.crt");
+    let key_path = tmp.0.join("localhost.key");
+    let status = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            "-keyout",
+        ])
+        .arg(&key_path)
+        .arg("-out")
+        .arg(&cert_path)
+        .status()
+        .expect("openssl available");
+    assert!(status.success(), "openssl cert generation succeeded");
+
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.enable_tls = true;
+    cfg.tls_cert_file = cert_path.clone();
+    cfg.tls_key_file = key_path;
+    let acceptor = build_tls_acceptor(&cfg).expect("build valid TLS acceptor");
+    let app = build_router(cfg, Some(vault));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        serve_tls(listener, acceptor, app, async move {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_file_iter(&cert_path).unwrap() {
+        root_store.add(cert.unwrap()).unwrap();
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_cfg));
+
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let domain = ServerName::try_from("localhost").unwrap();
+    let mut tls_stream = connector.connect(domain, tcp).await.unwrap();
+    tls_stream
+        .write_all(
+            b"POST /stats HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 39\r\nConnection: close\r\n\r\nop=login&password=VaultSecretPassword!9",
+        )
+        .await
+        .unwrap();
+    let mut resp_buf = Vec::new();
+    tls_stream.read_to_end(&mut resp_buf).await.unwrap();
+    let raw_http = String::from_utf8_lossy(&resp_buf);
+    assert!(raw_http.starts_with("HTTP/1.1 303"), "got: {raw_http}");
+    assert!(
+        raw_http.contains("; Secure"),
+        "expected Secure cookie on native TLS listener, got: {raw_http}"
+    );
+
+    let _ = tx.send(());
+    server_task.await.unwrap();
 }
 
 #[tokio::test]

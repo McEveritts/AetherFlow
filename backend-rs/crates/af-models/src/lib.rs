@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardware & System Telemetry Models (`backend/models/hardware.go` & `models.go`)
+// Hardware & System Telemetry Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -113,7 +113,7 @@ pub struct SystemMetrics {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// User, Session & Ingress Models (`backend/models/user.go` & `models.go`)
+// User, Session & Ingress Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -157,7 +157,7 @@ impl Default for AppIngressConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Marketplace & Package Automation Models (`backend/models/package.go`)
+// Marketplace & Package Automation Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -392,7 +392,7 @@ pub struct PackageJobOutcomeRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Privileged Runner IPC Models (`backend/services/privileged_runner.go`)
+// Privileged Runner IPC Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

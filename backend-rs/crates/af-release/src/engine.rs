@@ -444,16 +444,22 @@ where
             ),
         );
 
+        let current_slot_dirs = resolve_confined_legacy_current_slots(cfg);
+
         let fhs_db = cfg.host_data_dir.join(&cfg.sqlite_db);
         if resolved.path == fhs_db && !fhs_db.is_file() {
-            let legacy_candidates = [
+            let mut legacy_candidates = vec![
                 cfg.legacy_opt_root
                     .join("backend/data")
                     .join(&cfg.sqlite_db),
                 cfg.legacy_opt_root.join("backend").join(&cfg.sqlite_db),
             ];
+            for slot_dir in &current_slot_dirs {
+                legacy_candidates.push(slot_dir.join("backend/data").join(&cfg.sqlite_db));
+                legacy_candidates.push(slot_dir.join("backend").join(&cfg.sqlite_db));
+            }
             for legacy_db in &legacy_candidates {
-                if legacy_db.is_file() {
+                if is_regular_non_symlink_file(legacy_db) {
                     if dry_run {
                         append_jsonl_log(
                             &cfg.log_file,
@@ -499,12 +505,16 @@ where
         }
 
         if !dry_run && !cfg.host_env_file.is_file() {
-            let legacy_envs = [
+            let mut legacy_envs = vec![
                 cfg.legacy_opt_root.join("backend/.env"),
                 cfg.legacy_opt_root.join(".env"),
             ];
+            for slot_dir in &current_slot_dirs {
+                legacy_envs.push(slot_dir.join("backend/.env"));
+                legacy_envs.push(slot_dir.join(".env"));
+            }
             for legacy_env in &legacy_envs {
-                if legacy_env.is_file() {
+                if is_regular_non_symlink_file(legacy_env) {
                     append_jsonl_log(
                         &cfg.log_file,
                         "INFO",
@@ -1245,4 +1255,43 @@ where
             dry_run: false,
         })
     }
+}
+
+fn is_regular_non_symlink_file(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_file() && !meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
+fn resolve_confined_legacy_current_slots(cfg: &ReleaseConfig) -> Vec<PathBuf> {
+    let mut allowed_roots = Vec::new();
+    for root in [&cfg.releases_dir, &cfg.legacy_opt_root] {
+        if let Ok(canon) = fs::canonicalize(root) {
+            if !allowed_roots.contains(&canon) {
+                allowed_roots.push(canon);
+            }
+        }
+    }
+    if allowed_roots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let legacy_current = cfg.legacy_opt_root.join("current");
+    for candidate in [&cfg.current_link, &legacy_current] {
+        let Ok(canon_slot) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if !canon_slot.is_dir() {
+            continue;
+        }
+        let confined = allowed_roots
+            .iter()
+            .any(|allowed| canon_slot != *allowed && canon_slot.starts_with(allowed));
+        if confined && !out.contains(&canon_slot) {
+            out.push(canon_slot);
+        }
+    }
+    out
 }

@@ -397,7 +397,7 @@ mod audit_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Backups, Chunked Upload/Download, Retention & Smart Schedule (`backup.go`)
+// 1. Backups, Chunked Upload/Download, Retention & Smart Schedule
 // ─────────────────────────────────────────────────────────────────────────────
 
 static VALID_BACKUP_FILENAME_RE: Lazy<Regex> =
@@ -971,7 +971,11 @@ fn backup_ticket_cookie(token: &str, max_age: i64) -> String {
     .replace("Path=/;", "Path=/api/v1/admin/backup/download/;")
 }
 
-async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool {
+async fn authorize_backup_password(
+    user: &AuthUser,
+    session_auth_time: Option<i64>,
+    headers: &HeaderMap,
+) -> bool {
     let password = headers
         .get("X-Reauth-Password")
         .and_then(|value| value.to_str().ok())
@@ -1029,10 +1033,19 @@ async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool
                 record_failed_backup_reauth(uid);
                 return Ok(false);
             }
+            let now = Utc::now().timestamp();
+            let Some(auth_ts) = session_auth_time else {
+                record_failed_backup_reauth(uid);
+                return Ok(false);
+            };
+            if auth_ts <= 0 || now.saturating_sub(auth_ts) > 300 || auth_ts > now + 60 {
+                record_failed_backup_reauth(uid);
+                return Ok(false);
+            }
             let fresh_session: bool = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND created_at >= datetime('now', '-300 seconds'))",
-                    params![session, uid],
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND expires_at > ?3)",
+                    params![session, uid, now],
                     |row| row.get(0),
                 )
                 .unwrap_or(false);
@@ -1060,7 +1073,11 @@ pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request)
             "Invalid backup path",
         );
     }
-    if !authorize_backup_password(&user, req.headers()).await {
+    let session_auth_time = req
+        .extensions()
+        .get::<crate::auth::SessionAuthTime>()
+        .map(|t| t.0);
+    if !authorize_backup_password(&user, session_auth_time, req.headers()).await {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -1259,7 +1276,13 @@ pub async fn download_backup(
     let ticket_authorized = ticket
         .as_deref()
         .is_some_and(|token| redeem_backup_download_ticket(token, &user, &filename));
-    if !ticket_authorized && !authorize_backup_password(&user, req.headers()).await {
+    let session_auth_time = req
+        .extensions()
+        .get::<crate::auth::SessionAuthTime>()
+        .map(|t| t.0);
+    if !ticket_authorized
+        && !authorize_backup_password(&user, session_auth_time, req.headers()).await
+    {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -2028,7 +2051,7 @@ pub async fn set_backup_schedule(Json(req): Json<serde_json::Value>) -> Response
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. FileShare Upload, Download, Delete & Quota Headroom (`fileshare.go`)
+// 2. FileShare Upload, Download, Delete & Quota Headroom
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MAX_UPLOAD_SIZE: usize = 50 * 1024 * 1024; // 50 MiB
@@ -2549,7 +2572,7 @@ pub async fn delete_shared_file(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Storage Quotas (`quota_handlers.go` & `quota_manager.go`)
+// 3. Storage Quotas
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2757,7 +2780,7 @@ pub async fn refresh_user_quota(Path(user_id): Path<i64>) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Updater & Deploy SSE (`updater.go`, `deploy_api.go`, `sse_handler.go`)
+// 4. Updater & Deploy SSE
 // ─────────────────────────────────────────────────────────────────────────────
 
 static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
@@ -4478,5 +4501,73 @@ mod updater_tests {
         assert_eq!(plex.default_port, 32400);
         assert!(!plex.supports_dynamic_port);
         assert_eq!(allocate_or_verify_deploy_port(&plex), 32400);
+    }
+
+    #[tokio::test]
+    async fn test_oauth_only_admin_backup_stepup_against_live_schema_v24() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("af-oauth-backup-stepup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let db_file = tmp_dir.join("stepup.sqlite");
+
+        let keys = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        for &k in &keys {
+            std::env::set_var(k, &db_file);
+        }
+
+        af_db::init_db().expect("initialize full v24 schema");
+        let now = Utc::now().timestamp();
+        {
+            let conn = af_db::get_conn().unwrap();
+            let max_ver: i64 = conn
+                .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(max_ver, 24);
+            conn.execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_enabled) VALUES (77, 'oauth-admin', 'admin', '', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
+                 VALUES ('oauth-jti-fresh', 77, '127.0.0.1', 'TestUA', ?1, ?2, 'fam-77')",
+                params![now + 3600, now],
+            )
+            .unwrap();
+        }
+
+        let admin = AuthUser {
+            user_id: 77,
+            username: "oauth-admin".to_string(),
+            role: "admin".to_string(),
+            jti: "oauth-jti-fresh".to_string(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Reauth-Confirm", HeaderValue::from_static("oauth"));
+
+        // 1. Fresh authenticated OAuth session (<= 300s) with live active_sessions row succeeds
+        assert!(authorize_backup_password(&admin, Some(now - 60), &headers).await);
+
+        // 2. Stale authenticated OAuth session (> 300s) fails closed even if refreshed session is active
+        assert!(!authorize_backup_password(&admin, Some(now - 301), &headers).await);
+
+        // 3. Revoked/absent active_sessions row fails closed even with fresh auth_time
+        let revoked_admin = AuthUser {
+            jti: "oauth-jti-missing".to_string(),
+            ..admin
+        };
+        assert!(!authorize_backup_password(&revoked_admin, Some(now - 10), &headers).await);
+
+        for (k, val) in saved {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

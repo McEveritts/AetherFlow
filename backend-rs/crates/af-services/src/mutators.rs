@@ -1752,7 +1752,7 @@ pub async fn trigger_apache_cert_sync() {
 }
 
 /// Retroactively provisions `<app>.<baseDomain>` public domains for all installed apps
-/// and updates existing ingress records when the base domain changes (`blueprint_lifecycle.go`).
+/// and updates existing ingress records when the base domain changes.
 pub async fn provision_all_installed_app_subdomains() -> usize {
     provision_installed_app_subdomains(&crate::resolve_base_domain()).await
 }
@@ -1853,7 +1853,7 @@ pub async fn sync_installed_apps_base_domain(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App Credential & Runtime Metadata Discovery (`app_credentials.go`)
+// App Credential & Runtime Metadata Discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3699,7 +3699,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Master Credentials & PBKDF2-HMAC-SHA512 Synchronizer (`master_credentials.go`)
+// Master Credentials & PBKDF2-HMAC-SHA512 Synchronizer
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MASTER_CREDS_SYSTEM_KEY: &str = "master_credentials";

@@ -634,6 +634,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "TEST_ROOT": root_posix,
             "TMPDIR": f"{root_posix}/tmp",
             "AETHERFLOW_INSTALL_ROOT": root_posix,
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
             "LOGFILE": f"{root_posix}/test.log",
             **environment,
         }

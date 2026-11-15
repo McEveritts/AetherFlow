@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reference start hook for {{PLUGIN_NAME}} ({{PLUGIN_ID}}).
-# NOTE: backend-rs (v4.0.0) does not automatically invoke plugin lifecycle_hooks yet.
-# Run this script via a dedicated systemd service or operator supervisor when testing standalone.
+# Fallback start hook for {{PLUGIN_NAME}} ({{PLUGIN_ID}}).
+# Invoked automatically by backend-rs when no pre-built binary is discovered directly,
+# or manually by an operator / systemd unit during standalone testing.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -14,7 +14,9 @@ if [[ -x "${PLUGIN_ROOT}/bin/${BIN_NAME}" ]]; then
     exec "${PLUGIN_ROOT}/bin/${BIN_NAME}"
 elif [[ -x "${BACKEND_DIR}/target/release/${BIN_NAME}" ]]; then
     exec "${BACKEND_DIR}/target/release/${BIN_NAME}"
+elif [[ -x "${BACKEND_DIR}/target/debug/${BIN_NAME}" ]]; then
+    exec "${BACKEND_DIR}/target/debug/${BIN_NAME}"
 fi
 
-cd "${BACKEND_DIR}"
-exec cargo run --release
+echo "Error: pre-built plugin binary '${BIN_NAME}' not found under '${PLUGIN_ROOT}/bin/' or '${BACKEND_DIR}/target/{release,debug}/'. Build it first with 'cargo build --release --manifest-path ${BACKEND_DIR}/Cargo.toml'." >&2
+exit 1

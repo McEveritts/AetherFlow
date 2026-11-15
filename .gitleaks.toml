@@ -48,27 +48,78 @@ id = "generic-api-key"
   regexes = ['''^secret_(?:gh_tok_789|api_key_000)$''']
 
   [[rules.allowlists]]
-  description = "Synthetic AES_MASTER_KEY test fixture (sequential hex) in Go, Rust DB, and Python env unit tests"
+  description = "Synthetic AES_MASTER_KEY test fixture (sequential hex) in Rust DB and Python env unit tests"
   condition = "AND"
   regexTarget = "secret"
   paths = [
-    '''^backend/config/config_test\.go$''',
     '''^backend-rs/crates/af-db/src/lib\.rs$''',
     '''^tests/test_modern_stack_env\.py$''',
   ]
   regexes = ['''^0123456789abcdef0123456789abcdef$''']
 
   [[rules.allowlists]]
-  description = "Synthetic AIza test string in Go crypto unit test"
+  description = "Historical synthetic AES_MASTER_KEY test fixture in retired Go config unit test"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
+  paths = ['''^backend/config/config_test\.go$''']
+  regexes = ['''^0123456789abcdef0123456789abcdef$''']
+
+  [[rules.allowlists]]
+  description = "Historical synthetic AIza test string in retired Go crypto unit test"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
   paths = ['''^backend/api/crypto_test\.go$''']
   regexes = ['''^AIzaSyA_test_key_12345$''']
 
   [[rules.allowlists]]
-  description = "Synthetic CSRF test tokens in Go auth and revocation tests"
+  description = "Historical synthetic CSRF test tokens in retired Go auth and revocation tests"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
   paths = [
     '''^backend/api/auth_security_test\.go$''',
     '''^backend/api/auth_session_revocation_adversarial_test\.go$''',
@@ -76,9 +127,24 @@ id = "generic-api-key"
   regexes = ['''^(?:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4|f7e8d9c0b1a23456789abcdef0123456)$''']
 
   [[rules.allowlists]]
-  description = "Synthetic API key fixtures in Go app credentials unit tests"
+  description = "Historical synthetic API key fixtures in retired Go app credentials unit tests"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
   paths = ['''^backend/services/app_credentials_test\.go$''']
   regexes = ['''^(?:sabnzbd-key-abcdef123456|tautulli-secret-key-42|jackett-api-key-xyz987)$''']
 
@@ -90,9 +156,24 @@ id = "generic-api-key"
   regexes = ['''^(?:AF_KEEP_EXISTING_SECRETS=|generate_qbittorrent_pbkdf2)$''']
 
   [[rules.allowlists]]
-  description = "Synthetic unsigned/invalid-signature JWT test fixture in Go auth security test"
+  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired Go auth security test"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
   paths = ['''^backend/api/auth_security_test\.go$''']
   regexes = [
     '''^eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9\.eyJ1c2VyX2lkIjoxLCJleHAiOjk5OTk5OTk5OTl9\.invalid-signature$''',
@@ -117,9 +198,24 @@ id = "generic-api-key"
 id = "jwt"
 
   [[rules.allowlists]]
-  description = "Synthetic unsigned/invalid-signature JWT test fixture in Go auth security test"
+  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired Go auth security test"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''0f1d44f0775eb7f3b69e33684b8591bb95ea360a''',
+    '''20fd75cce2c6dce165fc031d6213d0b6f8ee2c36''',
+    '''b8a805f999b2121caad86f500b73f415c2bd8eb8''',
+    '''86419d53831590966c3bf3400bacd575ef1a9282''',
+    '''46fa3c0f0ab2f794fe6d2192e73927925991ba2f''',
+    '''8265162a9187c5fc81152cc704697283207a8ea8''',
+    '''6968de053b16ee79159f0804419f9e3d1cfb096d''',
+    '''e2f67e97b02e065ac8bf89c63390de2ab5ea7f38''',
+    '''699f4280e9e3df5d3d16bc19b6720e7e1a13a502''',
+    '''288fd7a3f59a6912350b44aee9a4678885971fe2''',
+    '''23a25c6ed96bdfff2a086584c09347c9616bb81d''',
+    '''049d7576b70b83e9dd4bed967401c6ee2247382a''',
+    '''7fe87c834b81026aebf9f58794596abc4d022b84''',
+  ]
   paths = ['''^backend/api/auth_security_test\.go$''']
   regexes = ['''^eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9\.eyJ1c2VyX2lkIjoxLCJleHAiOjk5OTk5OTk5OTl9\.invalid-signature$''']
 

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Standard Error Helpers (`backend/api/errors.go`)
+// Standard Error Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -34,7 +34,7 @@ pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JWT Claims, Client Fingerprint & Rotation Grace (`auth.go` & `oidc.go`)
+// JWT Claims, Client Fingerprint & Rotation Grace
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,11 @@ pub struct AuthUser {
     pub plugin_id: Option<String>,
     pub plugin_scopes: Vec<String>,
 }
+
+/// Cryptographically verified initial authentication timestamp (`auth_time` fallback `iat`)
+/// extracted from the validated session JWT in `auth_middleware`.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionAuthTime(pub i64);
 
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveSubject {
@@ -827,7 +832,7 @@ pub(crate) fn finalize_user_credential_revocation(user_id: i64, revoked_jtis: &[
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Auth, Admin & CSRF Middlewares (`auth.go` & `csrf.go`)
+// Auth, Admin & CSRF Middlewares
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
@@ -1141,6 +1146,9 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         );
     }
 
+    let verified_auth_time = session_auth_time(&claims);
+    req.extensions_mut()
+        .insert(SessionAuthTime(verified_auth_time));
     req.extensions_mut().insert(AuthUser {
         user_id: claims.user_id,
         username: subj.username,
@@ -1255,7 +1263,7 @@ pub async fn issue_csrf_token() -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth & Setup Endpoints (`backend/api/auth.go`)
+// Auth & Setup Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -2589,7 +2597,7 @@ fn revoke_session_blocking(jti_param: String, req: Request) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2FA TOTP Setup, Verification & MFA Login (`backend/api/totp.go`)
+// 2FA TOTP Setup, Verification & MFA Login
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn matching_totp_step(secret_b32: &str, code: &str, now_secs: u64) -> Option<i64> {

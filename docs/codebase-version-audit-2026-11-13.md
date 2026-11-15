@@ -1,5 +1,7 @@
 # AetherFlow Codebase Dependency, Workflow & Probe Audit (2026-11-13)
 
+> **Historical Point-in-Time Snapshot (2026-11-13, pre-Zero-Go cutover)**: This document preserves the `nightly` (`#110`) dependency and workflow audit recorded immediately before the v4.0.0 Zero-Go Consolidation & Cutover. Subsequent to this snapshot, `backend/`, `plugins/sdk-template/`, `packages/package/assets/librespeed/backend-patches/`, and all Go workflow steps were decommissioned in favor of the pure-Rust 12-crate workspace (`backend-rs/`).
+
 This audit records toolchain, dependency, workflow, installer, and version-probe alignment updates prepared for the `nightly` branch (`#110`).
 
 ## 1. Rust Control Plane (`backend-rs/`)

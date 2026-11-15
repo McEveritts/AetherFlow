@@ -3,16 +3,16 @@ use crate::config::Config;
 use crate::db::{NewTelemetryRecord, TelemetryVault};
 use crate::png_card::render_badge_png;
 use crate::redact::{
-    format_getip_display, redact_freeform_text, redact_single_ip, resolve_client_ip,
+    format_getip_display, peer_ip_key, redact_freeform_text, redact_single_ip, resolve_client_ip,
 };
-use crate::stats::{handle_stats, parse_urlencoded_map, AppState, StatsAuth};
+use crate::stats::{handle_stats, parse_urlencoded_map, AppState, StatsAuth, TelemetryRateLimiter};
 use crate::ulid::{generate_ulid, obfuscate_ulid, resolve_id};
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
 use axum::http::header::{
     ACCEPT_LANGUAGE, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH,
-    CONTENT_TYPE, PRAGMA, USER_AGENT,
+    CONTENT_TYPE, PRAGMA, RETRY_AFTER, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -29,10 +29,12 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 pub const MAX_EMPTY_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TELEMETRY_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_STATS_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_CONCURRENT_GARBAGE_STREAMS: usize = 32;
 const GARBAGE_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const MIN_GARBAGE_CHUNKS: usize = 1;
 const MAX_GARBAGE_CHUNKS: usize = 1024;
@@ -58,6 +60,8 @@ pub fn build_router(config: Config, vault: Option<TelemetryVault>) -> Router {
         vault,
         stats_auth: StatsAuth::new(),
         obfuscation_key,
+        garbage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_GARBAGE_STREAMS)),
+        telemetry_limiter: TelemetryRateLimiter::new(),
     };
 
     let empty_routes = Router::new()
@@ -203,7 +207,20 @@ struct GarbageQuery {
     ck_size: Option<String>,
 }
 
-async fn handle_garbage(Query(q): Query<GarbageQuery>) -> Response {
+async fn handle_garbage(
+    State(state): State<AppState>,
+    method: Method,
+    Query(q): Query<GarbageQuery>,
+) -> Response {
+    let Ok(permit) = state.garbage_semaphore.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(RETRY_AFTER, HeaderValue::from_static("5"))],
+            "Too many concurrent download streams",
+        )
+            .into_response();
+    };
+
     let chunks = q
         .ck_size
         .as_deref()
@@ -212,10 +229,6 @@ async fn handle_garbage(Query(q): Query<GarbageQuery>) -> Response {
         .unwrap_or(DEFAULT_GARBAGE_CHUNKS);
 
     let total_bytes = chunks * GARBAGE_CHUNK_BYTES;
-    let stream = futures::stream::iter((0..chunks).map(|_| {
-        let chunk = RANDOM_CHUNK_1MIB.clone();
-        Ok::<Bytes, Infallible>(chunk)
-    }));
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -243,6 +256,23 @@ async fn handle_garbage(Query(q): Query<GarbageQuery>) -> Response {
         headers.insert(CONTENT_LENGTH, len_hv);
     }
 
+    if method == Method::HEAD {
+        drop(permit);
+        return (StatusCode::OK, headers, Body::empty()).into_response();
+    }
+
+    let stream =
+        futures::stream::unfold((0usize, chunks, permit), |(idx, max, permit)| async move {
+            if idx >= max {
+                None
+            } else {
+                Some((
+                    Ok::<Bytes, Infallible>(RANDOM_CHUNK_1MIB.clone()),
+                    (idx + 1, max, permit),
+                ))
+            }
+        });
+
     (StatusCode::OK, headers, Body::from_stream(stream)).into_response()
 }
 
@@ -267,7 +297,7 @@ async fn handle_get_ip(
     Query(q): Query<GetIpQuery>,
 ) -> Response {
     let peer_addr = peer.map(|ConnectInfo(addr)| addr);
-    let client_ip = resolve_client_ip(peer_addr, &headers);
+    let client_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
     let display = format_getip_display(&client_ip, state.config.redact_ip_addresses);
 
     let want_isp = q
@@ -323,6 +353,24 @@ async fn handle_telemetry(
     let (parts, body) = req.into_parts();
     let headers = parts.headers.clone();
 
+    let peer_addr = peer.map(|ConnectInfo(addr)| addr);
+    let raw_ip = resolve_client_ip(peer_addr, &headers, &state.config.trusted_proxies);
+    let peer_ip = peer_ip_key(peer_addr);
+    let now_unix = Utc::now().timestamp();
+    if state.config.telemetry_enabled()
+        && state.vault.is_some()
+        && !state
+            .telemetry_limiter
+            .try_acquire(&peer_ip, &raw_ip, now_unix)
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(RETRY_AFTER, HeaderValue::from_static("60"))],
+            "Telemetry write rate limit exceeded",
+        )
+            .into_response();
+    }
+
     let mut stream = body.into_data_stream();
     let mut raw_bytes = Vec::with_capacity(4096);
     while let Some(next_chunk) = stream.next().await {
@@ -351,19 +399,28 @@ async fn handle_telemetry(
         return (StatusCode::OK, "").into_response();
     };
 
-    let peer_addr = peer.map(|ConnectInfo(addr)| addr);
-    let raw_ip = resolve_client_ip(peer_addr, &headers);
-
     let mut ispinfo = clamp_utf8(
         fields.get("ispinfo").map(String::as_str).unwrap_or(""),
         8192,
     );
-    let extra = clamp_utf8(fields.get("extra").map(String::as_str).unwrap_or(""), 8192);
+    let mut extra = clamp_utf8(fields.get("extra").map(String::as_str).unwrap_or(""), 8192);
     let dl = clamp_utf8(fields.get("dl").map(String::as_str).unwrap_or(""), 64);
     let ul = clamp_utf8(fields.get("ul").map(String::as_str).unwrap_or(""), 64);
     let ping = clamp_utf8(fields.get("ping").map(String::as_str).unwrap_or(""), 64);
     let jitter = clamp_utf8(fields.get("jitter").map(String::as_str).unwrap_or(""), 64);
     let mut log = clamp_utf8(fields.get("log").map(String::as_str).unwrap_or(""), 65_536);
+
+    if dl.trim().is_empty()
+        && ul.trim().is_empty()
+        && ping.trim().is_empty()
+        && jitter.trim().is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "telemetry requires at least one measurement field (dl, ul, ping, or jitter)",
+        )
+            .into_response();
+    }
 
     let ua_raw = fields
         .get("ua")
@@ -371,7 +428,7 @@ async fn handle_telemetry(
         .map(String::as_str)
         .or_else(|| headers.get(USER_AGENT).and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    let ua = clamp_utf8(ua_raw, 512);
+    let mut ua = clamp_utf8(ua_raw, 512);
 
     let lang_raw = fields
         .get("lang")
@@ -379,11 +436,14 @@ async fn handle_telemetry(
         .map(String::as_str)
         .or_else(|| headers.get(ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    let lang = clamp_utf8(lang_raw, 64);
+    let mut lang = clamp_utf8(lang_raw, 64);
 
     let ip = if state.config.redact_ip_addresses {
         ispinfo = redact_freeform_text(&ispinfo);
         log = redact_freeform_text(&log);
+        extra = redact_freeform_text(&extra);
+        ua = redact_freeform_text(&ua);
+        lang = redact_freeform_text(&lang);
         redact_single_ip(&raw_ip)
     } else {
         raw_ip

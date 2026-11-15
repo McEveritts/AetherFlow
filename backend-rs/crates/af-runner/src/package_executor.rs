@@ -25,7 +25,7 @@
 //! 4. **Structured Progress & Wire Compatibility**:
 //!    - Emits structured [`PackageProgressEvent`] values and formats lines as
 //!      `[PROGRESS:<pct>] <message>` plus timestamped `[INFO]`/`[WARN]`/`[ERROR]` lines compatible
-//!      with both the legacy Go scanner (`backend/services/privileged_runner.go`) and the Rust
+//!      with both the legacy Go scanner and the Rust
 //!      `consume_package_output` consumer.
 //! 5. **Explicit Failure, Cancellation & Rollback Recovery**:
 //!    - Every file mutation (`WriteTemplateFile`, `WriteSystemdUnit`, `InstallBinary`, `ExtractTarGz`)

@@ -459,6 +459,7 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
   .m-put { background: var(--amber-soft); color: var(--amber); border-color: rgba(251, 191, 36, 0.32); }
   .m-delete { background: var(--rose-soft); color: var(--rose); border-color: rgba(244, 63, 94, 0.32); }
   .m-patch { background: var(--fuchsia-soft); color: var(--fuchsia); border-color: rgba(232, 121, 249, 0.32); }
+  .m-head { background: var(--indigo-soft); color: var(--indigo-text); border-color: var(--border-accent); }
 
   .op-path {
     font-family: var(--font-mono);
@@ -729,7 +730,9 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
             <button type="button" class="chip" data-method="GET">GET</button>
             <button type="button" class="chip" data-method="POST">POST</button>
             <button type="button" class="chip" data-method="PUT">PUT</button>
+            <button type="button" class="chip" data-method="PATCH">PATCH</button>
             <button type="button" class="chip" data-method="DELETE">DELETE</button>
+            <button type="button" class="chip" data-method="HEAD">HEAD</button>
           </div>
           <div class="filter-group" id="auth-filters" role="group" aria-label="Filter by authentication">
             <button type="button" class="chip active" data-auth="ALL">Any Auth</button>

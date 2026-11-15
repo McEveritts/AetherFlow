@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 pub mod streaming;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AES-256-GCM Secret Encryption (`backend/api/crypto.go`)
+// AES-256-GCM Secret Encryption
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CIPHERTEXT_PREFIX: &str = "enc:v1:";
@@ -397,7 +397,7 @@ pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLite Connection Pool, WAL PRAGMAs & Schema Migrations (`backend/db/db.go`)
+// SQLite Connection Pool, WAL PRAGMAs & Schema Migrations
 // ─────────────────────────────────────────────────────────────────────────────
 
 static DB_POOL: Lazy<RwLock<Option<Pool<SqliteConnectionManager>>>> =
@@ -576,7 +576,7 @@ pub fn init_db() -> anyhow::Result<()> {
     let conn = pool.get()?;
     apply_pragmas(&conn);
 
-    // Core tables (`backend/db/db.go`)
+    // Core tables
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -1318,7 +1318,7 @@ fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Health Check & Data Pruning (`backend/db/db.go`)
+// Health Check & Data Pruning
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
@@ -1386,7 +1386,7 @@ pub fn prune_expired_data() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App Ingress Configs & Base Domain (`backend/db/db.go`)
+// App Ingress Configs & Base Domain
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct IngressCache {
@@ -1615,7 +1615,7 @@ pub fn delete_app_ingress_config(app_name: &str) -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Admin Audit Trail (`backend/db/audit.go`)
+// Admin Audit Trail
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1738,7 +1738,7 @@ pub fn query_audit_log(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Action Approval Gates (`backend/db/action_gates.go`)
+// Action Approval Gates
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1888,7 +1888,7 @@ pub fn resolve_action(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Session Revocation, 2FA Pending & MFA Challenge Store (`backend/db/redis.go`)
+// Session Revocation, 2FA Pending & MFA Challenge Store
 // ─────────────────────────────────────────────────────────────────────────────
 
 static TOKEN_BLACKLIST: Lazy<Mutex<HashMap<String, Instant>>> =

@@ -23,16 +23,14 @@ mkdir -p web/dist
 touch web/dist/.keep
 
 cd backend-rs
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
-```
 
 # Run all tests across the 12-crate pure-Rust workspace
-cd backend-rs
 JWT_SECRET="ci-test-secret-exactly-32bytes!!" \
 AES_MASTER_KEY="ci-test-aes-key-exactly-32bytes!" \
 ALLOWED_HOSTS="localhost:8080,127.0.0.1:8080" \
-cargo test --workspace --locked
+cargo test --workspace --locked -- --test-threads=1
 ```
 
 ### Targeting Specific Subsystems

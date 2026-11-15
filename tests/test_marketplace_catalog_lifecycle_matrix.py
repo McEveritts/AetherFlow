@@ -1051,6 +1051,7 @@ youtube_private_port() {
             "TMPDIR": str(self.root / "tmp"), "HOME": str(self.root / "home"),
             "AF_PROC_ROOT": str(self.root / "proc"),
             "AF_JOB_SCRATCH_ROOT": str(self.root / "tmp/aetherflow-scratch"),
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
             "DELETE_DATA": "false", **environment,
         }
         if self.app == "readarr":

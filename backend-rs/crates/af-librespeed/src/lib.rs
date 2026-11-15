@@ -5,4 +5,5 @@ pub mod png_card;
 pub mod redact;
 pub mod routes;
 pub mod stats;
+pub mod tls;
 pub mod ulid;

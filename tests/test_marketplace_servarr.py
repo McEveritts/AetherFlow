@@ -116,7 +116,7 @@ if 'Identity/Wizard' not in source and 'auth/createAdmin' not in source:
         helpers += common_functions('systemd_unit_inactive', 'stop_systemd_unit',
                                     'purge_systemd_unit', 'purge_system_user',
                                     'verify_systemd_service_active', 'wait_for_service_ready',
-                                    'af_write_failure_receipt')
+                                    'af_write_failure_receipt', 'derive_app_password')
         helpers = self.rebase(helpers)
         stubs = '''set -euo pipefail
 AF_ALLOW_VERSION_FALLBACK=1
@@ -217,6 +217,7 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
                        'TEST_TITLE': title, 'TEST_EXECUTABLE': EXECUTABLES.get(package, title),
                        'TEST_DATABASE': str(self.database_path(package)),
                        'TEST_EXECUTABLE_PATH': str(self.root / ('usr/local/bin/qui' if package == 'qui' else f'opt/{title}/{EXECUTABLES.get(package, title)}')),
+                       'AETHERFLOW_SKIP_PROVENANCE_VERIFY': '1',
                        'AF_APP_PORT': '19876', 'AF_PACKAGE_ACTION': 'install', **overrides}
         archive = self.root / 'release.tar.gz'
         if archive.is_file() and 'AF_DOWNLOAD_SHA256' not in overrides:

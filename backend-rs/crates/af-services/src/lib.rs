@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Package Catalog, Automation & Marketplace Orchestration (`package_service.go`)
+// Package Catalog, Automation & Marketplace Orchestration
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
@@ -365,7 +365,7 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App Blueprints & Port / Domain Resolution (`app_catalog.go` & `blueprint_lifecycle.go`)
+// App Blueprints & Port / Domain Resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -695,7 +695,7 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Service Manager (`service_manager.go` & `systemctl.go`)
+// Service Manager
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -1069,7 +1069,7 @@ pub fn aggregate_component_statuses(
     (status.to_string(), primary_unit)
 }
 
-/// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
+/// Resolves a logical package or service name into its concrete systemd unit names.
 pub fn resolve_service_units(target: &str) -> Vec<String> {
     resolve_service_units_with_catalog(target, &get_package_catalog().unwrap_or_default())
 }
@@ -1186,7 +1186,7 @@ pub fn format_uptime_duration(dur: chrono::Duration) -> String {
     }
 }
 
-/// Formats systemd's `ActiveEnterTimestamp` string into a concise human-readable uptime (`service_manager.go`).
+/// Formats systemd's `ActiveEnterTimestamp` string into a concise human-readable uptime.
 pub fn format_uptime(enter_timestamp: &str) -> String {
     let raw = enter_timestamp.trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("n/a") {
@@ -1223,7 +1223,7 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 }
 
 /// Queries `systemctl show <unit> --property=ActiveState,SubState,ActiveEnterTimestamp`
-/// with a short in-memory cache and graceful fallback on non-systemd platforms (`service_manager.go`).
+/// with a short in-memory cache and graceful fallback on non-systemd platforms.
 pub fn get_service_info(service_name: &str) -> (String, String, String) {
     let (status, uptime, primary_unit, _components) = get_service_info_detailed(service_name);
     (status, uptime, primary_unit)
@@ -2184,7 +2184,7 @@ pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Streaming Telemetry Monitor (`backend/services/streaming_monitor.go`)
+// Streaming Telemetry Monitor
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2699,7 +2699,7 @@ pub fn streaming_http_client_builder() -> reqwest::ClientBuilder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Notifications & Rules (`backend/services/notifications.go`)
+// Notifications & Rules
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -542,11 +542,16 @@ _build_modern_stack_from_source() {
                     exit 1
                 fi
             fi
+            local af_build_ver="source-${epoch}"
+            if [[ -f "${af_root}/.version" ]]; then
+                af_build_ver="$(tr -d '\r\n' < "${af_root}/.version")"
+            fi
             local -a bin_args=(--bin aetherflow-api --bin af)
             if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
                 bin_args+=(--bin speedtest-backend)
             fi
-            cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
+            AF_BUILD_VERSION="${af_build_ver}" AETHERFLOW_VERSION="${af_build_ver}" \
+                cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
             cp -f "${af_root}/backend-rs/target/release/aetherflow-api" "${release_dir}/aetherflow-api"
             local built_bin
             for built_bin in af speedtest-backend; do

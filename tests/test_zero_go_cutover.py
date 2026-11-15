@@ -1,14 +1,71 @@
+import hashlib
+import hmac
+import io
 import json
+import os
 import re
 import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
 import unittest
 from pathlib import Path
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installer_test_helpers import common_functions, replace_paths_once
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _extract_router_routes(code: str) -> list[tuple[str, list[str]]]:
+    out: list[tuple[str, list[str]]] = []
+    idx = 0
+    while True:
+        pos = code.find(".route(", idx)
+        if pos == -1:
+            break
+        depth = 0
+        end = pos + 6
+        in_str = False
+        while end < len(code):
+            ch = code[end]
+            if ch == '"' and code[end - 1] != "\\":
+                in_str = not in_str
+            elif not in_str:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end += 1
+                        break
+            end += 1
+        call = code[pos:end]
+        idx = end
+        m_path = re.search(
+            r'\.route\(\s*(?:"([^"]+)"|crate::streaming_portability::([A-Z_]+))\s*,',
+            call,
+        )
+        if not m_path:
+            continue
+        if m_path.group(1):
+            p = m_path.group(1)
+        else:
+            const_map = {
+                "EXPORT_ROUTE": "/streaming/portability/export",
+                "PREVIEW_ROUTE": "/streaming/portability/preview",
+                "RESTORE_ROUTE": "/streaming/portability/restore",
+            }
+            p = const_map[m_path.group(2)]
+        methods = sorted(set(re.findall(r"\b(get|post|put|delete|patch|head)\s*\(", call)))
+        out.append((p, methods))
+    return out
+
+
 class TestZeroGoCutoverInvariants(unittest.TestCase):
-    """Verify AetherFlow Zero-Go cutover invariants across repo, CI workflows, and scripts."""
+    """Verify AetherFlow Zero-Go cutover invariants across repo, CI workflows, OpenAPI, and scripts."""
 
     def test_git_has_no_tracked_go_files(self) -> None:
         proc = subprocess.run(
@@ -48,6 +105,81 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
                 parsed = json.loads(path.read_text(encoding="utf-8"))
                 self.assertTrue(parsed, f"Expected non-empty JSON asset: {rel}")
 
+        openapi_raw = (ROOT / "config/openapi-v1.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("NON-AUTHORITATIVE", openapi_raw)
+
+    def test_openapi_v1_route_parity_with_rust_router(self) -> None:
+        routes_rs = (ROOT / "backend-rs/crates/af-api/src/routes.rs").read_text(encoding="utf-8")
+        v1_sec = routes_rs.split("fn build_v1_router() -> Router {", 1)[1].split("\n}\n", 1)[0]
+
+        blocks = {}
+        for name in (
+            "auth_limited_public",
+            "oidc_limited_public",
+            "public_routes",
+            "ai_limited_auth",
+            "auth_routes",
+            "quota_guarded_upload",
+            "admin_routes",
+            "compat_routes",
+            "ingress_compat_routes",
+        ):
+            m = re.search(rf"let {name}\s*=\s*Router::new\(\)(.*?);", v1_sec, re.S)
+            blocks[name] = _extract_router_routes(m.group(1)) if m else []
+
+        mcb_auth: list[tuple[str, list[str]]] = []
+        mcb_pub: list[tuple[str, list[str]]] = []
+        mcb_files = sorted((ROOT / "backend-rs/crates/af-api/src").glob("mcbrowser*.rs")) + sorted(
+            (ROOT / "backend-rs/crates/af-api/src/mcbrowser").glob("*.rs")
+        )
+        for f in mcb_files:
+            txt = f.read_text(encoding="utf-8")
+            if f.name == "shares.rs":
+                p1 = txt.split("fn router_with_runtime", 1)[1].split("fn public_router_with_runtime", 1)[0]
+                p2 = txt.split("fn public_router_with_runtime", 1)[1].split("// ───", 1)[0]
+                mcb_auth.extend(_extract_router_routes(p1))
+                mcb_pub.extend(_extract_router_routes(p2))
+            else:
+                for fn_m in re.finditer(
+                    r"pub(?:\([^)]*\))?\s+fn\s+router\(\)\s*->\s*Router\s*\{(.*?)\n\}",
+                    txt,
+                    re.S,
+                ):
+                    mcb_auth.extend(_extract_router_routes(fn_m.group(1)))
+
+        expected: dict[str, set[str]] = {}
+
+        def add(prefix: str, items: list[tuple[str, list[str]]]) -> None:
+            for p, ms in items:
+                fp = re.sub(r":([A-Za-z0-9_]+)", r"{\1}", prefix + p)
+                fp = re.sub(r"\*([A-Za-z0-9_]+)", r"{\1}", fp)
+                expected.setdefault(fp, set()).update(ms)
+
+        add("/public", blocks["public_routes"] + blocks["auth_limited_public"] + blocks["oidc_limited_public"] + mcb_pub)
+        add("/auth", blocks["auth_routes"] + blocks["ai_limited_auth"] + mcb_auth)
+        add("/admin", blocks["admin_routes"] + blocks["quota_guarded_upload"])
+        add("", blocks["compat_routes"] + blocks["ingress_compat_routes"])
+
+        spec = yaml.safe_load((ROOT / "config/openapi-v1.yaml").read_text(encoding="utf-8"))
+        documented: dict[str, set[str]] = {}
+        for path_key, path_item in spec.get("paths", {}).items():
+            methods = {
+                k for k in path_item.keys() if k in {"get", "post", "put", "delete", "patch", "head"}
+            }
+            documented[path_key] = methods
+
+        self.assertEqual(documented, expected)
+
+        backup_item = spec["paths"]["/admin/backup/download/{filename}"]
+        for method in ("post", "get"):
+            param_names = {
+                p.get("name")
+                for p in backup_item[method].get("parameters", [])
+                if isinstance(p, dict) and "name" in p
+            }
+            for stepup_hdr in ("X-Reauth-Password", "X-Reauth-TOTP", "X-Reauth-Confirm"):
+                self.assertIn(stepup_hdr, param_names, f"{method.upper()} missing {stepup_hdr}")
+
     def test_rust_librespeed_and_neutral_spa_embed_present(self) -> None:
         librespeed_toml = ROOT / "backend-rs/crates/af-librespeed/Cargo.toml"
         self.assertTrue(
@@ -79,12 +211,218 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             if name in ("ci.yml", "release.yml"):
                 self.assertIn("speedtest-backend", text)
 
+        rel_text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn('AF_BUILD_VERSION="${RELEASE_TAG#v}"', rel_text)
+        self.assertIn("aarch64-unknown-linux-gnu", rel_text)
+        self.assertIn("armv7-unknown-linux-gnueabihf", rel_text)
+        self.assertIn('${extra_tar}.sigstore.json', rel_text)
+
+    def test_gitleaks_go_allowlists_are_commit_pinned(self) -> None:
+        cfg = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        for rule in cfg.get("rules", []):
+            for allow in rule.get("allowlists", []):
+                paths = allow.get("paths", [])
+                if any("backend/" in p and r"\.go" in p for p in paths):
+                    commits = allow.get("commits", [])
+                    self.assertTrue(
+                        commits,
+                        f"Gitleaks Go allowlist must be scoped to historical commits: {allow}",
+                    )
+
+    def test_installpackage_librespeed_security_and_provenance_contracts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="af-ls-cutover-") as tmp:
+            root = Path(tmp)
+            for rel in (
+                "bin",
+                "opt/AetherFlow/packages",
+                "opt/AetherFlow/deploy",
+                "var/log/aetherflow",
+                "etc/systemd/system",
+                "install",
+                "tmp",
+                "opt",
+            ):
+                (root / rel).mkdir(parents=True, exist_ok=True)
+
+            # Build a synthetic speedtest-backend archive (v4.1.0)
+            tar_buf = io.BytesIO()
+            bin_script = b'#!/bin/sh\nif [ "${1:-}" = "--version" ]; then echo "speedtest-backend 4.1.0"; fi\nexit 0\n'
+            with tarfile.open(fileobj=tar_buf, mode="w:gz") as tf:
+                ti = tarfile.TarInfo("speedtest-backend")
+                ti.size = len(bin_script)
+                ti.mode = 0o755
+                tf.addfile(ti, io.BytesIO(bin_script))
+            archive_bytes = tar_buf.getvalue()
+            expected_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+            (root / "release.tar.gz").write_bytes(archive_bytes)
+            (root / "SHA256SUMS").write_text(
+                f"{expected_sha256}  speedtest-backend_4.1.0_linux_amd64.tar.gz\n",
+                encoding="utf-8",
+            )
+            (root / "release.sigstore.json").write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
+
+            # Stage a stale local 4.0.0 binary to verify AF_TARGET_VERSION=4.1.0 skips it
+            stale_local = root / "opt/AetherFlow/bin/speedtest-backend"
+            stale_local.parent.mkdir(parents=True, exist_ok=True)
+            stale_local.write_text('#!/bin/sh\nif [ "${1:-}" = "--version" ]; then echo "speedtest-backend 4.0.0"; fi\nexit 0\n')
+            stale_local.chmod(0o755)
+
+            # Mock host commands
+            host_cmd = r'''#!/usr/bin/python3
+import json, os, pathlib, shutil, subprocess, sys
+root = pathlib.Path(os.environ["TEST_ROOT"])
+cmd, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
+with (root / "commands.jsonl").open("a") as f:
+    f.write(json.dumps([cmd, *args]) + "\n")
+if cmd == "dpkg":
+    if "--compare-versions" in args:
+        sys.exit(subprocess.run(["/usr/bin/dpkg", *args]).returncode)
+    print(os.environ.get("TEST_ARCH", "amd64"))
+elif cmd == "curl":
+    if "-o" in args:
+        target = pathlib.Path(args[args.index("-o") + 1])
+        url = [a for a in args if a.startswith("https://")][-1]
+        if url.endswith(".sigstore.json"):
+            shutil.copyfile(root / "release.sigstore.json", target)
+        elif url.endswith("/SHA256SUMS"):
+            shutil.copyfile(root / "SHA256SUMS", target)
+        elif url.endswith("speedtest-backend_4.1.0_linux_amd64.tar.gz"):
+            shutil.copyfile(root / "release.tar.gz", target)
+        else:
+            sys.exit(22)
+    else:
+        print('{"status":"OK"}')
+elif cmd == "systemctl":
+    sys.exit(0)
+elif cmd in ("tar", "mv"):
+    sys.exit(subprocess.run(["/usr/bin/" + cmd, *args]).returncode)
+elif cmd in ("apt-get", "id", "chown", "useradd"):
+    sys.exit(0)
+else:
+    raise RuntimeError((cmd, args))
+'''
+            for name in ("dpkg", "curl", "systemctl", "apt-get", "id", "chown", "useradd", "tar", "mv"):
+                p = root / "bin" / name
+                p.write_text(host_cmd)
+                p.chmod(0o755)
+
+            # Mock verify-provenance.py that checks exact CLI arguments & fails when TEST_PROVENANCE_FAIL=1
+            verifier = root / "opt/AetherFlow/deploy/verify-provenance.py"
+            verifier.write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["TEST_ROOT"])
+(root / "provenance_args.json").write_text(json.dumps(sys.argv[1:]))
+if os.environ.get("TEST_PROVENANCE_FAIL") == "1":
+    sys.stderr.write("[PROVENANCE-FAIL] simulated invalid attestation\n")
+    sys.exit(1)
+sys.exit(0)
+''')
+            verifier.chmod(0o755)
+
+            common_src = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
+            helpers = common_src[common_src.index("command_exists()"):common_src.index("lock_path()")]
+            helpers += common_functions(
+                "systemd_unit_inactive",
+                "stop_systemd_unit",
+                "verify_systemd_service_active",
+                "wait_for_service_ready",
+                "af_write_failure_receipt",
+                "derive_app_password",
+            )
+            stubs = """set -euo pipefail
+MASTER_USER=admin
+MASTER_PASS="top-secret-master-pass-999"
+require_root() { :; }
+log_info() { :; }
+log_warn() { :; }
+print_error() { printf '%s\\n' "$*" >&2; }
+print_warn() { printf '%s\\n' "$*" >&2; }
+report_progress() { :; }
+github_latest_tag() { printf '4.1.0\\n'; }
+write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_COMMITTED=true; }
+"""
+            rebased_helpers = replace_paths_once(
+                helpers,
+                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/var/", "/tmp/", "/install", "/home/")],
+            )
+            (root / "opt/AetherFlow/packages/common.sh").write_text(stubs + rebased_helpers)
+
+            installer_src = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
+            rebased_installer = replace_paths_once(
+                installer_src,
+                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/var/", "/tmp/", "/install", "/home/")],
+            )
+            script_path = root / "install_librespeed.sh"
+            script_path.write_text(rebased_installer)
+            script_path.chmod(0o755)
+
+            base_env = {
+                **os.environ,
+                "PATH": f"{root}/bin:/usr/bin:/bin",
+                "TEST_ROOT": str(root),
+                "TMPDIR": str(root / "tmp"),
+                "AF_APP_PORT": "18988",
+                "AF_TARGET_VERSION": "4.1.0",
+            }
+            base_env.pop("AETHERFLOW_SKIP_PROVENANCE_VERIFY", None)
+
+            # 1. Default fail-closed provenance verification rejects invalid bundle
+            fail_res = subprocess.run(
+                ["bash", str(script_path)],
+                env={**base_env, "TEST_PROVENANCE_FAIL": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(fail_res.returncode, 0)
+            self.assertFalse((root / "install/.librespeed.lock").exists())
+
+            # 2. Valid provenance + AF_TARGET_VERSION=4.1.0 skips stale 4.0.0 local binary, verifies digest, and hardens config
+            ok_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+            self.assertTrue((root / "install/.librespeed.lock").exists())
+
+            prov_args = json.loads((root / "provenance_args.json").read_text())
+            self.assertIn("--digest", prov_args)
+            self.assertEqual(prov_args[prov_args.index("--digest") + 1], expected_sha256)
+            self.assertIn("--artifact-name", prov_args)
+            self.assertEqual(
+                prov_args[prov_args.index("--artifact-name") + 1],
+                "speedtest-backend_4.1.0_linux_amd64.tar.gz",
+            )
+            self.assertIn("--tag", prov_args)
+            self.assertEqual(prov_args[prov_args.index("--tag") + 1], "v4.1.0")
+            self.assertIn("--bundle-file", prov_args)
+
+            self.assertEqual((root / "opt/librespeed/.af-version").read_text().strip(), "4.1.0")
+
+            settings_path = root / "opt/librespeed/settings.toml"
+            settings_text = settings_path.read_text(encoding="utf-8")
+            self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((root / "opt/librespeed").stat().st_mode & 0o777, 0o750)
+            self.assertNotIn("top-secret-master-pass-999", settings_text)
+            expected_derived = hmac.new(
+                b"top-secret-master-pass-999",
+                b"aetherflow:librespeed:webui:v1",
+                hashlib.sha256,
+            ).hexdigest()[:32]
+            self.assertIn(f'statistics_password="{expected_derived}"', settings_text)
+            self.assertIn("redact_ip_addresses=true", settings_text)
+            self.assertIn("enable_id_obfuscation=true", settings_text)
+            self.assertIn('trusted_proxies=""', settings_text)
+
+            unit_text = (root / "etc/systemd/system/librespeed.service").read_text(encoding="utf-8")
+            for directive in ("UMask=0077", "NoNewPrivileges=yes", "ProtectSystem=strict", "ReadWritePaths="):
+                self.assertIn(directive, unit_text)
+
     def test_scripts_and_sdk_scaffolder_are_zero_go(self) -> None:
         sdk_script = (ROOT / "scripts/create-plugin-sdk.sh").read_text(encoding="utf-8")
         self.assertIn("rust", sdk_script)
         self.assertNotIn("plugins/sdk-template/", sdk_script)
-
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             bad = subprocess.run(

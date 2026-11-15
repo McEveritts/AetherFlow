@@ -686,7 +686,7 @@ mod audit_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. FlowAI Multi-Provider Chat, Support & Connection Test (`backend/api/ai.go`)
+// 1. FlowAI Multi-Provider Chat, Support & Connection Test
 // ─────────────────────────────────────────────────────────────────────────────
 
 static ALLOWED_AI_MODELS: &[&str] = &[
@@ -3632,7 +3632,7 @@ pub async fn decline_mediaflow_item(Path(id): Path<String>) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Network VPN Management (`backend/api/network_handlers.go` & `network.go`)
+// 3. Network VPN Management
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

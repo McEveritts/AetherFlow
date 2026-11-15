@@ -67,32 +67,51 @@ pub fn normalize_ip_string(raw: &str) -> String {
     }
 }
 
-/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (rightmost
-/// non-loopback hop, defeating client-injected leftmost spoofing behind a local
-/// reverse proxy) and `X-Real-IP` ONLY when the direct TCP peer is loopback.
-pub fn resolve_client_ip(peer_addr: Option<SocketAddr>, headers: &HeaderMap) -> String {
-    let peer_ip = peer_addr.map(|s| canonicalize_ip_addr(s.ip()));
-    let trusted_proxy = peer_ip.map(|ip| ip.is_loopback()).unwrap_or(false);
+pub fn peer_ip_key(peer_addr: Option<SocketAddr>) -> String {
+    peer_addr
+        .map(|s| canonicalize_ip_addr(s.ip()).to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
 
-    if trusted_proxy {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            let mut loopback_fallback: Option<IpAddr> = None;
-            for candidate in xff.rsplit(',') {
-                if let Some(ip) = parse_ip_token(candidate) {
-                    if ip.is_loopback() {
-                        if loopback_fallback.is_none() {
-                            loopback_fallback = Some(ip);
-                        }
-                        continue;
-                    }
+pub fn is_trusted_proxy_peer(peer_addr: Option<SocketAddr>, trusted_proxies: &[IpAddr]) -> bool {
+    let Some(addr) = peer_addr else {
+        return false;
+    };
+    let peer_ip = canonicalize_ip_addr(addr.ip());
+    trusted_proxies
+        .iter()
+        .any(|trusted| canonicalize_ip_addr(*trusted) == peer_ip)
+}
+
+/// Resolves client IP from `peer_addr`, trusting `X-Forwarded-For` (strictly the
+/// single rightmost hop appended by the trusted reverse proxy) and `X-Real-IP`
+/// ONLY when the direct TCP peer IP is explicitly configured in `trusted_proxies`.
+pub fn resolve_client_ip(
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> String {
+    let peer_ip = peer_addr.map(|s| canonicalize_ip_addr(s.ip()));
+
+    if is_trusted_proxy_peer(peer_addr, trusted_proxies) {
+        if let Some(xff) = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(rightmost) = xff.rsplit(',').next() {
+                if let Some(ip) = parse_ip_token(rightmost) {
                     return ip.to_string();
                 }
             }
-            if let Some(loop_ip) = loopback_fallback {
-                return loop_ip.to_string();
-            }
         }
-        if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Some(xri) = headers
+            .get_all("x-real-ip")
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok())
+        {
             if let Some(ip) = parse_ip_token(xri) {
                 return ip.to_string();
             }
@@ -217,22 +236,50 @@ mod tests {
     use axum::http::HeaderValue;
 
     #[test]
-    fn resolves_forwarded_headers_only_from_loopback() {
+    fn resolves_forwarded_headers_only_from_explicitly_trusted_proxies() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("10.0.0.5, 198.51.100.77, 127.0.0.1"),
+            HeaderValue::from_static("10.0.0.5, 198.51.100.77"),
         );
         headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
 
         let loopback = Some("127.0.0.1:42311".parse::<SocketAddr>().unwrap());
-        assert_eq!(resolve_client_ip(loopback, &headers), "198.51.100.77");
+        // Default empty trusted_proxies ignores loopback XFF spoofing
+        assert_eq!(resolve_client_ip(loopback, &headers, &[]), "127.0.0.1");
+
+        let trusted = vec![
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "::1".parse::<IpAddr>().unwrap(),
+        ];
+        assert_eq!(
+            resolve_client_ip(loopback, &headers, &trusted),
+            "198.51.100.77"
+        );
 
         let loopback_v6 = Some("[::1]:42311".parse::<SocketAddr>().unwrap());
-        assert_eq!(resolve_client_ip(loopback_v6, &headers), "198.51.100.77");
+        assert_eq!(
+            resolve_client_ip(loopback_v6, &headers, &trusted),
+            "198.51.100.77"
+        );
+
+        // Single-hop rule: if local client connects via trusted proxy and injects leftmost XFF,
+        // proxy appends 127.0.0.1 at the end; we take the single rightmost hop (127.0.0.1), NOT 8.8.8.8.
+        let mut local_spoof = HeaderMap::new();
+        local_spoof.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("8.8.8.8, 127.0.0.1"),
+        );
+        assert_eq!(
+            resolve_client_ip(loopback, &local_spoof, &trusted),
+            "127.0.0.1"
+        );
 
         let external = Some("192.0.2.50:42311".parse::<SocketAddr>().unwrap());
-        assert_eq!(resolve_client_ip(external, &headers), "192.0.2.50");
+        assert_eq!(
+            resolve_client_ip(external, &headers, &trusted),
+            "192.0.2.50"
+        );
     }
 
     #[test]

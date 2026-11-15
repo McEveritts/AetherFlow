@@ -191,7 +191,7 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Router Construction (`backend/api/routes.go`)
+// Router Construction
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn build_router() -> Router {
@@ -600,7 +600,7 @@ fn build_v1_router() -> Router {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Health, Metrics & OpenAPI Handlers (`health.go`, `metrics.go`, `openapi.go`)
+// Health, Metrics & OpenAPI Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn health_check() -> Json<serde_json::Value> {
@@ -738,7 +738,7 @@ async fn get_openapi_spec() -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardware, Metrics, Services & Marketplace (`marketplace.go`, `routes.go`)
+// Hardware, Metrics, Services & Marketplace
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn get_system_metrics() -> Json<af_models::SystemMetrics> {
@@ -4774,7 +4774,7 @@ fn build_single_package_update_response(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Settings, Profile & Users (`settings.go`, `users.go`)
+// Settings, Profile & Users
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

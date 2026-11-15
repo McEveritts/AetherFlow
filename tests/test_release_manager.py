@@ -1087,6 +1087,18 @@ os.execvp(inner[0], inner)
         self.assertTrue(fresh_stage.exists())
         self.assertTrue(fresh_native.exists())
 
+    def test_stage0_migrates_legacy_v3_slot_current_backend_db_and_env(self):
+        v3_slot = self.releases / "v3.2.5"
+        (v3_slot / "backend" / "data").mkdir(parents=True)
+        self.write_db(v3_slot / "backend" / "data" / "aetherflow.sqlite", "v3-slot-marker")
+        (v3_slot / "backend" / ".env").write_text("JWT_SECRET=slot-secret-value\n")
+        self.current.symlink_to(v3_slot)
+
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.marker(self.data / "aetherflow.sqlite"), "v3-slot-marker")
+        self.assertEqual(self.env_file.read_text(), "JWT_SECRET=slot-secret-value\n")
+
 
 if __name__ == "__main__":
     unittest.main()

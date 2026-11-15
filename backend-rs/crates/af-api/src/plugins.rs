@@ -1012,19 +1012,41 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(PathBuf, Vec<String>)> {
-    if !manifest.backend.binary_name.trim().is_empty() {
-        for rel in [
-            format!(
-                "backend-rs/target/release/{}",
-                manifest.backend.binary_name.trim()
-            ),
-            format!(
-                "backend-rs/target/debug/{}",
-                manifest.backend.binary_name.trim()
-            ),
-            format!("bin/{}", manifest.backend.binary_name.trim()),
-            manifest.backend.binary_name.trim().to_string(),
+    let bin = manifest.backend.binary_name.trim();
+    if !bin.is_empty() {
+        let mut candidates = Vec::with_capacity(8);
+
+        // 1. Honor explicit Cargo manifest directory from `backend.manifest_path`
+        // (e.g. `backend/Cargo.toml` -> `backend/target/{release,debug}/<bin>`).
+        let manifest_path_trimmed = manifest.backend.manifest_path.trim();
+        if !manifest_path_trimmed.is_empty() {
+            if let Some(parent) = std::path::Path::new(manifest_path_trimmed).parent() {
+                let parent_str = parent.to_string_lossy().trim_matches('/').to_string();
+                if parent_str.is_empty() || parent_str == "." {
+                    candidates.push(format!("target/release/{bin}"));
+                    candidates.push(format!("target/debug/{bin}"));
+                } else {
+                    candidates.push(format!("{parent_str}/target/release/{bin}"));
+                    candidates.push(format!("{parent_str}/target/debug/{bin}"));
+                }
+            }
+        }
+
+        // 2. Canonical Rust plugin workspace target & packaged binary layouts.
+        for default_rel in [
+            format!("backend-rs/target/release/{bin}"),
+            format!("backend-rs/target/debug/{bin}"),
+            format!("backend/target/release/{bin}"),
+            format!("backend/target/debug/{bin}"),
+            format!("bin/{bin}"),
+            bin.to_string(),
         ] {
+            if !candidates.contains(&default_rel) {
+                candidates.push(default_rel);
+            }
+        }
+
+        for rel in candidates {
             if let Ok(path) = validate_relative_plugin_subpath(&manifest.plugin_dir, &rel, true) {
                 if path.is_file() {
                     return Some((path, Vec::new()));
@@ -2546,7 +2568,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resolve_plugin_executable_prefers_backend_rs_and_ignores_legacy_backend_target() {
+    fn resolve_plugin_executable_supports_sdk_template_manifest_path_and_backend_rs() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = env::temp_dir().join(format!("af-plugin-bin-test-{}", uuid::Uuid::new_v4()));
@@ -2574,6 +2596,7 @@ pub(crate) mod tests {
             granted_scopes: Vec::new(),
             lifecycle_hooks: PluginLifecycleHooks::default(),
             backend: PluginBackendSpec {
+                manifest_path: "backend/Cargo.toml".to_string(),
                 binary_name: "my-plugin-bin".to_string(),
                 ..Default::default()
             },
@@ -2581,25 +2604,37 @@ pub(crate) mod tests {
             plugin_dir: tmp.clone(),
         };
 
-        // 1. Legacy Go/old-layout backend/target/release must NOT be picked up.
-        make_exec("backend/target/release/my-plugin-bin");
-        assert!(
-            resolve_plugin_executable(&manifest).is_none(),
-            "legacy backend/target/release must not be resolved"
-        );
-
-        // 2. Fallback order: root <bin> -> bin/<bin> -> backend-rs/target/debug/<bin> -> backend-rs/target/release/<bin>.
+        // 1. Fallback order from lowest to highest priority when manifest_path = "backend/Cargo.toml":
+        // root <bin> -> bin/<bin> -> backend-rs/target/debug -> backend-rs/target/release -> backend/target/debug -> backend/target/release.
         let root_bin = make_exec("my-plugin-bin");
         assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, root_bin);
 
         let bin_dir_bin = make_exec("bin/my-plugin-bin");
         assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, bin_dir_bin);
 
-        let debug_bin = make_exec("backend-rs/target/debug/my-plugin-bin");
-        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, debug_bin);
+        let debug_rs_bin = make_exec("backend-rs/target/debug/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            debug_rs_bin
+        );
 
-        let release_bin = make_exec("backend-rs/target/release/my-plugin-bin");
-        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, release_bin);
+        let release_rs_bin = make_exec("backend-rs/target/release/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            release_rs_bin
+        );
+
+        let sdk_debug_bin = make_exec("backend/target/debug/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            sdk_debug_bin
+        );
+
+        let sdk_release_bin = make_exec("backend/target/release/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            sdk_release_bin
+        );
 
         // Clearing binary_name skips candidate resolution.
         manifest.backend.binary_name.clear();

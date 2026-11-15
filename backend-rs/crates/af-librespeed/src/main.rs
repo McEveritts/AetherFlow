@@ -1,6 +1,7 @@
 use af_librespeed::config::{parse_env_cli, CliAction, Config, VERSION_STRING};
 use af_librespeed::db::TelemetryVault;
 use af_librespeed::routes::build_router;
+use af_librespeed::tls::{build_tls_acceptor, serve_tls};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::process;
@@ -48,10 +49,19 @@ async fn run() -> Result<()> {
     };
 
     let config = Config::load_from_path(&config_path)?;
+    config.validate_listener_security()?;
+    let tls_acceptor = if config.enable_tls {
+        Some(build_tls_acceptor(&config)?)
+    } else {
+        None
+    };
+
     let vault = if config.telemetry_enabled() {
-        let opened = TelemetryVault::open(&config.database_file)?;
+        let opened =
+            TelemetryVault::open_with_max_rows(&config.database_file, config.max_telemetry_rows)?;
         info!(
             db_path = %opened.path().display(),
+            max_rows = config.max_telemetry_rows,
             "Initialized SQLite WAL telemetry vault"
         );
         Some(opened)
@@ -66,20 +76,32 @@ async fn run() -> Result<()> {
         .with_context(|| format!("failed to bind {bind_addr}"))?;
 
     let app = build_router(config.clone(), vault);
-    info!(
-        addr = %bind_addr,
-        url_base = %config.url_base,
-        assets = %config.assets_path.display(),
-        "Starting native Rust LibreSpeed backend"
-    );
-
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("HTTP server terminated unexpectedly")?;
+    if let Some(acceptor) = tls_acceptor {
+        info!(
+            addr = %bind_addr,
+            url_base = %config.url_base,
+            assets = %config.assets_path.display(),
+            cert = %config.tls_cert_file.display(),
+            "Starting native Rust LibreSpeed HTTPS backend (TLS 1.2/1.3)"
+        );
+        serve_tls(listener, acceptor, app, shutdown_signal())
+            .await
+            .context("HTTPS server terminated unexpectedly")?;
+    } else {
+        info!(
+            addr = %bind_addr,
+            url_base = %config.url_base,
+            assets = %config.assets_path.display(),
+            "Starting native Rust LibreSpeed HTTP backend"
+        );
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("HTTP server terminated unexpectedly")?;
+    }
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! Background Orchestration Workers (`metrics_recorder.go`, `af_heal.go`, `smart_backup.go`, `app_updates.go`).
+//! Background Orchestration Workers.
 //!
 //! Provides four background tasks and on-demand package update utilities:
 //! 1. [`start_metrics_recorder`] — 60-second system metrics snapshotter & hourly 7-day retention pruner.
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Metrics History Recorder (`backend/services/metrics_recorder.go`)
+// 1. Metrics History Recorder
 // ─────────────────────────────────────────────────────────────────────────────
 
 static METRICS_RECORDER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -262,7 +262,7 @@ fn prune_old_metrics() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Auto-Heal Worker `af_heal` (`backend/services/af_heal.go`)
+// 2. Auto-Heal Worker `af_heal`
 // ─────────────────────────────────────────────────────────────────────────────
 
 static HEAL_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -665,7 +665,7 @@ fn insert_user_notification(user_id: i64, level: &str, title: &str, message: &st
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Smart Backup Scheduler (`backend/services/smart_backup.go`)
+// 3. Smart Backup Scheduler
 // ─────────────────────────────────────────────────────────────────────────────
 
 static SMART_BACKUP_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -835,7 +835,7 @@ fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Package Update Watcher & On-Demand Checkers (`backend/services/app_updates.go`)
+// 4. Package Update Watcher & On-Demand Checkers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Represents the cached update status for an individual marketplace package,
@@ -5240,7 +5240,7 @@ fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. MediaFlow Worker Poller (`backend/services/mediaflow.go`)
+// 5. MediaFlow Worker Poller
 // ─────────────────────────────────────────────────────────────────────────────
 
 static MEDIAFLOW_POLLER_ACTIVE: AtomicBool = AtomicBool::new(false);

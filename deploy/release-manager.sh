@@ -1062,14 +1062,45 @@ ensure_fhs_layout() {
 
     resolve_db_path
 
+    # Resolve any confined v3 release slot symlink (e.g. /opt/AetherFlow/current -> releases/v3.x.y)
+    # so upgrades from slot-based v3 layouts also migrate backend/data/aetherflow.sqlite and backend/.env.
+    local -a legacy_slot_roots=()
+    local slot_candidate resolved_slot canonical_releases_dir canonical_repo_dir canonical_leg_root
+    canonical_releases_dir="$(readlink -f "${RELEASES_DIR:-}" 2>/dev/null || true)"
+    canonical_repo_dir="$(readlink -f "${REPO_DIR:-}" 2>/dev/null || true)"
+    canonical_leg_root="$(readlink -f "${LEGACY_OPT_ROOT:-}" 2>/dev/null || true)"
+    for slot_candidate in "${CURRENT_LINK:-}" "${REPO_DIR:-}/current" "${LEGACY_OPT_ROOT:-}/current"; do
+        [[ -n "${slot_candidate}" && -e "${slot_candidate}" ]] || continue
+        resolved_slot="$(readlink -f "${slot_candidate}" 2>/dev/null || true)"
+        [[ -n "${resolved_slot}" && -d "${resolved_slot}" ]] || continue
+        if [[ ( -n "${canonical_releases_dir}" && "${resolved_slot}" == "${canonical_releases_dir}/"* ) || \
+              ( -n "${canonical_repo_dir}" && "${resolved_slot}" == "${canonical_repo_dir}/"* ) || \
+              ( -n "${canonical_leg_root}" && "${resolved_slot}" == "${canonical_leg_root}/"* ) ]]; then
+            legacy_slot_roots+=("${resolved_slot}")
+        fi
+    done
+
     # Only migrate a legacy DB when the resolved live path IS the FHS file and
     # that file is missing. Copying into DATA_DIR while the process uses another
     # path creates a divergent stale database (this host's /var/lib copy).
     local fhs_db="${CONFIG_DATA_DIR}/${SQLITE_DB}"
     if [[ "${RESOLVED_DB_PATH}" == "${fhs_db}" && ! -f "${fhs_db}" ]]; then
+        local -a legacy_db_candidates=(
+            "${LEGACY_OPT_ROOT}/backend/data/${SQLITE_DB}"
+            "${LEGACY_OPT_ROOT}/backend/${SQLITE_DB}"
+        )
+        if [[ ${#legacy_slot_roots[@]} -gt 0 ]]; then
+            local slot_root
+            for slot_root in "${legacy_slot_roots[@]}"; do
+                legacy_db_candidates+=(
+                    "${slot_root}/backend/data/${SQLITE_DB}"
+                    "${slot_root}/backend/${SQLITE_DB}"
+                )
+            done
+        fi
         local legacy_db
-        for legacy_db in "${LEGACY_OPT_ROOT}/backend/data/${SQLITE_DB}" "${LEGACY_OPT_ROOT}/backend/${SQLITE_DB}"; do
-            if [[ -f "${legacy_db}" ]]; then
+        for legacy_db in "${legacy_db_candidates[@]}"; do
+            if [[ -f "${legacy_db}" && ! -L "${legacy_db}" ]]; then
                 if [[ "${DRY_RUN}" == true ]]; then
                     log_info "[DRY-RUN] Would migrate legacy SQLite database from ${legacy_db} to ${fhs_db}; dry-run does not write outside ${DRY_RUN_ROOT}."
                     break
@@ -1094,9 +1125,22 @@ ensure_fhs_layout() {
 
     # Migrate legacy .env only on a real deploy. Dry-run must not copy secrets.
     if [[ "${DRY_RUN}" == false && ! -f "${CONFIG_ENV_FILE}" ]]; then
+        local -a legacy_env_candidates=(
+            "${LEGACY_OPT_ROOT}/backend/.env"
+            "${LEGACY_OPT_ROOT}/.env"
+        )
+        if [[ ${#legacy_slot_roots[@]} -gt 0 ]]; then
+            local slot_root_env
+            for slot_root_env in "${legacy_slot_roots[@]}"; do
+                legacy_env_candidates+=(
+                    "${slot_root_env}/backend/.env"
+                    "${slot_root_env}/.env"
+                )
+            done
+        fi
         local legacy_env
-        for legacy_env in "${LEGACY_OPT_ROOT}/backend/.env" "${LEGACY_OPT_ROOT}/.env"; do
-            if [[ -f "${legacy_env}" ]]; then
+        for legacy_env in "${legacy_env_candidates[@]}"; do
+            if [[ -f "${legacy_env}" && ! -L "${legacy_env}" ]]; then
                 log_info "Migrating legacy environment secrets from ${legacy_env} to ${CONFIG_ENV_FILE}..."
                 mkdir -p "$(dirname "${CONFIG_ENV_FILE}")"
                 cp -pf "${legacy_env}" "${CONFIG_ENV_FILE}"

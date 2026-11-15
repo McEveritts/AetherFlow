@@ -5,7 +5,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/opt/librespeed/settings.toml";
-pub const VERSION_STRING: &str = "speedtest-backend 4.0.0";
+pub const VERSION_STRING: &str = concat!(
+    "speedtest-backend ",
+    env!("AF_LIBRESPEED_EFFECTIVE_VERSION")
+);
+pub const DEFAULT_MAX_TELEMETRY_ROWS: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -18,6 +22,11 @@ pub struct Config {
     pub database_type: String,
     pub database_file: PathBuf,
     pub enable_id_obfuscation: bool,
+    pub enable_tls: bool,
+    pub tls_cert_file: PathBuf,
+    pub tls_key_file: PathBuf,
+    pub trusted_proxies: Vec<IpAddr>,
+    pub max_telemetry_rows: usize,
 }
 
 impl Default for Config {
@@ -32,6 +41,11 @@ impl Default for Config {
             database_type: "sqlite".to_string(),
             database_file: PathBuf::from("/opt/librespeed/speedtest.db"),
             enable_id_obfuscation: false,
+            enable_tls: false,
+            tls_cert_file: PathBuf::new(),
+            tls_key_file: PathBuf::new(),
+            trusted_proxies: Vec::new(),
+            max_telemetry_rows: DEFAULT_MAX_TELEMETRY_ROWS,
         }
     }
 }
@@ -48,6 +62,21 @@ impl Config {
     pub fn stats_locked(&self) -> bool {
         let trimmed = self.statistics_password.trim();
         trimmed.is_empty() || self.statistics_password == "PASSWORD"
+    }
+
+    pub fn validate_listener_security(&self) -> Result<()> {
+        if self.enable_tls
+            && (self.tls_cert_file.as_os_str().is_empty()
+                || self.tls_key_file.as_os_str().is_empty())
+        {
+            bail!(
+                "enable_tls=true requires non-empty tls_cert_file and tls_key_file in settings.toml"
+            );
+        }
+        if self.max_telemetry_rows == 0 {
+            bail!("max_telemetry_rows must be greater than 0");
+        }
+        Ok(())
     }
 
     pub fn socket_addr(&self) -> Result<SocketAddr> {
@@ -134,12 +163,40 @@ impl Config {
                 "enable_id_obfuscation" => {
                     cfg.enable_id_obfuscation = val.into_bool("enable_id_obfuscation")?;
                 }
+                "enable_tls" => {
+                    cfg.enable_tls = val.into_bool("enable_tls")?;
+                }
+                "tls_cert_file" => {
+                    let s = val.into_string("tls_cert_file")?;
+                    cfg.tls_cert_file = PathBuf::from(s.trim());
+                }
+                "tls_key_file" => {
+                    let s = val.into_string("tls_key_file")?;
+                    cfg.tls_key_file = PathBuf::from(s.trim());
+                }
+                "proxyprotocol_port" => {
+                    let port = val.into_port("proxyprotocol_port")?;
+                    if port != 0 {
+                        bail!(
+                            "line {line_num}: proxyprotocol_port = {port} is not supported; set proxyprotocol_port = 0 and terminate PROXY protocol at your reverse proxy"
+                        );
+                    }
+                }
+                "trusted_proxies" => {
+                    cfg.trusted_proxies = val
+                        .into_ip_list("trusted_proxies")
+                        .with_context(|| format!("line {line_num}: invalid trusted_proxies"))?;
+                }
+                "max_telemetry_rows" => {
+                    cfg.max_telemetry_rows = val.into_positive_usize("max_telemetry_rows")?;
+                }
                 _ => {
-                    // Ignore legacy or custom user-tuning TOML keys gracefully.
+                    // Ignore non-security user-tuning TOML keys gracefully.
                 }
             }
         }
 
+        cfg.validate_listener_security()?;
         Ok(cfg)
     }
 }
@@ -206,6 +263,7 @@ pub fn parse_env_cli() -> Result<CliAction> {
 #[derive(Debug, Clone, PartialEq)]
 enum TomlScalar {
     Str(String),
+    StrList(Vec<String>),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -246,6 +304,52 @@ impl TomlScalar {
                 .map_err(|_| anyhow!("{key} invalid port string: {s:?}")),
             other => bail!("{key} must be an integer port, got {other:?}"),
         }
+    }
+
+    fn into_positive_usize(self, key: &str) -> Result<usize> {
+        let parsed = match self {
+            TomlScalar::Int(n) => usize::try_from(n)
+                .map_err(|_| anyhow!("{key} must be a positive integer, got {n}"))?,
+            TomlScalar::Str(s) => s
+                .trim()
+                .replace('_', "")
+                .parse::<usize>()
+                .map_err(|_| anyhow!("{key} invalid integer string: {s:?}"))?,
+            other => bail!("{key} must be a positive integer, got {other:?}"),
+        };
+        if parsed == 0 {
+            bail!("{key} must be greater than 0");
+        }
+        Ok(parsed)
+    }
+
+    fn into_ip_list(self, key: &str) -> Result<Vec<IpAddr>> {
+        let raw_items: Vec<String> = match self {
+            TomlScalar::Str(s) => s
+                .split(',')
+                .map(str::trim)
+                .filter(|tok| !tok.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+            TomlScalar::StrList(items) => items
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            other => {
+                bail!("{key} must be a comma-separated IP string or string array, got {other:?}")
+            }
+        };
+
+        let mut ips = Vec::with_capacity(raw_items.len());
+        for tok in raw_items {
+            let ip = crate::redact::parse_ip_token(&tok)
+                .ok_or_else(|| anyhow!("invalid IP address {tok:?} in {key}"))?;
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        }
+        Ok(ips)
     }
 }
 
@@ -338,6 +442,29 @@ fn parse_value(raw: &str) -> Result<TomlScalar> {
     if raw.is_empty() {
         bail!("empty value");
     }
+    if raw.starts_with('[') {
+        let stripped = strip_unquoted_comment(raw).trim();
+        let inner = stripped
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .ok_or_else(|| anyhow!("unterminated array value"))?
+            .trim();
+        if inner.is_empty() {
+            return Ok(TomlScalar::StrList(Vec::new()));
+        }
+        let mut items = Vec::new();
+        for part in inner.split(',') {
+            let trimmed_part = part.trim();
+            if trimmed_part.is_empty() {
+                continue;
+            }
+            match parse_value(trimmed_part)? {
+                TomlScalar::Str(s) => items.push(s),
+                other => bail!("expected string element in array, got {other:?}"),
+            }
+        }
+        return Ok(TomlScalar::StrList(items));
+    }
     if raw.starts_with('"') {
         let mut escaped = false;
         let mut end_idx = None;
@@ -429,6 +556,33 @@ custom_tuning = "keep-me"
             PathBuf::from("/var/lib/librespeed/speedtest.db")
         );
         assert!(cfg.enable_id_obfuscation);
+        assert!(!cfg.enable_tls);
+        assert!(cfg.trusted_proxies.is_empty());
+        assert_eq!(cfg.max_telemetry_rows, DEFAULT_MAX_TELEMETRY_ROWS);
+    }
+
+    #[test]
+    fn fails_closed_on_incomplete_tls_or_nonzero_proxyprotocol_or_bad_trusted_proxy() {
+        assert!(Config::parse_toml_str("enable_tls = true\n").is_err());
+        assert!(Config::parse_toml_str(
+            "enable_tls = true\ntls_cert_file = \"/etc/ssl/cert.pem\"\n"
+        )
+        .is_err());
+        assert!(Config::parse_toml_str("proxyprotocol_port = 8990\n").is_err());
+        assert!(Config::parse_toml_str("max_telemetry_rows = 0\n").is_err());
+        assert!(Config::parse_toml_str("trusted_proxies = \"not-an-ip\"\n").is_err());
+
+        let ok = Config::parse_toml_str(
+            "enable_tls = true\n\
+             tls_cert_file = \"/etc/ssl/cert.pem\"\n\
+             tls_key_file = \"/etc/ssl/key.pem\"\n\
+             trusted_proxies = [\"127.0.0.1\", \"::1\"]\n\
+             max_telemetry_rows = 5000\n",
+        )
+        .expect("valid security config");
+        assert!(ok.enable_tls);
+        assert_eq!(ok.trusted_proxies.len(), 2);
+        assert_eq!(ok.max_telemetry_rows, 5000);
     }
 
     #[test]

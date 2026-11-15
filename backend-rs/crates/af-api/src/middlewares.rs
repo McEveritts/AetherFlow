@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 mod security_regressions;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 1. Subdomain & Host Resolution (`backend/services/blueprint_lifecycle.go`)
+// 1. Subdomain & Host Resolution
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn strip_host_port_and_dot(raw_host: &str) -> String {
@@ -209,7 +209,7 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 2. Application Subdomain Reverse Proxy (`backend/api/ingress_handlers.go`)
+// 2. Application Subdomain Reverse Proxy
 // ──────────────────────────────────────────────────────────────────────────────
 
 static PRIVATE_IP_RE: Lazy<Regex> = Lazy::new(|| {
@@ -969,7 +969,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 3. Host Header Validation Middleware (`backend/api/auth.go`)
+// 3. Host Header Validation Middleware
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn matches_configured_env_host(clean_host: &str) -> bool {
@@ -1110,7 +1110,7 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 4. Per-IP Sliding-Window Rate Limiter Middlewares (`backend/api/ratelimit.go`)
+// 4. Per-IP Sliding-Window Rate Limiter Middlewares
 // ──────────────────────────────────────────────────────────────────────────────
 
 struct SlidingWindowLimiter {
@@ -1220,7 +1220,7 @@ pub async fn ai_rate_limit_middleware(req: Request, next: Next) -> Response {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 5. Storage Quota Upload Guard Middleware (`backend/api/quota_handlers.go`)
+// 5. Storage Quota Upload Guard Middleware
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn quota_upload_guard_middleware(req: Request, next: Next) -> Response {
