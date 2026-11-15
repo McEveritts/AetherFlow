@@ -1407,19 +1407,22 @@ pull_prebuilt_artifact() {
         return 1
     fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
-    if [[ -f "${RELEASE_DIR}/af" && ! -L "${RELEASE_DIR}/af" ]]; then
-        chmod +x "${RELEASE_DIR}/af"
-        mkdir -p "${RELEASE_DIR}/bin"
-        if [[ ! -e "${RELEASE_DIR}/bin/af" && ! -L "${RELEASE_DIR}/bin/af" ]]; then
-            cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
+    local companion_bin
+    for companion_bin in af speedtest-backend; do
+        if [[ -f "${RELEASE_DIR}/${companion_bin}" && ! -L "${RELEASE_DIR}/${companion_bin}" ]]; then
+            chmod +x "${RELEASE_DIR}/${companion_bin}"
+            mkdir -p "${RELEASE_DIR}/bin"
+            if [[ ! -e "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
+                cp -f "${RELEASE_DIR}/${companion_bin}" "${RELEASE_DIR}/bin/${companion_bin}"
+            fi
+            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
+        elif [[ -f "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
+            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
+            rm -f "${RELEASE_DIR}/${companion_bin}"
+            cp -f "${RELEASE_DIR}/bin/${companion_bin}" "${RELEASE_DIR}/${companion_bin}"
+            chmod +x "${RELEASE_DIR}/${companion_bin}"
         fi
-        chmod +x "${RELEASE_DIR}/bin/af"
-    elif [[ -f "${RELEASE_DIR}/bin/af" && ! -L "${RELEASE_DIR}/bin/af" ]]; then
-        chmod +x "${RELEASE_DIR}/bin/af"
-        rm -f "${RELEASE_DIR}/af"
-        cp -f "${RELEASE_DIR}/bin/af" "${RELEASE_DIR}/af"
-        chmod +x "${RELEASE_DIR}/af"
-    fi
+    done
     if ! stage_running_release_manager; then
         rm -rf "${tmp_dir}"
         return 1
@@ -1472,46 +1475,50 @@ build_from_source() {
         return 1
     fi
 
-    log_info "Embedding frontend static bundle into web/dist and backend/web/dist..."
-    rm -rf "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
-    mkdir -p "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
+    log_info "Embedding frontend static bundle into web/dist..."
+    rm -rf "${RELEASE_DIR}/web/dist"
+    mkdir -p "${RELEASE_DIR}/web/dist"
     cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/" || { log_error "Failed staging web/dist."; return 1; }
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/" || { log_error "Failed staging backend/web/dist."; return 1; }
-    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" || ! -f "${RELEASE_DIR}/backend/web/dist/index.html" ]]; then
+    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" ]]; then
         log_error "Frontend static export missing index.html."
         return 1
     fi
 
-    if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
-        log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
-        cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
-        local -a cargo_locked_args=(--locked)
-        if [[ ! -f Cargo.lock ]]; then
-            if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
-                cargo_locked_args=()
-            else
-                log_error "Missing backend-rs/Cargo.lock. Refusing unlocked source build."
-                return 1
-            fi
-        fi
-        cargo build --release "${cargo_locked_args[@]}" --bin aetherflow-api --bin af >> "${LOG_FILE}" 2>&1 || return 1
-        cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
-        if [[ -f "target/release/af" ]]; then
-            cp -f "target/release/af" "${RELEASE_DIR}/af"
-            mkdir -p "${RELEASE_DIR}/bin"
-            cp -f "target/release/af" "${RELEASE_DIR}/bin/af"
-            chmod +x "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-        fi
-    else
-        log_info "Compiling single-binary AetherFlow Go control plane..."
-        cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
-        export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-        "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1 || return 1
+    if [[ ! -d "${RELEASE_DIR}/backend-rs" ]] || ! command -v cargo &>/dev/null; then
+        log_error "Rust backend source (${RELEASE_DIR}/backend-rs) and cargo toolchain are required for source builds."
+        return 1
     fi
+
+    log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
+    cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
+    local -a cargo_locked_args=(--locked)
+    if [[ ! -f Cargo.lock ]]; then
+        if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
+            cargo_locked_args=()
+        else
+            log_error "Missing backend-rs/Cargo.lock. Refusing unlocked source build."
+            return 1
+        fi
+    fi
+    local -a cargo_bin_args=(--bin aetherflow-api --bin af)
+    if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
+        cargo_bin_args+=(--bin speedtest-backend)
+    fi
+    cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1 || return 1
+    cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
+    local built_bin
+    for built_bin in af speedtest-backend; do
+        if [[ -f "target/release/${built_bin}" ]]; then
+            cp -f "target/release/${built_bin}" "${RELEASE_DIR}/${built_bin}"
+            mkdir -p "${RELEASE_DIR}/bin"
+            cp -f "target/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+            chmod +x "${RELEASE_DIR}/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+        fi
+    done
     chmod +x "${RELEASE_DIR}/aetherflow-api"
 
     # Retain only runtime essentials (binary, af, config, packages, deploy, .version)
-    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist" "${RELEASE_DIR}/backend-rs/target"
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend-rs/target"
 }
 
 simulate_offline_artifact() {
@@ -1622,9 +1629,15 @@ prepare_release_permissions() {
     find "${RELEASE_DIR}" -type d -exec chmod 0755 {} + || return 1
     find "${RELEASE_DIR}" -type f -exec chmod a+r,go-w {} + || return 1
     chmod 0755 "${RELEASE_DIR}/aetherflow-api" || return 1
-    if [[ -f "${RELEASE_DIR}/af" ]]; then
-        chmod 0755 "${RELEASE_DIR}/af" || return 1
-    fi
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        if [[ -f "${RELEASE_DIR}/${companion_chmod}" ]]; then
+            chmod 0755 "${RELEASE_DIR}/${companion_chmod}" || return 1
+        fi
+        if [[ -f "${RELEASE_DIR}/bin/${companion_chmod}" ]]; then
+            chmod 0755 "${RELEASE_DIR}/bin/${companion_chmod}" || return 1
+        fi
+    done
     if [[ "${DRY_RUN}" == false ]]; then
         if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
             if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then

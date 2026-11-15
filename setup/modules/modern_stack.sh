@@ -49,25 +49,6 @@ _af_is_v4_release_tag() {
     [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
-_install_go() {
-    if ! _af_modern_from_source_enabled; then
-        echo "Prebuilt v4 Rust release mode active; skipping Go compiler installation."
-        return 0
-    fi
-
-    # Install Go Compiler (only when --from-source is explicitly requested)
-    if ! command -v go >/dev/null 2>&1; then
-        if [[ ! -s "${AF_GO_ARCHIVE}" ]]; then
-            _af_prefetch_runtime_archives || return 1
-        fi
-
-        rm -rf /usr/local/go
-        tar -C /usr/local -xzf "${AF_GO_ARCHIVE}" || return 1
-        rm -f "${AF_GO_ARCHIVE}"
-    fi
-
-    _af_ensure_path_entry "/usr/local/go/bin" 'export PATH=/usr/local/go/bin:$PATH'
-}
 
 _install_node() {
     if ! _af_modern_from_source_enabled; then
@@ -274,19 +255,22 @@ _stage_prebuilt_release_archive() {
     fi
 
     chmod 0755 "${release_dir}/aetherflow-api"
-    if [[ -f "${release_dir}/af" && ! -L "${release_dir}/af" ]]; then
-        chmod 0755 "${release_dir}/af"
-        mkdir -p "${release_dir}/bin"
-        if [[ ! -e "${release_dir}/bin/af" && ! -L "${release_dir}/bin/af" ]]; then
-            cp -f "${release_dir}/af" "${release_dir}/bin/af"
+    local companion_bin
+    for companion_bin in af speedtest-backend; do
+        if [[ -f "${release_dir}/${companion_bin}" && ! -L "${release_dir}/${companion_bin}" ]]; then
+            chmod 0755 "${release_dir}/${companion_bin}"
+            mkdir -p "${release_dir}/bin"
+            if [[ ! -e "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
+                cp -f "${release_dir}/${companion_bin}" "${release_dir}/bin/${companion_bin}"
+            fi
+            chmod 0755 "${release_dir}/bin/${companion_bin}"
+        elif [[ -f "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
+            chmod 0755 "${release_dir}/bin/${companion_bin}"
+            rm -f "${release_dir}/${companion_bin}"
+            cp -f "${release_dir}/bin/${companion_bin}" "${release_dir}/${companion_bin}"
+            chmod 0755 "${release_dir}/${companion_bin}"
         fi
-        chmod 0755 "${release_dir}/bin/af"
-    elif [[ -f "${release_dir}/bin/af" && ! -L "${release_dir}/bin/af" ]]; then
-        chmod 0755 "${release_dir}/bin/af"
-        rm -f "${release_dir}/af"
-        cp -f "${release_dir}/bin/af" "${release_dir}/af"
-        chmod 0755 "${release_dir}/af"
-    fi
+    done
 
     if [[ ! -f "${release_dir}/.version" || -L "${release_dir}/.version" || ! -s "${release_dir}/.version" ]]; then
         echo "[ERROR] Extracted release archive is missing a non-empty regular .version stamp." >&2
@@ -336,8 +320,11 @@ _stage_prebuilt_release_archive() {
     find "${release_dir}" -type d -exec chmod 0755 {} +
     find "${release_dir}" -type f -exec chmod a+r,go-w {} +
     chmod 0755 "${release_dir}/aetherflow-api"
-    [[ -f "${release_dir}/af" ]] && chmod 0755 "${release_dir}/af"
-    [[ -f "${release_dir}/bin/af" ]] && chmod 0755 "${release_dir}/bin/af"
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
+        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+    done
 
     if [[ -L "${current_link}" ]]; then
         readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
@@ -528,16 +515,15 @@ _build_modern_stack_from_source() {
             return 1
         }
 
-        # Populate both neutral web/dist and legacy backend/web/dist for single-binary embedding
-        mkdir -p "${af_root}/web/dist" "${af_root}/backend/web/dist"
-        rm -rf "${af_root}/web/dist/"* "${af_root}/backend/web/dist/"*
+        # Populate web/dist for single-binary rust-embed asset embedding
+        mkdir -p "${af_root}/web/dist"
+        rm -rf "${af_root}/web/dist/"*
         if [ -d "${af_root}/frontend/out" ]; then
             cp -r "${af_root}/frontend/out/"* "${af_root}/web/dist/"
-            cp -r "${af_root}/frontend/out/"* "${af_root}/backend/web/dist/"
         fi
     fi
 
-    # ── Compile Single Binary with Embedded UI Assets (Rust preferred, Go explicit fallback) ──
+    # ── Compile Single Binary with Embedded UI Assets (Rust backend-rs only) ──
     local epoch
     epoch="$(date +%s)"
     local release_dir="${af_root}/releases/${epoch}"
@@ -556,57 +542,43 @@ _build_modern_stack_from_source() {
                     exit 1
                 fi
             fi
-            cargo build --release "${locked_args[@]}" --bin aetherflow-api --bin af || exit 1
-            cp -f "${af_root}/backend-rs/target/release/aetherflow-api" "${release_dir}/aetherflow-api"
-            if [[ -f "${af_root}/backend-rs/target/release/af" ]]; then
-                cp -f "${af_root}/backend-rs/target/release/af" "${release_dir}/af"
-                mkdir -p "${release_dir}/bin"
-                cp -f "${af_root}/backend-rs/target/release/af" "${release_dir}/bin/af"
+            local -a bin_args=(--bin aetherflow-api --bin af)
+            if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
+                bin_args+=(--bin speedtest-backend)
             fi
+            cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
+            cp -f "${af_root}/backend-rs/target/release/aetherflow-api" "${release_dir}/aetherflow-api"
+            local built_bin
+            for built_bin in af speedtest-backend; do
+                if [[ -f "${af_root}/backend-rs/target/release/${built_bin}" ]]; then
+                    cp -f "${af_root}/backend-rs/target/release/${built_bin}" "${release_dir}/${built_bin}"
+                    mkdir -p "${release_dir}/bin"
+                    cp -f "${af_root}/backend-rs/target/release/${built_bin}" "${release_dir}/bin/${built_bin}"
+                fi
+            done
         ) || {
             rm -rf "${release_dir}"
             echo "Rust backend compilation failed." >&2
-            return 1
-        }
-    elif [ -d "${af_root}/backend" ]; then
-        have_backend=true
-        (
-            cd "${af_root}/backend" || exit 1
-            export PATH="/usr/local/go/bin:/usr/local/nodejs/bin:${PATH}"
-
-            # go-sqlite3 requires CGO (gcc)
-            _af_apt_install gcc build-essential || exit 1
-
-            mkdir -p "${af_root}/backend/data"
-
-            export GOOS=linux
-            export GOARCH=amd64
-            export CGO_ENABLED=1
-            /usr/local/go/bin/go build -o aetherflow-api main.go || exit 1
-            cp -f "${af_root}/backend/aetherflow-api" "${release_dir}/aetherflow-api"
-            /usr/local/go/bin/go clean -cache -modcache -testcache >/dev/null 2>&1 || true
-            rm -rf /tmp/go-build /root/.cache/go-build /root/go/pkg/mod "${AF_RUNTIME_CACHE_DIR}"
-        ) || {
-            rm -rf "${release_dir}"
-            echo "Backend compilation failed." >&2
             return 1
         }
     fi
 
     if [[ "${have_backend}" != "true" ]]; then
         rm -rf "${release_dir}"
-        echo "[ERROR] No backend source directory found under ${af_root}." >&2
+        echo "[ERROR] Rust backend source (${af_root}/backend-rs) and cargo toolchain are required for --from-source builds." >&2
         return 1
     fi
 
     [[ -d "${af_root}/config" ]] && cp -R "${af_root}/config" "${release_dir}/config"
-    [[ ! -d "${release_dir}/config" && -d "${af_root}/backend/config" ]] && cp -R "${af_root}/backend/config" "${release_dir}/config"
     [[ -d "${af_root}/packages" ]] && cp -R "${af_root}/packages" "${release_dir}/packages"
     [[ -d "${af_root}/deploy" ]] && cp -R "${af_root}/deploy" "${release_dir}/deploy"
     printf 'source-%s\n' "${epoch}" > "${release_dir}/.version"
     chmod 0755 "${release_dir}/aetherflow-api"
-    [[ -f "${release_dir}/af" ]] && chmod 0755 "${release_dir}/af"
-    [[ -f "${release_dir}/bin/af" ]] && chmod 0755 "${release_dir}/bin/af"
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
+        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+    done
 
     ln -sfn "${release_dir}" "${af_root}/current"
     mkdir -p "${af_root}/backend"

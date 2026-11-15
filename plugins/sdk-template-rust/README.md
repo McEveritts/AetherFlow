@@ -1,6 +1,6 @@
 # {{PLUGIN_NAME}} (Rust Plugin SDK Template)
 
-Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`).
+Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`), the sole supported first-party AetherFlow plugin SDK.
 
 ## Security & Runtime Architecture (`backend-rs` v4.0.0)
 
@@ -50,9 +50,9 @@ Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`).
 
 ## Development & Verification Flow
 
-1. Generate a Rust plugin scaffold:
+1. Generate a Rust plugin scaffold (defaults to `rust`):
    ```bash
-   bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin rust
+   bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin
    ```
 2. Run unit and contract tests in `backend/`:
    ```bash

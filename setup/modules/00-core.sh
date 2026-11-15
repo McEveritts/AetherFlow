@@ -31,10 +31,6 @@ function _af_build_jobs() {
 }
 
 AF_RUNTIME_CACHE_DIR="${AF_RUNTIME_CACHE_DIR:-/tmp/aetherflow-runtime-cache}"
-AF_GO_VERSION="${AF_GO_VERSION:-1.25.0}"
-AF_GO_ARCHIVE="${AF_RUNTIME_CACHE_DIR}/go${AF_GO_VERSION}.linux-amd64.tar.gz"
-AF_GO_URL="${AF_GO_URL:-https://go.dev/dl/go${AF_GO_VERSION}.linux-amd64.tar.gz}"
-AF_GO_SHA256="${AF_GO_SHA256:-2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613}"
 AF_NODE_VERSION="${AF_NODE_VERSION:-24.22.2}"
 AF_NODE_ARCHIVE="${AF_RUNTIME_CACHE_DIR}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz"
 AF_NODE_URL="${AF_NODE_URL:-https://nodejs.org/dist/v${AF_NODE_VERSION}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz}"
@@ -129,11 +125,6 @@ function _af_prefetch_runtime_archives() {
 	local pids=()
 
 	mkdir -p "${AF_RUNTIME_CACHE_DIR}"
-
-	if [[ ! -x /usr/local/go/bin/go ]] && [[ ! -s "${AF_GO_ARCHIVE}" ]]; then
-		(_af_download "${AF_GO_URL}" "${AF_GO_ARCHIVE}" "${AF_GO_SHA256}") &
-		pids+=("$!")
-	fi
 
 	if ! command -v node >/dev/null 2>&1 && [[ ! -s "${AF_NODE_ARCHIVE}" ]]; then
 		(_af_download "${AF_NODE_URL}" "${AF_NODE_ARCHIVE}" "${AF_NODE_SHA256}") &
