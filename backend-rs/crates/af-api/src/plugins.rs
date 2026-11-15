@@ -1015,11 +1015,11 @@ fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(Path
     if !manifest.backend.binary_name.trim().is_empty() {
         for rel in [
             format!(
-                "backend/target/release/{}",
+                "backend-rs/target/release/{}",
                 manifest.backend.binary_name.trim()
             ),
             format!(
-                "backend/target/debug/{}",
+                "backend-rs/target/debug/{}",
                 manifest.backend.binary_name.trim()
             ),
             format!("bin/{}", manifest.backend.binary_name.trim()),
@@ -2541,6 +2541,70 @@ pub(crate) mod tests {
             0,
             "grandchild pid {gc_pid} must be terminated when plugin process group stops"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_plugin_executable_prefers_backend_rs_and_ignores_legacy_backend_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = env::temp_dir().join(format!("af-plugin-bin-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let make_exec = |rel: &str| {
+            let p = tmp.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let mut manifest = ValidatedPluginManifest {
+            id: "bin-test".to_string(),
+            name: "bin-test".to_string(),
+            version: "1.0.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: Vec::new(),
+            granted_scopes: Vec::new(),
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec {
+                binary_name: "my-plugin-bin".to_string(),
+                ..Default::default()
+            },
+            frontend: PluginFrontendSpec::default(),
+            plugin_dir: tmp.clone(),
+        };
+
+        // 1. Legacy Go/old-layout backend/target/release must NOT be picked up.
+        make_exec("backend/target/release/my-plugin-bin");
+        assert!(
+            resolve_plugin_executable(&manifest).is_none(),
+            "legacy backend/target/release must not be resolved"
+        );
+
+        // 2. Fallback order: root <bin> -> bin/<bin> -> backend-rs/target/debug/<bin> -> backend-rs/target/release/<bin>.
+        let root_bin = make_exec("my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, root_bin);
+
+        let bin_dir_bin = make_exec("bin/my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, bin_dir_bin);
+
+        let debug_bin = make_exec("backend-rs/target/debug/my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, debug_bin);
+
+        let release_bin = make_exec("backend-rs/target/release/my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, release_bin);
+
+        // Clearing binary_name skips candidate resolution.
+        manifest.backend.binary_name.clear();
+        assert!(resolve_plugin_executable(&manifest).is_none());
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }

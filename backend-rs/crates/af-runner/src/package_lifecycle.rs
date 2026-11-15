@@ -56,23 +56,7 @@ fn catalog_source(variable: &str, filename: &str, embedded: &str) -> Result<Stri
             return Ok(std::fs::read_to_string(path.trim())?);
         }
     }
-    let mut candidates = vec![
-        Path::new("/opt/AetherFlow/current/config").join(filename),
-        Path::new("/opt/AetherFlow/current/backend/config").join(filename),
-        Path::new("config").join(filename),
-        Path::new("../config").join(filename),
-        Path::new("/opt/AetherFlow/config").join(filename),
-        Path::new("backend/config").join(filename),
-        Path::new("../backend/config").join(filename),
-        Path::new("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Some(directory) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_owned))
-    {
-        candidates.insert(2, directory.join("config").join(filename));
-    }
-    for path in candidates {
+    for path in crate::canonical_config_candidates(filename) {
         match std::fs::symlink_metadata(&path) {
             Ok(_) => return Ok(std::fs::read_to_string(path)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

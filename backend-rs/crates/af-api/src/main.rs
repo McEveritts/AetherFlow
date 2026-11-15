@@ -10,6 +10,7 @@ pub mod middlewares;
 pub mod network;
 pub mod notifications_ext;
 pub mod oidc;
+pub mod openapi_ui;
 pub mod plugins;
 #[cfg(test)]
 mod plugins_router_tests;

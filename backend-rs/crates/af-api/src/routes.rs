@@ -77,7 +77,7 @@ use std::time::Instant;
 
 static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
-const OPENAPI_YAML: &str = include_str!("../../../../config/openapi-v1.yaml");
+pub(crate) const OPENAPI_YAML: &str = include_str!("../../../../config/openapi-v1.yaml");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Security Headers, Request ID & API Versioning Middlewares
@@ -115,10 +115,16 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     );
 
     let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
-    let is_api_non_ui = req_path.starts_with("/api/")
-        && !is_plugin_ui
-        && !req_path.starts_with("/api/swagger")
-        && !req_path.starts_with("/api/docs");
+    let is_swagger_raw_spec =
+        req_path.ends_with("/openapi.yaml") || req_path.ends_with("/doc.yaml");
+    let is_swagger_ui = !is_swagger_raw_spec
+        && (req_path == "/api/v1/public/swagger"
+            || req_path.starts_with("/api/v1/public/swagger/")
+            || req_path == "/api/public/swagger"
+            || req_path.starts_with("/api/public/swagger/")
+            || req_path.starts_with("/api/swagger")
+            || req_path.starts_with("/api/docs"));
+    let is_api_non_ui = req_path.starts_with("/api/") && !is_plugin_ui && !is_swagger_ui;
 
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
@@ -246,6 +252,9 @@ fn build_v1_router() -> Router {
     let public_routes = Router::new()
         .merge(crate::mcbrowser::public_router())
         .route("/openapi.yaml", get(get_openapi_spec))
+        .route("/swagger", get(crate::openapi_ui::swagger_redirect))
+        .route("/swagger/", get(crate::openapi_ui::swagger_index))
+        .route("/swagger/*any", get(crate::openapi_ui::swagger_asset))
         .route("/csrf-token", get(issue_csrf_token))
         .route("/auth/google/login", get(google_login))
         .route("/auth/google/callback", get(google_callback))
@@ -12018,5 +12027,141 @@ mod hillclimb_tests {
                 "expected {accepted} to be accepted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn openapi_swagger_routes_serve_zero_cdn_viewer_and_spec_with_expected_headers() {
+        let app = build_router();
+
+        // 1. Bare /swagger redirects 307 to ./swagger/index.html with UI CSP.
+        let redirect_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/public/swagger")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirect_resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            redirect_resp.headers()[header::LOCATION],
+            "./swagger/index.html"
+        );
+        let redirect_csp = redirect_resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(redirect_csp.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(redirect_csp.contains("frame-ancestors 'none'"));
+
+        // 2. Viewer HTML at /swagger/ and /swagger/index.html must be 200 HTML and 100% offline/zero-CDN.
+        for path in [
+            "/api/v1/public/swagger/",
+            "/api/v1/public/swagger/index.html",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "path={path}");
+            let ct = resp.headers()[header::CONTENT_TYPE].to_str().unwrap();
+            assert!(ct.starts_with("text/html"), "path={path} ct={ct}");
+            let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(
+                csp.contains("script-src 'self' 'unsafe-inline'"),
+                "path={path} csp={csp}"
+            );
+            assert!(
+                csp.contains("frame-ancestors 'none'"),
+                "path={path} csp={csp}"
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            let html = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(html.contains("../openapi.yaml"), "path={path}");
+            assert!(
+                !html.contains("http://") && !html.contains("https://"),
+                "OpenAPI viewer HTML at {path} must not contain external http:// or https:// URLs"
+            );
+        }
+
+        // 3. Unversioned legacy /api/public/swagger/index.html emits Deprecation + Link headers and UI CSP.
+        let deprecated_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/public/swagger/index.html")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deprecated_resp.status(), StatusCode::OK);
+        assert_eq!(deprecated_resp.headers()["deprecation"], "true");
+        let link_hdr = deprecated_resp.headers()[header::LINK].to_str().unwrap();
+        assert!(
+            link_hdr.contains("/api/v1/public/swagger/index.html")
+                && link_hdr.contains("successor-version"),
+            "unexpected Link header: {link_hdr}"
+        );
+        let deprecated_csp = deprecated_resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(deprecated_csp.contains("script-src 'self' 'unsafe-inline'"));
+
+        // 4. Raw OpenAPI YAML endpoints return 200 application/yaml with strict non-UI API CSP.
+        for spec_path in [
+            "/api/v1/public/openapi.yaml",
+            "/api/v1/public/swagger/openapi.yaml",
+            "/api/v1/public/swagger/doc.yaml",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(spec_path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "spec_path={spec_path}");
+            let ct = resp.headers()[header::CONTENT_TYPE].to_str().unwrap();
+            assert!(
+                ct.starts_with("application/yaml"),
+                "spec_path={spec_path} ct={ct}"
+            );
+            assert_eq!(
+                resp.headers()[header::CONTENT_SECURITY_POLICY],
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            let yaml = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(yaml.contains("openapi: 3.1.0"), "spec_path={spec_path}");
+        }
+
+        // 5. Unknown swagger asset returns 404.
+        let missing_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/public/swagger/nonexistent.js")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
     }
 }

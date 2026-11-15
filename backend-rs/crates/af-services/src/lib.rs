@@ -165,6 +165,27 @@ fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
         .map_err(|error| anyhow::anyhow!("cannot read catalog {}: {error}", path.display()))
 }
 
+fn config_search_candidates(filename: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("config").join(filename),
+        PathBuf::from("../config").join(filename),
+        PathBuf::from("../../config").join(filename),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("config").join(filename));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
+        // Legacy v3 host upgrade fallback only
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
+    ]);
+    candidates
+}
+
 fn load_config_file_or_embedded(
     env_var: &str,
     filename: &str,
@@ -175,23 +196,7 @@ fn load_config_file_or_embedded(
             return read_catalog_file(Path::new(explicit.trim()));
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("../../config").join(filename),
-        PathBuf::from("backend/config").join(filename),
-        PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.insert(5, exe_dir.join("config").join(filename));
-        }
-    }
-    for c in candidates {
+    for c in config_search_candidates(filename) {
         match fs::symlink_metadata(&c) {
             Ok(_) => return read_catalog_file(&c),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3368,5 +3373,44 @@ mod tests {
         );
         assert_eq!(resolve_owning_package_id("sshd"), None);
         assert_eq!(resolve_owning_package_id("aetherflow-api"), None);
+    }
+
+    #[test]
+    fn config_search_candidates_prioritize_canonical_config_over_legacy_fallback() {
+        let candidates = config_search_candidates("packages.json");
+        let strings: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(strings[0], "config/packages.json");
+        assert_eq!(strings[1], "../config/packages.json");
+        assert_eq!(strings[2], "../../config/packages.json");
+        assert!(
+            !strings
+                .iter()
+                .any(|s| s == "backend/config/packages.json"
+                    || s == "../backend/config/packages.json"),
+            "dead relative backend/config paths must be removed: {strings:?}"
+        );
+        let opt_canonical_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/config/packages.json")
+            .unwrap();
+        let opt_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/config/packages.json")
+            .unwrap();
+        let legacy_curr_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/backend/config/packages.json")
+            .unwrap();
+        let legacy_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/backend/config/packages.json")
+            .unwrap();
+        assert!(opt_canonical_idx < opt_root_idx);
+        assert!(opt_root_idx < legacy_curr_idx);
+        assert!(legacy_curr_idx < legacy_root_idx);
     }
 }

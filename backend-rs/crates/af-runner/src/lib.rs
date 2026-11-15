@@ -2977,6 +2977,27 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
+pub(crate) fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("config").join(filename),
+        PathBuf::from("../config").join(filename),
+        PathBuf::from("../../config").join(filename),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("config").join(filename));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
+        // Legacy v3 host upgrade fallback only
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
+    ]);
+    candidates
+}
+
 fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str) -> String {
     if let Ok(explicit) = env::var(env_var) {
         let trimmed = explicit.trim();
@@ -2986,23 +3007,7 @@ fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str)
             }
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        PathBuf::from("backend/config").join(filename),
-        PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.insert(2, exe_dir.join("config").join(filename));
-        }
-    }
-    for c in candidates {
+    for c in canonical_config_candidates(filename) {
         if let Ok(s) = fs::read_to_string(&c) {
             return s;
         }
@@ -9221,5 +9226,96 @@ mod tests {
         env::remove_var("AETHERFLOW_DNSMASQ_DIR");
         env::remove_var("AETHERFLOW_PIHOLE_DIR");
         let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn canonical_config_candidates_prioritize_repo_config_and_isolate_legacy_fallback() {
+        let candidates = canonical_config_candidates("packages.json");
+        let strings: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(strings[0], "config/packages.json");
+        assert_eq!(strings[1], "../config/packages.json");
+        assert_eq!(strings[2], "../../config/packages.json");
+        assert!(
+            !strings
+                .iter()
+                .any(|s| s == "backend/config/packages.json"
+                    || s == "../backend/config/packages.json"),
+            "dead relative backend/config paths must be removed: {strings:?}"
+        );
+        let opt_canonical_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/config/packages.json")
+            .unwrap();
+        let opt_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/config/packages.json")
+            .unwrap();
+        let legacy_curr_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/backend/config/packages.json")
+            .unwrap();
+        let legacy_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/backend/config/packages.json")
+            .unwrap();
+        assert!(opt_canonical_idx < opt_root_idx);
+        assert!(opt_root_idx < legacy_curr_idx);
+        assert!(legacy_curr_idx < legacy_root_idx);
+    }
+
+    #[tokio::test]
+    async fn load_runner_config_or_embedded_prefers_canonical_over_legacy_relative() {
+        struct CwdRestore(PathBuf);
+        impl Drop for CwdRestore {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.0);
+            }
+        }
+
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let _cwd_guard = CwdRestore(env::current_dir().unwrap());
+        let prev_env = env::var_os("AETHERFLOW_TEST_CFG_PATH");
+        env::remove_var("AETHERFLOW_TEST_CFG_PATH");
+
+        let scratch = env::temp_dir().join(format!("af-runner-cfg-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(scratch.join("backend/config")).unwrap();
+        fs::write(
+            scratch.join("backend/config/test_only_cfg.json"),
+            r#"{"source":"legacy-relative"}"#,
+        )
+        .unwrap();
+        env::set_current_dir(&scratch).unwrap();
+
+        // Relative backend/config/ must be ignored in favor of embedded fallback when canonical config/ is absent.
+        let without_canonical = load_runner_config_or_embedded(
+            "AETHERFLOW_TEST_CFG_PATH",
+            "test_only_cfg.json",
+            r#"{"source":"embedded"}"#,
+        );
+        assert_eq!(without_canonical, r#"{"source":"embedded"}"#);
+
+        // Once canonical config/ exists, it wins immediately.
+        fs::create_dir_all(scratch.join("config")).unwrap();
+        fs::write(
+            scratch.join("config/test_only_cfg.json"),
+            r#"{"source":"canonical"}"#,
+        )
+        .unwrap();
+        let with_canonical = load_runner_config_or_embedded(
+            "AETHERFLOW_TEST_CFG_PATH",
+            "test_only_cfg.json",
+            r#"{"source":"embedded"}"#,
+        );
+        assert_eq!(with_canonical, r#"{"source":"canonical"}"#);
+
+        if let Some(val) = prev_env {
+            env::set_var("AETHERFLOW_TEST_CFG_PATH", val);
+        }
+        drop(_cwd_guard);
+        let _ = fs::remove_dir_all(&scratch);
     }
 }
