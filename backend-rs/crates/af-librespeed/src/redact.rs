@@ -354,7 +354,12 @@ fn is_ascii_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+fn is_valid_ipv6_slice(slice: &str) -> bool {
+    slice.bytes().filter(|&b| b == b':').count() >= 2 && slice.parse::<Ipv6Addr>().is_ok()
+}
+
 fn find_verified_ipv6_subspan(input: &str, m_start: usize, m_end: usize) -> Option<(usize, usize)> {
+    let bytes = input.as_bytes();
     let raw = &input[m_start..m_end];
     let (core_rel_end, has_zone) = match raw.find('%') {
         Some(idx) => (idx, true),
@@ -365,7 +370,15 @@ fn find_verified_ipv6_subspan(input: &str, m_start: usize, m_end: usize) -> Opti
         return None;
     }
 
-    let bytes = input.as_bytes();
+    // Preserve trailing sentence periods after `%zone` (e.g. `via fe80::1%eth0.`) while
+    // still scrubbing VLAN zone suffixes like `fe80::1%eth0.10`.
+    let mut zone_abs_end = m_end;
+    if has_zone {
+        while zone_abs_end > core_abs_end + 2 && bytes[zone_abs_end - 1] == b'.' {
+            zone_abs_end -= 1;
+        }
+    }
+
     let mut candidate_starts: Vec<usize> = Vec::with_capacity(6);
     if m_start == 0 || !is_ascii_word_byte(bytes[m_start - 1]) {
         candidate_starts.push(m_start);
@@ -389,25 +402,55 @@ fn find_verified_ipv6_subspan(input: &str, m_start: usize, m_end: usize) -> Opti
         if start >= core_abs_end {
             continue;
         }
-        let full_slice = &input[start..core_abs_end];
-        if full_slice.bytes().filter(|&b| b == b':').count() >= 2
-            && full_slice.parse::<Ipv6Addr>().is_ok()
-        {
-            let end = if has_zone { m_end } else { core_abs_end };
-            return Some((start, end));
+        if has_zone {
+            let full_slice = &input[start..core_abs_end];
+            if is_valid_ipv6_slice(full_slice) {
+                return Some((start, zone_abs_end));
+            }
+            continue;
         }
-        if !has_zone {
-            if let Some(last_colon_rel) = full_slice.rfind(':') {
-                let port_part = &full_slice[last_colon_rel + 1..];
-                let trimmed_slice = &full_slice[..last_colon_rel];
+
+        // If the candidate scan stopped mid-word at a non-hex word character (e.g.
+        // `2001:db8::1234:connected` where `:c` was consumed before `onnected`), strip
+        // the trailing `:hexprefix` first so `:connected` stays intact while the IPv6
+        // address before `:` is scrubbed.
+        if core_abs_end < bytes.len() && is_ascii_word_byte(bytes[core_abs_end]) {
+            if let Some(last_colon_rel) = input[start..core_abs_end].rfind(':') {
+                let colon_abs = start + last_colon_rel;
+                if colon_abs > start
+                    && bytes[colon_abs - 1] != b':'
+                    && is_valid_ipv6_slice(&input[start..colon_abs])
+                {
+                    return Some((start, colon_abs));
+                }
+            }
+        }
+
+        // Progressively trim trailing prose punctuation (`.` / `:`) that `IPV6_CANDIDATE_RE`
+        // can absorb (e.g. `Client address: 2001:db8::1234.`, `::ffff:192.0.2.9.`,
+        // `2001:db8::1234: ok`, `2001:db8:1:2:3:4:5:6:8443.`), checking full IPv6 first so
+        // compressed `2001:db8::` matches completely without losing a colon of `::`.
+        let mut end = core_abs_end;
+        loop {
+            let candidate_slice = &input[start..end];
+            if is_valid_ipv6_slice(candidate_slice) {
+                return Some((start, end));
+            }
+            if let Some(last_colon_rel) = candidate_slice.rfind(':') {
+                let port_part = &candidate_slice[last_colon_rel + 1..];
+                let trimmed_slice = &candidate_slice[..last_colon_rel];
                 if !port_part.is_empty()
                     && port_part.len() <= 5
                     && port_part.bytes().all(|b| b.is_ascii_digit())
-                    && trimmed_slice.bytes().filter(|&b| b == b':').count() >= 2
-                    && trimmed_slice.parse::<Ipv6Addr>().is_ok()
+                    && is_valid_ipv6_slice(trimmed_slice)
                 {
                     return Some((start, start + last_colon_rel));
                 }
+            }
+            if end > start && matches!(bytes[end - 1], b'.' | b':') {
+                end -= 1;
+            } else {
+                break;
             }
         }
     }
@@ -792,6 +835,13 @@ mod tests {
         assert_eq!(
             out,
             "peer::: id::: addr::: [::]:8443 peer::: map::: mac=aa:bb:cc:dd:ee:ff ts=1731638400000: ok"
+        );
+
+        let prose_punct = "Client address: 2001:db8::1234. Mapped: ::ffff:192.0.2.9. Subnet: 2001:db8::. Zone: fe80::1%eth0. Colon: 2001:db8::5678: connected and 2001:db8::9abc:connected and 2001:db8:1:2:3:4:5:6:8443.";
+        let scrubbed_prose = redact_freeform_text(prose_punct);
+        assert_eq!(
+            scrubbed_prose,
+            "Client address: ::. Mapped: ::. Subnet: ::. Zone: ::. Colon: ::: connected and :::connected and :::8443."
         );
     }
 

@@ -2133,8 +2133,12 @@ stage_app_archive() {
     AF_ARCHIVE_TIMER_UNIT=""
     AF_ARCHIVE_TIMER_ACTIVE=false
     AF_ARCHIVE_TIMER_ENABLED=false
+    AF_ARCHIVE_SOCKET_UNIT=""
+    AF_ARCHIVE_SOCKET_ACTIVE=false
+    AF_ARCHIVE_SOCKET_ENABLED=false
     if [[ "$unit" != *.timer && "$unit" != *.socket ]]; then
         AF_ARCHIVE_TIMER_UNIT="${unit%.service}.timer"
+        AF_ARCHIVE_SOCKET_UNIT="${unit%.service}.socket"
     fi
     AF_ARCHIVE_ARCHIVE="$archive"
     AF_ARCHIVE_ACTIVATED=false
@@ -2218,6 +2222,20 @@ PYEOF
             stop_systemd_unit "$AF_ARCHIVE_TIMER_UNIT"
         fi
     fi
+    if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" ]]; then
+        if systemctl is-active --quiet "$AF_ARCHIVE_SOCKET_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_SOCKET_ACTIVE=true
+        fi
+        if systemctl is-enabled --quiet "$AF_ARCHIVE_SOCKET_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_SOCKET_ENABLED=true
+        fi
+        if [[ -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+            cp -a -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" "$AF_ARCHIVE_BACKUP/socket_unit"
+        fi
+        if [[ "$AF_ARCHIVE_SOCKET_ACTIVE" == true || -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+            stop_systemd_unit "$AF_ARCHIVE_SOCKET_UNIT"
+        fi
+    fi
     stop_systemd_unit "$unit"
     AF_ARCHIVE_STOPPED=true
     for state_index in "${!AF_ARCHIVE_STATE_PATHS[@]}"; do
@@ -2261,10 +2279,14 @@ rollback_app_archive_update() {
     [[ "${INSTALL_COMMITTED:-false}" != true ]] || exit "$status"
     [[ "$status" -ne 0 ]] || status=1
     if [[ "${AF_ARCHIVE_ACTIVATED:-false}" == true && ( "${AF_ARCHIVE_ORIGINAL_PRESENT:-false}" != true || -e "${AF_ARCHIVE_BACKUP:-}/app" ) ]]; then
-        local -a quiesce_units=("$AF_ARCHIVE_UNIT")
+        local -a quiesce_units=()
         if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" && ( -e "${AF_ARCHIVE_BACKUP:-}/timer_unit" || -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ) ]]; then
-            quiesce_units=("$AF_ARCHIVE_TIMER_UNIT" "$AF_ARCHIVE_UNIT")
+            quiesce_units+=("$AF_ARCHIVE_TIMER_UNIT")
         fi
+        if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" && ( -e "${AF_ARCHIVE_BACKUP:-}/socket_unit" || -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || "${AF_ARCHIVE_SOCKET_ACTIVE:-false}" == true ) ]]; then
+            quiesce_units+=("$AF_ARCHIVE_SOCKET_UNIT")
+        fi
+        quiesce_units+=("$AF_ARCHIVE_UNIT")
         if ! quiesce_services_for_rollback "${quiesce_units[@]}"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt "$status" "rollback" "incomplete_rollback" "Application archive rollback aborted because service quiescence failed; recovery backup preserved at ${AF_ARCHIVE_BACKUP:-unknown} (incomplete-rollback)"
@@ -2295,12 +2317,32 @@ rollback_app_archive_update() {
                 rm -f -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
             fi
         fi
+        if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" ]]; then
+            if [[ -e "$AF_ARCHIVE_BACKUP/socket_unit" ]]; then
+                safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/socket_unit" "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || restored=false
+                if [[ "${AF_ARCHIVE_SOCKET_ENABLED:-false}" != true ]]; then
+                    af_logged systemctl disable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+                fi
+            elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || -L "/etc/systemd/system/sockets.target.wants/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+                af_logged systemctl disable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+                rm -f -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" "/etc/systemd/system/sockets.target.wants/${AF_ARCHIVE_SOCKET_UNIT}" || restored=false
+                rm -rf -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}.d" || restored=false
+            fi
+        fi
         af_logged systemctl daemon-reload || restored=false
     fi
     if [[ "$restored" == true ]]; then
         for entry in "${AF_ARCHIVE_ROLLBACK_RESTART_UNITS[@]}"; do
             af_logged systemctl restart "$entry" || restored=false
         done
+    fi
+    if [[ "$restored" == true && -n "${AF_ARCHIVE_SOCKET_UNIT:-}" && -e "$AF_ARCHIVE_BACKUP/socket_unit" ]]; then
+        if [[ "${AF_ARCHIVE_SOCKET_ENABLED:-false}" == true ]]; then
+            af_logged systemctl enable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+        fi
+        if [[ "$restored" == true && "${AF_ARCHIVE_SOCKET_ACTIVE:-false}" == true ]]; then
+            af_logged systemctl restart "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+        fi
     fi
     if [[ "$restored" == true && "${AF_ARCHIVE_STOPPED:-false}" == true && "${AF_ARCHIVE_PREVIOUS:-false}" == true ]]; then
         af_logged systemctl restart "$AF_ARCHIVE_UNIT" || restored=false

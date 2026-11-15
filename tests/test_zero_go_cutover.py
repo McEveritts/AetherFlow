@@ -379,8 +379,79 @@ elif cmd == "curl":
         else:
             sys.exit(22)
     else:
+        if os.environ.get("TEST_READINESS_FAIL") == "1":
+            sys.exit(7)
         print('{"status":"OK"}')
 elif cmd == "systemctl":
+    state_file = root / "systemd_state.json"
+    st = json.loads(state_file.read_text()) if state_file.exists() else {"active": {}, "enabled": {}}
+    clean = [a for a in args if a not in ("--", "--quiet")]
+    sub = clean[0] if clean else ""
+    rest = [a for a in clean[1:] if not a.startswith("-")]
+    now_flag = "--now" in args
+    def norm_unit(u: str) -> str:
+        return u if u.endswith((".service", ".socket", ".timer")) else u + ".service"
+    if sub == "daemon-reload" or sub == "reset-failed":
+        sys.exit(0)
+    elif sub == "enable":
+        for raw_u in rest:
+            u = norm_unit(raw_u)
+            st["enabled"][u] = True
+            wants_dir = root / "etc/systemd/system" / ("sockets.target.wants" if u.endswith(".socket") else "multi-user.target.wants")
+            wants_dir.mkdir(parents=True, exist_ok=True)
+            link_p = wants_dir / u
+            if not link_p.exists() and not link_p.is_symlink():
+                link_p.symlink_to(root / "etc/systemd/system" / u)
+            if now_flag:
+                st["active"][u] = True
+        state_file.write_text(json.dumps(st))
+        sys.exit(0)
+    elif sub == "disable":
+        for raw_u in rest:
+            u = norm_unit(raw_u)
+            st["enabled"][u] = False
+            if now_flag:
+                st["active"][u] = False
+            for wdir in ("sockets.target.wants", "multi-user.target.wants", "timers.target.wants"):
+                lp = root / "etc/systemd/system" / wdir / u
+                if lp.is_symlink() or lp.exists():
+                    lp.unlink()
+        state_file.write_text(json.dumps(st))
+        sys.exit(0)
+    elif sub in ("start", "restart", "reload"):
+        for raw_u in rest:
+            u = norm_unit(raw_u)
+            st["active"][u] = True
+        state_file.write_text(json.dumps(st))
+        sys.exit(0)
+    elif sub == "stop":
+        for raw_u in rest:
+            u = norm_unit(raw_u)
+            st["active"][u] = False
+        state_file.write_text(json.dumps(st))
+        sys.exit(0)
+    elif sub == "is-active":
+        u = norm_unit(rest[0]) if rest else ""
+        is_act = bool(st["active"].get(u, False))
+        if "--quiet" not in args:
+            print("active" if is_act else "inactive")
+        sys.exit(0 if is_act else 3)
+    elif sub == "is-enabled":
+        u = norm_unit(rest[0]) if rest else ""
+        is_en = bool(st["enabled"].get(u, False))
+        if "--quiet" not in args:
+            print("enabled" if is_en else "disabled")
+        sys.exit(0 if is_en else 1)
+    elif sub == "show":
+        u = norm_unit(rest[0]) if rest else ""
+        is_act = bool(st["active"].get(u, False))
+        is_en = bool(st["enabled"].get(u, False))
+        unit_exists = (root / "etc/systemd/system" / u).exists()
+        print(f"LoadState={'loaded' if unit_exists else 'not-found'}")
+        print(f"ActiveState={'active' if is_act else 'inactive'}")
+        print("MainPID=0")
+        print(f"UnitFileState={'enabled' if is_en else 'disabled'}")
+        sys.exit(0)
     sys.exit(0)
 elif cmd in ("tar", "mv"):
     sys.exit(subprocess.run(["/usr/bin/" + cmd, *args]).returncode)
@@ -411,6 +482,7 @@ sys.exit(0)
             helpers = common_src[common_src.index("command_exists()"):common_src.index("lock_path()")]
             helpers += common_functions(
                 "systemd_unit_inactive",
+                "quiesce_services_for_rollback",
                 "stop_systemd_unit",
                 "verify_systemd_service_active",
                 "wait_for_service_ready",
@@ -421,6 +493,7 @@ sys.exit(0)
 MASTER_USER=admin
 MASTER_PASS="top-secret-master-pass-999"
 require_root() { :; }
+sleep() { :; }
 log_info() { :; }
 log_warn() { :; }
 print_error() { printf '%s\\n' "$*" >&2; }
@@ -696,6 +769,111 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 text=True,
             )
             self.assertNotEqual(bad_magic_res.returncode, 0)
+
+            # 5. Custom [tuning] TOML subtable in settings.toml keeps all backfilled root keys
+            #    in the root preamble BEFORE [tuning] (Carbon P3-1 regression)
+            settings_path.write_text(
+                'bind_address="127.0.0.1"\n'
+                'listen_port=8988\n'
+                'statistics_password="custom-stats-password"\n'
+                'database_type="bolt"\n'
+                '\n'
+                '[tuning]\n'
+                'worker_threads=4\n',
+                encoding="utf-8",
+            )
+            subtable_res = subprocess.run(
+                ["bash", str(script_path)],
+                env=base_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(subtable_res.returncode, 0, subtable_res.stdout + subtable_res.stderr)
+            subtable_cfg = settings_path.read_text(encoding="utf-8")
+            self.assertIn("[tuning]\nworker_threads=4", subtable_cfg)
+            root_part, tuning_part = subtable_cfg.split("[tuning]", 1)
+            for root_key in (
+                "listen_port=18988",
+                'database_type="sqlite"',
+                "redact_ip_addresses=true",
+                "enable_id_obfuscation=true",
+                'trusted_proxies=["127.0.0.1", "::1"]',
+                "trusted_proxy_secret=",
+            ):
+                self.assertIn(root_key, root_part, f"Expected {root_key} in TOML root preamble: {subtable_cfg}")
+                self.assertNotIn(root_key, tuning_part, f"Key {root_key} leaked under [tuning]: {subtable_cfg}")
+            if tomllib is not None:
+                parsed_sub = tomllib.loads(subtable_cfg)
+                self.assertEqual(parsed_sub["redact_ip_addresses"], True)
+                self.assertEqual(parsed_sub["enable_id_obfuscation"], True)
+                self.assertEqual(parsed_sub["trusted_proxies"], ["127.0.0.1", "::1"])
+                self.assertTrue(parsed_sub["trusted_proxy_secret"])
+                self.assertEqual(parsed_sub["tuning"]["worker_threads"], 4)
+
+            # 6. Failed readiness during legacy Go -> Rust cutover rolls back librespeed.socket,
+            #    sockets.target.wants/librespeed.socket, proxy snippet, legacy binary, and legacy unit (Sol P2-3 regression)
+            for cleanup_p in (
+                root / "etc/systemd/system/librespeed.socket",
+                root / "etc/systemd/system/sockets.target.wants/librespeed.socket",
+                root / "etc/aetherflow/librespeed-proxy-token.conf",
+                root / "install/.librespeed.lock",
+                root / "systemd_state.json",
+            ):
+                cleanup_p.unlink(missing_ok=True)
+            for old_bak in (root / "opt").glob("librespeed.af-backup.*"):
+                shutil.rmtree(old_bak)
+            shutil.rmtree(root / "opt/librespeed", ignore_errors=True)
+            (root / "opt/librespeed").mkdir(parents=True, exist_ok=True)
+            legacy_go_bin = root / "opt/librespeed/speedtest-go"
+            legacy_go_bin.write_bytes(b"#!/bin/sh\necho legacy-go-binary\n")
+            legacy_go_bin.chmod(0o755)
+            (root / "opt/librespeed/.af-version").write_text("1.1.5\n", encoding="utf-8")
+            (root / "opt/librespeed/settings.toml").write_text(
+                'bind_address="127.0.0.1"\nlisten_port=8988\nstatistics_password="legacy"\n',
+                encoding="utf-8",
+            )
+            legacy_unit = "[Unit]\nDescription=Legacy Go LibreSpeed\n[Service]\nExecStart=/opt/librespeed/speedtest-go\n"
+            (root / "etc/systemd/system/librespeed.service").write_text(legacy_unit, encoding="utf-8")
+            (root / "systemd_state.json").write_text(
+                json.dumps({"active": {"librespeed.service": True}, "enabled": {"librespeed.service": True}}),
+                encoding="utf-8",
+            )
+
+            rb_res = subprocess.run(
+                ["bash", str(script_path)],
+                env={**base_env, "TEST_READINESS_FAIL": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(rb_res.returncode, 0)
+            self.assertFalse(
+                (root / "etc/systemd/system/librespeed.socket").exists(),
+                "Rollback left /etc/systemd/system/librespeed.socket behind",
+            )
+            self.assertFalse(
+                (root / "etc/systemd/system/sockets.target.wants/librespeed.socket").is_symlink(),
+                "Rollback left sockets.target.wants/librespeed.socket symlink enabled",
+            )
+            self.assertFalse(
+                (root / "etc/aetherflow/librespeed-proxy-token.conf").exists(),
+                "Rollback left newly generated librespeed-proxy-token.conf behind",
+            )
+            self.assertTrue(
+                legacy_go_bin.is_file() and not legacy_go_bin.is_symlink(),
+                "Rollback failed to restore legacy speedtest-go binary",
+            )
+            self.assertFalse((root / "opt/librespeed/speedtest-backend").exists())
+            self.assertEqual(
+                (root / "etc/systemd/system/librespeed.service").read_text(encoding="utf-8"),
+                legacy_unit,
+            )
+            final_sd = json.loads((root / "systemd_state.json").read_text(encoding="utf-8"))
+            self.assertFalse(final_sd["active"].get("librespeed.socket", False))
+            self.assertFalse(final_sd["enabled"].get("librespeed.socket", False))
+            self.assertTrue(
+                final_sd["active"].get("librespeed.service", False),
+                f"Expected legacy librespeed.service restarted on rollback: {final_sd}",
+            )
 
     def test_update_aetherflow_executes_real_af_binary_and_common_https_readiness_guard(self) -> None:
         with tempfile.TemporaryDirectory(prefix="af-shim-bin-") as tmp:

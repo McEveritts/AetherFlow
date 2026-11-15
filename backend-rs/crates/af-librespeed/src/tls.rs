@@ -314,7 +314,14 @@ where
                 let (tcp_stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
                     Err(err) => {
+                        if is_fatal_accept_error(&err) {
+                            return Err(err).context("fatal TCP accept error on HTTP listener");
+                        }
                         warn!(error = %err, "TCP accept error on HTTP listener");
+                        tokio::select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        }
                         continue;
                     }
                 };
@@ -425,7 +432,14 @@ where
                 let (tcp_stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
                     Err(err) => {
+                        if is_fatal_accept_error(&err) {
+                            return Err(err).context("fatal TCP accept error on TLS listener");
+                        }
                         warn!(error = %err, "TCP accept error on TLS listener");
+                        tokio::select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        }
                         continue;
                     }
                 };
@@ -518,10 +532,23 @@ where
     Ok(())
 }
 
+#[cfg(unix)]
+fn is_fatal_accept_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP)
+    )
+}
+
+#[cfg(not(unix))]
+fn is_fatal_accept_error(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::InvalidInput)
+}
+
 /// Validates and adopts a PID-1-owned systemd socket-activation descriptor
 /// (`SD_LISTEN_FDS_START = 3` in production, or a duplicated fd in tests),
-/// enforcing `SOCK_STREAM`, `FD_CLOEXEC`, and non-blocking mode before wrapping
-/// into a `tokio::net::TcpListener`.
+/// enforcing `SOCK_STREAM`, `SO_ACCEPTCONN == 1`, `FD_CLOEXEC`, and non-blocking mode
+/// before wrapping into a `tokio::net::TcpListener`.
 #[cfg(unix)]
 pub fn adopt_systemd_socket_fd(
     raw_fd: std::os::fd::RawFd,
@@ -551,6 +578,29 @@ pub fn adopt_systemd_socket_fd(
     }
     if sock_type != libc::SOCK_STREAM {
         bail!("systemd activation fd {raw_fd} is not SOCK_STREAM (got {sock_type})");
+    }
+
+    let mut accept_conn: libc::c_int = 0;
+    let mut accept_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `getsockopt(SO_ACCEPTCONN)` inspects kernel listen state on validated socket `raw_fd`.
+    let accept_rc = unsafe {
+        libc::getsockopt(
+            raw_fd,
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            (&mut accept_conn as *mut libc::c_int).cast(),
+            &mut accept_len,
+        )
+    };
+    if accept_rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!("failed querying SO_ACCEPTCONN on systemd activation fd {raw_fd}")
+        });
+    }
+    if accept_conn == 0 {
+        bail!(
+            "systemd activation fd {raw_fd} is not a listening socket (SO_ACCEPTCONN={accept_conn})"
+        );
     }
 
     let owned_fd = if duplicate_fd {
@@ -607,5 +657,18 @@ mod tests {
         let err = adopt_systemd_socket_fd(reg_file.as_raw_fd(), true).unwrap_err();
         let _ = std::fs::remove_file(&tmp);
         assert!(err.to_string().contains("not a valid socket"));
+
+        // Non-listening SOCK_STREAM socket (SO_ACCEPTCONN == 0) must also fail closed
+        let non_listening =
+            unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(non_listening >= 0);
+        let nl_err = adopt_systemd_socket_fd(non_listening, true).unwrap_err();
+        unsafe {
+            libc::close(non_listening);
+        }
+        assert!(
+            nl_err.to_string().contains("not a listening socket"),
+            "unexpected error: {nl_err}"
+        );
     }
 }

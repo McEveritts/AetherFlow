@@ -2609,4 +2609,135 @@ async fn migrated_unredacted_records_are_scrubbed_on_results_json_png_and_stats_
             "non-scalar/embedded sensitive data {forbidden:?} leaked in /results/json: {json4_body}"
         );
     }
+
+    // 5. Prose IPv6 literals ending with sentence punctuation `.` or trailing separator `:`
+    // must be redacted before storage and never leak over `/results/json` (Sol P2-1 regression).
+    let ipv6_prose_extra = "Client address: 2001:db8::1234. Mapped: ::ffff:192.0.2.9.";
+    let ipv6_prose_log = "peer 2001:db8::5678: connected via fe80::1%eth0.";
+    let enc_v6_extra: String = ipv6_prose_extra
+        .bytes()
+        .map(|b| format!("%{b:02X}"))
+        .collect();
+    let enc_v6_log: String = ipv6_prose_log
+        .bytes()
+        .map(|b| format!("%{b:02X}"))
+        .collect();
+    let post5 = app4
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/results/telemetry.php")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "dl=510.0&ul=220.0&ping=3.1&jitter=0.4&extra={enc_v6_extra}&log={enc_v6_log}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post5.status(), StatusCode::OK);
+    let id5 = String::from_utf8(body_bytes(post5).await)
+        .unwrap()
+        .strip_prefix("id ")
+        .unwrap()
+        .trim()
+        .to_string();
+    let json5_resp = app4
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={id5}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json5_resp.status(), StatusCode::OK);
+    let json5_body = String::from_utf8(body_bytes(json5_resp).await).unwrap();
+    for forbidden_v6 in ["2001:db8::1234", "192.0.2.9", "2001:db8::5678", "fe80::1"] {
+        assert!(
+            !json5_body.contains(forbidden_v6),
+            "punctuated IPv6 literal {forbidden_v6:?} leaked in /results/json: {json5_body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn colliding_url_base_prefixes_mount_cleanly_without_duplicate_route_panics() {
+    let tmp = TempDirGuard::new("url-base-collisions");
+    std::fs::create_dir_all(tmp.0.join("assets")).unwrap();
+    std::fs::write(tmp.0.join("assets/index.html"), b"<html>speedtest</html>").unwrap();
+
+    for base in [
+        "",
+        "speedtest",
+        "sub/path",
+        "backend",
+        "/backend/",
+        "stats",
+        "results",
+        "empty",
+        "garbage",
+        "getIP",
+        "backend/stats",
+    ] {
+        let (mut cfg, vault) = make_test_config(&tmp);
+        cfg.url_base = base.to_string();
+        let app = build_router(cfg, Some(vault));
+
+        let trimmed = base.trim_matches('/');
+        let empty_uri = if trimmed.is_empty() {
+            "/empty".to_string()
+        } else {
+            format!("/{trimmed}/empty")
+        };
+        let empty_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&empty_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            empty_resp.status(),
+            StatusCode::OK,
+            "failed GET {empty_uri} for url_base={base:?}"
+        );
+
+        let ip_uri = if trimmed.is_empty() {
+            "/backend/getIP".to_string()
+        } else {
+            format!("/{trimmed}/backend/getIP")
+        };
+        let ip_resp = app
+            .clone()
+            .oneshot(Request::builder().uri(&ip_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            ip_resp.status(),
+            StatusCode::OK,
+            "failed GET {ip_uri} for url_base={base:?}"
+        );
+
+        if trimmed == "backend" || trimmed == "speedtest" || trimmed == "sub/path" {
+            let asset_resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/{trimmed}/"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                asset_resp.status(),
+                StatusCode::OK,
+                "failed static index under /{trimmed}/ for url_base={base:?}"
+            );
+        }
+    }
 }

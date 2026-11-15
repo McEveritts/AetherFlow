@@ -97,11 +97,132 @@ pub fn build_router_with_stream_timeout(
     )
 }
 
+struct DedupRouteTable {
+    router: Router<AppState>,
+    registered: std::collections::HashSet<String>,
+}
+
+impl DedupRouteTable {
+    fn new() -> Self {
+        Self {
+            router: Router::new(),
+            registered: std::collections::HashSet::new(),
+        }
+    }
+
+    fn route(
+        &mut self,
+        path: impl Into<String>,
+        method_router: axum::routing::MethodRouter<AppState>,
+    ) {
+        let path = path.into();
+        if self.registered.insert(path.clone()) {
+            let prev = std::mem::take(&mut self.router);
+            self.router = prev.route(&path, method_router);
+        }
+    }
+}
+
+fn mount_core_routes(table: &mut DedupRouteTable, prefix: &str) {
+    for subpath in [
+        "/empty",
+        "/empty.php",
+        "/backend/empty",
+        "/backend/empty.php",
+    ] {
+        table.route(
+            format!("{prefix}{subpath}"),
+            get(handle_empty)
+                .post(handle_empty)
+                .layer(DefaultBodyLimit::max(MAX_EMPTY_BODY_BYTES)),
+        );
+    }
+
+    for subpath in [
+        "/results/telemetry",
+        "/results/telemetry.php",
+        "/backend/results/telemetry",
+        "/backend/results/telemetry.php",
+    ] {
+        table.route(
+            format!("{prefix}{subpath}"),
+            post(handle_telemetry).layer(DefaultBodyLimit::max(MAX_TELEMETRY_BODY_BYTES)),
+        );
+    }
+
+    for subpath in [
+        "/stats",
+        "/stats/",
+        "/stats.php",
+        "/stats/stats.php",
+        "/backend/stats",
+        "/backend/stats/",
+        "/backend/stats.php",
+    ] {
+        table.route(
+            format!("{prefix}{subpath}"),
+            get(handle_stats)
+                .post(handle_stats)
+                .layer(DefaultBodyLimit::max(MAX_STATS_BODY_BYTES)),
+        );
+    }
+
+    for subpath in [
+        "/garbage",
+        "/garbage.php",
+        "/backend/garbage",
+        "/backend/garbage.php",
+    ] {
+        table.route(format!("{prefix}{subpath}"), get(handle_garbage));
+    }
+
+    for subpath in [
+        "/getIP",
+        "/getIP.php",
+        "/backend/getIP",
+        "/backend/getIP.php",
+    ] {
+        table.route(format!("{prefix}{subpath}"), get(handle_get_ip));
+    }
+
+    for subpath in [
+        "/results",
+        "/results/",
+        "/results/index.php",
+        "/backend/results",
+        "/backend/results/",
+        "/backend/results/index.php",
+    ] {
+        table.route(format!("{prefix}{subpath}"), get(handle_results_png));
+    }
+
+    for subpath in [
+        "/results/json",
+        "/results/json.php",
+        "/backend/results/json",
+        "/backend/results/json.php",
+    ] {
+        table.route(format!("{prefix}{subpath}"), get(handle_results_json));
+    }
+}
+
 pub fn build_router_with_timeouts(
-    config: Config,
+    mut config: Config,
     vault: Option<TelemetryVault>,
     timeouts: RouteTimeouts,
 ) -> Router {
+    let normalized_base = crate::config::normalize_url_base(&config.url_base);
+    if let Err(err) = crate::config::validate_url_base(&normalized_base) {
+        tracing::warn!(
+            url_base = %config.url_base,
+            error = %err,
+            "Ignoring invalid url_base passed to build_router_with_timeouts"
+        );
+        config.url_base.clear();
+    } else {
+        config.url_base = normalized_base;
+    }
+
     let obfuscation_key = vault
         .as_ref()
         .map(|v| *v.obfuscation_key())
@@ -143,63 +264,18 @@ pub fn build_router_with_timeouts(
         http_client,
     };
 
-    let empty_routes = Router::new()
-        .route("/empty", get(handle_empty).post(handle_empty))
-        .route("/empty.php", get(handle_empty).post(handle_empty))
-        .route("/backend/empty", get(handle_empty).post(handle_empty))
-        .route("/backend/empty.php", get(handle_empty).post(handle_empty))
-        .layer(DefaultBodyLimit::max(MAX_EMPTY_BODY_BYTES));
-
-    let telemetry_routes = Router::new()
-        .route("/results/telemetry", post(handle_telemetry))
-        .route("/results/telemetry.php", post(handle_telemetry))
-        .route("/backend/results/telemetry", post(handle_telemetry))
-        .route("/backend/results/telemetry.php", post(handle_telemetry))
-        .layer(DefaultBodyLimit::max(MAX_TELEMETRY_BODY_BYTES));
-
-    let stats_routes = Router::new()
-        .route("/stats", get(handle_stats).post(handle_stats))
-        .route("/stats/", get(handle_stats).post(handle_stats))
-        .route("/stats.php", get(handle_stats).post(handle_stats))
-        .route("/stats/stats.php", get(handle_stats).post(handle_stats))
-        .route("/backend/stats", get(handle_stats).post(handle_stats))
-        .route("/backend/stats/", get(handle_stats).post(handle_stats))
-        .route("/backend/stats.php", get(handle_stats).post(handle_stats))
-        .layer(DefaultBodyLimit::max(MAX_STATS_BODY_BYTES));
-
-    let core_routes = Router::new()
-        .merge(empty_routes)
-        .merge(telemetry_routes)
-        .merge(stats_routes)
-        .route("/garbage", get(handle_garbage))
-        .route("/garbage.php", get(handle_garbage))
-        .route("/backend/garbage", get(handle_garbage))
-        .route("/backend/garbage.php", get(handle_garbage))
-        .route("/getIP", get(handle_get_ip))
-        .route("/getIP.php", get(handle_get_ip))
-        .route("/backend/getIP", get(handle_get_ip))
-        .route("/backend/getIP.php", get(handle_get_ip))
-        .route("/results", get(handle_results_png))
-        .route("/results/", get(handle_results_png))
-        .route("/results/index.php", get(handle_results_png))
-        .route("/backend/results", get(handle_results_png))
-        .route("/backend/results/", get(handle_results_png))
-        .route("/backend/results/index.php", get(handle_results_png))
-        .route("/results/json", get(handle_results_json))
-        .route("/results/json.php", get(handle_results_json))
-        .route("/backend/results/json", get(handle_results_json))
-        .route("/backend/results/json.php", get(handle_results_json));
-
-    let mut app = core_routes.clone();
+    let mut table = DedupRouteTable::new();
+    mount_core_routes(&mut table, "");
     if !state.config.url_base.is_empty() {
         let prefix = format!("/{}", state.config.url_base);
-        let nested = core_routes
-            .route("/", get(handle_static_asset))
-            .fallback(handle_static_asset);
-        app = app.nest(&prefix, nested);
+        mount_core_routes(&mut table, &prefix);
+        table.route(prefix.clone(), get(handle_static_asset));
+        table.route(format!("{prefix}/"), get(handle_static_asset));
     }
 
-    app.fallback(handle_static_asset)
+    table
+        .router
+        .fallback(handle_static_asset)
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn(cors_middleware))
         .with_state(state)

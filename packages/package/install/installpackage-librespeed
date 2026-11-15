@@ -220,7 +220,7 @@ else
         rm -f -- "$TMP_BUNDLE"
     fi
 fi
-stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend" "" "${PACKAGE_NAME}" "." "" "preserve"
+stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "/etc/aetherflow/librespeed-proxy-token.conf" "${PACKAGE_NAME}" "." "" "preserve"
 rm -f -- "$TMP_TAR"
 
 if [[ -f /opt/librespeed/speedtest-backend && ! -L /opt/librespeed/speedtest-backend ]]; then
@@ -258,14 +258,80 @@ fi
 if [[ -f /opt/librespeed/settings.toml ]]; then
     safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
 import errno, os, re, shutil, stat, sys
+
+def split_toml_root_preamble(src: str):
+    n = len(src)
+    i = 0
+    in_str = None
+    bracket_depth = 0
+    at_line_start = True
+    line_start_idx = 0
+    while i < n:
+        ch = src[i]
+        if in_str is not None:
+            if in_str in ('"""', "'''"):
+                if src.startswith(in_str, i):
+                    i += 3
+                    in_str = None
+                    continue
+                if in_str == '"""' and ch == "\\":
+                    i += 2
+                    continue
+                i += 1
+                continue
+            else:
+                if in_str == '"' and ch == "\\":
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+        if ch == "\n":
+            at_line_start = True
+            line_start_idx = i + 1
+            i += 1
+            continue
+        if ch in (" ", "\t", "\r"):
+            i += 1
+            continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+            at_line_start = True
+            line_start_idx = i
+            continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_str = src[i : i + 3]
+            at_line_start = False
+            i += 3
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            at_line_start = False
+            i += 1
+            continue
+        if ch == "[" and bracket_depth == 0 and at_line_start:
+            return src[:line_start_idx], src[line_start_idx:]
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]" and bracket_depth > 0:
+            bracket_depth -= 1
+        at_line_start = False
+        i += 1
+    return src, ""
+
 cfg_path, port = sys.argv[1], sys.argv[2]
 state_dir = os.path.dirname(os.path.abspath(cfg_path))
 confined_db = os.path.join(state_dir, "speedtest.db")
-text = safe_read_text(cfg_path)
+full_text = safe_read_text(cfg_path)
+text, sections_tail = split_toml_root_preamble(full_text)
 if re.search(r"^[ \t]*listen_port\s*=", text, re.MULTILINE):
     text = re.sub(r"^[ \t]*listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
 else:
-    text = text.rstrip("\n") + f"\nlisten_port={port}\n"
+    text = (text.rstrip("\n") + f"\nlisten_port={port}\n").lstrip("\n") if not text.strip() else text.rstrip("\n") + f"\nlisten_port={port}\n"
 text = re.sub(
     r'^([ \t]*database_type\s*=\s*)(["\'])bolt\2([ \t]*(?:#.*)?)$',
     r'\1"sqlite"\3',
@@ -475,7 +541,11 @@ has_loopback_proxy = bool(
 )
 if has_loopback_proxy and not re.search(r"^[ \t]*trusted_proxy_secret\s*=", text, re.MULTILINE):
     text = text.rstrip("\n") + f'\ntrusted_proxy_secret="{secrets.token_hex(32)}"\n'
-safe_write_text(cfg_path, text)
+if sections_tail:
+    final_text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + sections_tail
+else:
+    final_text = text if text.endswith("\n") else text + "\n"
+safe_write_text(cfg_path, final_text)
 PYEOF
 else
     if declare -F derive_app_password >/dev/null 2>&1; then
@@ -619,7 +689,34 @@ try:
     )
     harden_db_family(dir_fd, state_dir, "speedtest.db")
 
-    cfg_text = cfg_bytes.decode("utf-8", errors="replace")
+    cfg_full_text = cfg_bytes.decode("utf-8", errors="replace")
+    def _root_preamble(src: str) -> str:
+        n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+        while i < n:
+            ch = src[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if src.startswith(in_s, i):
+                        i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+            if ch in (" ", "\t", "\r"): i += 1; continue
+            if ch == "#":
+                nl = src.find("\n", i)
+                if nl == -1: break
+                i = nl + 1; bol = True; lstart = i; continue
+            if src.startswith('"""', i) or src.startswith("'''", i):
+                in_s = src[i:i+3]; bol = False; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+            if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+            if ch == "[": bdepth += 1
+            elif ch == "]" and bdepth > 0: bdepth -= 1
+            bol = False; i += 1
+        return src
+    cfg_text = _root_preamble(cfg_full_text)
     db_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', cfg_text, flags=re.MULTILINE)
     raw_db = db_m.group(2).strip() if db_m else ""
     if raw_db:
@@ -719,7 +816,7 @@ if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
         if [[ ! -e /etc/apache2/mods-enabled/headers.load ]]; then
             af_logged a2enmod -q headers || true
         fi
-        if [[ ! -L /opt/librespeed && ! -L /opt/librespeed/settings.toml && -f /opt/librespeed/settings.toml ]] && grep -Eiq '^[[:space:]]*enable_tls[[:space:]]*=[[:space:]]*"?true"?([[:space:]]*(#.*)?)$' /opt/librespeed/settings.toml; then
+        if [[ ! -L /opt/librespeed && ! -L /opt/librespeed/settings.toml && -f /opt/librespeed/settings.toml ]] && awk '/^[[:space:]]*\[/{exit} tolower($0) ~ /^[[:space:]]*enable_tls[[:space:]]*=[[:space:]]*"?true"?([[:space:]]*(#.*)?)?$/{found=1; exit} END{exit !found}' /opt/librespeed/settings.toml; then
             for _mod in ssl proxy proxy_http proxy_wstunnel rewrite; do
                 if [[ ! -e "/etc/apache2/mods-enabled/${_mod}.load" ]]; then
                     af_logged a2enmod -q "${_mod}" || true
@@ -757,7 +854,34 @@ try:
     txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
 finally:
     os.close(fd)
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
+def _root_preamble(src: str) -> str:
+    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+    while i < n:
+        ch = src[i]
+        if in_s is not None:
+            if in_s in ('"""', "'''"):
+                if src.startswith(in_s, i):
+                    i += 3; in_s = None; continue
+                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+            i += 2 if (in_s == '"' and ch == "\\") else 1
+            if ch == in_s: in_s = None
+            continue
+        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+        if ch in (" ", "\t", "\r"): i += 1; continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1: break
+            i = nl + 1; bol = True; lstart = i; continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_s = src[i:i+3]; bol = False; i += 3; continue
+        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+        if ch == "[": bdepth += 1
+        elif ch == "]" and bdepth > 0: bdepth -= 1
+        bol = False; i += 1
+    return src
+txt_root = _root_preamble(txt)
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt_root, flags=re.MULTILINE)
 bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "0.0.0.0"
 if bind_val == "*":
     bind_val = "0.0.0.0"
@@ -789,9 +913,36 @@ try:
     txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
 finally:
     os.close(fd)
-tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt, flags=re.MULTILINE | re.IGNORECASE)
+def _root_preamble(src: str) -> str:
+    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+    while i < n:
+        ch = src[i]
+        if in_s is not None:
+            if in_s in ('"""', "'''"):
+                if src.startswith(in_s, i):
+                    i += 3; in_s = None; continue
+                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+            i += 2 if (in_s == '"' and ch == "\\") else 1
+            if ch == in_s: in_s = None
+            continue
+        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+        if ch in (" ", "\t", "\r"): i += 1; continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1: break
+            i = nl + 1; bol = True; lstart = i; continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_s = src[i:i+3]; bol = False; i += 3; continue
+        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+        if ch == "[": bdepth += 1
+        elif ch == "]" and bdepth > 0: bdepth -= 1
+        bol = False; i += 1
+    return src
+txt_root = _root_preamble(txt)
+tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt_root, flags=re.MULTILINE | re.IGNORECASE)
 tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt_root, flags=re.MULTILINE)
 bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "127.0.0.1"
 host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
 if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
