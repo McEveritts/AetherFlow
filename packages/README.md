@@ -116,6 +116,7 @@ including through retained-data uninstall.
 ## Legacy CLI
 
 `packages/system/af` delegates to an executable `AETHERFLOW_CLI_BIN`,
+`/opt/AetherFlow/current/bin/af`, `/opt/AetherFlow/current/af`,
 `/usr/local/bin/af-cli`, or `/opt/AetherFlow/bin/af-cli`, in that order. Set
 `AETHERFLOW_USE_RUNNER=1` to reject the legacy fallback when no compiled CLI is
 available. Minimal installations without the compiled CLI serialize their Bash

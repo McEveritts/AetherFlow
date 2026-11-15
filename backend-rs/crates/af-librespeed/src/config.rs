@@ -19,6 +19,37 @@ pub const MAX_CONFIG_AND_PEM_BYTES: usize = 1024 * 1024;
 /// Opens `path` with `O_NOFOLLOW | O_CLOEXEC`, verifies via `fstat` that the
 /// descriptor is a regular non-world-writable file, and reads at most `max_bytes`.
 pub fn read_regular_file_nofollow(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
+    for ancestor in path.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() || ancestor == Path::new("/") {
+            break;
+        }
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    bail!(
+                        "refusing symlinked ancestor directory for {label}: {}",
+                        ancestor.display()
+                    );
+                }
+                if !meta.is_dir() {
+                    bail!(
+                        "ancestor path is not a directory for {label}: {}",
+                        ancestor.display()
+                    );
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to inspect ancestor directory for {label}: {}",
+                        ancestor.display()
+                    )
+                });
+            }
+        }
+    }
+
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -219,6 +250,17 @@ impl Config {
         if !self.server_lng.is_finite() || !(-180.0..=180.0).contains(&self.server_lng) {
             bail!("server_lng must be a finite longitude between -180.0 and 180.0");
         }
+        if crate::routes::build_safe_ipinfo_lookup_url(
+            &self.ipinfo_base_url,
+            IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        )
+        .is_none()
+        {
+            bail!(
+                "invalid or untrusted ipinfo_base_url {:?}: only https://ipinfo.io or loopback http://127.0.0.1:<port> / http://[::1]:<port> are permitted",
+                self.ipinfo_base_url
+            );
+        }
         Ok(())
     }
 
@@ -355,6 +397,13 @@ impl Config {
                 }
                 "ipinfo_api_key" => {
                     cfg.ipinfo_api_key = val.into_string("ipinfo_api_key")?.trim().to_string();
+                }
+                "ipinfo_base_url" => {
+                    let s = val.into_string("ipinfo_base_url")?;
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        cfg.ipinfo_base_url = trimmed.to_string();
+                    }
                 }
                 _ => {
                     // Ignore non-security user-tuning TOML keys gracefully.
@@ -1197,6 +1246,13 @@ extra_flags = [
             .to_string();
         assert!(sym_err.contains("symlink"), "unexpected error: {sym_err}");
 
+        let sym_dir = dir.join("sym_dir");
+        symlink(&dir, &sym_dir).unwrap();
+        let anc_err = Config::load_from_path(&sym_dir.join("real.toml"))
+            .expect_err("symlinked ancestor directory must fail closed")
+            .to_string();
+        assert!(anc_err.contains("symlink"), "unexpected error: {anc_err}");
+
         fs::set_permissions(&real_cfg, fs::Permissions::from_mode(0o666)).unwrap();
         let ww_err = Config::load_from_path(&real_cfg)
             .expect_err("world-writable settings.toml must fail closed")
@@ -1226,11 +1282,17 @@ extra_flags = [
             "url_base = \"speed#frag\"\n",
             "url_base = \"speed//double\"\n",
             "url_base = \"speed with space\"\n",
+            "ipinfo_base_url = \"http://169.254.169.254:80\"\n",
+            "ipinfo_base_url = \"https://evil.example\"\n",
         ] {
             assert!(
                 Config::parse_toml_str(bad_base).is_err(),
-                "expected unsafe url_base to fail closed: {bad_base}"
+                "expected unsafe url_base/ipinfo_base_url to fail closed: {bad_base}"
             );
         }
+        let loopback_ipinfo =
+            Config::parse_toml_str("ipinfo_base_url = \"http://127.0.0.1:18080\"\n")
+                .expect("loopback ipinfo_base_url must parse");
+        assert_eq!(loopback_ipinfo.ipinfo_base_url, "http://127.0.0.1:18080");
     }
 }

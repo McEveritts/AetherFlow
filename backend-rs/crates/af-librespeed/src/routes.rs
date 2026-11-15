@@ -869,9 +869,22 @@ fn redact_json_value_in_place(val: &mut serde_json::Value) {
         }
         serde_json::Value::Object(obj) => {
             for (k, v) in obj.iter_mut() {
-                if k.eq_ignore_ascii_case("hostname") {
+                let key_lower = k.to_ascii_lowercase();
+                if matches!(
+                    key_lower.as_str(),
+                    "hostname"
+                        | "city"
+                        | "region"
+                        | "postal"
+                        | "loc"
+                        | "latitude"
+                        | "longitude"
+                        | "lat"
+                        | "lon"
+                        | "lng"
+                ) {
                     *v = serde_json::Value::String("REDACTED".to_string());
-                } else if k.eq_ignore_ascii_case("ip") {
+                } else if key_lower == "ip" {
                     let scrubbed = v
                         .as_str()
                         .map(redact_single_ip)
@@ -1219,6 +1232,12 @@ async fn handle_telemetry(
     let mut lang = clamp_utf8(lang_raw, 64);
 
     let ip = if state.config.redact_ip_addresses {
+        if let Ok(mut parsed_isp) = serde_json::from_str::<serde_json::Value>(&ispinfo) {
+            redact_json_value_in_place(&mut parsed_isp);
+            if let Ok(serialized) = serde_json::to_string(&parsed_isp) {
+                ispinfo = clamp_utf8(&serialized, 8192);
+            }
+        }
         ispinfo = redact_freeform_text(&ispinfo);
         log = redact_freeform_text(&log);
         extra = redact_freeform_text(&extra);
@@ -1396,6 +1415,34 @@ async fn lookup_result_record(
             Ok(false) => {}
             Err(err) => {
                 tracing::error!(error = %err, "Failed checking legacy telemetry ID table");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+            }
+        }
+    }
+
+    if raw_id.len() == 22 && safe_ascii_id {
+        match vault.resolve_legacy_go_share_id(raw_id.to_string()).await {
+            Ok(Some(legacy_uuid)) => match vault.get_by_uuid(legacy_uuid).await {
+                Ok(Some(rec)) => {
+                    let display_id = if state.config.enable_id_obfuscation {
+                        obfuscate_ulid(&rec.uuid, &state.obfuscation_key)
+                    } else {
+                        rec.uuid.clone()
+                    };
+                    return Ok((rec, display_id));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "Failed loading migrated legacy Go obfuscated telemetry record"
+                    );
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(error = %err, "Failed resolving legacy Go share ID");
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
             }
         }

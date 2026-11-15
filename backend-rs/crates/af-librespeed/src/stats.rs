@@ -733,7 +733,7 @@ pub async fn handle_stats(
             resolved = canonicalize_ulid(&lookup_id);
         }
         let target_uuid = resolved.unwrap_or_else(|| lookup_id.clone());
-        let record_opt = match vault.get_by_uuid(target_uuid.clone()).await {
+        let mut record_opt = match vault.get_by_uuid(target_uuid.clone()).await {
             Ok(Some(r)) => Some(r),
             Ok(None) if state.config.enable_id_obfuscation => {
                 if let Some(canon) = canonicalize_ulid(&lookup_id) {
@@ -752,6 +752,12 @@ pub async fn handle_stats(
                 None
             }
         };
+        if record_opt.is_none() && lookup_id.len() == 22 {
+            if let Ok(Some(legacy_uuid)) = vault.resolve_legacy_go_share_id(lookup_id.clone()).await
+            {
+                record_opt = vault.get_by_uuid(legacy_uuid).await.ok().flatten();
+            }
+        }
 
         match record_opt {
             Some(rec) => {

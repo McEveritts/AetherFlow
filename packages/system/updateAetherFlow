@@ -8,14 +8,14 @@ CHANNEL="" CHECK_ONLY=false DRY_RUN=false OFFLINE=false
 
 usage() {
     cat <<'EOF'
-Usage: updateAetherFlow [--channel <stable|nightly>] [--check] [--dry-run] [--offline] [--help]
+Usage: updateAetherFlow [--channel <stable|nightly|experimental>] [--check] [--dry-run] [--offline] [--help]
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --channel) [[ $# -ge 2 ]] || { echo "[ERROR] --channel requires stable or nightly" >&2; exit 1; }; CHANNEL="$2"; shift 2 ;;
+        --channel) [[ $# -ge 2 ]] || { echo "[ERROR] --channel requires stable, nightly, or experimental" >&2; exit 1; }; CHANNEL="$2"; shift 2 ;;
         --channel=*) CHANNEL="${1#--channel=}"; shift ;;
         --check) CHECK_ONLY=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -24,8 +24,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+[[ "${CHANNEL}" == "experimental" ]] && CHANNEL="nightly"
+
 if [[ -n "${CHANNEL}" && "${CHANNEL}" != "stable" && "${CHANNEL}" != "nightly" ]]; then
-    echo "[ERROR] Unsupported channel '${CHANNEL}' (expected stable or nightly)" >&2
+    echo "[ERROR] Unsupported channel '${CHANNEL}' (expected stable, nightly, or experimental)" >&2
     exit 1
 fi
 
@@ -41,9 +43,26 @@ fi
 
 resolve_af_bin() {
     local path_af cand self_real cand_real magic
+    local -a candidates=()
     self_real="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-    path_af="$(command -v af 2>/dev/null || true)"
-    for cand in "${AF_ROOT}/current/bin/af" "${AF_ROOT}/current/af" "/usr/local/bin/af" "${path_af}"; do
+    if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates=(
+            "${AF_ROOT}/current/bin/af"
+            "${AF_ROOT}/current/af"
+            "${AF_ROOT}/opt/AetherFlow/current/bin/af"
+            "${AF_ROOT}/opt/AetherFlow/current/af"
+            "${AF_ROOT}/usr/local/bin/af"
+        )
+    else
+        path_af="$(command -v af 2>/dev/null || true)"
+        candidates=(
+            "${AF_ROOT}/current/bin/af"
+            "${AF_ROOT}/current/af"
+            "/usr/local/bin/af"
+            "${path_af}"
+        )
+    fi
+    for cand in "${candidates[@]}"; do
         [[ -n "${cand}" && -x "${cand}" && ! -d "${cand}" ]] || continue
         cand_real="$(readlink -f -- "${cand}" 2>/dev/null || printf '%s' "${cand}")"
         [[ "${cand_real}" == "${self_real}" ]] && continue
@@ -58,7 +77,12 @@ resolve_af_bin() {
 
 resolve_release_manager() {
     local cand
-    for cand in "${AF_ROOT}/current/deploy/release-manager.sh" "${AF_ROOT}/deploy/release-manager.sh" "${REPO_ROOT}/deploy/release-manager.sh"; do
+    for cand in \
+        "${AF_ROOT}/current/deploy/release-manager.sh" \
+        "${AF_ROOT}/deploy/release-manager.sh" \
+        "${AF_ROOT}/opt/AetherFlow/current/deploy/release-manager.sh" \
+        "${AF_ROOT}/opt/AetherFlow/deploy/release-manager.sh" \
+        "${REPO_ROOT}/deploy/release-manager.sh"; do
         [[ -f "${cand}" ]] || continue
         printf '%s\n' "${cand}"; return 0
     done
@@ -68,13 +92,20 @@ resolve_release_manager() {
 AF_BIN="$(resolve_af_bin || true)"
 RM_SCRIPT="$(resolve_release_manager || true)"
 AF_GLOBAL_ARGS=()
-[[ -n "${AF_INSTALL_ROOT:-}" ]] && AF_GLOBAL_ARGS+=(--root "${AF_ROOT}")
+RM_GLOBAL_ARGS=()
+if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+    AF_GLOBAL_ARGS+=(--root "${AF_ROOT}")
+    export AETHERFLOW_RELEASE_ROOT="${AETHERFLOW_RELEASE_ROOT:-${AF_ROOT}}"
+    RM_GLOBAL_ARGS+=(--root "${AETHERFLOW_RELEASE_ROOT}")
+fi
 
 if [[ "${CHECK_ONLY}" == "true" ]]; then
     [[ "${DRY_RUN}" == "true" ]] && { echo "[DRY-RUN] Would check release status under ${AF_ROOT}"; exit 0; }
     [[ -n "${AF_BIN}" ]] && exec "${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release status
     if [[ -f "${AF_ROOT}/current/.version" ]]; then
         printf 'current_version=%s\n' "$(head -n 1 "${AF_ROOT}/current/.version")"; exit 0
+    elif [[ -f "${AF_ROOT}/opt/AetherFlow/current/.version" ]]; then
+        printf 'current_version=%s\n' "$(head -n 1 "${AF_ROOT}/opt/AetherFlow/current/.version")"; exit 0
     fi
     echo "[ERROR] No native af CLI or active release slot found under ${AF_ROOT}" >&2
     exit 1
@@ -91,9 +122,9 @@ if [[ -n "${AF_BIN}" ]]; then
     CMD=("${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
 elif [[ -n "${RM_SCRIPT}" ]]; then
     if [[ "${DRY_RUN}" == "true" && "${OFFLINE}" == "true" ]]; then
-        exec bash "${RM_SCRIPT}" deploy --dry-run ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
+        exec bash "${RM_SCRIPT}" deploy ${RM_GLOBAL_ARGS[@]+"${RM_GLOBAL_ARGS[@]}"} --dry-run ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
     fi
-    CMD=(bash "${RM_SCRIPT}" deploy ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
+    CMD=(bash "${RM_SCRIPT}" deploy ${RM_GLOBAL_ARGS[@]+"${RM_GLOBAL_ARGS[@]}"} ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
 else
     echo "[ERROR] Neither native af CLI nor release-manager.sh found under ${AF_ROOT}" >&2
     exit 1

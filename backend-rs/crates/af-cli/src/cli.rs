@@ -910,10 +910,10 @@ where
             AfCommand::Help { topic }
         }
         "version" => AfCommand::Version,
-        "health" | "ping" => {
+        "health" | "ping" | "status" => {
             if !rest.is_empty() {
                 return Err(CliError::Usage(format!(
-                    "unexpected arguments for 'af health': {}",
+                    "unexpected arguments for 'af {head}': {}",
                     rest.join(" ")
                 )));
             }

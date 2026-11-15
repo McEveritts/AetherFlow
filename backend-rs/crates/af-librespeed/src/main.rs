@@ -1,8 +1,9 @@
 use af_librespeed::config::{parse_env_cli, CliAction, Config, VERSION_STRING};
 use af_librespeed::db::TelemetryVault;
 use af_librespeed::routes::build_router;
-use af_librespeed::tls::{build_tls_acceptor, serve_http, serve_tls};
-use anyhow::{Context, Result};
+use af_librespeed::tls::{adopt_systemd_socket_fd, build_tls_acceptor, serve_http, serve_tls};
+use anyhow::{bail, Context, Result};
+use std::net::SocketAddr;
 use std::process;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -88,15 +89,14 @@ async fn run() -> Result<()> {
         None
     };
 
-    let bind_addr = config.socket_addr()?;
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .with_context(|| format!("failed to bind {bind_addr}"))?;
+    let configured_addr = config.socket_addr()?;
+    let (listener, bind_addr, socket_activated) = acquire_tcp_listener(configured_addr).await?;
 
     let app = build_router(config.clone(), vault);
     if let Some(acceptor) = tls_acceptor {
         info!(
             addr = %bind_addr,
+            socket_activated,
             url_base = %config.url_base,
             assets = %config.assets_path.display(),
             cert = %config.tls_cert_file.display(),
@@ -108,6 +108,7 @@ async fn run() -> Result<()> {
     } else {
         info!(
             addr = %bind_addr,
+            socket_activated,
             url_base = %config.url_base,
             assets = %config.assets_path.display(),
             "Starting native Rust LibreSpeed HTTP backend"
@@ -118,6 +119,46 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn acquire_tcp_listener(
+    configured_addr: SocketAddr,
+) -> Result<(TcpListener, SocketAddr, bool)> {
+    let listen_pid = std::env::var("LISTEN_PID").ok();
+    let listen_fds = std::env::var("LISTEN_FDS").ok();
+    std::env::remove_var("LISTEN_PID");
+    std::env::remove_var("LISTEN_FDS");
+    std::env::remove_var("LISTEN_FDNAMES");
+
+    if let (Some(pid_raw), Some(fds_raw)) = (listen_pid, listen_fds) {
+        let target_pid: u32 = pid_raw
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid LISTEN_PID {pid_raw:?}"))?;
+        if target_pid == process::id() {
+            let fd_count: usize = fds_raw
+                .trim()
+                .parse()
+                .with_context(|| format!("invalid LISTEN_FDS {fds_raw:?}"))?;
+            if fd_count == 0 {
+                bail!("LISTEN_FDS=0 with matching LISTEN_PID={target_pid}");
+            }
+            if fd_count > 1 {
+                warn!(
+                    listen_fds = fd_count,
+                    "Multiple systemd activation sockets passed; adopting primary fd 3"
+                );
+            }
+            let (listener, local_addr) = adopt_systemd_socket_fd(3, false)?;
+            return Ok((listener, local_addr, true));
+        }
+    }
+
+    let listener = TcpListener::bind(configured_addr)
+        .await
+        .with_context(|| format!("failed to bind {configured_addr}"))?;
+    let actual_addr = listener.local_addr().unwrap_or(configured_addr);
+    Ok((listener, actual_addr, false))
 }
 
 async fn shutdown_signal() {

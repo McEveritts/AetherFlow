@@ -12,10 +12,12 @@ This audit records toolchain, dependency, workflow, installer, and version-probe
   - Removed unused `anyhow` and `tracing` workspace dependencies from `backend-rs/crates/af-host/Cargo.toml`.
   - Regenerated `backend-rs/Cargo.lock` (`--locked` builds and Clippy verified with zero warnings on release-critical crates `-p af-models -p af-host -p af-release -p af-cli`).
 
-## 2. Legacy Go Service (`backend/`)
+## 2. Legacy Go Service (`backend/` — Decommissioned in v4.0.0 Zero-Go Cutover)
 
-- **Toolchain bump**: Updated `backend/go.mod` `go` directive from `1.26.10` to `1.26.11`.
-- **Vulnerability & test posture**: Verified clean under `govulncheck ./...` (`0` vulnerabilities) and `go test ./... -count=1`.
+> **Decommissioned**: Following this 2026-11-13 snapshot, `backend/`, `plugins/sdk-template/`, `packages/package/assets/librespeed/backend-patches/`, and all Go workflow steps were completely removed in the v4.0.0 Zero-Go Consolidation & Cutover.
+
+- **Toolchain bump (historical)**: Updated `backend/go.mod` `go` directive from `1.26.10` to `1.26.11`.
+- **Vulnerability & test posture (historical)**: Verified clean under `govulncheck ./...` (`0` vulnerabilities) and `go test ./... -count=1`.
 
 ## 3. GitHub Actions Workflows (`.github/workflows/`)
 

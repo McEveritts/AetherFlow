@@ -13,7 +13,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import installer_common_functions as common_functions
+from installer_test_helpers import installer_common_functions as common_functions, replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,9 +150,10 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         self.unit = self.root / 'etc/systemd/system/af-palate.service'
 
     def run_script(self, action='install', **environment):
-        source = (ROOT / f'packages/package/{action}/{action}package-palate').read_text()
-        for prefix in ('/opt/', '/var/', '/etc/', '/run/', '/install'):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            (ROOT / f'packages/package/{action}/{action}package-palate').read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ('/opt/', '/var/', '/etc/', '/run/', '/install')],
+        )
         script = self.root / f'{action}.sh'
         script.write_text(source)
         return subprocess.run(['bash', str(script)], env={**self.env, **environment}, capture_output=True, text=True, timeout=20)

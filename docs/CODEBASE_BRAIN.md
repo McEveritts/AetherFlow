@@ -19,7 +19,7 @@ graph TD
     Client["Next.js 16 Client SPA (Obsidian V2)"] -->|HTTPS / WSS + JWT| Proxy["Apache2 + Subdomain Gateway"]
     Proxy -->|127.0.0.1:8080| AxumRouter("Rust Axum Control Plane (af-api)<br/>User=aetherflow • ProtectSystem=strict")
 
-    subgraph Control_Plane["11-Crate Rust Workspace (backend-rs)"]
+    subgraph Control_Plane["12-Crate Rust Workspace (backend-rs)"]
         AxumRouter --> AuthMiddleware["AuthMiddleware + HS256 JWT + CSRF + Rate Limiter"]
         AuthMiddleware --> RBAC["Admin & Plugin Scope Guard"]
         RBAC --> Handlers["API, McBrowser (af-files) & Streaming Handlers"]

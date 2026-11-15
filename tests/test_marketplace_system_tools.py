@@ -8,7 +8,7 @@ import unittest
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,9 +33,10 @@ class MarketplaceSystemToolsTests(unittest.TestCase):
         return result.stdout.splitlines()
 
     def test_sandbox_sources_local_current_then_legacy_helpers(self):
-        source = (ROOT / "packages/system/af-systemd-sandbox").read_text()
-        for prefix in ("/opt/", "/usr/local/"):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            (ROOT / "packages/system/af-systemd-sandbox").read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/usr/local/")],
+        )
         script = self.file("local/system/af-systemd-sandbox", source)
         helpers = [
             self.file("local/common.sh", "echo local\n"),
@@ -76,9 +77,10 @@ resolve_master_user() { echo admin; }
 
     def test_cli_package_scripts_prefer_current_release_with_legacy_fallbacks(self):
         source = (ROOT / "packages/system/af").read_text()
-        functions = source[source.index("package_roots=("):source.index("\n#\n# [AetherFlow")]
-        for prefix in ("/opt/", "/usr/local/"):
-            functions = functions.replace(prefix, str(self.root) + prefix)
+        functions = replace_paths_once(
+            source[source.index("package_roots=("):source.index("\n#\n# [AetherFlow")],
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/usr/local/")],
+        )
         for action in ("install", "remove"):
             scripts = [self.file(f"{prefix}/{action}/{action}package-dispatcharr", prefix) for prefix in (
                 "opt/AetherFlow/current/packages/package", "opt/AetherFlow/packages/package", "usr/local/bin/AetherFlow/package",
@@ -89,14 +91,21 @@ resolve_master_user() { echo admin; }
                 script.unlink()
 
     def cli_script(self):
-        source = (ROOT / "packages/system/af").read_text()
-        for prefix in ("/opt/", "/usr/local/", "/install/"):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            (ROOT / "packages/system/af").read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/usr/local/", "/install/")],
+        )
         return self.file("af", source)
 
     def test_cli_executes_authoritative_binary_before_loading_legacy_helpers(self):
         script = self.cli_script()
-        for relative in ("custom/af-cli", "usr/local/bin/af-cli", "opt/AetherFlow/bin/af-cli"):
+        for relative in (
+            "custom/af-cli",
+            "opt/AetherFlow/current/bin/af",
+            "opt/AetherFlow/current/af",
+            "usr/local/bin/af-cli",
+            "opt/AetherFlow/bin/af-cli",
+        ):
             with self.subTest(binary=relative):
                 binary = self.file(relative, '#!/bin/bash\nprintf "%s\\n" "$@"\nexit 23\n')
                 binary.chmod(0o755)

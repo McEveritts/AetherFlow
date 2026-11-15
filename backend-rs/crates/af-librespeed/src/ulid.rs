@@ -7,6 +7,8 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const URLSAFE_B64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const FEISTEL_DOMAIN: &[u8] = b"AetherFlow-LibreSpeed-ULID-Obfuscation-v1";
 
 /// Generates a canonical 26-character Crockford Base32 ULID:
@@ -160,6 +162,83 @@ pub fn resolve_id(raw_id: &str, obfuscation_enabled: bool, key: &[u8; 32]) -> Op
     }
 }
 
+fn urlsafe_b64_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
+}
+
+/// Encodes a canonical 26-char ULID into upstream `librespeed/speedtest-go`'s
+/// legacy 22-character `base64.RawURLEncoding` XOR-4-byte obfuscated format
+/// (`results/idobfuscation.go`), used for verifying legacy share-URL migration.
+pub fn encode_legacy_go_obfuscated_ulid(canonical: &str, salt: &[u8; 4]) -> Option<String> {
+    let val = decode_ulid(canonical)?;
+    let mut raw = val.to_be_bytes();
+    for i in 0..4 {
+        raw[i] ^= salt[i];
+    }
+    let mut out = [0u8; 22];
+    let mut out_idx = 0usize;
+    let mut chunk_idx = 0usize;
+    while chunk_idx + 3 <= 15 {
+        let b0 = raw[chunk_idx];
+        let b1 = raw[chunk_idx + 1];
+        let b2 = raw[chunk_idx + 2];
+        out[out_idx] = URLSAFE_B64_ALPHABET[(b0 >> 2) as usize];
+        out[out_idx + 1] = URLSAFE_B64_ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize];
+        out[out_idx + 2] = URLSAFE_B64_ALPHABET[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize];
+        out[out_idx + 3] = URLSAFE_B64_ALPHABET[(b2 & 0x3F) as usize];
+        chunk_idx += 3;
+        out_idx += 4;
+    }
+    let b15 = raw[15];
+    out[20] = URLSAFE_B64_ALPHABET[(b15 >> 2) as usize];
+    out[21] = URLSAFE_B64_ALPHABET[((b15 & 0x03) << 4) as usize];
+    Some(String::from_utf8(out.to_vec()).expect("URL-safe Base64 alphabet is ASCII"))
+}
+
+/// Strictly decodes a 22-character unpadded URL-safe Base64 token
+/// (`base64.RawURLEncoding`) into 16 raw bytes, rejecting non-zero padding bits.
+pub fn decode_legacy_go_obfuscated_ulid_bytes(token: &str) -> Option<[u8; 16]> {
+    let trimmed = token.trim();
+    if trimmed.len() != 22 || !trimmed.is_ascii() {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut out = [0u8; 16];
+    for group in 0..5 {
+        let s0 = urlsafe_b64_val(bytes[group * 4])?;
+        let s1 = urlsafe_b64_val(bytes[group * 4 + 1])?;
+        let s2 = urlsafe_b64_val(bytes[group * 4 + 2])?;
+        let s3 = urlsafe_b64_val(bytes[group * 4 + 3])?;
+        out[group * 3] = (s0 << 2) | (s1 >> 4);
+        out[group * 3 + 1] = (s1 << 4) | (s2 >> 2);
+        out[group * 3 + 2] = (s2 << 6) | s3;
+    }
+    let s20 = urlsafe_b64_val(bytes[20])?;
+    let s21 = urlsafe_b64_val(bytes[21])?;
+    if (s21 & 0x0F) != 0 {
+        return None;
+    }
+    out[15] = (s20 << 2) | (s21 >> 4);
+    Some(out)
+}
+
+/// Reverses upstream `librespeed/speedtest-go`'s `DeobfuscateULID` using the
+/// 4-byte `idObfuscation_salt.bin` value.
+pub fn decode_legacy_go_obfuscated_ulid(token: &str, salt: &[u8; 4]) -> Option<String> {
+    let mut raw = decode_legacy_go_obfuscated_ulid_bytes(token)?;
+    for i in 0..4 {
+        raw[i] ^= salt[i];
+    }
+    Some(encode_u128(u128::from_be_bytes(raw)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +286,26 @@ mod tests {
             canonicalize_ulid("01j000000000000000000000ol"),
             Some("01J00000000000000000000001".to_string())
         );
+    }
+
+    #[test]
+    fn legacy_go_obfuscated_ulid_roundtrips_and_preserves_96bit_suffix() {
+        let salt = [0xDE, 0xAD, 0xBE, 0xEF];
+        let ulid = "01JABCDEFGHJKMNPQRSTVWXYZ1";
+        let go_token = encode_legacy_go_obfuscated_ulid(ulid, &salt).expect("encode go token");
+        assert_eq!(go_token.len(), 22);
+        assert_eq!(
+            decode_legacy_go_obfuscated_ulid(&go_token, &salt).as_deref(),
+            Some(ulid)
+        );
+        let raw_obf = decode_legacy_go_obfuscated_ulid_bytes(&go_token).unwrap();
+        let orig_bytes = decode_ulid(ulid).unwrap().to_be_bytes();
+        assert_eq!(&raw_obf[4..16], &orig_bytes[4..16]);
+
+        // Reject non-zero trailing padding bits on 22nd Base64 char
+        let mut bad = go_token.into_bytes();
+        bad[21] = b'B'; // index 1 -> low 4 bits = 0001 != 0
+        let bad_str = String::from_utf8(bad).unwrap();
+        assert!(decode_legacy_go_obfuscated_ulid_bytes(&bad_str).is_none());
     }
 }

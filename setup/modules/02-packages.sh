@@ -173,8 +173,10 @@ case "${1:-}" in
 		;;
 	status)
 		shift
-		if [[ -x /opt/AetherFlow/current/af ]]; then
-			exec /opt/AetherFlow/current/af status "$@"
+		if [[ $# -eq 0 && -x /opt/AetherFlow/current/bin/af ]]; then
+			exec /opt/AetherFlow/current/bin/af status
+		elif [[ $# -eq 0 && -x /opt/AetherFlow/current/af ]]; then
+			exec /opt/AetherFlow/current/af status
 		fi
 		exec systemctl status aetherflow-api aetherflow-runner "$@"
 		;;

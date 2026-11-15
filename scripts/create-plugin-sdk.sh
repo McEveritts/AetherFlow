@@ -78,8 +78,8 @@ echo ""
 echo "=> Linking Shared UI Library..."
 if [[ -d "${REPO_ROOT}/packages/ui" ]]; then
     mkdir -p "${TARGET_DIR}/frontend"
-    # Provide a relative symlink to core UI for absolute parity
-    ln -sfn "${REPO_ROOT}/packages/ui" "${TARGET_DIR}/frontend/ui-link" || true
+    REL_UI_PATH="$(python3 -c 'import os, sys; print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' "${REPO_ROOT}/packages/ui" "${TARGET_DIR}/frontend")"
+    ln -sfn "${REL_UI_PATH}" "${TARGET_DIR}/frontend/ui-link" || true
     echo "=> Symlinked AetherFlow UI primitives to ${TARGET_DIR}/frontend/ui-link successfully."
 else
     echo "=> Warning: Core packages/ui not found. Plugin may drift aesthetically."

@@ -405,9 +405,10 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
         self.remover = self.rewrite_script(REMOVER, "remover")
 
     def rewrite_script(self, path, filename):
-        source = path.read_text()
-        for prefix in ("/opt/", "/var/", "/etc/", "/run/", "/install"):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            path.read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/var/", "/etc/", "/run/", "/install")],
+        )
         target = self.root / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)

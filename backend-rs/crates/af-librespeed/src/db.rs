@@ -1,4 +1,7 @@
-use crate::ulid::canonicalize_ulid;
+use crate::ulid::{
+    canonicalize_ulid, decode_legacy_go_obfuscated_ulid, decode_legacy_go_obfuscated_ulid_bytes,
+    decode_ulid,
+};
 use anyhow::{bail, Context, Result};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -8,7 +11,7 @@ use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,7 +26,8 @@ const BBOLT_BRANCH_FLAG: u16 = 0x01;
 const BBOLT_LEAF_FLAG: u16 = 0x02;
 const BBOLT_META_FLAG: u16 = 0x04;
 const BBOLT_BUCKET_LEAF_FLAG: u32 = 0x01;
-const MAX_BOLTDB_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BOLTDB_PAGE_SPAN_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BOLTDB_CUMULATIVE_READ_BYTES: usize = 256 * 1024 * 1024;
 const MAX_BOLTDB_TREE_DEPTH: usize = 16;
 const MAX_BOLTDB_VISITED_PAGES: usize = 65_536;
 const SQLITE_SIDECAR_SUFFIXES: [(&str, &str); 3] = [
@@ -70,6 +74,7 @@ pub struct TelemetryVault {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
     obfuscation_key: [u8; 32],
+    legacy_go_salt: Option<[u8; 4]>,
     max_rows: usize,
 }
 
@@ -123,6 +128,7 @@ impl TelemetryVault {
             conn: Arc::new(Mutex::new(conn)),
             path: PathBuf::from(":memory:"),
             obfuscation_key,
+            legacy_go_salt: None,
             max_rows,
         })
     }
@@ -203,11 +209,13 @@ impl TelemetryVault {
         );
 
         let obfuscation_key = init_or_load_obfuscation_key(&conn)?;
+        let legacy_go_salt = init_or_load_legacy_go_salt(db_path, &conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: db_path.to_path_buf(),
             obfuscation_key,
+            legacy_go_salt,
             max_rows,
         })
     }
@@ -218,6 +226,77 @@ impl TelemetryVault {
 
     pub fn obfuscation_key(&self) -> &[u8; 32] {
         &self.obfuscation_key
+    }
+
+    pub fn legacy_go_salt(&self) -> Option<[u8; 4]> {
+        self.legacy_go_salt
+    }
+
+    /// Resolves a legacy 22-character `librespeed/speedtest-go` obfuscated share token
+    /// (`base64.RawURLEncoding` over `ulid_bytes` with `bytes[0..4] ^= salt`) to a
+    /// migrated canonical ULID in `telemetry_legacy_raw_ids`.
+    ///
+    /// Uses the imported `idObfuscation_salt.bin` 4-byte salt for exact O(1) lookup when
+    /// available, and falls back to matching the unmasked 96-bit suffix (`bytes[4..16]`)
+    /// across `telemetry_legacy_raw_ids` iff the match is globally unique.
+    pub async fn resolve_legacy_go_share_id(&self, token: String) -> Result<Option<String>> {
+        let Some(raw_bytes) = decode_legacy_go_obfuscated_ulid_bytes(&token) else {
+            return Ok(None);
+        };
+        let salt_opt = self.legacy_go_salt;
+        let conn_arc = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn_arc
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SQLite vault mutex poisoned"))?;
+            if let Some(salt) = salt_opt {
+                if let Some(exact_uuid) = decode_legacy_go_obfuscated_ulid(&token, &salt) {
+                    let found: Option<String> = conn
+                        .query_row(
+                            "SELECT u.uuid
+                             FROM speedtest_users u
+                             INNER JOIN telemetry_legacy_raw_ids l ON l.uuid = u.uuid
+                             WHERE u.uuid = ?1
+                             LIMIT 1",
+                            params![exact_uuid],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .context("failed exact legacy Go share ID lookup")?;
+                    if found.is_some() {
+                        return Ok(found);
+                    }
+                }
+            }
+
+            let mut stmt = conn
+                .prepare(
+                    "SELECT u.uuid
+                     FROM speedtest_users u
+                     INNER JOIN telemetry_legacy_raw_ids l ON l.uuid = u.uuid",
+                )
+                .context("failed preparing legacy Go suffix scan")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .context("failed executing legacy Go suffix scan")?;
+            let mut matched: Option<String> = None;
+            for row in rows {
+                let cand_uuid = row.context("failed decoding legacy Go candidate UUID")?;
+                let Some(val) = decode_ulid(&cand_uuid) else {
+                    continue;
+                };
+                if val.to_be_bytes()[4..16] == raw_bytes[4..16] {
+                    if matched.is_some() {
+                        // Ambiguous suffix match: fail closed rather than returning wrong record.
+                        return Ok(None);
+                    }
+                    matched = Some(cand_uuid);
+                }
+            }
+            Ok(matched)
+        })
+        .await
+        .context("legacy Go share ID lookup panicked")?
     }
 
     pub async fn is_legacy_raw_id(&self, uuid: String) -> Result<bool> {
@@ -600,11 +679,21 @@ fn guard_and_backup_legacy_boltdb(db_path: &Path) -> Result<Option<PathBuf>> {
         .unwrap_or_default()
         .as_secs();
 
+    let already_bolt_ext = db_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("bolt"));
+    let bak_ext = if already_bolt_ext {
+        ".bak"
+    } else {
+        ".bolt.bak"
+    };
+
     let mut candidates = Vec::with_capacity(66);
-    candidates.push(sidecar_path(db_path, ".bolt.bak"));
-    candidates.push(sidecar_path(db_path, &format!(".bolt.bak.{ts}")));
+    candidates.push(sidecar_path(db_path, bak_ext));
+    candidates.push(sidecar_path(db_path, &format!("{bak_ext}.{ts}")));
     for seq in 1..=64u32 {
-        candidates.push(sidecar_path(db_path, &format!(".bolt.bak.{ts}.{seq}")));
+        candidates.push(sidecar_path(db_path, &format!("{bak_ext}.{ts}.{seq}")));
     }
 
     let mut chosen_backup = None;
@@ -824,12 +913,69 @@ fn decode_bolt_telemetry_leaf(key_bytes: &[u8], val_bytes: &[u8]) -> Option<NewT
     })
 }
 
-fn walk_bbolt_page_id(
-    data: &[u8],
+trait BoltByteSource {
+    fn byte_len(&self) -> u64;
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
+}
+
+impl BoltByteSource for &[u8] {
+    fn byte_len(&self) -> u64 {
+        self.len() as u64
+    }
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let start = usize::try_from(offset).context("bbolt slice offset overflow")?;
+        let end = start
+            .checked_add(buf.len())
+            .context("bbolt slice end overflow")?;
+        if end > self.len() {
+            bail!("bbolt read past slice end ({end} > {})", self.len());
+        }
+        buf.copy_from_slice(&self[start..end]);
+        Ok(())
+    }
+}
+
+struct FileBoltSource {
+    file: fs::File,
+    len: u64,
+}
+
+impl BoltByteSource for FileBoltSource {
+    fn byte_len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .context("bbolt file offset overflow")?;
+        if end > self.len {
+            bail!("bbolt read past file end ({end} > {})", self.len);
+        }
+        self.file
+            .read_exact_at(buf, offset)
+            .with_context(|| format!("bbolt positional pread failed at offset {offset}"))
+    }
+}
+
+fn select_best_bbolt_meta_from_source<S: BoltByteSource>(src: &S) -> Option<BoltMeta> {
+    let head_len = usize::try_from(src.byte_len().min(131_072)).ok()?;
+    if head_len < 80 {
+        return None;
+    }
+    let mut head = vec![0u8; head_len];
+    src.read_exact_at(0, &mut head).ok()?;
+    select_best_bbolt_meta(&head)
+}
+
+fn walk_bbolt_page_id<S: BoltByteSource>(
+    src: &S,
     page_size: usize,
     pgid: u64,
     depth: usize,
     visited: &mut HashSet<u64>,
+    cumulative_bytes: &mut usize,
     out: &mut Vec<NewTelemetryRecord>,
 ) -> Result<()> {
     if depth > MAX_BOLTDB_TREE_DEPTH || pgid < 2 || visited.len() >= MAX_BOLTDB_VISITED_PAGES {
@@ -838,39 +984,60 @@ fn walk_bbolt_page_id(
     if !visited.insert(pgid) {
         bail!("cyclic bbolt page reference detected at pgid={pgid}");
     }
-    let start = usize::try_from(pgid)
-        .ok()
-        .and_then(|p| p.checked_mul(page_size))
+    let start = pgid
+        .checked_mul(page_size as u64)
         .context("bbolt page start overflow")?;
-    if start.saturating_add(BBOLT_PAGE_HEADER_BYTES) > data.len() {
+    if start
+        .checked_add(BBOLT_PAGE_HEADER_BYTES as u64)
+        .is_none_or(|hdr_end| hdr_end > src.byte_len())
+    {
         bail!("bbolt page {pgid} header out of file bounds");
     }
-    let overflow = u32::from_le_bytes(
-        data[start + 12..start + 16]
-            .try_into()
-            .expect("4-byte overflow slice"),
-    ) as usize;
+    let mut hdr = [0u8; BBOLT_PAGE_HEADER_BYTES];
+    src.read_exact_at(start, &mut hdr)?;
+    let overflow =
+        u32::from_le_bytes(hdr[12..16].try_into().expect("4-byte overflow slice")) as usize;
     let span_pages = 1usize
         .checked_add(overflow)
         .context("bbolt page overflow count")?;
     let span_bytes = span_pages
         .checked_mul(page_size)
         .context("bbolt page span byte overflow")?;
-    let end = start
+    if span_bytes > MAX_BOLTDB_PAGE_SPAN_BYTES {
+        bail!("bbolt page {pgid} span ({span_bytes} bytes) exceeds 16 MiB bound");
+    }
+    *cumulative_bytes = cumulative_bytes
         .checked_add(span_bytes)
+        .context("bbolt cumulative read byte overflow")?;
+    if *cumulative_bytes > MAX_BOLTDB_CUMULATIVE_READ_BYTES {
+        bail!("bbolt cumulative page reads exceed 256 MiB bound");
+    }
+    let end = start
+        .checked_add(span_bytes as u64)
         .context("bbolt page end overflow")?;
-    if end > data.len() {
+    if end > src.byte_len() {
         bail!("bbolt page {pgid} span exceeds file length");
     }
-    walk_bbolt_page_slice(data, page_size, &data[start..end], depth, visited, out)
+    let mut page_buf = vec![0u8; span_bytes];
+    src.read_exact_at(start, &mut page_buf)?;
+    walk_bbolt_page_slice(
+        src,
+        page_size,
+        &page_buf,
+        depth,
+        visited,
+        cumulative_bytes,
+        out,
+    )
 }
 
-fn walk_bbolt_page_slice(
-    data: &[u8],
+fn walk_bbolt_page_slice<S: BoltByteSource>(
+    src: &S,
     page_size: usize,
     page_span: &[u8],
     depth: usize,
     visited: &mut HashSet<u64>,
+    cumulative_bytes: &mut usize,
     out: &mut Vec<NewTelemetryRecord>,
 ) -> Result<()> {
     if depth > MAX_BOLTDB_TREE_DEPTH || page_span.len() < BBOLT_PAGE_HEADER_BYTES {
@@ -894,7 +1061,15 @@ fn walk_bbolt_page_slice(
                     .try_into()
                     .expect("8-byte child pgid"),
             );
-            walk_bbolt_page_id(data, page_size, child_pgid, depth + 1, visited, out)?;
+            walk_bbolt_page_id(
+                src,
+                page_size,
+                child_pgid,
+                depth + 1,
+                visited,
+                cumulative_bytes,
+                out,
+            )?;
         }
         Ok(())
     } else if flags == BBOLT_LEAF_FLAG {
@@ -943,16 +1118,25 @@ fn walk_bbolt_page_slice(
                 if sub_root == 0 {
                     if val_bytes.len() > 16 {
                         walk_bbolt_page_slice(
-                            data,
+                            src,
                             page_size,
                             &val_bytes[16..],
                             depth + 1,
                             visited,
+                            cumulative_bytes,
                             out,
                         )?;
                     }
                 } else {
-                    walk_bbolt_page_id(data, page_size, sub_root, depth + 1, visited, out)?;
+                    walk_bbolt_page_id(
+                        src,
+                        page_size,
+                        sub_root,
+                        depth + 1,
+                        visited,
+                        cumulative_bytes,
+                        out,
+                    )?;
                 }
             } else if let Some(record) = decode_bolt_telemetry_leaf(key_bytes, val_bytes) {
                 out.push(record);
@@ -964,21 +1148,25 @@ fn walk_bbolt_page_slice(
     }
 }
 
-pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecord>> {
-    let Some(meta) = select_best_bbolt_meta(data) else {
+fn parse_boltdb_telemetry_from_source<S: BoltByteSource>(
+    src: &S,
+) -> Result<Vec<NewTelemetryRecord>> {
+    let Some(meta) = select_best_bbolt_meta_from_source(src) else {
         bail!("no valid bbolt v2 meta page with matching FNV-1a checksum");
     };
     if meta.root_pgid < 2 {
         return Ok(Vec::new());
     }
     let mut visited = HashSet::new();
+    let mut cumulative_bytes = 0usize;
     let mut records = Vec::new();
     walk_bbolt_page_id(
-        data,
+        src,
         meta.page_size,
         meta.root_pgid,
         0,
         &mut visited,
+        &mut cumulative_bytes,
         &mut records,
     )?;
     records.sort_by(|a, b| {
@@ -988,6 +1176,10 @@ pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecor
     });
     records.dedup_by(|a, b| a.uuid == b.uuid);
     Ok(records)
+}
+
+pub fn parse_boltdb_telemetry_bytes(data: &[u8]) -> Result<Vec<NewTelemetryRecord>> {
+    parse_boltdb_telemetry_from_source(&data)
 }
 
 fn init_or_load_obfuscation_key(conn: &Connection) -> Result<[u8; 32]> {
@@ -1037,6 +1229,87 @@ fn init_or_load_obfuscation_key(conn: &Connection) -> Result<[u8; 32]> {
     }
 }
 
+fn init_or_load_legacy_go_salt(db_path: &Path, conn: &Connection) -> Result<Option<[u8; 4]>> {
+    let stored_salt: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM telemetry_meta WHERE key = 'legacy_go_obfuscation_salt' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("failed probing legacy_go_obfuscation_salt")?;
+
+    let mut disk_candidates = Vec::new();
+    if let Some(parent) = db_path.parent() {
+        disk_candidates.push(parent.join("idObfuscation_salt.bin"));
+        if let Some(grandparent) = parent.parent() {
+            if grandparent
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == "librespeed")
+            {
+                disk_candidates.push(grandparent.join("idObfuscation_salt.bin"));
+            }
+        }
+    }
+
+    let mut imported_from_disk: Option<[u8; 4]> = None;
+    for salt_path in disk_candidates {
+        let mut safe_ancestors = true;
+        for anc in salt_path.ancestors().skip(1) {
+            if anc.as_os_str().is_empty() {
+                break;
+            }
+            if check_not_symlink(anc, "legacy salt ancestor").is_err() {
+                safe_ancestors = false;
+                break;
+            }
+        }
+        if !safe_ancestors || check_not_symlink(&salt_path, "idObfuscation_salt.bin").is_err() {
+            continue;
+        }
+        let Ok(mut salt_file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&salt_path)
+        else {
+            continue;
+        };
+        let Ok(meta) = salt_file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let _ = salt_file.set_permissions(fs::Permissions::from_mode(0o600));
+        if meta.len() == 4 && imported_from_disk.is_none() {
+            let mut salt = [0u8; 4];
+            if salt_file.read_exact(&mut salt).is_ok() {
+                imported_from_disk = Some(salt);
+            }
+        }
+    }
+
+    if let Some(blob) = stored_salt {
+        if blob.len() == 4 {
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&blob);
+            return Ok(Some(arr));
+        }
+    }
+
+    if let Some(salt) = imported_from_disk {
+        conn.execute(
+            "INSERT OR REPLACE INTO telemetry_meta (key, value) VALUES ('legacy_go_obfuscation_salt', ?1)",
+            params![salt.as_slice()],
+        )
+        .context("failed storing legacy_go_obfuscation_salt")?;
+        return Ok(Some(salt));
+    }
+
+    Ok(None)
+}
+
 fn discover_and_import_legacy_bolt_backups(
     db_path: &Path,
     primary_backup: Option<&Path>,
@@ -1058,6 +1331,8 @@ fn discover_and_import_legacy_bolt_backups(
         db_path.file_name().and_then(|s| s.to_str()),
     ) {
         if let Ok(entries) = fs::read_dir(parent) {
+            let bak_exact = format!("{db_fname}.bak");
+            let bak_prefix = format!("{db_fname}.bak.");
             let bolt_bak_exact = format!("{db_fname}.bolt.bak");
             let bolt_bak_prefix = format!("{db_fname}.bolt.bak.");
             let pre_migrate_prefix = format!("{db_fname}.pre-migrate.");
@@ -1073,11 +1348,17 @@ fn discover_and_import_legacy_bolt_backups(
                 let Some(fname) = fname_os.to_str() else {
                     continue;
                 };
-                let is_bolt_backup = fname == bolt_bak_exact
+                let is_bolt_backup = fname == bak_exact
+                    || fname.starts_with(&bak_prefix)
+                    || fname == bolt_bak_exact
                     || fname.starts_with(&bolt_bak_prefix)
                     || fname == "speedtest.bolt.bak"
                     || fname.starts_with("speedtest.bolt.bak.")
-                    || (fname.starts_with(&pre_migrate_prefix) && fname.ends_with(".bak"));
+                    || fname == "speedtest.bolt.bolt.bak"
+                    || fname.starts_with("speedtest.bolt.bolt.bak.")
+                    || ((fname.starts_with(&pre_migrate_prefix)
+                        || fname.starts_with("speedtest.bolt.pre-migrate."))
+                        && fname.ends_with(".bak"));
                 if is_bolt_backup {
                     let path = entry.path();
                     if !candidates.iter().any(|c| c == &path) {
@@ -1111,17 +1392,6 @@ fn discover_and_import_legacy_bolt_backups(
     }
 }
 
-fn mark_bolt_source_migrated(conn: &Connection, source_name: &str) {
-    let now_ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let _ = conn.execute(
-        "INSERT OR IGNORE INTO telemetry_bolt_migrations (source_name, imported_at) VALUES (?1, ?2)",
-        params![source_name, now_ts],
-    );
-}
-
 fn import_legacy_boltdb_if_valid(
     backup_path: &Path,
     source_name: &str,
@@ -1146,44 +1416,38 @@ fn import_legacy_boltdb_if_valid(
     let Ok(meta) = file.metadata() else {
         return;
     };
-    if !meta.is_file() || meta.len() > MAX_BOLTDB_IMPORT_BYTES {
+    if !meta.is_file() {
+        warn!(
+            backup = %backup_path.display(),
+            "Skipping legacy BoltDB telemetry import: backup is not a regular file"
+        );
+        return;
+    }
+    if meta.len() < 80 {
         warn!(
             backup = %backup_path.display(),
             size_bytes = meta.len(),
-            "Skipping legacy BoltDB telemetry import: non-regular or exceeds 64 MiB bound"
+            "Legacy non-SQLite backup is smaller than bbolt header; leaving eligible for repair"
         );
-        return;
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    if let Err(err) = file
-        .take(MAX_BOLTDB_IMPORT_BYTES + 1)
-        .read_to_end(&mut bytes)
-    {
-        warn!(
-            backup = %backup_path.display(),
-            error = %err,
-            "Skipping legacy BoltDB telemetry import: read error"
-        );
-        return;
-    }
-    if bytes.len() as u64 > MAX_BOLTDB_IMPORT_BYTES {
         return;
     }
 
-    let mut records = match parse_boltdb_telemetry_bytes(&bytes) {
+    let src = FileBoltSource {
+        file,
+        len: meta.len(),
+    };
+    let mut records = match parse_boltdb_telemetry_from_source(&src) {
         Ok(r) => r,
         Err(err) => {
             warn!(
                 backup = %backup_path.display(),
                 reason = %err,
-                "Legacy non-SQLite backup is not an importable BoltDB v2 archive; starting fresh SQLite vault"
+                "Legacy non-SQLite backup is not an importable BoltDB v2 archive; leaving unrecorded for retry after repair"
             );
-            mark_bolt_source_migrated(conn, source_name);
             return;
         }
     };
     if records.is_empty() {
-        mark_bolt_source_migrated(conn, source_name);
         return;
     }
     if records.len() > max_rows {
@@ -1195,6 +1459,7 @@ fn import_legacy_boltdb_if_valid(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
+    let keep = i64::try_from(max_rows).unwrap_or(100_000);
 
     let imported = (|| -> Result<usize> {
         let tx = conn.transaction()?;
@@ -1225,6 +1490,20 @@ fn import_legacy_boltdb_if_valid(
                 legacy_id_stmt.execute(params![rec.uuid])?;
             }
         }
+        tx.execute(
+            "DELETE FROM speedtest_users
+             WHERE id NOT IN (
+                 SELECT id FROM speedtest_users
+                 ORDER BY timestamp DESC, uuid DESC, id DESC
+                 LIMIT ?1
+             )",
+            params![keep],
+        )?;
+        tx.execute(
+            "DELETE FROM telemetry_legacy_raw_ids
+             WHERE uuid NOT IN (SELECT uuid FROM speedtest_users)",
+            [],
+        )?;
         tx.execute(
             "INSERT OR IGNORE INTO telemetry_bolt_migrations (source_name, imported_at) VALUES (?1, ?2)",
             params![source_name, now_ts],
@@ -1572,5 +1851,170 @@ mod tests {
         // In-memory vault supports full telemetry lifecycle without touching disk
         let mem_vault = TelemetryVault::open_in_memory(10).expect("in-memory vault");
         assert_eq!(mem_vault.path(), Path::new(":memory:"));
+    }
+
+    fn build_single_record_bbolt_archive(uuid: &str, timestamp: &str, dl: &str) -> Vec<u8> {
+        let page_size = 4096usize;
+        let mut archive = vec![0u8; page_size * 4];
+        write_test_bbolt_meta_page(&mut archive[0..page_size], 0, page_size as u32, 2, 1);
+        write_test_bbolt_meta_page(
+            &mut archive[page_size..page_size * 2],
+            1,
+            page_size as u32,
+            2,
+            2,
+        );
+        let mut bucket_val = [0u8; 16];
+        bucket_val[0..8].copy_from_slice(&3u64.to_le_bytes());
+        let root_page = build_leaf_page_bytes(
+            2,
+            page_size,
+            &[(BBOLT_BUCKET_LEAF_FLAG, b"speedtest", &bucket_val)],
+        );
+        archive[page_size * 2..page_size * 3].copy_from_slice(&root_page);
+
+        let payload = format!(
+            r#"{{"uuid":"{uuid}","timestamp":"{timestamp}","ip":"198.51.100.9","dl":"{dl}","ul":"100.0","ping":"1.5","jitter":"0.2"}}"#
+        );
+        let leaf_page =
+            build_leaf_page_bytes(3, page_size, &[(0, uuid.as_bytes(), payload.as_bytes())]);
+        archive[page_size * 3..page_size * 4].copy_from_slice(&leaf_page);
+        archive
+    }
+
+    #[tokio::test]
+    async fn migrates_sparse_128mib_bbolt_via_pread_and_retries_after_repair() {
+        let tmp = TempDirGuard::new("sparse-128m-and-retry");
+        let db_path = tmp.0.join("speedtest.db");
+        let sparse_bak = tmp.0.join("speedtest.bolt.bak");
+
+        // 1. Truncated/unreadable backup must NOT be permanently marked migrated
+        fs::write(&sparse_bak, b"truncated-partial-copy").unwrap();
+        {
+            let v1 = TelemetryVault::open(&db_path).expect("open with truncated backup");
+            assert!(v1.list_recent(10).await.unwrap().is_empty());
+        }
+
+        // 2. Repair the backup into a sparse 128 MiB BoltDB v2 file (> old 64 MiB limit)
+        //    with leaf page placed at 96 MiB (pgid = 24_576 * 4096)
+        let page_size = 4096usize;
+        let high_leaf_pgid: u64 = 24_576;
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&sparse_bak)
+            .unwrap();
+        f.set_len(128 * 1024 * 1024).unwrap();
+        let mut meta0 = vec![0u8; page_size];
+        let mut meta1 = vec![0u8; page_size];
+        write_test_bbolt_meta_page(&mut meta0, 0, page_size as u32, 2, 1);
+        write_test_bbolt_meta_page(&mut meta1, 1, page_size as u32, 2, 2);
+        f.write_all_at(&meta0, 0).unwrap();
+        f.write_all_at(&meta1, page_size as u64).unwrap();
+
+        let mut bucket_val = [0u8; 16];
+        bucket_val[0..8].copy_from_slice(&high_leaf_pgid.to_le_bytes());
+        let root_page = build_leaf_page_bytes(
+            2,
+            page_size,
+            &[(BBOLT_BUCKET_LEAF_FLAG, b"speedtest", &bucket_val)],
+        );
+        f.write_all_at(&root_page, (page_size * 2) as u64).unwrap();
+
+        let rec_json = br#"{"uuid":"01JABCDEFGHJKMNPQRSTVWXYZ9","timestamp":"2026-11-15T12:00:00.000Z","dl":"950.5","ul":"450.2","ping":"1.9","jitter":"0.1"}"#;
+        let high_leaf = build_leaf_page_bytes(
+            high_leaf_pgid,
+            page_size,
+            &[(0, b"01JABCDEFGHJKMNPQRSTVWXYZ9", rec_json.as_slice())],
+        );
+        f.write_all_at(&high_leaf, high_leaf_pgid * page_size as u64)
+            .unwrap();
+        drop(f);
+
+        let v2 = TelemetryVault::open(&db_path).expect("reopen after repairing 128 MiB boltdb");
+        let rows = v2.list_recent(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, "01JABCDEFGHJKMNPQRSTVWXYZ9");
+        assert_eq!(rows[0].dl, "950.5");
+    }
+
+    #[tokio::test]
+    async fn bolt_extension_backup_naming_multi_backup_retention_and_legacy_go_share_ids() {
+        use crate::ulid::encode_legacy_go_obfuscated_ulid;
+
+        // 1. Direct `.bolt` database_file backs up to `speedtest.bolt.bak` (not `.bolt.bolt.bak`)
+        let tmp_bolt = TempDirGuard::new("dot-bolt-naming");
+        let dot_bolt_db = tmp_bolt.0.join("speedtest.bolt");
+        let arch1 = build_single_record_bbolt_archive(
+            "01JABCDEFGHJKMNPQRSTVWXYZ3",
+            "2026-11-15T09:00:00.000Z",
+            "500.0",
+        );
+        fs::write(&dot_bolt_db, &arch1).unwrap();
+        let salt = [0x12, 0x34, 0x56, 0x78];
+        let salt_path = tmp_bolt.0.join("idObfuscation_salt.bin");
+        fs::write(&salt_path, salt).unwrap();
+        fs::set_permissions(&salt_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let v_bolt = TelemetryVault::open(&dot_bolt_db).expect("migrate speedtest.bolt");
+        assert!(tmp_bolt.0.join("speedtest.bolt.bak").is_file());
+        assert!(!tmp_bolt.0.join("speedtest.bolt.bolt.bak").exists());
+        assert_eq!(
+            fs::metadata(&salt_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(v_bolt.legacy_go_salt(), Some(salt));
+
+        let go_tok = encode_legacy_go_obfuscated_ulid("01JABCDEFGHJKMNPQRSTVWXYZ3", &salt).unwrap();
+        assert_eq!(
+            v_bolt
+                .resolve_legacy_go_share_id(go_tok.clone())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("01JABCDEFGHJKMNPQRSTVWXYZ3")
+        );
+
+        // 2. Multi-backup global `max_rows = 1` cap + crash-resume of `.bolt.bolt.bak` + saltless 96-bit fallback
+        let tmp_cap = TempDirGuard::new("multi-backup-cap");
+        let cap_db = tmp_cap.0.join("speedtest.db");
+        let older = build_single_record_bbolt_archive(
+            "01JABCDEFGHJKMNPQRSTVWXYZ4",
+            "2026-11-15T08:00:00.000Z",
+            "300.0",
+        );
+        let newer = build_single_record_bbolt_archive(
+            "01JABCDEFGHJKMNPQRSTVWXYZ5",
+            "2026-11-15T11:00:00.000Z",
+            "999.0",
+        );
+        fs::write(tmp_cap.0.join("speedtest.bolt.bolt.bak"), &older).unwrap();
+        fs::write(tmp_cap.0.join("speedtest.db.bolt.bak"), &newer).unwrap();
+
+        let v_cap = TelemetryVault::open_with_max_rows(&cap_db, 1).expect("open with max_rows=1");
+        let kept = v_cap.list_recent(10).await.unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].uuid, "01JABCDEFGHJKMNPQRSTVWXYZ5");
+        assert!(!v_cap
+            .is_legacy_raw_id("01JABCDEFGHJKMNPQRSTVWXYZ4".to_string())
+            .await
+            .unwrap());
+
+        // Saltless 96-bit suffix fallback resolves unique migrated ULID even without idObfuscation_salt.bin
+        let unknown_salt_tok = encode_legacy_go_obfuscated_ulid(
+            "01JABCDEFGHJKMNPQRSTVWXYZ5",
+            &[0xAA, 0xBB, 0xCC, 0xDD],
+        )
+        .unwrap();
+        assert_eq!(v_cap.legacy_go_salt(), None);
+        assert_eq!(
+            v_cap
+                .resolve_legacy_go_share_id(unknown_salt_tok)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("01JABCDEFGHJKMNPQRSTVWXYZ5")
+        );
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reference stop hook for {{PLUGIN_NAME}} ({{PLUGIN_ID}}).
-# NOTE: backend-rs (v4.0.0) does not automatically invoke plugin lifecycle_hooks yet.
+# Managed teardown hook (`lifecycle_hooks.on_stop`) for {{PLUGIN_NAME}} ({{PLUGIN_ID}}).
+# Invoked by backend-rs (`af-api`) during plugin shutdown or manually by an operator.
 
-echo "Stopping standalone plugin {{PLUGIN_ID}} (managed externally by systemd/operator)"
+echo "Running on_stop cleanup hook for plugin {{PLUGIN_ID}}"

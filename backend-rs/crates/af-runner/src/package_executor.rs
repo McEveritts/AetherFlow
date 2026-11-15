@@ -11325,19 +11325,32 @@ fn apply_runner_blueprint_app_config_changes(
         } else {
             ""
         };
-        let librespeed_tls = if clean_app == "librespeed" {
+        let librespeed_tls_cfg = if clean_app == "librespeed" {
             let settings_path = match fs_root {
                 Some(root) => root.join("opt/librespeed/settings.toml"),
                 None => PathBuf::from("/opt/librespeed/settings.toml"),
             };
-            Some(librespeed_runner_settings_tls_enabled(&settings_path))
+            Some(librespeed_runner_settings_tls_config(
+                &settings_path,
+                fs_root,
+            ))
         } else {
             None
         };
+        let librespeed_tls = librespeed_tls_cfg.as_ref().map(|c| c.enabled);
+        let librespeed_ca_cert = librespeed_tls_cfg
+            .as_ref()
+            .and_then(|c| c.ca_cert_file.as_deref());
         let ssl_proxy_directive = if librespeed_tls == Some(true) {
-            "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+            if let Some(ca_cert) = librespeed_ca_cert {
+                format!(
+                    "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+                )
+            } else {
+                "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n".to_string()
+            }
         } else {
-            ""
+            String::new()
         };
         let http_scheme = if librespeed_tls == Some(true) {
             "https"
@@ -11360,12 +11373,13 @@ fn apply_runner_blueprint_app_config_changes(
             );
             let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
             let prev_int = read_runner_apache_vhost(&conf_file, fs_root, false)?;
-            let vhost = render_or_update_runner_apache_vhost(
+            let vhost = render_or_update_runner_apache_vhost_with_ca(
                 prev_int.as_deref(),
                 &default_vhost,
                 Some(&int_dom),
                 listen_port,
                 librespeed_tls,
+                librespeed_ca_cert,
                 &preserved_blocks,
             );
             if prev_int.as_deref() != Some(vhost.as_str()) {
@@ -11385,14 +11399,15 @@ fn apply_runner_blueprint_app_config_changes(
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
             if ing.external_access_enabled && valid_dom && sites_avail_exists {
                 let default_ext_vhost = format!(
-                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
+                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"expr=%{{REQUEST_SCHEME}}\"\n{proxy_token_directive}</VirtualHost>\n"
                 );
-                let ext_vhost = render_or_update_runner_apache_vhost(
+                let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
                     prev_ext.as_deref(),
                     &default_ext_vhost,
                     Some(&pub_dom),
                     listen_port,
                     librespeed_tls,
+                    librespeed_ca_cert,
                     &preserved_blocks,
                 );
                 if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
@@ -11404,12 +11419,13 @@ fn apply_runner_blueprint_app_config_changes(
                 modified_any = true;
             }
         } else if let Some(prev_ext) = prev_ext {
-            let ext_vhost = render_or_update_runner_apache_vhost(
+            let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
                 Some(&prev_ext),
                 &prev_ext,
                 None,
                 listen_port,
                 librespeed_tls,
+                librespeed_ca_cert,
                 &preserved_blocks,
             );
             if prev_ext != ext_vhost {
@@ -11429,12 +11445,13 @@ fn apply_runner_blueprint_app_config_changes(
             if let Some(prev_raw) =
                 read_runner_apache_vhost(&path, fs_root, path.parent() == Some(sites_en.as_path()))?
             {
-                let updated = render_or_update_runner_apache_vhost(
+                let updated = render_or_update_runner_apache_vhost_with_ca(
                     Some(&prev_raw),
                     &prev_raw,
                     None,
                     listen_port,
                     librespeed_tls,
+                    librespeed_ca_cert,
                     &preserved_blocks,
                 );
                 if prev_raw != updated {
@@ -11478,7 +11495,20 @@ fn apply_runner_blueprint_app_config_changes(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LibreSpeedUpstreamTlsConfig {
+    pub enabled: bool,
+    pub ca_cert_file: Option<String>,
+}
+
 pub fn librespeed_runner_settings_tls_enabled(settings_path: &Path) -> bool {
+    librespeed_runner_settings_tls_config(settings_path, None).enabled
+}
+
+pub fn librespeed_runner_settings_tls_config(
+    settings_path: &Path,
+    fs_root: Option<&Path>,
+) -> LibreSpeedUpstreamTlsConfig {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -11492,7 +11522,7 @@ pub fn librespeed_runner_settings_tls_enabled(settings_path: &Path) -> bool {
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
-            return false;
+            return LibreSpeedUpstreamTlsConfig::default();
         }
         cur = dir.parent();
     }
@@ -11502,23 +11532,83 @@ pub fn librespeed_runner_settings_tls_enabled(settings_path: &Path) -> bool {
     #[cfg(unix)]
     opts.custom_flags(libc::O_NOFOLLOW);
     let Ok(file) = opts.open(settings_path) else {
-        return false;
+        return LibreSpeedUpstreamTlsConfig::default();
     };
     let Ok(meta) = file.metadata() else {
-        return false;
+        return LibreSpeedUpstreamTlsConfig::default();
     };
-    if !meta.is_file() || meta.len() > 262_144 {
-        return false;
+    if !meta.is_file() || meta.len() > 1_048_576 {
+        return LibreSpeedUpstreamTlsConfig::default();
     }
     let mut raw = String::new();
-    if file.take(262_144).read_to_string(&mut raw).is_err() {
-        return false;
+    if file.take(1_048_576).read_to_string(&mut raw).is_err() {
+        return LibreSpeedUpstreamTlsConfig::default();
     }
-    parse_librespeed_root_tls_flag(&raw)
+    let (enabled, raw_cert) = parse_librespeed_root_tls_config(&raw);
+    let ca_cert_file = if enabled {
+        raw_cert.and_then(|cert_str| validate_librespeed_apache_ca_cert(&cert_str, fs_root))
+    } else {
+        None
+    };
+    LibreSpeedUpstreamTlsConfig {
+        enabled,
+        ca_cert_file,
+    }
 }
 
+fn validate_librespeed_apache_ca_cert(cert_str: &str, fs_root: Option<&Path>) -> Option<String> {
+    let trimmed = cert_str.trim();
+    if trimmed.is_empty()
+        || !trimmed.starts_with('/')
+        || trimmed.len() > 512
+        || trimmed.bytes().any(|b| {
+            b.is_ascii_whitespace()
+                || b.is_ascii_control()
+                || matches!(b, b'"' | b'\'' | b'\\' | b'#')
+        })
+    {
+        return None;
+    }
+    let cert_path = Path::new(trimmed);
+    for comp in cert_path.components() {
+        if matches!(
+            comp,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        ) {
+            return None;
+        }
+    }
+    let disk_path = match fs_root {
+        Some(root) => root.join(trimmed.trim_start_matches('/')),
+        None => cert_path.to_path_buf(),
+    };
+    for anc in disk_path.ancestors().skip(1) {
+        if anc.as_os_str().is_empty() || anc == Path::new("/") {
+            break;
+        }
+        if fs::symlink_metadata(anc)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    let meta = fs::symlink_metadata(&disk_path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() == 0 || meta.len() > 1_048_576
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
 fn parse_librespeed_root_tls_flag(raw: &str) -> bool {
+    parse_librespeed_root_tls_config(raw).0
+}
+
+fn parse_librespeed_root_tls_config(raw: &str) -> (bool, Option<String>) {
     let mut enabled = false;
+    let mut cert_file: Option<String> = None;
     for line in raw.lines() {
         let mut in_single = false;
         let mut in_double = false;
@@ -11558,13 +11648,19 @@ fn parse_librespeed_root_tls_flag(raw: &str) -> bool {
         }
         if let Some((k, v)) = cleaned.split_once('=') {
             let key = k.trim().trim_matches('"').trim_matches('\'');
+            let val = v.trim().trim_matches('"').trim_matches('\'');
             if key == "enable_tls" {
-                let val = v.trim().trim_matches('"').trim_matches('\'');
                 enabled = val.eq_ignore_ascii_case("true");
+            } else if key == "tls_cert_file" {
+                cert_file = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.to_string())
+                };
             }
         }
     }
-    enabled
+    (enabled, cert_file)
 }
 
 fn rewrite_runner_apache_proxy_url_port(
@@ -11720,12 +11816,33 @@ fn extract_runner_apache_custom_blocks(
     Ok(blocks)
 }
 
+#[cfg(test)]
 fn render_or_update_runner_apache_vhost(
     existing_raw: Option<&str>,
     default_template: &str,
     desired_server_name: Option<&str>,
     listen_port: i32,
     upstream_tls: Option<bool>,
+    preserved_blocks: &[String],
+) -> String {
+    render_or_update_runner_apache_vhost_with_ca(
+        existing_raw,
+        default_template,
+        desired_server_name,
+        listen_port,
+        upstream_tls,
+        None,
+        preserved_blocks,
+    )
+}
+
+fn render_or_update_runner_apache_vhost_with_ca(
+    existing_raw: Option<&str>,
+    default_template: &str,
+    desired_server_name: Option<&str>,
+    listen_port: i32,
+    upstream_tls: Option<bool>,
+    upstream_ca_cert: Option<&str>,
     preserved_blocks: &[String],
 ) -> String {
     let base = match existing_raw {
@@ -11735,11 +11852,13 @@ fn render_or_update_runner_apache_vhost(
                 let trimmed = line.trim_start();
                 let indent = &line[..line.len() - trimmed.len()];
                 let lower = trimmed.to_ascii_lowercase();
-                if upstream_tls == Some(false)
+                if upstream_tls.is_some()
                     && (lower.starts_with("sslproxyengine ")
                         || lower.starts_with("sslproxyengine\t")
                         || lower.starts_with("sslproxyverify ")
                         || lower.starts_with("sslproxyverify\t")
+                        || lower.starts_with("sslproxycacertificatefile ")
+                        || lower.starts_with("sslproxycacertificatefile\t")
                         || lower.starts_with("sslproxycheckpeercn ")
                         || lower.starts_with("sslproxycheckpeercn\t")
                         || lower.starts_with("sslproxycheckpeername ")
@@ -11774,11 +11893,7 @@ fn render_or_update_runner_apache_vhost(
                     out_lines.push(line.to_string());
                 }
             }
-            if upstream_tls == Some(true)
-                && !out_lines
-                    .iter()
-                    .any(|l| l.trim().to_ascii_lowercase().starts_with("sslproxyengine "))
-            {
+            if upstream_tls == Some(true) {
                 let insert_pos = out_lines
                     .iter()
                     .position(|l| {
@@ -11792,13 +11907,16 @@ fn render_or_update_runner_apache_vhost(
                             .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
                     })
                     .unwrap_or(out_lines.len());
-                let ssl_lines = [
-                    "    SSLProxyEngine On".to_string(),
-                    "    SSLProxyVerify none".to_string(),
-                    "    SSLProxyCheckPeerCN off".to_string(),
-                    "    SSLProxyCheckPeerName off".to_string(),
-                    "    SSLProxyCheckPeerExpire off".to_string(),
-                ];
+                let mut ssl_lines = vec!["    SSLProxyEngine On".to_string()];
+                if let Some(ca_cert) = upstream_ca_cert {
+                    ssl_lines.push("    SSLProxyVerify require".to_string());
+                    ssl_lines.push(format!("    SSLProxyCACertificateFile {ca_cert}"));
+                } else {
+                    ssl_lines.push("    SSLProxyVerify none".to_string());
+                }
+                ssl_lines.push("    SSLProxyCheckPeerCN off".to_string());
+                ssl_lines.push("    SSLProxyCheckPeerName off".to_string());
+                ssl_lines.push("    SSLProxyCheckPeerExpire off".to_string());
                 out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
@@ -18367,9 +18485,23 @@ int main(int argc, char** argv) {
         assert!(promoted_tls.contains("ProxyPass / https://127.0.0.1:18988/"));
         assert!(promoted_tls.contains("ProxyPassReverse / https://127.0.0.1:18988/"));
 
+        // Pin operator certificate via SSLProxyCACertificateFile + SSLProxyVerify require when tls_cert_file is provided
+        let pinned_tls = render_or_update_runner_apache_vhost_with_ca(
+            Some(&promoted_tls),
+            http_default,
+            Some("librespeed.aether.local"),
+            18988,
+            Some(true),
+            Some("/opt/librespeed/cert.pem"),
+            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
+        );
+        assert!(pinned_tls.contains("SSLProxyVerify require"));
+        assert!(pinned_tls.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
+        assert!(!pinned_tls.contains("SSLProxyVerify none"));
+
         // Downgrade back to HTTP cleanly when enable_tls=false
         let demoted_http = render_or_update_runner_apache_vhost(
-            Some(&promoted_tls),
+            Some(&pinned_tls),
             http_default,
             Some("librespeed.aether.local"),
             18989,
@@ -18377,6 +18509,7 @@ int main(int argc, char** argv) {
             &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
         );
         assert!(!demoted_http.contains("SSLProxyEngine"));
+        assert!(!demoted_http.contains("SSLProxyCACertificateFile"));
         assert!(demoted_http.contains("ws://127.0.0.1:18989/$1"));
         assert!(demoted_http.contains("ProxyPass / http://127.0.0.1:18989/"));
     }

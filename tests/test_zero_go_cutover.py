@@ -1042,6 +1042,93 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                     f"Unexpected -k={('-k' in logged)} for {probe_url}: {logged}",
                 )
 
+    def test_wave10_update_shim_experimental_channel_rm_root_and_librespeed_socket(self) -> None:
+        update_shim = ROOT / "packages/system/updateAetherFlow"
+        with tempfile.TemporaryDirectory() as tmp:
+            isolated_root = Path(tmp) / "isolated-af"
+            deploy_dir = isolated_root / "deploy"
+            deploy_dir.mkdir(parents=True)
+            rm_log = Path(tmp) / "rm_invocations.jsonl"
+            mock_rm = deploy_dir / "release-manager.sh"
+            mock_rm.write_text(
+                "#!/bin/bash\n"
+                "exec python3 -c \"import json, os, pathlib, sys; "
+                "pathlib.Path(os.environ['RM_LOG']).open('a', encoding='utf-8').write("
+                "json.dumps({'argv': sys.argv[1:], 'release_root': os.environ.get('AETHERFLOW_RELEASE_ROOT')}) + '\\n')\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            mock_rm.chmod(0o755)
+
+            # Even if a global `af` binary exists in PATH, explicit AF_INSTALL_ROOT must strictly confine resolution
+            fake_path_bin = Path(tmp) / "fake-path-bin"
+            fake_path_bin.mkdir()
+            poison_af = fake_path_bin / "af"
+            poison_af.write_text("#!/bin/sh\necho POISON >&2\nexit 99\n", encoding="utf-8")
+            poison_af.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "AF_INSTALL_ROOT": str(isolated_root),
+                "RM_LOG": str(rm_log),
+                "PATH": f"{fake_path_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            }
+            env.pop("AF_BIN", None)
+            env.pop("AETHERFLOW_RELEASE_ROOT", None)
+
+            subprocess.run(
+                ["bash", str(update_shim), "--channel", "experimental", "--dry-run", "--offline"],
+                env=env,
+                check=True,
+            )
+            dry_preview = subprocess.run(
+                ["bash", str(update_shim), "--channel=experimental", "--dry-run"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("--root", dry_preview.stdout)
+            self.assertIn("--channel nightly", dry_preview.stdout)
+
+            af_bin_dir = isolated_root / "current" / "bin"
+            af_bin_dir.mkdir(parents=True)
+            mock_af = af_bin_dir / "af"
+            mock_af.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "p = pathlib.Path(os.environ['RM_LOG'])\n"
+                "with p.open('a', encoding='utf-8') as fh:\n"
+                "    fh.write(json.dumps({'argv': sys.argv[1:], 'release_root': os.environ.get('AETHERFLOW_RELEASE_ROOT')}) + '\\n')\n"
+                "sys.exit(0)\n",
+                encoding="utf-8",
+            )
+            mock_af.chmod(0o755)
+
+            subprocess.run(
+                ["bash", str(update_shim), "--channel=experimental", "--dry-run", "--offline"],
+                env=env,
+                check=True,
+            )
+
+            calls = [json.loads(line) for line in rm_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                calls[0]["argv"],
+                ["deploy", "--root", str(isolated_root), "--dry-run", "--channel", "nightly", "--offline"],
+            )
+            self.assertEqual(calls[0]["release_root"], str(isolated_root))
+            self.assertEqual(
+                calls[1]["argv"],
+                ["--dry-run", "--root", str(isolated_root), "release", "deploy", "--local", "--channel", "nightly", "--offline"],
+            )
+            self.assertEqual(calls[1]["release_root"], str(isolated_root))
+
+        ls_install = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
+        ls_remove = (ROOT / "packages/package/remove/removepackage-librespeed").read_text(encoding="utf-8")
+        self.assertIn("/etc/systemd/system/librespeed.socket", ls_install)
+        self.assertIn("Requires=librespeed.socket", ls_install)
+        self.assertIn('purge_systemd_unit "librespeed.socket" "librespeed"', ls_remove)
+
 
 if __name__ == "__main__":
     unittest.main()

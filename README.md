@@ -4,7 +4,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?include_prereleases&style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases)
 [![Rust](https://img.shields.io/badge/Control_Plane-Rust_%28Axum_%2B_Tokio%29-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
-[![Admin CLI](https://img.shields.io/badge/Admin_CLI-af_%2811_Crates%29-4f46e5?style=flat-square)](./docs/rust-admin-cli.md)
+[![Admin CLI](https://img.shields.io/badge/Admin_CLI-af_%2812_Crates%29-4f46e5?style=flat-square)](./docs/rust-admin-cli.md)
 [![Frontend](https://img.shields.io/badge/Interface-Next.js_16_%28Obsidian_V2%29-000000?style=flat-square&logo=next.js&logoColor=white)](./frontend)
 [![OS Support](https://img.shields.io/badge/Target_OS-Debian_12%2F13_%7C_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-77_Apps-9333ea?style=flat-square)](./packages)
@@ -24,7 +24,7 @@
 
 ### Why AetherFlow v4.0.0?
 
-- **11-Crate Single-Binary Rust Control Plane (`aetherflow-api` + `af`)** — The entire **Next.js 16 (Obsidian V2)** static frontend is embedded directly inside the compiled **Rust (`Axum` + `Tokio`)** binary via `rust-embed` (`af-api`), paired with the unified **`af` (`af-cli`)** administrative CLI and bundled SQLite WAL (`af-db`), eliminating separate Node.js runtime daemons, Redis dependencies, and port-proxy sprawl.
+- **12-Crate Single-Binary Rust Control Plane (`aetherflow-api` + `af` + `speedtest-backend`)** — The entire **Next.js 16 (Obsidian V2)** static frontend is embedded directly inside the compiled **Rust (`Axum` + `Tokio`)** binary via `rust-embed` (`af-api`), paired with the unified **`af` (`af-cli`)** administrative CLI, native **`speedtest-backend` (`af-librespeed`)** telemetry daemon, and bundled SQLite WAL (`af-db`), eliminating separate Node.js runtime daemons, Go binaries, Redis dependencies, and port-proxy sprawl.
 - **Native McBrowser (`af-files`)** — Built-in left-sidebar file manager backed by a capability-scoped Rust engine (`af-files`) with private per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads (up to 64 GiB), ETag-guarded Ace code editing, 9-format archive extraction/creation, and FlowAI natural-language BFS file search. See [McBrowser Documentation](./docs/mcbrowser.md).
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (15 native declarative Rust recipes + serialized Bash installers), `systemctl` transitions, WireGuard/Tailscale management, quota updates, and isolated `aetherflow-self-update.service` deployments are mediated over `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
@@ -58,7 +58,7 @@ flowchart LR
     Operator["Operator Browser<br/>(Obsidian V2 SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
     Ingress -->|127.0.0.1:8080| API["aetherflow-api (af-api)<br/>(Single-Binary Rust + Embedded SPA)<br/>User=aetherflow • ProtectSystem=strict"]
 
-    subgraph RustWorkspace["11-Crate Rust Workspace (backend-rs)"]
+    subgraph RustWorkspace["12-Crate Rust Workspace (backend-rs)"]
         DB[("SQLite WAL (af-db)<br/>AES-256-GCM + Sessions")]
         Files["Native McBrowser (af-files)<br/>Scoped Tenant Storage"]
         HW["Hardware & NVML FFI (af-hardware)<br/>Zero-Fork Telemetry"]
@@ -86,7 +86,7 @@ flowchart LR
     Runner --> CertSync
 ```
 
-### 11-Crate Rust Control Plane (`backend-rs`)
+### 12-Crate Rust Control Plane (`backend-rs`)
 
 | Crate | Role |
 | :--- | :--- |
@@ -99,6 +99,7 @@ flowchart LR
 | **`af-host`** | Shared host backup & verification library (`af-host.backup-manifest.v1`), WAL-consistent `OnlineBackupApi` / `VACUUM INTO` snapshots, 5-digit chunk splitting, staged restore (`--staging-root`), and native host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
 | **`af-cli`** | Unified **`af`** administrative CLI binary for package lifecycle, systemd services, disk quotas (`setdisk`), sandbox drop-ins, releases, backups, maintenance, and 14-step resumable bare-metal provisioning. |
 | **`af-hardware`** | Zero-fork `sysinfo` and `/proc/diskstats` telemetry collector plus dynamic `libloading` FFI bindings to `libnvidia-ml.so.1` for NVIDIA GPU metrics. |
+| **`af-librespeed`** | Native **`speedtest-backend`** replacement with Obsidian V2 telemetry UI, SQLite WAL telemetry vault (plus legacy BoltDB v2 auto-migration), keyed ULID obfuscation, and PNG result badge renderer. |
 | **`af-models`** | Shared `serde` wire contracts, catalog schemas, hardware telemetry structs, and runner IPC payloads. |
 | **`af-streaming-tests`** | Contract and integration verification suite for canonical streaming playback history, reconciliation, and portability. |
 

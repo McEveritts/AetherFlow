@@ -1424,20 +1424,41 @@ pub fn sync_apache_app_vhost(
     } else {
         ""
     };
-    let librespeed_tls = if clean_app == "librespeed" {
+    let librespeed_tls_cfg = if clean_app == "librespeed" {
+        let fs_root_override = ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"]
+            .into_iter()
+            .find_map(|k| env::var(k).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         let settings_path = std::env::var("AETHERFLOW_LIBRESPEED_SETTINGS_PATH")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/opt/librespeed/settings.toml"));
-        Some(librespeed_apache_settings_tls_enabled(&settings_path))
+            .unwrap_or_else(|| resolve_config_path("/opt/librespeed/settings.toml"));
+        Some(
+            af_runner::package_executor::librespeed_runner_settings_tls_config(
+                &settings_path,
+                fs_root_override.as_deref(),
+            ),
+        )
     } else {
         None
     };
+    let librespeed_tls = librespeed_tls_cfg.as_ref().map(|c| c.enabled);
+    let librespeed_ca_cert = librespeed_tls_cfg
+        .as_ref()
+        .and_then(|c| c.ca_cert_file.as_deref());
     let ssl_proxy_directive = if librespeed_tls == Some(true) {
-        "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+        if let Some(ca_cert) = librespeed_ca_cert {
+            format!(
+                "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+            )
+        } else {
+            "    SSLProxyEngine On\n    SSLProxyVerify none\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n".to_string()
+        }
     } else {
-        ""
+        String::new()
     };
     let http_scheme = if librespeed_tls == Some(true) {
         "https"
@@ -1467,6 +1488,7 @@ pub fn sync_apache_app_vhost(
             Some(&int_dom),
             listen_port,
             librespeed_tls,
+            librespeed_ca_cert,
             &preserved_blocks,
         );
         if prev_int.as_deref() != Some(vhost.as_str()) {
@@ -1495,7 +1517,7 @@ pub fn sync_apache_app_vhost(
     if external_access && !public_domain.trim().is_empty() {
         let pub_dom = validate_dns_domain(public_domain)?;
         let default_ext_vhost = format!(
-            "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n{proxy_token_directive}</VirtualHost>\n"
+            "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"expr=%{{REQUEST_SCHEME}}\"\n{proxy_token_directive}</VirtualHost>\n"
         );
         let prev_ext = fs::read_to_string(&ext_conf_file).ok();
         let ext_vhost = render_or_update_apache_vhost(
@@ -1504,6 +1526,7 @@ pub fn sync_apache_app_vhost(
             Some(&pub_dom),
             listen_port,
             librespeed_tls,
+            librespeed_ca_cert,
             &preserved_blocks,
         );
         if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
@@ -1567,6 +1590,7 @@ pub fn sync_apache_app_vhost(
                     None,
                     listen_port,
                     librespeed_tls,
+                    librespeed_ca_cert,
                     &preserved_blocks,
                 );
                 if prev_raw != updated && write_file_atomic(&path, updated.as_bytes()).is_ok() {
@@ -1601,10 +1625,6 @@ pub fn sync_apache_app_vhost(
     }
 
     Ok(wrote_any)
-}
-
-fn librespeed_apache_settings_tls_enabled(settings_path: &Path) -> bool {
-    af_runner::package_executor::librespeed_runner_settings_tls_enabled(settings_path)
 }
 
 fn rewrite_apache_proxy_url_port(
@@ -1694,6 +1714,7 @@ fn render_or_update_apache_vhost(
     desired_server_name: Option<&str>,
     listen_port: i32,
     upstream_tls: Option<bool>,
+    upstream_ca_cert: Option<&str>,
     preserved_blocks: &[String],
 ) -> String {
     let base = match existing_raw {
@@ -1703,11 +1724,13 @@ fn render_or_update_apache_vhost(
                 let trimmed = line.trim_start();
                 let indent = &line[..line.len() - trimmed.len()];
                 let lower = trimmed.to_ascii_lowercase();
-                if upstream_tls == Some(false)
+                if upstream_tls.is_some()
                     && (lower.starts_with("sslproxyengine ")
                         || lower.starts_with("sslproxyengine\t")
                         || lower.starts_with("sslproxyverify ")
                         || lower.starts_with("sslproxyverify\t")
+                        || lower.starts_with("sslproxycacertificatefile ")
+                        || lower.starts_with("sslproxycacertificatefile\t")
                         || lower.starts_with("sslproxycheckpeercn ")
                         || lower.starts_with("sslproxycheckpeercn\t")
                         || lower.starts_with("sslproxycheckpeername ")
@@ -1742,11 +1765,7 @@ fn render_or_update_apache_vhost(
                     out_lines.push(line.to_string());
                 }
             }
-            if upstream_tls == Some(true)
-                && !out_lines
-                    .iter()
-                    .any(|l| l.trim().to_ascii_lowercase().starts_with("sslproxyengine "))
-            {
+            if upstream_tls == Some(true) {
                 let insert_pos = out_lines
                     .iter()
                     .position(|l| {
@@ -1760,13 +1779,16 @@ fn render_or_update_apache_vhost(
                             .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
                     })
                     .unwrap_or(out_lines.len());
-                let ssl_lines = [
-                    "    SSLProxyEngine On".to_string(),
-                    "    SSLProxyVerify none".to_string(),
-                    "    SSLProxyCheckPeerCN off".to_string(),
-                    "    SSLProxyCheckPeerName off".to_string(),
-                    "    SSLProxyCheckPeerExpire off".to_string(),
-                ];
+                let mut ssl_lines = vec!["    SSLProxyEngine On".to_string()];
+                if let Some(ca_cert) = upstream_ca_cert {
+                    ssl_lines.push("    SSLProxyVerify require".to_string());
+                    ssl_lines.push(format!("    SSLProxyCACertificateFile {ca_cert}"));
+                } else {
+                    ssl_lines.push("    SSLProxyVerify none".to_string());
+                }
+                ssl_lines.push("    SSLProxyCheckPeerCN off".to_string());
+                ssl_lines.push("    SSLProxyCheckPeerName off".to_string());
+                ssl_lines.push("    SSLProxyCheckPeerExpire off".to_string());
                 out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
@@ -5764,5 +5786,71 @@ mod tests {
 
         env::remove_var("AETHERFLOW_CONFIG_ROOT");
         let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[tokio::test]
+    async fn test_librespeed_apache_vhost_pins_upstream_ca_and_dynamic_proto_on_ext_vhost() {
+        let _env_guard = TEST_ENV_LOCK.lock().await;
+        let dir = temp_test_dir("librespeed-tls-vhost");
+        let sites_avail = dir.join("etc/apache2/sites-available");
+        let sites_en = dir.join("etc/apache2/sites-enabled");
+        let ls_dir = dir.join("opt/librespeed");
+        fs::create_dir_all(&sites_avail).unwrap();
+        fs::create_dir_all(&sites_en).unwrap();
+        fs::create_dir_all(&ls_dir).unwrap();
+
+        fs::write(
+            ls_dir.join("cert.pem"),
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        fs::write(
+            ls_dir.join("settings.toml"),
+            "enable_tls = true\ntls_cert_file = \"/opt/librespeed/cert.pem\"\n",
+        )
+        .unwrap();
+
+        let prev_fs_root = std::env::var_os("AETHERFLOW_FS_ROOT");
+        let prev_cfg_root = std::env::var_os("AETHERFLOW_CONFIG_ROOT");
+        std::env::set_var("AETHERFLOW_FS_ROOT", &dir);
+        std::env::set_var("AETHERFLOW_CONFIG_ROOT", &dir);
+
+        let sync_res = sync_apache_app_vhost(
+            "librespeed",
+            8988,
+            "librespeed.aether.local",
+            "speed.example.com",
+            true,
+        );
+
+        for (key, prev) in [
+            ("AETHERFLOW_FS_ROOT", prev_fs_root),
+            ("AETHERFLOW_CONFIG_ROOT", prev_cfg_root),
+        ] {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert!(sync_res.unwrap());
+        let int_vhost =
+            fs::read_to_string(sites_avail.join("aetherflow-app-librespeed.conf")).unwrap();
+        let ext_vhost =
+            fs::read_to_string(sites_avail.join("aetherflow-ext-librespeed.conf")).unwrap();
+        for vhost in [&int_vhost, &ext_vhost] {
+            assert!(vhost.contains("SSLProxyEngine On"));
+            assert!(vhost.contains("SSLProxyVerify require"));
+            assert!(vhost.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
+            assert!(!vhost.contains("SSLProxyVerify none"));
+            assert!(vhost.contains("https://127.0.0.1:8988/"));
+            assert!(vhost.contains("IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf"));
+        }
+        assert!(int_vhost.contains("RequestHeader set X-Forwarded-Proto \"http\""));
+        assert!(
+            ext_vhost.contains("RequestHeader set X-Forwarded-Proto \"expr=%{REQUEST_SCHEME}\"")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

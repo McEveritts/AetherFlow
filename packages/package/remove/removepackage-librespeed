@@ -84,7 +84,7 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Stopping and removing librespeed.service..."
 
-purge_systemd_unit "librespeed"
+purge_systemd_unit "librespeed.socket" "librespeed"
 
 report_progress 65 "Removing LibreSpeed application directory and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then

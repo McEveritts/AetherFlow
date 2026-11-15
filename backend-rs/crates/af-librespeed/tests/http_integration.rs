@@ -1955,11 +1955,12 @@ async fn getip_isp_lookup_haversine_distance_cache_and_redaction() {
         "second lookup for same IP must hit IspLookupCache"
     );
 
-    // 2. Redacted lookup with explicit ipinfo_api_key sends Bearer token and sanitizes IP/hostname
+    // 2. Redacted lookup with explicit ipinfo_api_key sends Bearer token and sanitizes IP/hostname/location
     cfg.redact_ip_addresses = true;
     cfg.ipinfo_api_key = "test-ipinfo-token".to_string();
-    let redacted_app = build_router(cfg, Some(vault));
+    let redacted_app = build_router(cfg, Some(vault.clone()));
     let res_red = redacted_app
+        .clone()
         .oneshot(with_peer(
             Request::builder()
                 .uri("/getIP?isp=true&distance=km")
@@ -1978,6 +1979,10 @@ async fn getip_isp_lookup_haversine_distance_cache_and_redaction() {
         !raw_red_str.contains("dns.google"),
         "leaked hostname: {raw_red_str}"
     );
+    assert!(
+        !raw_red_str.contains("Mountain View") && !raw_red_str.contains("37.3860"),
+        "leaked geolocation coordinates/city: {raw_red_str}"
+    );
     let json_red: Value = serde_json::from_slice(&raw_red_bytes).unwrap();
     assert_eq!(
         json_red["processedString"],
@@ -1985,10 +1990,41 @@ async fn getip_isp_lookup_haversine_distance_cache_and_redaction() {
     );
     assert_eq!(json_red["rawIspInfo"]["ip"], "0.0.0.0");
     assert_eq!(json_red["rawIspInfo"]["hostname"], "REDACTED");
+    assert_eq!(json_red["rawIspInfo"]["city"], "REDACTED");
+    assert_eq!(json_red["rawIspInfo"]["region"], "REDACTED");
+    assert_eq!(json_red["rawIspInfo"]["loc"], "REDACTED");
     assert_eq!(
         last_auth.lock().unwrap().as_str(),
         "Bearer test-ipinfo-token"
     );
+
+    // Client-submitted JSON ispinfo in POST /results/telemetry also scrubs city/region/loc/postal
+    let tel_red = redacted_app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/results/telemetry")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "dl=500.0&ul=250.0&ping=4.0&jitter=0.5&ispinfo=%7B%22ip%22%3A%228.8.8.8%22%2C%22city%22%3A%22Mountain%20View%22%2C%22loc%22%3A%2237.3860%2C-122.0838%22%2C%22postal%22%3A%2294043%22%7D",
+                ))
+                .unwrap(),
+            "198.51.100.44:50001",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tel_red.status(), StatusCode::OK);
+    let tel_id = String::from_utf8(body_bytes(tel_red).await)
+        .unwrap()
+        .strip_prefix("id ")
+        .unwrap()
+        .trim()
+        .to_string();
+    let stored = vault.get_by_uuid(tel_id).await.unwrap().unwrap();
+    assert!(!stored.ispinfo.contains("Mountain View"));
+    assert!(!stored.ispinfo.contains("37.3860"));
+    assert!(!stored.ispinfo.contains("94043"));
 
     let _ = tx.send(());
     mock_task.await.unwrap();
@@ -2266,4 +2302,72 @@ async fn upstream_unsuffixed_backend_aliases_results_json_and_memory_vault_parit
     assert_eq!(payload["ul"], "456.78");
     assert_eq!(payload["extra"], "json-check");
     assert!(payload.get("ip").is_none());
+}
+
+#[tokio::test]
+async fn legacy_go_obfuscated_share_links_resolve_on_results_png_json_and_stats() {
+    use af_librespeed::db::NewTelemetryRecord;
+    use af_librespeed::ulid::encode_legacy_go_obfuscated_ulid;
+
+    let tmp = TempDirGuard::new("legacy-go-share-http");
+    let salt = [0xCAFE_u16 as u8, 0xBA, 0xBE, 0x42];
+    fs::write(tmp.0.join("idObfuscation_salt.bin"), salt).unwrap();
+
+    let (mut cfg, vault) = make_test_config(&tmp);
+    cfg.enable_id_obfuscation = true;
+    cfg.statistics_password = "LegacyShareAdmin!99".to_string();
+
+    let canon_ulid = "01JABCDEFGHJKMNPQRSTVWXYZ8";
+    vault
+        .insert_with_mode(
+            NewTelemetryRecord {
+                uuid: canon_ulid.to_string(),
+                timestamp: "2026-11-15T12:34:56.000Z".to_string(),
+                ip: "198.51.100.12".to_string(),
+                ispinfo: "ExampleISP".to_string(),
+                extra: "migrated-go-share".to_string(),
+                ua: "Mozilla/5.0".to_string(),
+                lang: "en-US".to_string(),
+                dl: "812.50".to_string(),
+                ul: "406.25".to_string(),
+                ping: "2.75".to_string(),
+                jitter: "0.30".to_string(),
+                log: "ok".to_string(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+    let go_share_id = encode_legacy_go_obfuscated_ulid(canon_ulid, &salt).unwrap();
+    assert_eq!(go_share_id.len(), 22);
+
+    let app = build_router(cfg, Some(vault));
+    let png_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results?id={go_share_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(png_res.status(), StatusCode::OK);
+    let png_bytes = body_bytes(png_res).await;
+    assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
+
+    let json_res = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/results/json?id={go_share_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json_res.status(), StatusCode::OK);
+    let json_payload: Value = serde_json::from_slice(&body_bytes(json_res).await).unwrap();
+    assert_eq!(json_payload["dl"], "812.50");
+    assert_eq!(json_payload["extra"], "migrated-go-share");
 }

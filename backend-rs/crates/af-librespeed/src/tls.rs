@@ -517,3 +517,95 @@ where
 
     Ok(())
 }
+
+/// Validates and adopts a PID-1-owned systemd socket-activation descriptor
+/// (`SD_LISTEN_FDS_START = 3` in production, or a duplicated fd in tests),
+/// enforcing `SOCK_STREAM`, `FD_CLOEXEC`, and non-blocking mode before wrapping
+/// into a `tokio::net::TcpListener`.
+#[cfg(unix)]
+pub fn adopt_systemd_socket_fd(
+    raw_fd: std::os::fd::RawFd,
+    duplicate_fd: bool,
+) -> Result<(TcpListener, std::net::SocketAddr)> {
+    use std::os::fd::FromRawFd;
+
+    if raw_fd < 0 {
+        bail!("invalid negative systemd socket fd {raw_fd}");
+    }
+
+    let mut sock_type: libc::c_int = 0;
+    let mut opt_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `getsockopt` only inspects kernel socket metadata on `raw_fd` and writes to stack `sock_type`.
+    let rc = unsafe {
+        libc::getsockopt(
+            raw_fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut sock_type as *mut libc::c_int).cast(),
+            &mut opt_len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("fd {raw_fd} is not a valid socket for systemd activation"));
+    }
+    if sock_type != libc::SOCK_STREAM {
+        bail!("systemd activation fd {raw_fd} is not SOCK_STREAM (got {sock_type})");
+    }
+
+    let owned_fd = if duplicate_fd {
+        // SAFETY: `F_DUPFD_CLOEXEC` atomically duplicates validated socket `raw_fd` with `FD_CLOEXEC`.
+        let dup = unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed duplicating systemd socket fd {raw_fd}"));
+        }
+        dup
+    } else {
+        // Ensure `FD_CLOEXEC` is set on inherited fd 3 so child processes never inherit the listener.
+        // SAFETY: `fcntl(F_GETFD / F_SETFD)` operates on validated socket `raw_fd`.
+        unsafe {
+            let flags = libc::fcntl(raw_fd, libc::F_GETFD);
+            if flags >= 0 && (flags & libc::FD_CLOEXEC) == 0 {
+                let _ = libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+        raw_fd
+    };
+
+    // SAFETY: `owned_fd` was verified to be an open `SOCK_STREAM` socket owned exclusively by this caller
+    // (either newly duplicated via `F_DUPFD_CLOEXEC` or handed off once from PID 1 at `SD_LISTEN_FDS_START`).
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(owned_fd) };
+    std_listener
+        .set_nonblocking(true)
+        .context("failed setting systemd-activated TcpListener nonblocking")?;
+    let local_addr = std_listener
+        .local_addr()
+        .context("failed reading local_addr from systemd-activated TcpListener")?;
+    let listener = TcpListener::from_std(std_listener)
+        .context("failed wrapping systemd-activated TcpListener in Tokio")?;
+    Ok((listener, local_addr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[tokio::test]
+    async fn adopts_prebound_systemd_socket_fd_and_rejects_non_socket() {
+        let prebound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let expected_addr = prebound.local_addr().unwrap();
+        let (tokio_listener, actual_addr) =
+            adopt_systemd_socket_fd(prebound.as_raw_fd(), true).expect("adopt socket fd");
+        assert_eq!(actual_addr, expected_addr);
+        drop(tokio_listener);
+        drop(prebound);
+
+        let tmp = std::env::temp_dir().join(format!("af-ls-nonsock-{}", std::process::id()));
+        let reg_file = std::fs::File::create(&tmp).unwrap();
+        let err = adopt_systemd_socket_fd(reg_file.as_raw_fd(), true).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(err.to_string().contains("not a valid socket"));
+    }
+}

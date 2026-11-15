@@ -542,7 +542,9 @@ try:
                     check=True,
                 )
             if entry_name == "settings.toml" and parent_fd == dir_fd:
-                return os.pread(fd, 65536, 0)
+                if fst.st_size > 1048576:
+                    raise SystemExit(f"LibreSpeed settings.toml exceeds 1 MiB limit: {full_label}")
+                return os.pread(fd, 1048576, 0)
             return b""
         finally:
             os.close(fd)
@@ -553,9 +555,19 @@ try:
             f"{base_leaf}-wal",
             f"{base_leaf}-shm",
             f"{base_leaf}-journal",
+            f"{base_leaf}.bak",
             f"{base_leaf}.bolt.bak",
+            "speedtest.bolt.bak",
+            "speedtest.bolt.bolt.bak",
+            "idObfuscation_salt.bin",
         }
-        prefixes = (f"{base_leaf}.bolt.bak.", f"{base_leaf}.pre-migrate.")
+        prefixes = (
+            f"{base_leaf}.bak.",
+            f"{base_leaf}.bolt.bak.",
+            f"{base_leaf}.pre-migrate.",
+            "speedtest.bolt.bak.",
+            "speedtest.bolt.bolt.bak.",
+        )
         for name in sorted(os.listdir(target_dir_fd)):
             if name in exact or name.startswith(prefixes):
                 harden_entry_in_dir(
@@ -680,11 +692,101 @@ if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
     fi
 fi
 
-report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
+report_progress 85 "Configuring and starting librespeed.socket + librespeed.service on port ${APP_PORT}..."
+LS_SOCKET_LISTEN="127.0.0.1:${APP_PORT}"
+LS_READINESS_TARGET="/"
+if [[ -e /opt/librespeed/settings.toml || -L /opt/librespeed/settings.toml ]]; then
+    LS_SOCKET_LISTEN="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import os, re, stat, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
+    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
+finally:
+    os.close(dfd)
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
+        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
+    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
+finally:
+    os.close(fd)
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
+bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "0.0.0.0"
+if bind_val == "*":
+    bind_val = "0.0.0.0"
+if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", bind_val):
+    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
+if ":" in bind_val and not bind_val.startswith("["):
+    bind_val = f"[{bind_val}]"
+print(f"{bind_val}:{port}")
+PYEOF
+)"
+    LS_READINESS_TARGET="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import os, re, stat, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
+    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
+finally:
+    os.close(dfd)
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
+        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
+    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
+finally:
+    os.close(fd)
+tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt, flags=re.MULTILINE | re.IGNORECASE)
+tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
+bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
+bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "127.0.0.1"
+host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
+if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
+    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
+if tls_on:
+    print(f"https://{host}:{port}/")
+elif host != "127.0.0.1":
+    print(f"http://{host}:{port}/")
+else:
+    print("/")
+PYEOF
+)"
+fi
+
+cat <<EOF > /etc/systemd/system/librespeed.socket
+[Unit]
+Description=LibreSpeed Speedtest Socket (PID 1 loopback port guard)
+PartOf=librespeed.service
+
+[Socket]
+ListenStream=${LS_SOCKET_LISTEN}
+NoDelay=true
+Backlog=1024
+
+[Install]
+WantedBy=sockets.target
+EOF
+
 cat <<'EOF' > /etc/systemd/system/librespeed.service
 [Unit]
 Description=LibreSpeed Speedtest Daemon (native Rust)
-After=network.target
+After=network.target librespeed.socket
+Requires=librespeed.socket
 
 [Service]
 User=librespeed
@@ -721,34 +823,12 @@ WantedBy=multi-user.target
 EOF
 
 af_logged systemctl daemon-reload
+af_logged systemctl enable --now librespeed.socket
+af_logged systemctl restart librespeed.socket
 af_logged systemctl enable --now librespeed
+af_logged systemctl restart librespeed
 systemctl is-active --quiet librespeed
 
-LS_READINESS_TARGET="/"
-if [[ -f /opt/librespeed/settings.toml ]]; then
-    LS_READINESS_TARGET="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
-import re, sys
-cfg_path, port = sys.argv[1], sys.argv[2]
-with open(cfg_path, "r", encoding="utf-8", errors="replace") as fh:
-    txt = fh.read()
-tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt, flags=re.MULTILINE | re.IGNORECASE)
-tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt, flags=re.MULTILINE)
-bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "127.0.0.1"
-host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
-if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
-    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
-if ":" in host and not host.startswith("["):
-    host = f"[{host}]"
-if tls_on:
-    print(f"https://{host}:{port}/")
-elif host != "127.0.0.1":
-    print(f"http://{host}:{port}/")
-else:
-    print("/")
-PYEOF
-)"
-fi
 finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$LS_READINESS_TARGET"
 
 commit_app_versions
