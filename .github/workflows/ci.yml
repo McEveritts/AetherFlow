@@ -60,7 +60,7 @@ jobs:
 
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |
-          PATH="$PATH:/usr/sbin" /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py
           python3 tests/check_shell_hygiene.py
 
   palate-installer:

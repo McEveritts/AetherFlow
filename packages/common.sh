@@ -2194,7 +2194,10 @@ with tarfile.open(sys.argv[1], 'r:gz') as archive:
             member.mode &= 0o777
             member.uid = member.gid = -1
             member.uname = member.gname = ''
-        archive.extractall(sys.argv[2], members=members)
+        if hasattr(tarfile, 'fully_trusted_filter'):
+            archive.extractall(sys.argv[2], members=members, filter=tarfile.fully_trusted_filter)
+        else:
+            archive.extractall(sys.argv[2], members=members)
 PYEOF
     fi
     for candidate in "${candidates[@]}"; do
