@@ -240,6 +240,13 @@ jobs:
         run: |
           cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
 
+      - name: Verify Zero-Go Cutover & Real af CLI Confinement Gates
+        working-directory: .
+        env:
+          AETHERFLOW_SKIP_ENV_FILES: "1"
+        run: |
+          python3 -m unittest tests/test_zero_go_cutover.py -v
+
       - name: Upload Rust Single-Binary & CLI Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

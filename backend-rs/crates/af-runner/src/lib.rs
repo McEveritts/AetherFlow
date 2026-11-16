@@ -3019,10 +3019,13 @@ pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
         return true;
     }
     #[cfg(unix)]
-    if err.raw_os_error() == Some(libc::ENOTDIR) {
-        return true;
+    {
+        err.raw_os_error() == Some(libc::ENOTDIR)
     }
-    false
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
@@ -9435,7 +9438,8 @@ mod tests {
             "librespeed drop-in must not downgrade ProtectHome to read-only"
         );
         assert!(
-            rendered.contains("\nReadWritePaths=/opt/librespeed"),
+            rendered.contains("\nReadWritePaths=/opt/librespeed\n")
+                || rendered.contains("\nReadWritePaths=-/opt/librespeed\n"),
             "expected confined /opt/librespeed ReadWritePaths, got:\n{rendered}"
         );
         assert!(

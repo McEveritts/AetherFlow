@@ -2969,10 +2969,7 @@ pub(crate) fn verify_user_totp_stepup(user_id: i64, code: &str) -> bool {
     };
     let ok = consume_totp_code(&tx, user_id, &secret, trimmed)
         || validate_recovery_code(&tx, user_id, trimmed);
-    if ok && tx.commit().is_ok() {
-        return true;
-    }
-    false
+    ok && tx.commit().is_ok()
 }
 
 pub async fn disable_2fa(req: Request) -> Response {

@@ -798,6 +798,7 @@ _build_modern_stack() {
     local existing_priv_runner=""
     local existing_db_path=""
     local existing_af_db_path=""
+    local existing_af_env=""
     local existing_gin_mode=""
 
     if [[ -f "${existing_env}" ]]; then
@@ -813,6 +814,7 @@ _build_modern_stack() {
         existing_priv_runner="$(_af_read_env_raw "${existing_env}" "PRIVILEGED_RUNNER_ENABLED")"
         existing_db_path="$(_af_read_env_raw "${existing_env}" "DB_PATH")"
         existing_af_db_path="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_DB_PATH")"
+        existing_af_env="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_ENV")"
         existing_gin_mode="$(_af_read_env_raw "${existing_env}" "GIN_MODE")"
     fi
 
@@ -936,12 +938,13 @@ _build_modern_stack() {
     local effective_af_db_path="${existing_af_db_path:-${AETHERFLOW_DB_PATH:-${effective_db_path}}}"
     local final_hosts="${existing_hosts:-${allowed_hosts}}"
     local final_cors="${existing_cors:-${cors_origins}}"
+    local af_env="${existing_af_env:-production}"
     local gin_mode="${existing_gin_mode:-release}"
 
     # Preserve any custom operator environment variables from existing file before overwriting
     local extra_lines=""
     if [[ -f "${existing_env}" ]]; then
-        extra_lines="$(grep -v -E '^[[:space:]]*(export[[:space:]]+)?(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
+        extra_lines="$(grep -v -E '^[[:space:]]*(export[[:space:]]+)?(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|AETHERFLOW_ENV|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     fi
 
     if [[ -L "${env_dir}" || -L "${env_dir}/aetherflow.env" ]]; then
@@ -964,6 +967,7 @@ AETHERFLOW_DB_PATH=${effective_af_db_path}
 AETHERFLOW_RUNNER_SOCK=${runner_sock}
 PRIVILEGED_RUNNER_ENABLED=${priv_runner}
 COOKIE_SECURE=${cookie_secure}
+AETHERFLOW_ENV=${af_env}
 GIN_MODE=${gin_mode}
 EOF
 

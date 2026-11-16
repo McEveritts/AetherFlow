@@ -323,31 +323,172 @@ def split_toml_root_preamble(src: str):
         i += 1
     return src, ""
 
+def iter_toml_root_assignments(preamble: str):
+    """Yield (stmt_start, stmt_end, key, rhs_raw) for real root-table assignments outside strings/comments."""
+    n = len(preamble)
+    i = 0
+    while i < n:
+        stmt_start = i
+        while i < n and preamble[i] in (" ", "\t", "\r"):
+            i += 1
+        if i >= n:
+            break
+        if preamble[i] == "\n":
+            i += 1
+            continue
+        if preamble[i] == "#":
+            nl = preamble.find("\n", i)
+            i = n if nl == -1 else nl + 1
+            continue
+        k_start = i
+        if preamble[i] in ('"', "'"):
+            q = preamble[i]
+            i += 1
+            while i < n:
+                if q == '"' and preamble[i] == "\\":
+                    i += 2
+                    continue
+                if preamble[i] == q:
+                    i += 1
+                    break
+                i += 1
+            key = preamble[k_start + 1 : max(k_start + 1, i - 1)].strip()
+        else:
+            while i < n and (preamble[i].isalnum() or preamble[i] in ("_", "-")):
+                i += 1
+            key = preamble[k_start:i].strip()
+        while i < n and preamble[i] in (" ", "\t"):
+            i += 1
+        eq_pos = i if (i < n and preamble[i] == "=") else -1
+        if eq_pos != -1:
+            i += 1
+        rhs_start = i
+        in_str = None
+        bdepth = 0
+        comment_pos = None
+        while i < n:
+            ch = preamble[i]
+            if in_str is not None:
+                if in_str in ('"""', "'''"):
+                    if preamble.startswith(in_str, i):
+                        i += 3
+                        in_str = None
+                        continue
+                    i += 2 if (in_str == '"""' and ch == "\\") else 1
+                    continue
+                if in_str == '"' and ch == "\\":
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+            if ch == "#" and bdepth == 0:
+                if comment_pos is None:
+                    comment_pos = i
+                nl = preamble.find("\n", i)
+                if nl == -1:
+                    i = n
+                    break
+                i = nl + 1
+                break
+            if ch == "\n" and bdepth == 0:
+                i += 1
+                break
+            if preamble.startswith('"""', i) or preamble.startswith("'''", i):
+                in_str = preamble[i : i + 3]
+                i += 3
+                continue
+            if ch in ('"', "'"):
+                in_str = ch
+                i += 1
+                continue
+            if ch in ("[", "{"):
+                bdepth += 1
+            elif ch in ("]", "}") and bdepth > 0:
+                bdepth -= 1
+            i += 1
+        stmt_end = i
+        if key and eq_pos != -1:
+            rhs_end = comment_pos if comment_pos is not None else stmt_end
+            rhs_raw = preamble[rhs_start:rhs_end].strip()
+            yield (stmt_start, stmt_end, key, rhs_raw)
+
+def parse_toml_string_rhs(rhs_raw: str):
+    if len(rhs_raw) >= 6 and (
+        (rhs_raw.startswith('"""') and rhs_raw.endswith('"""'))
+        or (rhs_raw.startswith("'''") and rhs_raw.endswith("'''"))
+    ):
+        body = rhs_raw[3:-3]
+        if body.startswith("\r\n"):
+            body = body[2:]
+        elif body.startswith("\n"):
+            body = body[1:]
+        return body
+    if len(rhs_raw) >= 2 and (
+        (rhs_raw.startswith('"') and rhs_raw.endswith('"'))
+        or (rhs_raw.startswith("'") and rhs_raw.endswith("'"))
+    ):
+        inner = rhs_raw[1:-1]
+        if rhs_raw[0] == '"':
+            inner = inner.replace('\\"', '"').replace("\\\\", "\\")
+        return inner
+    return None
+
+def toml_root_has_key(preamble: str, target_key: str) -> bool:
+    return any(k == target_key for _, _, k, _ in iter_toml_root_assignments(preamble))
+
+def toml_root_get_str(preamble: str, target_key: str):
+    val = None
+    for _, _, k, rhs_raw in iter_toml_root_assignments(preamble):
+        if k == target_key:
+            parsed = parse_toml_string_rhs(rhs_raw)
+            if parsed is not None:
+                val = parsed
+    return val
+
+def toml_root_set_assignment(preamble: str, target_key: str, new_rhs: str, append_if_missing: bool = True) -> str:
+    matches = [item for item in iter_toml_root_assignments(preamble) if item[2] == target_key]
+    if not matches:
+        if not append_if_missing:
+            return preamble
+        if not preamble.strip():
+            return f"{target_key}={new_rhs}\n"
+        return preamble.rstrip("\n") + f"\n{target_key}={new_rhs}\n"
+    out = []
+    cursor = 0
+    for idx, (s_start, s_end, _, _) in enumerate(matches):
+        out.append(preamble[cursor:s_start])
+        if idx == 0:
+            lead_ws = ""
+            j = s_start
+            while j < s_end and preamble[j] in (" ", "\t"):
+                lead_ws += preamble[j]
+                j += 1
+            out.append(f"{lead_ws}{target_key}={new_rhs}\n")
+        cursor = s_end
+    out.append(preamble[cursor:])
+    return "".join(out)
+
 cfg_path, port = sys.argv[1], sys.argv[2]
 state_dir = os.path.dirname(os.path.abspath(cfg_path))
 confined_db = os.path.join(state_dir, "speedtest.db")
 full_text = safe_read_text(cfg_path)
 text, sections_tail = split_toml_root_preamble(full_text)
-if re.search(r"^[ \t]*listen_port\s*=", text, re.MULTILINE):
-    text = re.sub(r"^[ \t]*listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
-else:
-    text = (text.rstrip("\n") + f"\nlisten_port={port}\n").lstrip("\n") if not text.strip() else text.rstrip("\n") + f"\nlisten_port={port}\n"
-text = re.sub(
-    r'^([ \t]*database_type\s*=\s*)(["\'])bolt\2([ \t]*(?:#.*)?)$',
-    r'\1"sqlite"\3',
-    text,
-    flags=re.MULTILINE | re.IGNORECASE,
-)
-if not re.search(r"^[ \t]*redact_ip_addresses\s*=", text, re.MULTILINE):
-    text = text.rstrip("\n") + "\nredact_ip_addresses=true\n"
-if not re.search(r"^[ \t]*enable_id_obfuscation\s*=", text, re.MULTILINE):
-    text = text.rstrip("\n") + "\nenable_id_obfuscation=true\n"
+text = toml_root_set_assignment(text, "listen_port", str(port), append_if_missing=True)
+cur_db_type = toml_root_get_str(text, "database_type")
+if cur_db_type is not None and cur_db_type.strip().lower() == "bolt":
+    text = toml_root_set_assignment(text, "database_type", '"sqlite"', append_if_missing=False)
+if not toml_root_has_key(text, "redact_ip_addresses"):
+    text = toml_root_set_assignment(text, "redact_ip_addresses", "true", append_if_missing=True)
+if not toml_root_has_key(text, "enable_id_obfuscation"):
+    text = toml_root_set_assignment(text, "enable_id_obfuscation", "true", append_if_missing=True)
 
-db_type_m = re.search(r'^[ \t]*database_type\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
-db_type = db_type_m.group(2).strip().lower() if db_type_m else "sqlite"
-db_file_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
-if db_type not in ("none", "memory") and db_file_m:
-    raw_db_file = db_file_m.group(2).strip()
+cur_db_type_after = toml_root_get_str(text, "database_type")
+db_type = cur_db_type_after.strip().lower() if cur_db_type_after is not None else "sqlite"
+raw_db_file_opt = toml_root_get_str(text, "database_file")
+if db_type not in ("none", "memory") and raw_db_file_opt is not None:
+    raw_db_file = raw_db_file_opt.strip()
     if raw_db_file:
         norm_state = os.path.normpath(state_dir)
         resolved_db = os.path.normpath(
@@ -365,11 +506,8 @@ if db_type not in ("none", "memory") and db_file_m:
                 if not stat.S_ISREG(st_in.st_mode):
                     raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
             if raw_db_file != resolved_db:
-                text = re.sub(
-                    r'^[ \t]*database_file\s*=.*',
-                    f'database_file="{resolved_db}"',
-                    text,
-                    flags=re.MULTILINE,
+                text = toml_root_set_assignment(
+                    text, "database_file", f'"{resolved_db}"', append_if_missing=False
                 )
         else:
             allowed_ext_prefixes = (
@@ -522,11 +660,8 @@ if db_type not in ("none", "memory") and db_file_m:
                     finally:
                         os.close(fd_salt_in)
 
-            text = re.sub(
-                r'^[ \t]*database_file\s*=.*',
-                f'database_file="{confined_db}"',
-                text,
-                flags=re.MULTILINE,
+            text = toml_root_set_assignment(
+                text, "database_file", f'"{confined_db}"', append_if_missing=False
             )
 
 import ipaddress, secrets
@@ -560,7 +695,7 @@ def _token_has_loopback(tok: str) -> bool:
         pass
     return False
 
-def _detect_loopback_trusted_proxy(toml_text: str) -> bool:
+def _detect_loopback_trusted_proxy(toml_text: str, root_preamble: str) -> bool:
     if tomllib is not None:
         try:
             parsed = tomllib.loads(toml_text)
@@ -569,25 +704,29 @@ def _detect_loopback_trusted_proxy(toml_text: str) -> bool:
                 return any(_token_has_loopback(part) for part in tp.split(","))
             if isinstance(tp, list):
                 return any(_token_has_loopback(str(part)) for part in tp)
+            return False
         except Exception:
             pass
-    tp_arr = re.search(r"^[ \t]*trusted_proxies\s*=\s*\[([^\]]*)\]", toml_text, re.MULTILINE | re.DOTALL)
-    if tp_arr:
-        return any(_token_has_loopback(part) for part in tp_arr.group(1).split(","))
-    tp_str = re.search(r'^[ \t]*trusted_proxies\s*=\s*(["\'])([^"\']*)\1', toml_text, re.MULTILINE)
-    if tp_str:
-        return any(_token_has_loopback(part) for part in tp_str.group(2).split(","))
+    for _, _, k, rhs_raw in iter_toml_root_assignments(root_preamble):
+        if k == "trusted_proxies":
+            if rhs_raw.startswith("[") and rhs_raw.endswith("]"):
+                return any(_token_has_loopback(part) for part in rhs_raw[1:-1].split(","))
+            s_val = parse_toml_string_rhs(rhs_raw)
+            if s_val is not None:
+                return any(_token_has_loopback(part) for part in s_val.split(","))
     return False
 
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', text, re.MULTILINE)
-bind_val = bind_m.group(2).strip() if bind_m else None
-if not re.search(r"^[ \t]*trusted_proxies\s*=", text, re.MULTILINE):
+bind_val_raw = toml_root_get_str(text, "bind_address")
+bind_val = bind_val_raw.strip() if bind_val_raw is not None else None
+if not toml_root_has_key(text, "trusted_proxies"):
     if bind_val is None or _token_has_loopback(bind_val):
-        text = text.rstrip("\n") + '\ntrusted_proxies=["127.0.0.1", "::1"]\n'
+        text = toml_root_set_assignment(text, "trusted_proxies", '["127.0.0.1", "::1"]', append_if_missing=True)
 candidate_toml = (text.rstrip("\n") + "\n\n" + sections_tail) if sections_tail else text
-has_loopback_proxy = _detect_loopback_trusted_proxy(candidate_toml)
-if has_loopback_proxy and not re.search(r"^[ \t]*trusted_proxy_secret\s*=", text, re.MULTILINE):
-    text = text.rstrip("\n") + f'\ntrusted_proxy_secret="{secrets.token_hex(32)}"\n'
+has_loopback_proxy = _detect_loopback_trusted_proxy(candidate_toml, text)
+if has_loopback_proxy and not toml_root_has_key(text, "trusted_proxy_secret"):
+    text = toml_root_set_assignment(
+        text, "trusted_proxy_secret", f'"{secrets.token_hex(32)}"', append_if_missing=True
+    )
 if sections_tail:
     final_text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + sections_tail
 else:
@@ -714,6 +853,7 @@ try:
             f"{base_leaf}-journal",
             f"{base_leaf}.bak",
             f"{base_leaf}.bolt.bak",
+            "speedtest.bolt",
             "speedtest.bolt.bak",
             "speedtest.bolt.bolt.bak",
             "idObfuscation_salt.bin",
@@ -737,6 +877,10 @@ try:
     harden_db_family(dir_fd, state_dir, "speedtest.db")
 
     cfg_full_text = cfg_bytes.decode("utf-8", errors="replace")
+    try:
+        import tomllib as _tomllib
+    except ImportError:
+        _tomllib = None  # type: ignore[assignment]
     def _root_preamble(src: str) -> str:
         n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
         while i < n:
@@ -763,9 +907,54 @@ try:
             elif ch == "]" and bdepth > 0: bdepth -= 1
             bol = False; i += 1
         return src
+    def _root_str_val(full_src: str, root_src: str, key_name: str) -> str:
+        if _tomllib is not None:
+            try:
+                parsed = _tomllib.loads(full_src)
+                v = parsed.get(key_name)
+                return v.strip() if isinstance(v, str) else ""
+            except Exception:
+                pass
+        n, i, res = len(root_src), 0, ""
+        while i < n:
+            while i < n and root_src[i] in (" ", "\t", "\r"): i += 1
+            if i >= n: break
+            if root_src[i] == "\n": i += 1; continue
+            if root_src[i] == "#":
+                nl = root_src.find("\n", i); i = n if nl == -1 else nl + 1; continue
+            ks = i
+            while i < n and (root_src[i].isalnum() or root_src[i] in ("_", "-")): i += 1
+            k = root_src[ks:i].strip()
+            while i < n and root_src[i] in (" ", "\t"): i += 1
+            eq = (i < n and root_src[i] == "=")
+            if eq: i += 1
+            rs, in_s, bd, cpos = i, None, 0, None
+            while i < n:
+                ch = root_src[i]
+                if in_s is not None:
+                    if in_s in ('"""', "'''"):
+                        if root_src.startswith(in_s, i): i += 3; in_s = None; continue
+                        i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                    i += 2 if (in_s == '"' and ch == "\\") else 1
+                    if ch == in_s: in_s = None
+                    continue
+                if ch == "#" and bd == 0:
+                    cpos = i; nl = root_src.find("\n", i); i = n if nl == -1 else nl + 1; break
+                if ch == "\n" and bd == 0: i += 1; break
+                if root_src.startswith('"""', i) or root_src.startswith("'''", i): in_s = root_src[i:i+3]; i += 3; continue
+                if ch in ('"', "'"): in_s = ch; i += 1; continue
+                if ch in ("[", "{"): bd += 1
+                elif ch in ("]", "}") and bd > 0: bd -= 1
+                i += 1
+            if eq and k == key_name:
+                rhs = root_src[rs:(cpos if cpos is not None else i)].strip()
+                if len(rhs) >= 6 and ((rhs.startswith('"""') and rhs.endswith('"""')) or (rhs.startswith("'''") and rhs.endswith("'''"))):
+                    res = rhs[3:-3].lstrip("\r\n").strip()
+                elif len(rhs) >= 2 and ((rhs.startswith('"') and rhs.endswith('"')) or (rhs.startswith("'") and rhs.endswith("'"))):
+                    res = rhs[1:-1].strip()
+        return res
     cfg_text = _root_preamble(cfg_full_text)
-    db_m = re.search(r'^[ \t]*database_file\s*=\s*(["\'])([^"\']*)\1', cfg_text, flags=re.MULTILINE)
-    raw_db = db_m.group(2).strip() if db_m else ""
+    raw_db = _root_str_val(cfg_full_text, cfg_text, "database_file")
     if raw_db:
         resolved_db = os.path.normpath(raw_db if os.path.isabs(raw_db) else os.path.join(state_dir, raw_db))
         prefix = state_dir.rstrip("/") + "/"
@@ -806,12 +995,7 @@ try:
                         for sub_fd in reversed(opened_fds):
                             os.close(sub_fd)
 
-    sec_m = re.search(
-        r'^[ \t]*trusted_proxy_secret\s*=\s*(["\'])([^"\']*)\1',
-        cfg_text,
-        flags=re.MULTILINE,
-    )
-    proxy_secret = sec_m.group(2).strip() if sec_m else ""
+    proxy_secret = _root_str_val(cfg_full_text, cfg_text, "trusted_proxy_secret")
     if proxy_secret and not re.fullmatch(r"[A-Za-z0-9_.:=-]{16,128}", proxy_secret):
         raise SystemExit("Refusing unsafe trusted_proxy_secret characters in LibreSpeed settings.toml")
 
@@ -928,8 +1112,55 @@ def _root_preamble(src: str) -> str:
         bol = False; i += 1
     return src
 txt_root = _root_preamble(txt)
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt_root, flags=re.MULTILINE)
-bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "0.0.0.0"
+try:
+    import tomllib as _tomllib
+except ImportError:
+    _tomllib = None  # type: ignore[assignment]
+bind_raw = None
+if _tomllib is not None:
+    try:
+        v = _tomllib.loads(txt).get("bind_address")
+        if isinstance(v, str):
+            bind_raw = v.strip()
+    except Exception:
+        pass
+if bind_raw is None:
+    n, i = len(txt_root), 0
+    while i < n:
+        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
+        if i >= n: break
+        if txt_root[i] == "\n": i += 1; continue
+        if txt_root[i] == "#":
+            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
+        ks = i
+        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
+        k = txt_root[ks:i].strip()
+        while i < n and txt_root[i] in (" ", "\t"): i += 1
+        eq = (i < n and txt_root[i] == "=")
+        if eq: i += 1
+        rs, in_s, bd, cpos = i, None, 0, None
+        while i < n:
+            ch = txt_root[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "#" and bd == 0:
+                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
+            if ch == "\n" and bd == 0: i += 1; break
+            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; i += 1; continue
+            if ch in ("[", "{"): bd += 1
+            elif ch in ("]", "}") and bd > 0: bd -= 1
+            i += 1
+        if eq and k == "bind_address":
+            rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
+            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
+                bind_raw = rhs[1:-1].strip()
+bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "0.0.0.0"
 if bind_val == "*":
     bind_val = "0.0.0.0"
 if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", bind_val):
@@ -987,10 +1218,65 @@ def _root_preamble(src: str) -> str:
         bol = False; i += 1
     return src
 txt_root = _root_preamble(txt)
-tls_m = re.search(r'^[ \t]*enable_tls\s*=\s*(?:"?(true|false)"?)\b', txt_root, flags=re.MULTILINE | re.IGNORECASE)
-tls_on = bool(tls_m and tls_m.group(1).lower() == "true")
-bind_m = re.search(r'^[ \t]*bind_address\s*=\s*(["\'])([^"\']*)\1', txt_root, flags=re.MULTILINE)
-bind_val = (bind_m.group(2).strip() if bind_m else "127.0.0.1") or "127.0.0.1"
+try:
+    import tomllib as _tomllib
+except ImportError:
+    _tomllib = None  # type: ignore[assignment]
+tls_on = None
+bind_raw = None
+if _tomllib is not None:
+    try:
+        parsed = _tomllib.loads(txt)
+        tv = parsed.get("enable_tls")
+        if isinstance(tv, bool):
+            tls_on = tv
+        elif isinstance(tv, str):
+            tls_on = tv.strip().lower() == "true"
+        bv = parsed.get("bind_address")
+        if isinstance(bv, str):
+            bind_raw = bv.strip()
+    except Exception:
+        pass
+if tls_on is None or bind_raw is None:
+    n, i = len(txt_root), 0
+    while i < n:
+        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
+        if i >= n: break
+        if txt_root[i] == "\n": i += 1; continue
+        if txt_root[i] == "#":
+            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
+        ks = i
+        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
+        k = txt_root[ks:i].strip()
+        while i < n and txt_root[i] in (" ", "\t"): i += 1
+        eq = (i < n and txt_root[i] == "=")
+        if eq: i += 1
+        rs, in_s, bd, cpos = i, None, 0, None
+        while i < n:
+            ch = txt_root[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "#" and bd == 0:
+                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
+            if ch == "\n" and bd == 0: i += 1; break
+            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; i += 1; continue
+            if ch in ("[", "{"): bd += 1
+            elif ch in ("]", "}") and bd > 0: bd -= 1
+            i += 1
+        rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
+        if eq and k == "enable_tls" and tls_on is None:
+            tls_on = rhs.strip("\"'").strip().lower() == "true"
+        elif eq and k == "bind_address" and bind_raw is None:
+            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
+                bind_raw = rhs[1:-1].strip()
+tls_on = bool(tls_on)
+bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "127.0.0.1"
 host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
 if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
     raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")

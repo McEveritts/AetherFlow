@@ -1564,10 +1564,7 @@ pub fn is_prerelease_version_for_channel_with_source(
                 } else {
                     true
                 };
-                if segments_numeric && is_valid_apt_debian_revision_suffix(deb_rev) {
-                    return false;
-                }
-                return true;
+                return !(segments_numeric && is_valid_apt_debian_revision_suffix(deb_rev));
             }
             false
         }
@@ -2000,10 +1997,7 @@ pub fn single_version_matches(achieved: &str, expected: &str) -> bool {
     if sem_exp.eq_ignore_ascii_case(sem_ach) {
         return true;
     }
-    if commits_match_prefix(norm_exp, norm_ach, false) {
-        return true;
-    }
-    false
+    commits_match_prefix(norm_exp, norm_ach, false)
 }
 
 pub fn single_version_matches_target(achieved: &str, expected: &str) -> bool {

@@ -207,13 +207,19 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    if raw.is_empty() && env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() != Ok("1") {
-        if let Ok(explicit) = env::var("AETHERFLOW_ENV_FILE") {
-            let trimmed_path = explicit.trim();
-            if !trimmed_path.is_empty() {
-                if let Some(from_file) = read_last_aes_key_from_env_file(Path::new(trimmed_path)) {
-                    raw = from_file;
-                }
+    if raw.is_empty() {
+        let explicit_env_file = env::var("AETHERFLOW_ENV_FILE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        if let Some(ref explicit_path) = explicit_env_file {
+            if let Some(from_file) = read_last_aes_key_from_env_file(Path::new(explicit_path)) {
+                raw = from_file;
+            }
+        } else if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() != Ok("1") {
+            let default_env = Path::new("/etc/aetherflow/aetherflow.env");
+            if let Some(from_file) = read_last_aes_key_from_env_file(default_env) {
+                raw = from_file;
             }
         }
     }
@@ -586,7 +592,7 @@ pub fn init_db() -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
             ai_model TEXT DEFAULT 'gemini-4-argon',
-            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
+            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a consolidated Next.js + Rust aetherflow-api environment. Always prioritize safe and performant configurations.',
             language TEXT DEFAULT 'en',
             timezone TEXT DEFAULT 'UTC',
             update_channel TEXT DEFAULT 'stable',
@@ -2586,6 +2592,10 @@ pub(crate) mod tests {
         env::set_var("AETHERFLOW_ENV_FILE", &env_path);
         init_aes_key().expect("init_aes_key must load AES_MASTER_KEY from AETHERFLOW_ENV_FILE");
         let ct = encrypt_key("r8-env-secret").unwrap();
+        assert!(
+            ct.starts_with("enc:v1:"),
+            "expected AES-256-GCM ciphertext prefix enc:v1:, got {ct}"
+        );
         assert_eq!(decrypt_key(&ct).unwrap(), "r8-env-secret");
         env::remove_var("AETHERFLOW_ENV_FILE");
         let _ = std::fs::remove_file(&env_path);

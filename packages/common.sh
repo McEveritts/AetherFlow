@@ -2478,30 +2478,63 @@ write_lock() {
 
 get_base_domain() {
     local dom="" db_cand=""
-    local env_file="${AETHERFLOW_ENV_FILE:-/etc/aetherflow/aetherflow.env}"
+    local explicit_env_file="${AETHERFLOW_ENV_FILE:-}"
+    local skip_host_env="${AETHERFLOW_SKIP_ENV_FILES:-0}"
+    local env_file=""
+    if [[ -n "$explicit_env_file" ]]; then
+        env_file="$explicit_env_file"
+    elif [[ "$skip_host_env" != "1" ]]; then
+        env_file="/etc/aetherflow/aetherflow.env"
+    fi
     local env_af_db="" env_db="" env_aetherflow_db="" env_data_dir="" env_base_domain=""
-    if [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" && -f "$env_file" ]]; then
-        local _k="" _v=""
-        while IFS= read -r _line || [[ -n "$_line" ]]; do
-            _line="${_line%$'\r'}"
-            [[ "$_line" =~ ^[[:space:]]*# || -z "${_line//[[:space:]]/}" ]] && continue
-            if [[ "$_line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
-                _k="${BASH_REMATCH[2]}"
-                _v="${BASH_REMATCH[3]}"
-                _v="${_v#"${_v%%[![:space:]]*}"}"
-                _v="${_v%"${_v##*[![:space:]]}"}"
-                if [[ ( "$_v" == \"*\" && "$_v" == *\" ) || ( "$_v" == \'*\' && "$_v" == *\' ) ]]; then
-                    _v="${_v:1:${#_v}-2}"
-                fi
-                case "$_k" in
-                    AF_DB_PATH) env_af_db="$_v" ;;
-                    DB_PATH) env_db="$_v" ;;
-                    AETHERFLOW_DB_PATH) env_aetherflow_db="$_v" ;;
-                    DATA_DIR) env_data_dir="$_v" ;;
-                    AETHERFLOW_BASE_DOMAIN) env_base_domain="$_v" ;;
-                esac
-            fi
-        done < "$env_file"
+    if [[ -n "$env_file" && -e "$env_file" ]]; then
+        local _parsed_env=""
+        _parsed_env="$(python3 - "$env_file" <<'PYEOF' 2>/dev/null || true
+import os, stat, sys
+target = sys.argv[1]
+parent = os.path.dirname(os.path.abspath(target)) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+lst = os.lstat(target)
+if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+    raise SystemExit(1)
+fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
+        content = fh.read()
+finally:
+    os.close(fd)
+vals = {}
+for raw_line in content.splitlines():
+    s = raw_line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    k = k.strip()
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+        v = v[1:-1]
+    if k in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH", "DATA_DIR", "AETHERFLOW_BASE_DOMAIN"):
+        vals[k] = v
+for key in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH", "DATA_DIR", "AETHERFLOW_BASE_DOMAIN"):
+    print(vals.get(key, "").replace("\n", "").replace("\r", ""))
+PYEOF
+)"
+        if [[ -n "$_parsed_env" ]]; then
+            env_af_db="$(printf '%s\n' "$_parsed_env" | sed -n '1p')"
+            env_db="$(printf '%s\n' "$_parsed_env" | sed -n '2p')"
+            env_aetherflow_db="$(printf '%s\n' "$_parsed_env" | sed -n '3p')"
+            env_data_dir="$(printf '%s\n' "$_parsed_env" | sed -n '4p')"
+            env_base_domain="$(printf '%s\n' "$_parsed_env" | sed -n '5p')"
+        fi
     fi
     local eff_data_dir="${DATA_DIR:-$env_data_dir}"
     local custom_data_db=""
@@ -2509,18 +2542,24 @@ get_base_domain() {
         custom_data_db="${eff_data_dir%/}/aetherflow.sqlite"
     fi
     if command -v sqlite3 >/dev/null 2>&1; then
-        for db_cand in \
-            "${AF_DB_PATH:-}" \
-            "${DB_PATH:-}" \
-            "${AETHERFLOW_DB_PATH:-}" \
-            "$env_af_db" \
-            "$env_db" \
-            "$env_aetherflow_db" \
-            "$custom_data_db" \
-            /var/lib/aetherflow/aetherflow.sqlite \
-            /opt/AetherFlow/current/data/aetherflow.sqlite \
-            /opt/AetherFlow/data/aetherflow.sqlite \
-            /opt/AetherFlow/backend/data/aetherflow.sqlite
+        local -a _db_candidates=(
+            "${AF_DB_PATH:-}"
+            "${DB_PATH:-}"
+            "${AETHERFLOW_DB_PATH:-}"
+            "$env_af_db"
+            "$env_db"
+            "$env_aetherflow_db"
+            "$custom_data_db"
+        )
+        if [[ "$skip_host_env" != "1" ]]; then
+            _db_candidates+=(
+                /var/lib/aetherflow/aetherflow.sqlite
+                /opt/AetherFlow/current/data/aetherflow.sqlite
+                /opt/AetherFlow/data/aetherflow.sqlite
+                /opt/AetherFlow/backend/data/aetherflow.sqlite
+            )
+        fi
+        for db_cand in "${_db_candidates[@]}"
         do
             if [[ -n "$db_cand" && -f "$db_cand" ]]; then
                 local has_settings=""
@@ -4709,7 +4748,11 @@ load_master_credentials() {
         export MASTER_HA1="${MASTER_HA1:-$(printf '%s' "$MASTER_PASS" | md5sum | awk '{print $1}')}"
         return 0
     fi
-    for creds_json in "$primary_creds_file" /opt/AetherFlow/backend/data/.master.creds; do
+    local -a _creds_files=("$primary_creds_file")
+    if [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" ]]; then
+        _creds_files+=(/opt/AetherFlow/backend/data/.master.creds)
+    fi
+    for creds_json in "${_creds_files[@]}"; do
         if [[ -f "$creds_json" && ! -L "$creds_json" ]]; then
             local parsed_creds=""
             parsed_creds="$(python3 - "$creds_json" "$primary_creds_file" 2>/dev/null <<'PYEOF' || true
@@ -4735,23 +4778,27 @@ def _read_regular_file_nofollow(target):
 
 def load_aes_key():
     raw = os.environ.get("AES_MASTER_KEY", "").strip()
-    if not raw and os.environ.get("AETHERFLOW_SKIP_ENV_FILES") != "1":
-        env_path = os.environ.get("AETHERFLOW_ENV_FILE", "/etc/aetherflow/aetherflow.env")
-        try:
-            for line in _read_regular_file_nofollow(env_path).splitlines():
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                if s.startswith("export "):
-                    s = s[7:].strip()
-                if s.startswith("AES_MASTER_KEY="):
-                    candidate = s.split("=", 1)[1].strip().strip("\"'")
-                    if candidate:
-                        raw = candidate
-        except FileNotFoundError:
-            raw = ""
-        except OSError as exc:
-            sys.stderr.write(f"Skipping unreadable env file {env_path}: {exc}\n")
+    if not raw:
+        explicit_env = os.environ.get("AETHERFLOW_ENV_FILE", "").strip()
+        env_path = explicit_env if explicit_env else (
+            "/etc/aetherflow/aetherflow.env" if os.environ.get("AETHERFLOW_SKIP_ENV_FILES") != "1" else ""
+        )
+        if env_path:
+            try:
+                for line in _read_regular_file_nofollow(env_path).splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    if s.startswith("export "):
+                        s = s[7:].strip()
+                    if s.startswith("AES_MASTER_KEY="):
+                        candidate = s.split("=", 1)[1].strip().strip("\"'")
+                        if candidate:
+                            raw = candidate
+            except FileNotFoundError:
+                raw = ""
+            except OSError as exc:
+                sys.stderr.write(f"Skipping unreadable env file {env_path}: {exc}\n")
     if not raw:
         return "", None
     if len(raw) == 64:
@@ -4899,46 +4946,104 @@ PYEOF
             [[ -n "$u" && -n "$p" ]] && break
         fi
     done
-    if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
-        u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
-        p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
-        h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"
-    fi
-    if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
-        u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
+    local skip_host_env="${AETHERFLOW_SKIP_ENV_FILES:-0}"
+    if [[ "$skip_host_env" != "1" ]]; then
+        if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
+            u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
+            p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
+            h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"
+        fi
+        if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
+            u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
+        fi
     fi
     if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1; then
         local db_cand="" env_db="" env_data_dir=""
-        if [[ -f /etc/aetherflow/aetherflow.env ]]; then
-            env_db="$(grep -E '^(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
-            env_data_dir="$(grep -E '^DATA_DIR=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+        local _creds_env_file="${AETHERFLOW_ENV_FILE:-}"
+        if [[ -z "$_creds_env_file" && "$skip_host_env" != "1" ]]; then
+            _creds_env_file="/etc/aetherflow/aetherflow.env"
         fi
-        for db_cand in \
-            "${AF_DB_PATH:-}" \
-            "${DB_PATH:-}" \
-            "${AETHERFLOW_DB_PATH:-}" \
-            "$env_db" \
-            "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}" \
-            "${env_data_dir:+${env_data_dir%/}/aetherflow.sqlite}" \
-            /var/lib/aetherflow/aetherflow.sqlite \
-            /opt/AetherFlow/current/data/aetherflow.sqlite \
-            /opt/AetherFlow/data/aetherflow.sqlite \
-            /opt/AetherFlow/backend/data/aetherflow.sqlite; do
+        if [[ -n "$_creds_env_file" && -e "$_creds_env_file" ]]; then
+            local _creds_env_parsed=""
+            _creds_env_parsed="$(python3 - "$_creds_env_file" <<'PYEOF' 2>/dev/null || true
+import os, stat, sys
+target = sys.argv[1]
+parent = os.path.dirname(os.path.abspath(target)) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+lst = os.lstat(target)
+if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+    raise SystemExit(1)
+fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
+        lines = fh.read().splitlines()
+finally:
+    os.close(fd)
+env_db = ""
+env_data = ""
+for raw_line in lines:
+    s = raw_line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    k = k.strip()
+    v = v.strip().strip("\"'")
+    if k in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"):
+        env_db = v
+    elif k == "DATA_DIR":
+        env_data = v
+print(env_db.replace("\n", "").replace("\r", ""))
+print(env_data.replace("\n", "").replace("\r", ""))
+PYEOF
+)"
+            if [[ -n "$_creds_env_parsed" ]]; then
+                env_db="$(printf '%s\n' "$_creds_env_parsed" | sed -n '1p')"
+                env_data_dir="$(printf '%s\n' "$_creds_env_parsed" | sed -n '2p')"
+            fi
+        fi
+        local -a _creds_db_candidates=(
+            "${AF_DB_PATH:-}"
+            "${DB_PATH:-}"
+            "${AETHERFLOW_DB_PATH:-}"
+            "$env_db"
+            "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}"
+            "${env_data_dir:+${env_data_dir%/}/aetherflow.sqlite}"
+        )
+        if [[ "$skip_host_env" != "1" ]]; then
+            _creds_db_candidates+=(
+                /var/lib/aetherflow/aetherflow.sqlite
+                /opt/AetherFlow/current/data/aetherflow.sqlite
+                /opt/AetherFlow/data/aetherflow.sqlite
+                /opt/AetherFlow/backend/data/aetherflow.sqlite
+            )
+        fi
+        for db_cand in "${_creds_db_candidates[@]}"; do
             if [[ -n "$db_cand" && -f "$db_cand" ]]; then
                 u="$(sqlite3 "$db_cand" "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
                 [[ -n "$u" ]] && break
             fi
         done
     fi
-    if [[ -z "$p" && -n "$u" && -f "/root/${u}.info.db" ]]; then
-        p="$(cut -d: -f2- "/root/${u}.info.db" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
-    fi
-    if [[ -z "$p" ]]; then
-        local info_file
-        info_file="$(ls -1 /root/*.info.db 2>/dev/null | head -n1 || true)"
-        if [[ -n "$info_file" && -f "$info_file" ]]; then
-            [[ -z "$u" ]] && u="$(cut -d: -f1 "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
-            p="$(cut -d: -f2- "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+    if [[ "$skip_host_env" != "1" ]]; then
+        if [[ -z "$p" && -n "$u" && -f "/root/${u}.info.db" ]]; then
+            p="$(cut -d: -f2- "/root/${u}.info.db" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+        fi
+        if [[ -z "$p" ]]; then
+            local info_file
+            info_file="$(ls -1 /root/*.info.db 2>/dev/null | head -n1 || true)"
+            if [[ -n "$info_file" && -f "$info_file" ]]; then
+                [[ -z "$u" ]] && u="$(cut -d: -f1 "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+                p="$(cut -d: -f2- "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+            fi
         fi
     fi
     if [[ -z "$p" ]]; then
@@ -5002,23 +5107,27 @@ if os.path.lexists(destination):
 
 def resolve_aes_key():
     raw = os.environ.get('AES_MASTER_KEY', '').strip()
-    if not raw and os.environ.get('AETHERFLOW_SKIP_ENV_FILES') != '1':
-        env_path = os.environ.get('AETHERFLOW_ENV_FILE', '/etc/aetherflow/aetherflow.env')
-        try:
-            for line in _read_regular_file_nofollow(env_path).splitlines():
-                s = line.strip()
-                if not s or s.startswith('#'):
-                    continue
-                if s.startswith('export '):
-                    s = s[7:].strip()
-                if s.startswith('AES_MASTER_KEY='):
-                    candidate = s.split('=', 1)[1].strip().strip("\"'")
-                    if candidate:
-                        raw = candidate
-        except FileNotFoundError:
-            raw = ''
-        except OSError as exc:
-            sys.stderr.write(f'Skipping unreadable env file {env_path}: {exc}\n')
+    if not raw:
+        explicit_env = os.environ.get('AETHERFLOW_ENV_FILE', '').strip()
+        env_path = explicit_env if explicit_env else (
+            '/etc/aetherflow/aetherflow.env' if os.environ.get('AETHERFLOW_SKIP_ENV_FILES') != '1' else ''
+        )
+        if env_path:
+            try:
+                for line in _read_regular_file_nofollow(env_path).splitlines():
+                    s = line.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    if s.startswith('export '):
+                        s = s[7:].strip()
+                    if s.startswith('AES_MASTER_KEY='):
+                        candidate = s.split('=', 1)[1].strip().strip("\"'")
+                        if candidate:
+                            raw = candidate
+            except FileNotFoundError:
+                raw = ''
+            except OSError as exc:
+                sys.stderr.write(f'Skipping unreadable env file {env_path}: {exc}\n')
     if not raw:
         return '', None
     if len(raw) == 64:

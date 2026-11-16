@@ -236,7 +236,7 @@ sudo sqlite3 /var/lib/aetherflow/aetherflow.sqlite \
 
 ## Rollback Plan
 
-> Do **not** remove `AES_MASTER_KEY`, `JWT_SECRET`, or `ALLOWED_HOSTS`, and do **not** downgrade encryption or authentication to plaintext/fail-open modes. Preserve the original encryption key during rollback. Missing-secret handling is not uniformly fail-closed: the current AES initializer permits an unset key unless the compatibility variable `GIN_MODE=release` is set, while an unset JWT secret produces a process-local key. Explicitly validate production configuration rather than relying on startup rejection.
+> Do **not** remove `AES_MASTER_KEY`, `JWT_SECRET`, or `ALLOWED_HOSTS`, and do **not** downgrade encryption or authentication to plaintext/fail-open modes. Preserve the original encryption key during rollback. In v4.0.0, `af-db::init_aes_key` fails closed whenever `AES_MASTER_KEY` is missing or malformed under `AETHERFLOW_ENV=production` / `AETHERFLOW_ENV=release` (or legacy `GIN_MODE=release`), and `af-api` (`validate_startup_jwt_secret`) fails closed at startup whenever `JWT_SECRET` is unset or shorter than `32` bytes. Always explicitly validate `/etc/aetherflow/aetherflow.env` before and after rollback.
 
 
 If an issue is encountered after deployment, execute an atomic rollback to `.previous_release` with WAL-safe database integrity verification:

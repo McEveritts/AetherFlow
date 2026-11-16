@@ -175,9 +175,17 @@ fn build_cors_layer() -> CorsLayer {
         .allow_credentials(true)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Populate process environment before spawning multi-threaded Tokio worker threads
+    // so `dotenvy::from_path` (`setenv`) executes strictly single-threaded.
     load_env_files();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let _ = af_runner::af_release::runtime::runtime_identity();
 
     tracing_subscriber::fmt()

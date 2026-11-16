@@ -294,7 +294,7 @@ impl TelemetryVault {
         let sibling_bolt_backup = if let Some(parent) = db_path.parent() {
             let sibling_bolt = parent.join("speedtest.bolt");
             if sibling_bolt != db_path {
-                guard_and_backup_legacy_boltdb(&sibling_bolt).ok().flatten()
+                guard_and_backup_legacy_boltdb(&sibling_bolt)?
             } else {
                 None
             }
@@ -1654,21 +1654,16 @@ fn import_legacy_boltdb_if_valid(
     conn: &mut Connection,
     max_rows: usize,
 ) -> Result<()> {
-    let file = match OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(backup_path)
-    {
-        Ok(f) => f,
-        Err(err) => {
-            warn!(
-                backup = %backup_path.display(),
-                error = %err,
-                "Skipping legacy BoltDB telemetry import: failed opening backup"
-            );
-            return Ok(());
-        }
-    };
+        .with_context(|| {
+            format!(
+                "failed opening legacy BoltDB backup {} for migration",
+                backup_path.display()
+            )
+        })?;
     let meta = file.metadata().with_context(|| {
         format!(
             "failed reading metadata for legacy BoltDB backup {}",
@@ -2566,5 +2561,40 @@ mod tests {
         assert_eq!(by_id.uuid, "01JNULLTEST000000000000001");
         assert_eq!(by_id.ping, "4.1");
         assert_eq!(by_id.ul, "");
+    }
+
+    #[tokio::test]
+    async fn unreadable_sibling_boltdb_fails_closed_until_permissions_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+        // Skip chmod-000 permission denial check if running as root (UID 0 bypasses DAC read bits)
+        if unsafe { libc::geteuid() == 0 } {
+            return;
+        }
+        let tmp = TempDirGuard::new("unreadable-sibling-bolt");
+        let db_path = tmp.0.join("speedtest.db");
+        let sibling_bolt = tmp.0.join("speedtest.bolt");
+        let bolt_bytes = build_single_record_bbolt_archive(
+            "01JSIBLINGBOLT0000000000001",
+            "2026-11-16 01:00:00",
+            "888.8",
+        );
+        std::fs::write(&sibling_bolt, &bolt_bytes).unwrap();
+        std::fs::set_permissions(&sibling_bolt, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = TelemetryVault::open_with_max_rows(&db_path, 100)
+            .err()
+            .expect("unreadable sibling speedtest.bolt must fail closed rather than silently starting empty");
+        assert!(
+            format!("{err:#}").contains("speedtest.bolt")
+                || format!("{err:#}").contains("Permission denied"),
+            "unexpected error for unreadable sibling bolt: {err:#}"
+        );
+
+        std::fs::set_permissions(&sibling_bolt, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let vault = TelemetryVault::open_with_max_rows(&db_path, 100)
+            .expect("reopen after repairing sibling speedtest.bolt permissions");
+        let rows = vault.list_recent(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, "01JSIBLINGBOLT0000000000001");
     }
 }

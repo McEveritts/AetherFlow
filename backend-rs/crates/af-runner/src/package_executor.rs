@@ -9954,16 +9954,11 @@ pub fn script_matches_package_identity(action: &str, package_id: &str, script_na
 
     // Allow synthetic non-catalog test fixtures (e.g. `package_id = "fixture"` with
     // `installpackage-overflow-fixture` or `installpackage-hillclimb-<uuid>`) in isolated tests.
-    if pkg == "fixture"
+    pkg == "fixture"
         && (script_stem.ends_with("-fixture")
             || script_stem.starts_with("fixture-")
             || script_stem.starts_with("hillclimb-")
             || script_stem.starts_with("polling-"))
-    {
-        return true;
-    }
-
-    false
 }
 
 /// Resolves whether a `PackageRunnerRequest` can be satisfied by either a built-in

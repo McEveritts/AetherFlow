@@ -965,10 +965,7 @@ fn is_pid_alive(pid: u32) -> bool {
             // In `/proc/<pid>/stat`, state character follows the last `)` of `comm`
             if let Some(rparen) = stat_raw.rfind(')') {
                 let after = stat_raw[rparen + 1..].trim_start();
-                if after.starts_with('Z') || after.starts_with('X') {
-                    return false;
-                }
-                return true;
+                return !(after.starts_with('Z') || after.starts_with('X'));
             }
         }
         let Ok(raw_pid) = libc::pid_t::try_from(pid) else {

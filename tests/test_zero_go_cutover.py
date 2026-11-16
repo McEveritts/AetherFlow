@@ -1133,7 +1133,11 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
         for rel in ("packages/system/af-certbot-sync", "packages/common.sh"):
             txt = (ROOT / rel).read_text(encoding="utf-8")
-            self.assertIn("(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=", txt)
+            self.assertTrue(
+                "(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=" in txt
+                or '("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH")' in txt,
+                f"Expected DB env precedence check in {rel}",
+            )
             self.assertIn("/opt/AetherFlow/current/data/aetherflow.sqlite", txt)
 
         sec_yml = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
@@ -1393,10 +1397,17 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertNotIn("TOP_SECRET_HOST_LINE", check_sym.stdout + check_sym.stderr)
 
             # Verify `<sysroot>/opt/AetherFlow` vs `<sysroot>` vs standalone `<app_root>` against real compiled `af` binary (Carbon P2-1 regression)
-            real_af_candidates = [
-                ROOT / "backend-rs/target/release/af",
-                ROOT / "backend-rs/target/debug/af",
-            ]
+            real_af_candidates = []
+            cargo_target_env = os.environ.get("CARGO_TARGET_DIR", "").strip()
+            if cargo_target_env:
+                ct_path = Path(cargo_target_env)
+                real_af_candidates.extend([ct_path / "release/af", ct_path / "debug/af"])
+            real_af_candidates.extend(
+                [
+                    ROOT / "backend-rs/target/release/af",
+                    ROOT / "backend-rs/target/debug/af",
+                ]
+            )
             real_af = next((p for p in real_af_candidates if p.is_file() and os.access(p, os.X_OK)), None)
             if real_af is not None:
                 # Case A: AF_INSTALL_ROOT points to `<sysroot>/opt/AetherFlow` (must normalize `--root` to `<sysroot>`, not `<sysroot>/opt/AetherFlow/opt/AetherFlow`)
@@ -1448,6 +1459,74 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
         self.assertIn("Requires=librespeed.socket", ls_install)
         self.assertIn("idObfuscation_salt.bin", ls_install)
         self.assertIn('purge_systemd_unit "librespeed.socket" "librespeed"', ls_remove)
+
+    def test_multiline_toml_strings_and_isolated_credential_fallbacks(self) -> None:
+        ls_install = (ROOT / "packages/package/install/installpackage-librespeed").read_text(encoding="utf-8")
+        start_marker = 'safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<\'PYEOF\'\n'
+        idx = ls_install.index(start_marker) + len(start_marker)
+        end_idx = ls_install.index("\nPYEOF\n", idx)
+        toml_rewriter_py = (
+            "def safe_read_text(p):\n"
+            "    with open(p, 'r', encoding='utf-8') as f: return f.read()\n"
+            "def safe_write_text(p, s):\n"
+            "    with open(p, 'w', encoding='utf-8') as f: f.write(s)\n\n"
+            + ls_install[idx:end_idx]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "librespeed"
+            state_dir.mkdir(parents=True)
+            cfg = state_dir / "settings.toml"
+            multiline_pw = 'line1\nlisten_port=9999\ndatabase_file="/etc/shadow"\nline4'
+            cfg.write_text(
+                'bind_address="127.0.0.1"\n'
+                "listen_port=8989\n"
+                f'statistics_password="""\n{multiline_pw}"""\n'
+                'database_type="bolt"\n'
+                f'database_file="{state_dir}/speedtest.db"\n',
+                encoding="utf-8",
+            )
+            res = subprocess.run(
+                ["python3", "-", str(cfg), "18989"],
+                input=toml_rewriter_py,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            import tomllib
+            parsed = tomllib.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(parsed["listen_port"], 18989)
+            self.assertEqual(parsed["statistics_password"], multiline_pw)
+            self.assertEqual(parsed["database_type"], "sqlite")
+            self.assertEqual(parsed["database_file"], f"{state_dir}/speedtest.db")
+
+            # Verify common.sh load_master_credentials under AETHERFLOW_SKIP_ENV_FILES=1 ignores host username files
+            creds_file = Path(tmp) / ".master.creds"
+            env_file = Path(tmp) / "isolated.env"
+            env_file.write_text(f"AES_MASTER_KEY={'a' * 64}\n", encoding="utf-8")
+            chk = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'source "{ROOT / "packages/common.sh"}"; load_master_credentials; printf "%s" "$MASTER_USER"',
+                ],
+                env={
+                    **os.environ,
+                    "LOGFILE": "/dev/null",
+                    "MASTER_USER": "",
+                    "MASTER_PASS": "",
+                    "AETHERFLOW_SKIP_ENV_FILES": "1",
+                    "AETHERFLOW_ENV_FILE": str(env_file),
+                    "AETHERFLOW_MASTER_CREDS_FILE": str(creds_file),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(chk.returncode, 0, chk.stdout + chk.stderr)
+            self.assertEqual(chk.stdout.strip(), "admin")
+            persisted = json.loads(creds_file.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["username"], "admin")
+            self.assertTrue(persisted["password"].startswith("enc:v1:"))
 
 
 if __name__ == "__main__":
