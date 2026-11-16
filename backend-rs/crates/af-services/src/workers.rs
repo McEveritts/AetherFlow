@@ -2598,7 +2598,13 @@ fn is_regular_executable(path: &Path) -> bool {
         }
         if meta.file_type().is_symlink() {
             let path_str = path.to_string_lossy();
-            if path_str.starts_with("/usr/bin/") || path_str.starts_with("/usr/local/bin/") {
+            if path_str.starts_with("/bin/")
+                || path_str.starts_with("/sbin/")
+                || path_str.starts_with("/usr/bin/")
+                || path_str.starts_with("/usr/sbin/")
+                || path_str.starts_with("/usr/local/bin/")
+                || path_str.starts_with("/usr/local/sbin/")
+            {
                 if let Ok(target_meta) = fs::metadata(path) {
                     if target_meta.file_type().is_file()
                         && (target_meta.permissions().mode() & 0o111) != 0
