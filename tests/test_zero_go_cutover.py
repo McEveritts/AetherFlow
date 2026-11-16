@@ -1508,23 +1508,27 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
             # Verify common.sh load_master_credentials under AETHERFLOW_SKIP_ENV_FILES=1 ignores host username files
             creds_file = Path(tmp) / ".master.creds"
+            lock_dir = Path(tmp) / "lock"
             env_file = Path(tmp) / "isolated.env"
             env_file.write_text(f"AES_MASTER_KEY={'a' * 64}\n", encoding="utf-8")
+            isolated_env = {
+                **os.environ,
+                "LOCK_DIR": str(lock_dir),
+                "LOGFILE": "/dev/null",
+                "MASTER_USER": "",
+                "MASTER_PASS": "",
+                "AETHERFLOW_SKIP_ENV_FILES": "1",
+                "AETHERFLOW_ENV_FILE": str(env_file),
+                "AETHERFLOW_MASTER_CREDS_FILE": str(creds_file),
+            }
+            isolated_env.pop("AES_MASTER_KEY", None)
             chk = subprocess.run(
                 [
                     "bash",
                     "-c",
                     f'source "{ROOT / "packages/common.sh"}"; load_master_credentials; printf "%s" "$MASTER_USER"',
                 ],
-                env={
-                    **os.environ,
-                    "LOGFILE": "/dev/null",
-                    "MASTER_USER": "",
-                    "MASTER_PASS": "",
-                    "AETHERFLOW_SKIP_ENV_FILES": "1",
-                    "AETHERFLOW_ENV_FILE": str(env_file),
-                    "AETHERFLOW_MASTER_CREDS_FILE": str(creds_file),
-                },
+                env=isolated_env,
                 capture_output=True,
                 text=True,
             )
