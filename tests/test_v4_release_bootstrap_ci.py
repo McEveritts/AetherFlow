@@ -267,9 +267,9 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("Ubuntu 22.04", checklist)
         self.assertIn("Cargo.lock", checklist)
         self.assertIn("2026-11-03", checklist)
-        self.assertIn("ephemeral process secret", checklist)
-        self.assertIn("Hex strings and arbitrary passphrases are not supported", checklist)
-        self.assertIn("Missing-secret handling is not uniformly fail-closed", checklist)
+        self.assertIn("validate_startup_jwt_secret", checklist)
+        self.assertIn("64 hex characters", checklist)
+        self.assertIn("AETHERFLOW_ENV=production", checklist)
 
         for forbidden in (
             "redis-cli",

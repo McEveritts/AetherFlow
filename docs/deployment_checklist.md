@@ -31,8 +31,8 @@ Configure runtime variables in `/etc/aetherflow/aetherflow.env` (`chmod 0640`, o
 
 | Variable | Description | Validation & Fail-Closed Behavior |
 | --- | --- | --- |
-| `JWT_SECRET` | Session JWT signing secret | Supply at least 32 cryptographically random bytes. The current helper uses an ephemeral process secret when unset and does not enforce a minimum configured length; deployment must enforce this requirement. |
-| `AES_MASTER_KEY` | AES-256-GCM key for encrypted provider API keys | Exactly 32 raw bytes or base64 decoding to exactly 32 bytes. Hex strings and arbitrary passphrases are not supported. Invalid nonempty keys stop initialization. |
+| `JWT_SECRET` | Session JWT signing secret | Must be at least 32 cryptographically random bytes. `aetherflow-api` (`validate_startup_jwt_secret`) fails closed at startup if `JWT_SECRET` is unset or shorter than 32 bytes. |
+| `AES_MASTER_KEY` | AES-256-GCM key for encrypted provider API keys | Exactly 32 raw bytes, 64 hex characters (32 decoded bytes), or base64 decoding to 32 bytes. `af-db::init_aes_key` fails closed under `AETHERFLOW_ENV=production` / `release` (or `GIN_MODE=release`) when unset, and always stops initialization on invalid nonempty keys. |
 | `AF_DB_PATH` / `DB_PATH` / `AETHERFLOW_DB_PATH` | Absolute path to the live SQLite database | Shared resolution uses this precedence, rejects conflicting overrides, and enforces an isolated root when supplied. Installed units default to `/var/lib/aetherflow/aetherflow.sqlite`. |
 | `ALLOWED_HOSTS` | Comma-separated allowlist of HTTP `Host` header values | Validated by host-check middleware (`localhost,localhost:8080,127.0.0.1,127.0.0.1:8080,<your-domain>`). Spoofed `Host` headers are rejected with HTTP `400`. |
 
