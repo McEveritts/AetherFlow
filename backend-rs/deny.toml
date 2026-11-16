@@ -1,11 +1,12 @@
 # AetherFlow v4 Rust Workspace Security, Advisory & Supply-Chain Policy
-# Enforced in CI via `cargo deny --manifest-path backend-rs/Cargo.toml check advisories bans sources`
-# and `cargo audit --file backend-rs/Cargo.lock --ignore ...`.
+# Enforced in CI via `cargo deny --manifest-path backend-rs/Cargo.toml check advisories bans licenses sources`
+# and `cargo audit --file backend-rs/Cargo.lock`.
 
 [graph]
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "armv7-unknown-linux-gnueabihf" },
 ]
 all-features = false
 
@@ -16,12 +17,7 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = [
-    # RSA Marvin timing side-channel (RUSTSEC-2023-0071): rsa 0.9 is used strictly for
-    # public-key JWT/OIDC signature verification (RS256 JWKS), never for PKCS#1v1.5 decryption
-    # or private key operations where timing side-channels apply. No upstream fix exists in 0.9.x.
-    { id = "RUSTSEC-2023-0071", reason = "rsa crate is used only for public-key OIDC/JWKS RS256 signature verification; private-key PKCS#1v1.5 decryption is never invoked." },
-]
+ignore = []
 
 [licenses]
 version = 2
@@ -41,6 +37,7 @@ allow = [
     "BSL-1.0",
     "0BSD",
     "OpenSSL",
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-for CLI_BIN in "${AETHERFLOW_CLI_BIN:-}" /usr/local/bin/af-cli /opt/AetherFlow/bin/af-cli; do
+for CLI_BIN in "${AETHERFLOW_CLI_BIN:-}" /opt/AetherFlow/current/bin/af /opt/AetherFlow/current/af /usr/local/bin/af-cli /opt/AetherFlow/bin/af-cli; do
   if [[ -n "$CLI_BIN" && -x "$CLI_BIN" && ! "$CLI_BIN" -ef "$0" ]]; then
     exec "$CLI_BIN" "$@"
   fi

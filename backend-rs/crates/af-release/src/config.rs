@@ -1302,9 +1302,9 @@ pub fn try_resolve_db_path(
             for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
                 if let Some(val) = read_systemd_environment_value(key, blob) {
                     let candidate = PathBuf::from(val.trim());
-                    let is_legacy_unit_default =
-                        normalize_root_cmp(&candidate) == "/var/lib/aetherflow/aetherflow.sqlite"
-                            && key != "AF_DB_PATH";
+                    let is_legacy_unit_default = normalize_root_cmp(&candidate)
+                        == "/var/lib/aetherflow/aetherflow.sqlite"
+                        && key != "AF_DB_PATH";
                     if !(custom_data_dir_active && is_legacy_unit_default) {
                         let validated = ensure_within_isolated(&candidate, key)?;
                         return Ok(ResolvedDbPath {
@@ -1328,10 +1328,7 @@ pub fn try_resolve_db_path(
     })
 }
 
-pub fn resolve_db_path(
-    config: &ReleaseConfig,
-    systemd_env_blob: Option<&str>,
-) -> ResolvedDbPath {
+pub fn resolve_db_path(config: &ReleaseConfig, systemd_env_blob: Option<&str>) -> ResolvedDbPath {
     match try_resolve_db_path(config, systemd_env_blob) {
         Ok(resolved) => resolved,
         Err(_) => ResolvedDbPath {

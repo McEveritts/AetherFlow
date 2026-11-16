@@ -23,7 +23,69 @@ PACKAGE_NAME="x2go"
 APP_NAME="x2go"
 DATA_DIR="/var/lib/x2go"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 PACKAGE_NAME="${PACKAGE_NAME:-x2go}"
 begin_state_transaction "x2goserver.service" "0" "/" "/var/lib/x2go" "/etc/x2go" "/etc/systemd/system/x2goserver.service" "/usr/bin/x2gostartagent" "/usr/bin/x2goruncommand" "/usr/sbin/x2gocleansessions" "/usr/lib/x2go" "/usr/share/x2go"
@@ -33,24 +95,24 @@ log_info "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
 report_progress 15 "Preparing ${APP_NAME} installation..."
 
 report_progress 45 "Installing x2goserver, x2goserver-xsession, and XFCE4 desktop environment..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils
 
 mkdir -p "${DATA_DIR}"
 report_progress 75 "Initializing X2Go SQLite session database..."
 if command -v x2godbadmin >/dev/null 2>&1; then
-    x2godbadmin --createdb >> "$LOGFILE" 2>&1 || true
+    af_logged x2godbadmin --createdb || true
 fi
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
 queue_app_version "${DATA_DIR}/.af-version" "${INSTALLED_VER}"
 
 report_progress 90 "Enabling and starting x2goserver.service..."
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now x2goserver.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now x2goserver.service
 
-systemctl restart x2goserver >> "$LOGFILE" 2>&1
+af_logged systemctl restart x2goserver
 systemctl is-active --quiet x2goserver
 
 commit_app_versions

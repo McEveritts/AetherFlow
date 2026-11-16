@@ -12,15 +12,18 @@ Group=aetherflow
 UMask=0077
 WorkingDirectory=/opt/AetherFlow/current
 
-# Creates /run/aetherflow owned by root:aetherflow (0750)
+# Creates /run/aetherflow and /var/log/aetherflow owned by root:aetherflow (0750)
 RuntimeDirectory=aetherflow
-RuntimeDirectoryMode=1770
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
+LogsDirectory=aetherflow
+LogsDirectoryMode=0750
+LogsDirectoryPreserve=yes
 
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 ExecStart=/opt/AetherFlow/current/aetherflow-api runner
 
@@ -31,6 +34,19 @@ Restart=on-failure
 RestartSec=3s
 
 LimitNOFILE=65535
+
+# Sandboxing: NoNewPrivileges=yes and RestrictSUIDSGID=yes are intentionally
+# omitted because marketplace package installers drop privileges via Debian
+# sudo 1.9+, which aborts when PR_GET_NO_NEW_PRIVS is set.
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap
 
 [Install]
 WantedBy=multi-user.target

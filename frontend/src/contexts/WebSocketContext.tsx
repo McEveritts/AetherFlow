@@ -284,7 +284,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         isManualCloseRef.current = false;
 
         const stateLabel = attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING';
-        setConnectionState(stateLabel);
+        if (transportOwnerRef.current !== 'poll') {
+            setConnectionState(stateLabel);
+        }
 
         let wsUrl: string;
         try {
@@ -299,7 +301,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             console.error('[WS] Failed to obtain connection ticket', err);
             attemptRef.current += 1;
             setReconnectAttempt(attemptRef.current);
-            setConnectionState('RECONNECTING');
+            if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
+                if (transportOwnerRef.current !== 'poll') {
+                    startPolling();
+                }
+            } else {
+                setConnectionState('RECONNECTING');
+            }
             const delay = getBackoffDelay(attemptRef.current - 1);
             reconnectTimerRef.current = setTimeout(() => {
                 connectRef.current();
@@ -427,7 +435,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 addToast('Connection lost — reconnecting...', 'info');
             }
 
-            setConnectionState('RECONNECTING');
+            if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
+                if (transportOwnerRef.current !== 'poll') {
+                    startPolling();
+                }
+            } else {
+                setConnectionState('RECONNECTING');
+            }
             const delay = getBackoffDelay(attemptRef.current - 1);
             console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${attemptRef.current})`);
             reconnectTimerRef.current = setTimeout(() => {
@@ -444,7 +458,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     }, [
         setConnectionState, setReconnectAttempt, setLastMessageAt,
         startHeartbeat, clearHeartbeat, resetHeartbeatTimeout,
-        stopPolling, addToast, refreshMarketplace,
+        startPolling, stopPolling, addToast, refreshMarketplace,
     ]);
 
     useEffect(() => {

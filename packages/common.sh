@@ -6,18 +6,335 @@ set -euo pipefail
 umask 077
 
 export PATH="/usr/local/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
-export LOGFILE="${LOGFILE:-/var/log/aetherflow/install.log}"
+if [[ -z "${LOGFILE:-}" ]]; then
+    case "${0##*/}" in
+        installpackage-*) export LOGFILE="/var/log/aetherflow/install-${0##*installpackage-}.log" ;;
+        removepackage-*)  export LOGFILE="/var/log/aetherflow/remove-${0##*removepackage-}.log" ;;
+        *)                export LOGFILE="/var/log/aetherflow/install.log" ;;
+    esac
+else
+    export LOGFILE
+fi
 export LOCK_DIR="${LOCK_DIR:-/install}"
 export AF_REQUIRE_DOWNLOAD_SHA256="${AF_REQUIRE_DOWNLOAD_SHA256:-1}"
 
-mkdir -p "$LOCK_DIR" "$(dirname "$LOGFILE")"
+af_prepare_logfile_path() {
+    local target="${1:-${LOGFILE:-/var/log/aetherflow/install.log}}"
+    [[ "$target" != "/dev/null" ]] || return 0
+    [[ -n "$target" ]] || return 1
+    local parent_dir="."
+    if [[ "$target" == */* ]]; then
+        parent_dir="${target%/*}"
+        [[ -n "$parent_dir" ]] || parent_dir="/"
+    fi
+    if [[ -L "$target" || -L "$parent_dir" || ( -e "$target" && ! -f "$target" ) ]]; then
+        printf 'Refusing unsafe logfile path: %s\n' "$target" >&2
+        return 1
+    fi
+    if [[ "$parent_dir" == /var/log/aetherflow || "$target" == /var/log/aetherflow/* ]] && [[ -L /var/log/aetherflow ]]; then
+        printf 'Refusing symlinked /var/log/aetherflow directory\n' >&2
+        return 1
+    fi
+    if [[ "${EUID:-$(id -u)}" -eq 0 && ( "$parent_dir" == /var/log/aetherflow || "$parent_dir" == */var/log/aetherflow ) ]]; then
+        local log_group="root"
+        if getent group aetherflow >/dev/null 2>&1; then
+            log_group="aetherflow"
+        fi
+        install -d -m 0750 -o root -g "$log_group" "$parent_dir" || return 1
+    else
+        mkdir -p -m 0750 -- "$parent_dir" || return 1
+    fi
+    python3 - "$target" "$parent_dir" <<'PYEOF'
+import fcntl, grp, os, stat, sys
+
+target, parent_dir = sys.argv[1], sys.argv[2]
+parent_st = os.lstat(parent_dir)
+if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
+    raise SystemExit(f"Unsafe log directory: {parent_dir}")
+target_gid = 0
+if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+    try:
+        target_gid = grp.getgrnam("aetherflow").gr_gid
+    except KeyError:
+        target_gid = 0
+    if parent_st.st_uid != 0 or parent_st.st_gid != target_gid:
+        os.chown(parent_dir, 0, target_gid)
+    if stat.S_IMODE(parent_st.st_mode) != 0o750:
+        os.chmod(parent_dir, 0o750)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(target, flags, 0o640)
+try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise SystemExit(f"Refusing non-regular or hardlinked logfile target: {target}")
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+}
+
+mkdir -p "$LOCK_DIR"
+af_prepare_logfile_path "$LOGFILE"
 
 timestamp() {
     date "+%Y-%m-%d %H:%M:%S"
 }
 
 log() {
-    printf '[%s] %s\n' "$(timestamp)" "$*" >>"$LOGFILE"
+    local target="${LOGFILE:-/dev/null}"
+    [[ "$target" != "/dev/null" ]] || return 0
+    local line
+    line="$(printf '[%s] %s\n' "$(timestamp)" "$*")"
+    python3 - "$target" "$line" <<'PYEOF'
+import fcntl, os, stat, sys
+
+target, line = sys.argv[1], sys.argv[2]
+parent_dir = os.path.dirname(target) or "."
+parent_st = os.lstat(parent_dir)
+if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+    raise SystemExit(1)
+try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+            raise SystemExit(1)
+        if not line.endswith("\n"):
+            line += "\n"
+        data = line.encode("utf-8", errors="replace")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+}
+
+af_logged() {
+    local target="${LOGFILE:-/dev/null}"
+    if [[ "$target" == "/dev/null" ]]; then
+        "$@" >/dev/null 2>&1
+        return $?
+    fi
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1 && [[ ! -f "$target" ]]; then
+        af_prepare_logfile_path "$target" || return 1
+    fi
+    local _flock_bin="flock"
+    if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
+        _flock_bin="/usr/bin/flock"
+    fi
+    local _out_r="" _meta=""
+    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, grp, os, select, stat, sys
+
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            try:
+                target_gid = grp.getgrnam("aetherflow").gr_gid
+            except KeyError:
+                target_gid = 0
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+    ) || return 1
+    if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        exec {_out_r}<&-
+        return 1
+    fi
+    local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd=""
+    if ! exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}"; then
+        exec {_out_r}<&-
+        return 1
+    fi
+    if ! "$_flock_bin" -s "$lock_fd"; then
+        exec {lock_fd}>&-
+        exec {_out_r}<&-
+        return 1
+    fi
+    exec {_out_r}<&-
+    local rc=0
+    "$@" >&"$lock_fd" 2>&1 || rc=$?
+    "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
+}
+
+af_logged_stderr() {
+    local target="${LOGFILE:-/dev/null}"
+    if [[ "$target" == "/dev/null" ]]; then
+        "$@" 2>/dev/null
+        return $?
+    fi
+    if declare -F af_prepare_logfile_path >/dev/null 2>&1 && [[ ! -f "$target" ]]; then
+        af_prepare_logfile_path "$target" || return 1
+    fi
+    local _flock_bin="flock"
+    if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then
+        _flock_bin="/usr/bin/flock"
+    fi
+    local _out_r="" _meta=""
+    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, grp, os, select, stat, sys
+
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
+    # truncation/rotation while allowing nested af_logged -> log() opens on the
+    # same logfile without self-deadlocking; kernel O_APPEND keeps line writes atomic.
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.endswith("/var/log/aetherflow")):
+            try:
+                target_gid = grp.getgrnam("aetherflow").gr_gid
+            except KeyError:
+                target_gid = 0
+            if st.st_uid != 0 or st.st_gid != target_gid:
+                os.fchown(fd, 0, target_gid)
+            if stat.S_IMODE(st.st_mode) != 0o640:
+                os.fchmod(fd, 0o640)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+    ) || return 1
+    if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        exec {_out_r}<&-
+        return 1
+    fi
+    local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd=""
+    if ! exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}"; then
+        exec {_out_r}<&-
+        return 1
+    fi
+    if ! "$_flock_bin" -s "$lock_fd"; then
+        exec {lock_fd}>&-
+        exec {_out_r}<&-
+        return 1
+    fi
+    exec {_out_r}<&-
+    local rc=0
+    "$@" 2>&"$lock_fd" || rc=$?
+    "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+    exec {lock_fd}>&-
+    return "$rc"
+}
+
+af_validate_tar_archive() {
+    local archive_path="$1"
+    [[ -f "$archive_path" && ! -L "$archive_path" ]] || {
+        log_error "Refusing missing or symlinked archive path: ${archive_path}"
+        return 1
+    }
+    python3 - "$archive_path" <<'PYEOF'
+import pathlib, sys, tarfile
+
+archive = sys.argv[1]
+try:
+    with tarfile.open(archive, "r:*") as tf:
+        members = tf.getmembers()
+        if not members:
+            raise ValueError("empty tar archive")
+        for member in members:
+            name = member.name or ""
+            if not (member.isfile() or member.isdir()):
+                raise ValueError(f"disallowed non-regular tar entry: {name} (type={member.type!r})")
+            if name.startswith("/") or name.startswith("\\"):
+                raise ValueError(f"disallowed absolute tar entry: {name}")
+            parts = pathlib.PurePosixPath(name).parts
+            if ".." in parts:
+                raise ValueError(f"disallowed path-traversal tar entry: {name}")
+except Exception as exc:
+    sys.stderr.write(f"Tar archive validation failed for {archive}: {exc}\n")
+    raise SystemExit(1)
+PYEOF
 }
 
 log_info() {
@@ -128,7 +445,7 @@ install_npm_app() (
     trap 'exit 143' TERM
     # mktemp creates a private directory; the service user must traverse it.
     chmod 755 "$staged"
-    node_build npm install --prefix "$staged" --no-audit --no-fund "$package" >> "$LOGFILE" 2>&1 || return $?
+    af_logged node_build npm install --prefix "$staged" --no-audit --no-fund "$package" || return $?
     if [[ ! -x "$staged/node_modules/.bin/$bin_name" ]]; then
         print_error "npm package $package did not provide executable $bin_name"
         return 1
@@ -438,9 +755,9 @@ rollback_apt_packages() {
         AF_APT_ROLLBACK_MUTATED=true
         reconciled=true
         if [[ "$previous" == '<none>' ]]; then
-            DEBIAN_FRONTEND=noninteractive command apt-get remove -y --no-auto-remove "$package" >> "$LOGFILE" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get remove -y --no-auto-remove "$package" || reconciled=false
         else
-            DEBIAN_FRONTEND=noninteractive command apt-get install -y --allow-downgrades --reinstall "$package=$previous" >> "$LOGFILE" 2>&1 || reconciled=false
+            DEBIAN_FRONTEND=noninteractive af_logged command apt-get install -y --allow-downgrades --reinstall "$package=$previous" || reconciled=false
         fi
         installed="$(installed_apt_package_version "$package")"
         if [[ "$reconciled" != true || "$installed" != "$previous" ]]; then
@@ -468,9 +785,9 @@ install_deb_verified() {
     local archive="$1" package="$2" expected="${3:-}"
     [[ -n "$expected" ]] || expected="$(dpkg-deb -f "$archive" Version)" || return 1
     [[ -n "$expected" ]] || return 1
-    if ! DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >> "$LOGFILE" 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1 || return 1
-        DEBIAN_FRONTEND=noninteractive dpkg -i "$archive" >> "$LOGFILE" 2>&1 || return 1
+    if ! DEBIAN_FRONTEND=noninteractive af_logged dpkg -i "$archive"; then
+        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -f -y -qq || return 1
+        DEBIAN_FRONTEND=noninteractive af_logged dpkg -i "$archive" || return 1
     fi
     verify_deb_installed "$package" "$expected"
 }
@@ -661,11 +978,11 @@ cleanup_state_transaction() {
                     fi
                 fi
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$AF_STATE_WAS_ACTIVE" == true && ( "$AF_STATE_SNAPSHOT_READY" != true || "${AF_STATE_RESTART_ON_ROLLBACK:-false}" == true ) ]]; then
             for unit in "${AF_STATE_PREVIOUS_UNITS[@]}"; do
-                systemctl start "$unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl start "$unit" || restore_failed=true
             done
         fi
     fi
@@ -890,7 +1207,7 @@ verify_download_sha256() {
         release_repository="${release_repository%%/releases/download/*}"
         release_tag="${source_url#*/releases/download/}"
         release_tag="${release_tag%%/*}"
-        release_metadata="$(curl -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag" 2>> "${LOGFILE:-/dev/null}")" || release_metadata=""
+        release_metadata="$(af_logged_stderr curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/$release_repository/releases/tags/$release_tag")" || release_metadata=""
     fi
     if [[ -n "$release_metadata" && -n "$source_url" ]]; then
         local release_digest
@@ -946,7 +1263,9 @@ PYMANIFESTS
             fetched="$checksum_directory/node-shasums.txt"
         fi
         for checksum_url in "${checksum_urls[@]}"; do
-            if curl -fsSL --connect-timeout 2 --max-time 4 "$checksum_url" -o "$fetched" 2>> "${LOGFILE:-/dev/null}"; then
+            local -a _chk_proto=()
+            [[ "$checksum_url" == https://* ]] && _chk_proto=(--proto '=https' --proto-redir '=https')
+            if af_logged_stderr curl "${_chk_proto[@]}" -fsSL --connect-timeout 2 --max-time 4 "$checksum_url" -o "$fetched"; then
                 while read -r digest candidate || [[ -n "$digest" ]]; do
                     [[ "$digest" =~ ^[a-fA-F0-9]{64}$ ]] || continue
                     candidate="${candidate#\*}"
@@ -990,10 +1309,12 @@ download_file() {
         return 0
     fi
     local source_url="$1" file_path="$2" app_id="${3:-${PACKAGE_NAME:-}}"
+    local -a proto_args=()
+    [[ "$source_url" == https://* ]] && proto_args=(--proto '=https' --proto-redir '=https')
     if declare -F curl >/dev/null; then
-        curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
+        curl "${proto_args[@]}" -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
     else
-        download_file --transport -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
+        download_file --transport "${proto_args[@]}" -fsSL --retry 3 --connect-timeout 10 --max-time 300 "$source_url" -o "$file_path" || return $?
     fi
     if ! verify_download_sha256 "$file_path" "$app_id" "$source_url" "${4:-}"; then
         print_error "Refusing unverified download from $source_url"
@@ -1548,7 +1869,7 @@ restore_configured_database() (
     case "$backend" in
         mysql|mariadb)
             configured_database_connection "$backend" "$host" "$username" || return 1
-            MYSQL_PWD="$password" mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql" >> "$LOGFILE" 2>&1
+            MYSQL_PWD="$password" af_logged mysql "${AF_DATABASE_ARGS[@]}" "$database" < "$backup/database.sql"
             ;;
         postgres|pgsql)
             configured_database_connection "$backend" "$host" "$username" || return 1
@@ -1557,7 +1878,7 @@ restore_configured_database() (
                 [[ -f "$backup/$artifact" && ( "$artifact" == postgres-recovery.log || -s "$backup/$artifact" ) ]] || return 1
             done
             [[ "$(cat "$backup/.af-postgres-ready")" == in-database-v1 ]] || return 1
-            printf '%s\n' 'Restoring configured PostgreSQL database in one transaction' >> "${LOGFILE:-/dev/null}" || return 1
+            af_logged printf '%s\n' 'Restoring configured PostgreSQL database in one transaction' || return 1
             if ! PGPASSWORD="$password" PGCONNECT_TIMEOUT=5 psql "${AF_DATABASE_ARGS[@]}" --no-psqlrc --no-password "--dbname=$database" --set=ON_ERROR_STOP=1 --single-transaction --file="$backup/postgres-identity.sql" --file="$backup/postgres-clean.sql" --file="$backup/postgres-schemas.sql" --file="$backup/database.sql" --file="$backup/postgres-metadata.sql" >> "$backup/postgres-recovery.log" 2>&1; then
                 print_error "Configured PostgreSQL recovery failed; retained database transaction was not committed"
                 return 1
@@ -1588,10 +1909,10 @@ restore_postgresql_database() {
     local backup="$1" database="$2" restored=true database_file relative
     [[ -f "$backup/.af-database-ready" ]] || return 0
     [[ "$database" =~ ^[a-z_][a-z0-9_-]*$ && ! -L "$backup" && ! -L "$backup/.af-database-ready" && ! -L "$backup/$database.sql" && "$(cat "$backup/.af-database-ready")" == "$database" ]] || return 1
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" >> "$LOGFILE" 2>&1 <<'SQL' || restored=false
+    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" <<'SQL' || restored=false
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'database' AND pid <> pg_backend_pid();
 SQL
-    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" >> "$LOGFILE" 2>&1 || restored=false
+    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" || restored=false
     if [[ -n "${AETHERFLOW_INSTALL_ROOT:-}" && /var/lib/postgresql == "${AETHERFLOW_INSTALL_ROOT%/}/"* && -d "$backup/postgresql-database" ]]; then
         [[ ! -L "$backup/postgresql-database" && ! -L /var/lib/postgresql ]] || return 1
         while IFS= read -r -d '' database_file; do
@@ -1809,6 +2130,16 @@ stage_app_archive() {
         fi
     done
     AF_ARCHIVE_UNIT="$unit"
+    AF_ARCHIVE_TIMER_UNIT=""
+    AF_ARCHIVE_TIMER_ACTIVE=false
+    AF_ARCHIVE_TIMER_ENABLED=false
+    AF_ARCHIVE_SOCKET_UNIT=""
+    AF_ARCHIVE_SOCKET_ACTIVE=false
+    AF_ARCHIVE_SOCKET_ENABLED=false
+    if [[ "$unit" != *.timer && "$unit" != *.socket ]]; then
+        AF_ARCHIVE_TIMER_UNIT="${unit%.service}.timer"
+        AF_ARCHIVE_SOCKET_UNIT="${unit%.service}.socket"
+    fi
     AF_ARCHIVE_ARCHIVE="$archive"
     AF_ARCHIVE_ACTIVATED=false
     AF_ARCHIVE_ORIGINAL_PRESENT=false
@@ -1863,7 +2194,10 @@ with tarfile.open(sys.argv[1], 'r:gz') as archive:
             member.mode &= 0o777
             member.uid = member.gid = -1
             member.uname = member.gname = ''
-        archive.extractall(sys.argv[2], members=members)
+        if hasattr(tarfile, 'fully_trusted_filter'):
+            archive.extractall(sys.argv[2], members=members, filter=tarfile.fully_trusted_filter)
+        else:
+            archive.extractall(sys.argv[2], members=members)
 PYEOF
     fi
     for candidate in "${candidates[@]}"; do
@@ -1877,6 +2211,34 @@ PYEOF
     fi
     [[ "${9:-}" != binary ]] || extracted="$extracted/${candidates[0]}"
     touch "$AF_ARCHIVE_BACKUP/.af-archive-pending"
+    if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+        if systemctl is-active --quiet "$AF_ARCHIVE_TIMER_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_TIMER_ACTIVE=true
+        fi
+        if systemctl is-enabled --quiet "$AF_ARCHIVE_TIMER_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_TIMER_ENABLED=true
+        fi
+        if [[ -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+            cp -a -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" "$AF_ARCHIVE_BACKUP/timer_unit"
+        fi
+        if [[ "$AF_ARCHIVE_TIMER_ACTIVE" == true || -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+            stop_systemd_unit "$AF_ARCHIVE_TIMER_UNIT"
+        fi
+    fi
+    if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" ]]; then
+        if systemctl is-active --quiet "$AF_ARCHIVE_SOCKET_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_SOCKET_ACTIVE=true
+        fi
+        if systemctl is-enabled --quiet "$AF_ARCHIVE_SOCKET_UNIT" 2>/dev/null; then
+            AF_ARCHIVE_SOCKET_ENABLED=true
+        fi
+        if [[ -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+            cp -a -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" "$AF_ARCHIVE_BACKUP/socket_unit"
+        fi
+        if [[ "$AF_ARCHIVE_SOCKET_ACTIVE" == true || -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+            stop_systemd_unit "$AF_ARCHIVE_SOCKET_UNIT"
+        fi
+    fi
     stop_systemd_unit "$unit"
     AF_ARCHIVE_STOPPED=true
     for state_index in "${!AF_ARCHIVE_STATE_PATHS[@]}"; do
@@ -1920,7 +2282,15 @@ rollback_app_archive_update() {
     [[ "${INSTALL_COMMITTED:-false}" != true ]] || exit "$status"
     [[ "$status" -ne 0 ]] || status=1
     if [[ "${AF_ARCHIVE_ACTIVATED:-false}" == true && ( "${AF_ARCHIVE_ORIGINAL_PRESENT:-false}" != true || -e "${AF_ARCHIVE_BACKUP:-}/app" ) ]]; then
-        if ! quiesce_services_for_rollback "$AF_ARCHIVE_UNIT"; then
+        local -a quiesce_units=()
+        if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" && ( -e "${AF_ARCHIVE_BACKUP:-}/timer_unit" || -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ) ]]; then
+            quiesce_units+=("$AF_ARCHIVE_TIMER_UNIT")
+        fi
+        if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" && ( -e "${AF_ARCHIVE_BACKUP:-}/socket_unit" || -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || "${AF_ARCHIVE_SOCKET_ACTIVE:-false}" == true ) ]]; then
+            quiesce_units+=("$AF_ARCHIVE_SOCKET_UNIT")
+        fi
+        quiesce_units+=("$AF_ARCHIVE_UNIT")
+        if ! quiesce_services_for_rollback "${quiesce_units[@]}"; then
             if declare -F af_write_failure_receipt >/dev/null 2>&1; then
                 af_write_failure_receipt "$status" "rollback" "incomplete_rollback" "Application archive rollback aborted because service quiescence failed; recovery backup preserved at ${AF_ARCHIVE_BACKUP:-unknown} (incomplete-rollback)"
             else
@@ -1939,18 +2309,54 @@ rollback_app_archive_update() {
         if [[ -e "$AF_ARCHIVE_BACKUP/unit" ]]; then
             safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/unit" "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         else
-            systemctl disable -- "$AF_ARCHIVE_UNIT" >> "$LOGFILE" 2>&1 || restored=false
+            af_logged systemctl disable -- "$AF_ARCHIVE_UNIT" || restored=false
             rm -f -- "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restored=false
+        if [[ -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+            if [[ -e "$AF_ARCHIVE_BACKUP/timer_unit" ]]; then
+                safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/timer_unit" "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
+            elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" ]]; then
+                af_logged systemctl disable -- "$AF_ARCHIVE_TIMER_UNIT" || restored=false
+                rm -f -- "/etc/systemd/system/${AF_ARCHIVE_TIMER_UNIT}" || restored=false
+            fi
+        fi
+        if [[ -n "${AF_ARCHIVE_SOCKET_UNIT:-}" ]]; then
+            if [[ -e "$AF_ARCHIVE_BACKUP/socket_unit" ]]; then
+                safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/socket_unit" "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || restored=false
+                if [[ "${AF_ARCHIVE_SOCKET_ENABLED:-false}" != true ]]; then
+                    af_logged systemctl disable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+                fi
+            elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" || -L "/etc/systemd/system/sockets.target.wants/${AF_ARCHIVE_SOCKET_UNIT}" ]]; then
+                af_logged systemctl disable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+                rm -f -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}" "/etc/systemd/system/sockets.target.wants/${AF_ARCHIVE_SOCKET_UNIT}" || restored=false
+                rm -rf -- "/etc/systemd/system/${AF_ARCHIVE_SOCKET_UNIT}.d" || restored=false
+            fi
+        fi
+        af_logged systemctl daemon-reload || restored=false
     fi
     if [[ "$restored" == true ]]; then
         for entry in "${AF_ARCHIVE_ROLLBACK_RESTART_UNITS[@]}"; do
-            systemctl restart "$entry" >> "$LOGFILE" 2>&1 || restored=false
+            af_logged systemctl restart "$entry" || restored=false
         done
     fi
+    if [[ "$restored" == true && -n "${AF_ARCHIVE_SOCKET_UNIT:-}" && -e "$AF_ARCHIVE_BACKUP/socket_unit" ]]; then
+        if [[ "${AF_ARCHIVE_SOCKET_ENABLED:-false}" == true ]]; then
+            af_logged systemctl enable -- "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+        fi
+        if [[ "$restored" == true && "${AF_ARCHIVE_SOCKET_ACTIVE:-false}" == true ]]; then
+            af_logged systemctl restart "$AF_ARCHIVE_SOCKET_UNIT" || restored=false
+        fi
+    fi
     if [[ "$restored" == true && "${AF_ARCHIVE_STOPPED:-false}" == true && "${AF_ARCHIVE_PREVIOUS:-false}" == true ]]; then
-        systemctl restart "$AF_ARCHIVE_UNIT" >> "$LOGFILE" 2>&1 || restored=false
+        af_logged systemctl restart "$AF_ARCHIVE_UNIT" || restored=false
+    fi
+    if [[ "$restored" == true && -n "${AF_ARCHIVE_TIMER_UNIT:-}" ]]; then
+        if [[ "${AF_ARCHIVE_TIMER_ENABLED:-false}" == true ]]; then
+            af_logged systemctl enable -- "$AF_ARCHIVE_TIMER_UNIT" || restored=false
+        fi
+        if [[ "$restored" == true && "${AF_ARCHIVE_TIMER_ACTIVE:-false}" == true ]]; then
+            af_logged systemctl restart "$AF_ARCHIVE_TIMER_UNIT" || restored=false
+        fi
     fi
     rm -f -- "${AF_ARCHIVE_ARCHIVE:-}"
     rm -rf -- "${AF_ARCHIVE_BACKUP:-}/release"
@@ -2074,12 +2480,105 @@ write_lock() {
 }
 
 get_base_domain() {
-    local dom=""
-    if command -v sqlite3 >/dev/null 2>&1 && [[ -f /opt/AetherFlow/backend/data/aetherflow.sqlite ]]; then
-        dom="$(sqlite3 /opt/AetherFlow/backend/data/aetherflow.sqlite "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+    local dom="" db_cand=""
+    local explicit_env_file="${AETHERFLOW_ENV_FILE:-}"
+    local skip_host_env="${AETHERFLOW_SKIP_ENV_FILES:-0}"
+    local env_file=""
+    if [[ -n "$explicit_env_file" ]]; then
+        env_file="$explicit_env_file"
+    elif [[ "$skip_host_env" != "1" ]]; then
+        env_file="/etc/aetherflow/aetherflow.env"
     fi
-    if [[ -z "$dom" && -f /etc/aetherflow/aetherflow.env ]]; then
-        dom="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+    local env_af_db="" env_db="" env_aetherflow_db="" env_data_dir="" env_base_domain=""
+    if [[ -n "$env_file" && -e "$env_file" ]]; then
+        local _parsed_env=""
+        _parsed_env="$(python3 - "$env_file" <<'PYEOF' 2>/dev/null || true
+import os, stat, sys
+target = sys.argv[1]
+parent = os.path.dirname(os.path.abspath(target)) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+lst = os.lstat(target)
+if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+    raise SystemExit(1)
+fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
+        content = fh.read()
+finally:
+    os.close(fd)
+vals = {}
+for raw_line in content.splitlines():
+    s = raw_line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    k = k.strip()
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+        v = v[1:-1]
+    if k in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH", "DATA_DIR", "AETHERFLOW_BASE_DOMAIN"):
+        vals[k] = v
+for key in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH", "DATA_DIR", "AETHERFLOW_BASE_DOMAIN"):
+    print(vals.get(key, "").replace("\n", "").replace("\r", ""))
+PYEOF
+)"
+        if [[ -n "$_parsed_env" ]]; then
+            env_af_db="$(printf '%s\n' "$_parsed_env" | sed -n '1p')"
+            env_db="$(printf '%s\n' "$_parsed_env" | sed -n '2p')"
+            env_aetherflow_db="$(printf '%s\n' "$_parsed_env" | sed -n '3p')"
+            env_data_dir="$(printf '%s\n' "$_parsed_env" | sed -n '4p')"
+            env_base_domain="$(printf '%s\n' "$_parsed_env" | sed -n '5p')"
+        fi
+    fi
+    local eff_data_dir="${DATA_DIR:-$env_data_dir}"
+    local custom_data_db=""
+    if [[ -n "$eff_data_dir" && "${eff_data_dir%/}" != "/var/lib/aetherflow" ]]; then
+        custom_data_db="${eff_data_dir%/}/aetherflow.sqlite"
+    fi
+    if command -v sqlite3 >/dev/null 2>&1; then
+        local -a _db_candidates=(
+            "${AF_DB_PATH:-}"
+            "${DB_PATH:-}"
+            "${AETHERFLOW_DB_PATH:-}"
+            "$env_af_db"
+            "$env_db"
+            "$env_aetherflow_db"
+            "$custom_data_db"
+        )
+        if [[ "$skip_host_env" != "1" ]]; then
+            _db_candidates+=(
+                /var/lib/aetherflow/aetherflow.sqlite
+                /opt/AetherFlow/current/data/aetherflow.sqlite
+                /opt/AetherFlow/data/aetherflow.sqlite
+                /opt/AetherFlow/backend/data/aetherflow.sqlite
+            )
+        fi
+        for db_cand in "${_db_candidates[@]}"
+        do
+            if [[ -n "$db_cand" && -f "$db_cand" ]]; then
+                local has_settings=""
+                has_settings="$(sqlite3 "$db_cand" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings';" 2>/dev/null | tr -d '[:space:]' || true)"
+                if [[ "$has_settings" == "1" ]]; then
+                    dom="$(sqlite3 "$db_cand" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
+                    break
+                fi
+            fi
+        done
+    fi
+    if [[ -z "$dom" ]]; then
+        local raw_env_dom="${AETHERFLOW_BASE_DOMAIN:-$env_base_domain}"
+        if [[ -n "$raw_env_dom" ]]; then
+            dom="$(printf '%s' "$raw_env_dom" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]')"
+        fi
     fi
     local domain_regex='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'
     if [[ "$dom" == "localhost" || "$dom" == *.local ]] || { [[ -n "$dom" ]] && [[ ! "$dom" =~ $domain_regex ]]; }; then
@@ -2130,7 +2629,9 @@ fetch_and_run() {
     fi
     
     log_info "Downloading install script from $url"
-    if ! curl -fsSL -o "$tmp_script" "$url"; then
+    local -a _boot_proto=()
+    [[ "$url" == https://* ]] && _boot_proto=(--proto '=https' --proto-redir '=https')
+    if ! curl "${_boot_proto[@]}" -fsSL -o "$tmp_script" "$url"; then
         print_error "Failed to download $url"
         rm -f "$tmp_script"
         return 1
@@ -2143,7 +2644,7 @@ fetch_and_run() {
         return 1
     fi
     log_info "Checksum validation passed."
-    echo "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" >> "$LOGFILE" 2>/dev/null || true
+    af_logged printf '%s\n' "[BOOTSTRAP-PROVENANCE] url=${url} sha256=${computed_hash,,}" || true
 
     if ! bash "$tmp_script" "$@"; then
         print_error "Script execution failed for $url"
@@ -3784,7 +4285,7 @@ github_latest_tag() {
         auth_header=(-H "Authorization: Bearer $token")
     fi
 
-    eff_url="$(curl -fsSL "${auth_header[@]}" -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
+    eff_url="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
     if [[ "$eff_url" == *"/releases/tag/"* ]]; then
         tag="${eff_url##*/releases/tag/}"
         tag="${tag%%\?*}"
@@ -3792,7 +4293,7 @@ github_latest_tag() {
     fi
 
     if [[ -z "$tag" ]]; then
-        tag="$(curl -fsSL "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+        tag="$(curl --proto '=https' --proto-redir '=https' -fsSL "${auth_header[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
             | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1 || true)"
     fi
 
@@ -3915,15 +4416,15 @@ ensure_node() {
     local have_major=0
     # Native addons and Git prepare scripts need these on already-provisioned
     # Node hosts too, not just when Node itself is first installed.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates git build-essential python3 python3-setuptools pkg-config >> "$LOGFILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+        ca-certificates git build-essential python3 python3-setuptools pkg-config
     if command_exists node; then
         have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
     fi
     if [[ "${have_major:-0}" -lt "$want_major" ]]; then
         local nodesource_sha256="${AF_NODESOURCE_BOOTSTRAP_SHA256:-2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be}"
         fetch_and_run "https://deb.nodesource.com/setup_${want_major}.x" "$nodesource_sha256" || return 1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >> "$LOGFILE" 2>&1
+        DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq nodejs
     fi
     sync_node_global_bins
 }
@@ -3940,7 +4441,8 @@ systemd_unit_inactive() {
         esac
     done <<< "$state"
     case "$active_state" in
-        inactive|failed) [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1 ;;
+        inactive) [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1 ;;
+        failed) [[ "$main_pid" == 0 ]] || return 1 ;;
         *) return 1 ;;
     esac
     [[ "$load_state" == loaded || "$load_state" == masked || "$load_state" == not-found ]] || return 1
@@ -3957,7 +4459,7 @@ quiesce_services_for_rollback() {
     local backup="${AF_ROLLBACK_BACKUP:-${BACKUP_DIR:-${RUNTIME_BACKUP:-${ABS_BACKUP_DIR:-${AF_STATE_BACKUP:-${AF_ARCHIVE_BACKUP:-unknown}}}}}}"
     for unit in "$@"; do
         stop_status=0
-        systemctl stop -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || stop_status=$?
+        af_logged systemctl stop -- "$unit" || stop_status=$?
         if [[ "$stop_status" -ne 0 ]]; then
             print_error "Incomplete rollback: failed to stop $unit; recovery backup preserved at $backup"
             failed=true
@@ -4016,8 +4518,8 @@ stop_systemd_unit() {
     local unit stop_status
     for unit in "$@"; do
         stop_status=0
-        systemctl stop -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || stop_status=$?
-        systemctl reset-failed -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1 || true
+        af_logged systemctl stop -- "$unit" || stop_status=$?
+        af_logged systemctl reset-failed -- "$unit" || true
         if [[ "$stop_status" == 0 ]]; then
             continue
         fi
@@ -4053,7 +4555,7 @@ purge_systemd_unit() {
         fi
     done
     for unit in "${units[@]}"; do
-        if ! systemctl reset-failed -- "$unit" >> "${LOGFILE:-/dev/null}" 2>&1; then
+        if ! af_logged systemctl reset-failed -- "$unit"; then
             systemd_unit_inactive "$unit" true || return 1
         fi
         rm -f "/etc/systemd/system/${unit}" || return 1
@@ -4185,15 +4687,22 @@ wait_for_service_ready() {
     [[ "$credentials" != *$'\n'* && "$credentials" != *$'\r'* ]] || return 1
     [[ "$port" =~ ^[0-9]{1,5}$ && "$attempts" =~ ^[1-9][0-9]*$ ]] || return 1
     (( 10#$port > 0 && 10#$port <= 65535 )) || return 1
-    case "$readiness_path" in
-        http://*) ready_url="$readiness_path" ;;
-        /*) ready_url="http://127.0.0.1:${port}${readiness_path}" ;;
-        *) return 1 ;;
-    esac
+    local -a curl_tls_args=()
+    local loopback_https_re='^https://(127(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\[::1\]|localhost)(:[0-9]{1,5})?(/.*)?$'
+    if [[ "$readiness_path" =~ $loopback_https_re ]]; then
+        ready_url="$readiness_path"
+        curl_tls_args=(-k)
+    elif [[ "$readiness_path" == http://* || "$readiness_path" == https://* ]]; then
+        ready_url="$readiness_path"
+    elif [[ "$readiness_path" == /* ]]; then
+        ready_url="http://127.0.0.1:${port}${readiness_path}"
+    else
+        return 1
+    fi
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if systemctl is-active --quiet "$unit"; then
             if [[ -n "$credentials" ]]; then
-                if printf 'user = "%s"\n' "$credentials" | curl -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+                if printf 'user = "%s"\n' "$credentials" | curl "${curl_tls_args[@]}" -K - -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
                     return 0
                 fi
                 if [[ "$app_name" == transmission* && "$readiness_path" == /transmission/rpc ]]; then
@@ -4201,10 +4710,10 @@ wait_for_service_ready() {
                         case "$http_status" in 200|401|409) return 0 ;; esac
                     fi
                 fi
-            elif curl -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
+            elif curl "${curl_tls_args[@]}" -fsS --connect-timeout 2 --max-time 5 "$ready_url" >/dev/null 2>&1; then
                 return 0
             elif [[ "$app_name" =~ ^(bazarr|overseerr|tautulli|flaresolverr|sabnzbd|listenarr)$ ]]; then
-                if http_status="$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
+                if http_status="$(curl "${curl_tls_args[@]}" -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null)"; then
                     case "$http_status" in 200|204|401|403) return 0 ;; esac
                 fi
             fi
@@ -4235,40 +4744,309 @@ purge_system_user() {
 }
 
 load_master_credentials() {
-    local u="" p="" h="" creds_json generated=false
+    local u="" p="" h="" creds_json generated=false primary_creds_file="/var/lib/aetherflow/.master.creds"
+    primary_creds_file="${AETHERFLOW_MASTER_CREDS_FILE:-$primary_creds_file}"
     if [[ -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" && "$MASTER_PASS" != adminadmin ]]; then
         export MASTER_USER MASTER_PASS
         export MASTER_HA1="${MASTER_HA1:-$(printf '%s' "$MASTER_PASS" | md5sum | awk '{print $1}')}"
         return 0
     fi
-    for creds_json in /var/lib/aetherflow/.master.creds /opt/AetherFlow/backend/data/.master.creds; do
-        if [[ -f "$creds_json" ]]; then
-            u="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("username",""))' "$creds_json" 2>/dev/null || true)"
-            p="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("password",""))' "$creds_json" 2>/dev/null || true)"
-            h="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("ha1",""))' "$creds_json" 2>/dev/null || true)"
+    local -a _creds_files=("$primary_creds_file")
+    if [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" ]]; then
+        _creds_files+=(/opt/AetherFlow/backend/data/.master.creds)
+    fi
+    for creds_json in "${_creds_files[@]}"; do
+        if [[ -f "$creds_json" && ! -L "$creds_json" ]]; then
+            local parsed_creds=""
+            parsed_creds="$(python3 - "$creds_json" "$primary_creds_file" 2>/dev/null <<'PYEOF' || true
+import base64, ctypes, ctypes.util, json, os, stat, sys
+
+def _read_regular_file_nofollow(target):
+    parent = os.path.dirname(os.path.abspath(target)) or "."
+    pst = os.lstat(parent)
+    if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+        raise OSError(f"Unsafe parent directory for {target}")
+    lst = os.lstat(target)
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        raise OSError(f"Refusing non-regular or symlinked file {target}")
+    fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+            raise OSError(f"File identity changed during open for {target}")
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
+
+def load_aes_key():
+    raw = os.environ.get("AES_MASTER_KEY", "").strip()
+    if not raw:
+        explicit_env = os.environ.get("AETHERFLOW_ENV_FILE", "").strip()
+        env_path = explicit_env if explicit_env else (
+            "/etc/aetherflow/aetherflow.env" if os.environ.get("AETHERFLOW_SKIP_ENV_FILES") != "1" else ""
+        )
+        if env_path:
+            try:
+                for line in _read_regular_file_nofollow(env_path).splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    if s.startswith("export "):
+                        s = s[7:].strip()
+                    if s.startswith("AES_MASTER_KEY="):
+                        candidate = s.split("=", 1)[1].strip().strip("\"'")
+                        if candidate:
+                            raw = candidate
+            except FileNotFoundError:
+                raw = ""
+            except OSError as exc:
+                sys.stderr.write(f"Skipping unreadable env file {env_path}: {exc}\n")
+    if not raw:
+        return "", None
+    if len(raw) == 64:
+        try:
+            dec_hex = bytes.fromhex(raw)
+            if len(dec_hex) == 32:
+                return raw, dec_hex
+        except ValueError:
+            pass
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return raw, dec
+    except Exception:
+        pass
+    raw_bytes = raw.encode("utf-8")
+    return raw, (raw_bytes if len(raw_bytes) == 32 else None)
+
+def _load_libcrypto():
+    candidates = []
+    found = ctypes.util.find_library("crypto")
+    if found:
+        candidates.append(found)
+    candidates.extend(("libcrypto.so.3", "libcrypto.so.1.1"))
+    for name in candidates:
+        try:
+            lib = ctypes.CDLL(name)
+            lib.EVP_CIPHER_CTX_new.argtypes = []
+            lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_free.restype = None
+            lib.EVP_aes_256_gcm.argtypes = []
+            lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
+            lib.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            lib.EVP_DecryptInit_ex.restype = ctypes.c_int
+            lib.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int]
+            lib.EVP_DecryptUpdate.restype = ctypes.c_int
+            lib.EVP_DecryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+            lib.EVP_DecryptFinal_ex.restype = ctypes.c_int
+            return lib
+        except OSError:
+            continue
+    raise RuntimeError("OpenSSL libcrypto unavailable")
+
+def aes_gcm_decrypt(key, nonce, ct_and_tag):
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(key).decrypt(nonce, ct_and_tag, None)
+    except ImportError:
+        pass
+    if len(nonce) != 12 or len(ct_and_tag) < 16:
+        raise ValueError("invalid AES-GCM payload length")
+    ct, tag = ct_and_tag[:-16], ct_and_tag[-16:]
+    lib = _load_libcrypto()
+    ctx = lib.EVP_CIPHER_CTX_new()
+    if not ctx:
+        raise RuntimeError("EVP_CIPHER_CTX_new failed")
+    try:
+        key_buf = (ctypes.c_ubyte * 32).from_buffer_copy(key)
+        iv_buf = (ctypes.c_ubyte * 12).from_buffer_copy(nonce)
+        tag_buf = (ctypes.c_ubyte * 16).from_buffer_copy(tag)
+        if lib.EVP_DecryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None) != 1:
+            raise ValueError("EVP_DecryptInit_ex cipher failed")
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 12, None) != 1:
+            raise ValueError("EVP_CTRL_GCM_SET_IVLEN failed")
+        if lib.EVP_DecryptInit_ex(ctx, None, None, ctypes.byref(key_buf), ctypes.byref(iv_buf)) != 1:
+            raise ValueError("EVP_DecryptInit_ex key/iv failed")
+        out_buf = (ctypes.c_ubyte * max(1, len(ct) + 16))()
+        out_len = ctypes.c_int(0)
+        if ct:
+            ct_buf = (ctypes.c_ubyte * len(ct)).from_buffer_copy(ct)
+            if lib.EVP_DecryptUpdate(ctx, ctypes.byref(out_buf), ctypes.byref(out_len), ctypes.byref(ct_buf), len(ct)) != 1:
+                raise ValueError("EVP_DecryptUpdate failed")
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x11, 16, ctypes.byref(tag_buf)) != 1:
+            raise ValueError("EVP_CTRL_GCM_SET_TAG failed")
+        final_len = ctypes.c_int(0)
+        tail_ptr = ctypes.cast(ctypes.addressof(out_buf) + out_len.value, ctypes.c_void_p)
+        if lib.EVP_DecryptFinal_ex(ctx, tail_ptr, ctypes.byref(final_len)) != 1:
+            raise ValueError("AES-GCM authentication failed")
+        return bytes(out_buf[:out_len.value + final_len.value])
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+def decrypt_field(val, key):
+    if not isinstance(val, str):
+        return ""
+    val = val.strip()
+    if not val.startswith("enc:v1:"):
+        return val
+    if key is None:
+        raise ValueError("AES_MASTER_KEY missing or invalid for enc:v1: secret")
+    blob = base64.b64decode(val[len("enc:v1:"):], validate=True)
+    if len(blob) < 28:
+        raise ValueError("enc:v1: ciphertext truncated")
+    return aes_gcm_decrypt(key, blob[:12], blob[12:]).decode("utf-8")
+
+path, primary_path = sys.argv[1], sys.argv[2]
+try:
+    raw_text = _read_regular_file_nofollow(path)
+except OSError:
+    if os.path.abspath(path) == os.path.abspath(primary_path):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+try:
+    d = json.loads(raw_text)
+except Exception:
+    if "enc:v1:" in raw_text or (raw_text.strip() and os.path.abspath(path) == os.path.abspath(primary_path)):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+if not isinstance(d, dict):
+    if os.path.abspath(path) == os.path.abspath(primary_path):
+        print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+_, key = load_aes_key()
+u = str(d.get("username") or "").strip()
+raw_pw = d.get("password") or ""
+raw_ha1 = d.get("ha1") or ""
+try:
+    p = decrypt_field(raw_pw, key)
+    h = decrypt_field(raw_ha1, key) if str(raw_ha1).strip() else ""
+except Exception:
+    print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+if isinstance(raw_pw, str) and raw_pw.strip().startswith("enc:v1:") and not p:
+    print("__AF_CREDS_FATAL__")
+    raise SystemExit(0)
+if p == "adminadmin":
+    p = ""
+print(u)
+print(p)
+print(h)
+PYEOF
+)"
+            if [[ "$parsed_creds" == "__AF_CREDS_FATAL__"* ]]; then
+                printf 'Refusing to overwrite undecryptable or corrupted master credentials file: %s\n' "$creds_json" >&2
+                return 1
+            fi
+            if [[ -n "$parsed_creds" ]]; then
+                u="$(printf '%s\n' "$parsed_creds" | sed -n '1p')"
+                p="$(printf '%s\n' "$parsed_creds" | sed -n '2p')"
+                h="$(printf '%s\n' "$parsed_creds" | sed -n '3p')"
+            fi
             [[ -n "$u" && -n "$p" ]] && break
         fi
     done
-    if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
-        u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
-        p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
-        h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"
+    local skip_host_env="${AETHERFLOW_SKIP_ENV_FILES:-0}"
+    if [[ "$skip_host_env" != "1" ]]; then
+        if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
+            u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
+            p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
+            h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"
+        fi
+        if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
+            u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
+        fi
     fi
-    if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
-        u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        local db_cand="" env_db="" env_data_dir=""
+        local _creds_env_file="${AETHERFLOW_ENV_FILE:-}"
+        if [[ -z "$_creds_env_file" && "$skip_host_env" != "1" ]]; then
+            _creds_env_file="/etc/aetherflow/aetherflow.env"
+        fi
+        if [[ -n "$_creds_env_file" && -e "$_creds_env_file" ]]; then
+            local _creds_env_parsed=""
+            _creds_env_parsed="$(python3 - "$_creds_env_file" <<'PYEOF' 2>/dev/null || true
+import os, stat, sys
+target = sys.argv[1]
+parent = os.path.dirname(os.path.abspath(target)) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+lst = os.lstat(target)
+if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+    raise SystemExit(1)
+fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
+        lines = fh.read().splitlines()
+finally:
+    os.close(fd)
+env_db = ""
+env_data = ""
+for raw_line in lines:
+    s = raw_line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    k = k.strip()
+    v = v.strip().strip("\"'")
+    if k in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"):
+        env_db = v
+    elif k == "DATA_DIR":
+        env_data = v
+print(env_db.replace("\n", "").replace("\r", ""))
+print(env_data.replace("\n", "").replace("\r", ""))
+PYEOF
+)"
+            if [[ -n "$_creds_env_parsed" ]]; then
+                env_db="$(printf '%s\n' "$_creds_env_parsed" | sed -n '1p')"
+                env_data_dir="$(printf '%s\n' "$_creds_env_parsed" | sed -n '2p')"
+            fi
+        fi
+        local -a _creds_db_candidates=(
+            "${AF_DB_PATH:-}"
+            "${DB_PATH:-}"
+            "${AETHERFLOW_DB_PATH:-}"
+            "$env_db"
+            "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}"
+            "${env_data_dir:+${env_data_dir%/}/aetherflow.sqlite}"
+        )
+        if [[ "$skip_host_env" != "1" ]]; then
+            _creds_db_candidates+=(
+                /var/lib/aetherflow/aetherflow.sqlite
+                /opt/AetherFlow/current/data/aetherflow.sqlite
+                /opt/AetherFlow/data/aetherflow.sqlite
+                /opt/AetherFlow/backend/data/aetherflow.sqlite
+            )
+        fi
+        for db_cand in "${_creds_db_candidates[@]}"; do
+            if [[ -n "$db_cand" && -f "$db_cand" ]]; then
+                u="$(sqlite3 "$db_cand" "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
+                [[ -n "$u" ]] && break
+            fi
+        done
     fi
-    if [[ -z "$u" ]] && command -v sqlite3 >/dev/null 2>&1 && [[ -f /opt/AetherFlow/backend/data/aetherflow.sqlite ]]; then
-        u="$(sqlite3 /opt/AetherFlow/backend/data/aetherflow.sqlite "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null | tr -d '[:space:]' || true)"
-    fi
-    if [[ -z "$p" && -n "$u" && -f "/root/${u}.info.db" ]]; then
-        p="$(cut -d: -f2- "/root/${u}.info.db" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
-    fi
-    if [[ -z "$p" ]]; then
-        local info_file
-        info_file="$(ls -1 /root/*.info.db 2>/dev/null | head -n1 || true)"
-        if [[ -n "$info_file" && -f "$info_file" ]]; then
-            [[ -z "$u" ]] && u="$(cut -d: -f1 "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
-            p="$(cut -d: -f2- "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+    if [[ "$skip_host_env" != "1" ]]; then
+        if [[ -z "$p" && -n "$u" && -f "/root/${u}.info.db" ]]; then
+            p="$(cut -d: -f2- "/root/${u}.info.db" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+        fi
+        if [[ -z "$p" ]]; then
+            local info_file
+            info_file="$(ls -1 /root/*.info.db 2>/dev/null | head -n1 || true)"
+            if [[ -n "$info_file" && -f "$info_file" ]]; then
+                [[ -z "$u" ]] && u="$(cut -d: -f1 "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+                p="$(cut -d: -f2- "$info_file" 2>/dev/null | head -n1 | tr -d '\r\n' || true)"
+            fi
         fi
     fi
     if [[ -z "$p" ]]; then
@@ -4284,31 +5062,205 @@ load_master_credentials() {
     fi
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then
-        python3 - /var/lib/aetherflow/.master.creds <<'PYEOF'
-import errno, json, os, sys, tempfile
+        python3 - "$primary_creds_file" <<'PYEOF'
+import base64, ctypes, ctypes.util, errno, json, os, stat, sys, tempfile
 username, password, ha1 = (os.environ[name] for name in ('MASTER_USER', 'MASTER_PASS', 'MASTER_HA1'))
 destination = sys.argv[1]
-directory = os.path.dirname(destination)
+directory = os.path.dirname(destination) or '.'
+
+def _ensure_no_symlink_ancestors(target_dir):
+    abs_dir = os.path.abspath(target_dir)
+    probe = abs_dir
+    while True:
+        if os.path.lexists(probe):
+            st = os.lstat(probe)
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f'Refusing symlinked credentials ancestor: {probe}')
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+
+def _read_regular_file_nofollow(target):
+    parent = os.path.dirname(os.path.abspath(target)) or '.'
+    pst = os.lstat(parent)
+    if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+        raise OSError(f'Unsafe parent directory for {target}')
+    lst = os.lstat(target)
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        raise OSError(f'Refusing non-regular or symlinked file {target}')
+    fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+            raise OSError(f'File identity changed during open for {target}')
+        with os.fdopen(fd, 'r', encoding='utf-8', closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
+
+_ensure_no_symlink_ancestors(directory)
+if os.path.lexists(destination):
+    dst_st = os.lstat(destination)
+    if stat.S_ISLNK(dst_st.st_mode) or not stat.S_ISREG(dst_st.st_mode):
+        raise RuntimeError(f'Refusing symlinked or non-regular master credentials path at {destination}')
+    existing_raw = _read_regular_file_nofollow(destination)
+    if 'enc:v1:' in existing_raw:
+        raise RuntimeError(f'Refusing to overwrite encrypted master credentials at {destination}')
+
+def resolve_aes_key():
+    raw = os.environ.get('AES_MASTER_KEY', '').strip()
+    if not raw:
+        explicit_env = os.environ.get('AETHERFLOW_ENV_FILE', '').strip()
+        env_path = explicit_env if explicit_env else (
+            '/etc/aetherflow/aetherflow.env' if os.environ.get('AETHERFLOW_SKIP_ENV_FILES') != '1' else ''
+        )
+        if env_path:
+            try:
+                for line in _read_regular_file_nofollow(env_path).splitlines():
+                    s = line.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    if s.startswith('export '):
+                        s = s[7:].strip()
+                    if s.startswith('AES_MASTER_KEY='):
+                        candidate = s.split('=', 1)[1].strip().strip("\"'")
+                        if candidate:
+                            raw = candidate
+            except FileNotFoundError:
+                raw = ''
+            except OSError as exc:
+                sys.stderr.write(f'Skipping unreadable env file {env_path}: {exc}\n')
+    if not raw:
+        return '', None
+    if len(raw) == 64:
+        try:
+            dec_hex = bytes.fromhex(raw)
+            if len(dec_hex) == 32:
+                return raw, dec_hex
+        except ValueError:
+            pass
+    try:
+        dec = base64.b64decode(raw, validate=True)
+        if len(dec) == 32:
+            return raw, dec
+    except Exception:
+        pass
+    raw_bytes = raw.encode('utf-8')
+    return raw, (raw_bytes if len(raw_bytes) == 32 else None)
+
+def _load_libcrypto():
+    candidates = []
+    found = ctypes.util.find_library('crypto')
+    if found:
+        candidates.append(found)
+    candidates.extend(('libcrypto.so.3', 'libcrypto.so.1.1'))
+    for name in candidates:
+        try:
+            lib = ctypes.CDLL(name)
+            lib.EVP_CIPHER_CTX_new.argtypes = []
+            lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_free.restype = None
+            lib.EVP_aes_256_gcm.argtypes = []
+            lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+            lib.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            lib.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
+            lib.EVP_EncryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            lib.EVP_EncryptInit_ex.restype = ctypes.c_int
+            lib.EVP_EncryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int]
+            lib.EVP_EncryptUpdate.restype = ctypes.c_int
+            lib.EVP_EncryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+            lib.EVP_EncryptFinal_ex.restype = ctypes.c_int
+            return lib
+        except OSError:
+            continue
+    raise RuntimeError('OpenSSL libcrypto unavailable')
+
+def aes_gcm_encrypt(key, nonce, pt):
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(key).encrypt(nonce, pt, None)
+    except ImportError:
+        pass
+    lib = _load_libcrypto()
+    ctx = lib.EVP_CIPHER_CTX_new()
+    if not ctx:
+        raise RuntimeError('EVP_CIPHER_CTX_new failed')
+    try:
+        key_buf = (ctypes.c_ubyte * 32).from_buffer_copy(key)
+        iv_buf = (ctypes.c_ubyte * 12).from_buffer_copy(nonce)
+        if lib.EVP_EncryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None) != 1:
+            raise RuntimeError('EVP_EncryptInit_ex cipher failed')
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 12, None) != 1:
+            raise RuntimeError('EVP_CTRL_GCM_SET_IVLEN failed')
+        if lib.EVP_EncryptInit_ex(ctx, None, None, ctypes.byref(key_buf), ctypes.byref(iv_buf)) != 1:
+            raise RuntimeError('EVP_EncryptInit_ex key/iv failed')
+        out_buf = (ctypes.c_ubyte * max(1, len(pt) + 16))()
+        out_len = ctypes.c_int(0)
+        if pt:
+            pt_buf = (ctypes.c_ubyte * len(pt)).from_buffer_copy(pt)
+            if lib.EVP_EncryptUpdate(ctx, ctypes.byref(out_buf), ctypes.byref(out_len), ctypes.byref(pt_buf), len(pt)) != 1:
+                raise RuntimeError('EVP_EncryptUpdate failed')
+        final_len = ctypes.c_int(0)
+        tail_ptr = ctypes.cast(ctypes.addressof(out_buf) + out_len.value, ctypes.c_void_p)
+        if lib.EVP_EncryptFinal_ex(ctx, tail_ptr, ctypes.byref(final_len)) != 1:
+            raise RuntimeError('EVP_EncryptFinal_ex failed')
+        tag_buf = (ctypes.c_ubyte * 16)()
+        if lib.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, ctypes.byref(tag_buf)) != 1:
+            raise RuntimeError('EVP_CTRL_GCM_GET_TAG failed')
+        return bytes(out_buf[:out_len.value + final_len.value]) + bytes(tag_buf)
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+def maybe_encrypt(plaintext, raw_key, key):
+    if not raw_key:
+        return plaintext
+    if key is None:
+        raise RuntimeError('AES_MASTER_KEY is configured but is not a valid 32-byte key')
+    nonce = os.urandom(12)
+    ct = aes_gcm_encrypt(key, nonce, plaintext.encode('utf-8'))
+    return 'enc:v1:' + base64.b64encode(nonce + ct).decode('ascii')
+
+raw_key, key = resolve_aes_key()
+stored_password = maybe_encrypt(password, raw_key, key)
+stored_ha1 = maybe_encrypt(ha1, raw_key, key)
 temporary = None
 try:
+    _ensure_no_symlink_ancestors(directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        os.fchmod(dir_fd, 0o700)
+    finally:
+        os.close(dir_fd)
+    if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
+        raise RuntimeError(f'Refusing symlinked master credentials destination: {destination}')
     descriptor, temporary = tempfile.mkstemp(prefix='.master.creds.', dir=directory)
     with os.fdopen(descriptor, 'w') as output:
         os.fchmod(output.fileno(), 0o600)
-        json.dump({'username': username, 'password': password, 'ha1': ha1}, output)
+        json.dump({'username': username, 'password': stored_password, 'ha1': stored_ha1}, output)
         output.write('\n')
         output.flush()
         os.fsync(output.fileno())
+    if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
+        raise RuntimeError(f'Refusing symlinked master credentials destination: {destination}')
     os.replace(temporary, destination)
     temporary = None
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 except OSError as error:
-    if error.errno not in (errno.EROFS, errno.ENODEV, errno.ENXIO):
+    if (
+        error.errno in (errno.EACCES, errno.EPERM)
+        and os.geteuid() != 0
+        and 'AETHERFLOW_MASTER_CREDS_FILE' not in os.environ
+        and destination == '/var/lib/aetherflow/.master.creds'
+    ):
+        pass
+    elif error.errno not in (errno.EROFS, errno.ENODEV, errno.ENXIO):
         raise
 finally:
     if temporary is not None:
@@ -4319,6 +5271,22 @@ finally:
                 raise
 PYEOF
     fi
+}
+
+derive_app_password() {
+    local app_id="${1:?Application id is required for derive_app_password}"
+    local master_secret="${2:-${MASTER_PASS:-}}"
+    if [[ -z "$master_secret" ]]; then
+        load_master_credentials || return $?
+        master_secret="$MASTER_PASS"
+    fi
+    AF_DERIVE_APP="$app_id" AF_DERIVE_SECRET="$master_secret" python3 - <<'PYEOF'
+import hashlib, hmac, os
+app_id = os.environ["AF_DERIVE_APP"].strip().lower()
+secret = os.environ["AF_DERIVE_SECRET"].encode("utf-8")
+msg = f"aetherflow:{app_id}:webui:v1".encode("utf-8")
+print(hmac.new(secret, msg, hashlib.sha256).hexdigest()[:32])
+PYEOF
 }
 
 generate_qbittorrent_pbkdf2() {
@@ -4345,7 +5313,7 @@ seed_servarr_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" python3 - "$app" "$port" "$api_ver" "$cfg_xml" >> "$LOGFILE" 2>&1 <<'PYEOF'
+    AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" af_logged python3 - "$app" "$port" "$api_ver" "$cfg_xml" <<'PYEOF'
 import sys, os, re, time, json, urllib.request
 
 app, port, api_ver, cfg_xml = sys.argv[1:]
@@ -4420,7 +5388,7 @@ seed_jellyfin_master_user() {
     if declare -F keep_existing_secrets_enabled >/dev/null 2>&1 && keep_existing_secrets_enabled; then
         keep_secrets="1"
     fi
-    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" python3 - "$port" >> "$LOGFILE" 2>&1 <<'PYEOF'
+    if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" af_logged python3 - "$port" <<'PYEOF'
 import os, sys, time, json, urllib.request
 
 port = sys.argv[1]

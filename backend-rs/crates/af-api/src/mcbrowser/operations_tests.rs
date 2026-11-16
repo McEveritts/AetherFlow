@@ -339,7 +339,8 @@ fn flowai_natural_language_search_and_bfs_walk_for_search_tests() {
 
     bfs.create_directory_all("Google/Media/TV/The Pitt/Season 1")
         .unwrap();
-    bfs.create_directory_all("Google/Documents/Finance").unwrap();
+    bfs.create_directory_all("Google/Documents/Finance")
+        .unwrap();
     execute_create_file_conn(
         &conn,
         &bfs,
@@ -378,10 +379,7 @@ fn flowai_natural_language_search_and_bfs_walk_for_search_tests() {
         .entries
         .iter()
         .any(|e| e.name == "The Pitt" && e.kind == "directory"));
-    assert!(res_pitt
-        .entries
-        .iter()
-        .any(|e| e.name.contains("S01E01")));
+    assert!(res_pitt.entries.iter().any(|e| e.name.contains("S01E01")));
     assert!(!res_pitt
         .entries
         .iter()
@@ -395,12 +393,8 @@ fn flowai_natural_language_search_and_bfs_walk_for_search_tests() {
 
     // 3. Natural language file type intent: "excel spreadsheets about gas prices"
     let plan_sheet = build_deterministic_nl_plan("excel spreadsheets about gas prices");
-    let res_sheet = filter_and_rank_entries_with_flowai(
-        walked,
-        &plan_sheet,
-        SearchKindFilter::Any,
-        100,
-    );
+    let res_sheet =
+        filter_and_rank_entries_with_flowai(walked, &plan_sheet, SearchKindFilter::Any, 100);
     assert_eq!(res_sheet.entries.len(), 1);
     assert_eq!(res_sheet.entries[0].name, "Oil_Gas_Prices_2026.xlsx");
 }
@@ -749,20 +743,40 @@ fn confined_alias_archives_authorize_every_hop_preserve_names_and_pin_all_source
         Ok(())
     })
     .unwrap();
-    for path in ["alias", "hop", "storage", "alias/a.txt", "hop/a.txt", "storage/a.txt", "leaf.txt"] {
+    for path in [
+        "alias",
+        "hop",
+        "storage",
+        "alias/a.txt",
+        "hop/a.txt",
+        "storage/a.txt",
+        "leaf.txt",
+    ] {
         assert!(checked.contains(path), "authorization missing for {path}");
     }
-    for denied in ["alias", "hop", "storage", "alias/a.txt", "hop/a.txt", "storage/a.txt", "leaf.txt", "alias/sub/copied.txt"] {
-        assert!(matches!(
-            collect_archive_plan_with_auth(&filesystem, &selection, |path| {
-                if path == denied {
-                    Err(McBrowserError::Forbidden("denied".to_string()))
-                } else {
-                    Ok(())
-                }
-            }),
-            Err(McBrowserError::Forbidden(_))
-        ), "denial was bypassed for {denied}");
+    for denied in [
+        "alias",
+        "hop",
+        "storage",
+        "alias/a.txt",
+        "hop/a.txt",
+        "storage/a.txt",
+        "leaf.txt",
+        "alias/sub/copied.txt",
+    ] {
+        assert!(
+            matches!(
+                collect_archive_plan_with_auth(&filesystem, &selection, |path| {
+                    if path == denied {
+                        Err(McBrowserError::Forbidden("denied".to_string()))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(McBrowserError::Forbidden(_))
+            ),
+            "denial was bypassed for {denied}"
+        );
     }
     fs::remove_file(root.join("leaf.txt")).unwrap();
     symlink("private.txt", root.join("leaf.txt")).unwrap();
@@ -794,7 +808,9 @@ fn confined_alias_archives_authorize_every_hop_preserve_names_and_pin_all_source
         for path in ["alias/a.txt", "alias/sub/copied.txt", "leaf.txt"] {
             assert_eq!(decoded[path], b"authorized bytes", "{format:?}: {path}");
         }
-        assert!(decoded.keys().all(|path| !path.starts_with("storage/") && !path.starts_with("hop/")));
+        assert!(decoded
+            .keys()
+            .all(|path| !path.starts_with("storage/") && !path.starts_with("hop/")));
     }
 
     fs::remove_file(root.join("hop")).unwrap();
@@ -824,7 +840,8 @@ fn pinned_archive_readers_bound_growth_reject_truncation_and_have_independent_of
     let filesystem = open_user_browser_fs_at(temporary.path(), 12).unwrap();
     let source = temporary.path().join("user-12/data.txt");
     fs::write(&source, b"original").unwrap();
-    let plan = collect_archive_plan_with_auth(&filesystem, &["data.txt".to_string()], |_| Ok(())).unwrap();
+    let plan =
+        collect_archive_plan_with_auth(&filesystem, &["data.txt".to_string()], |_| Ok(())).unwrap();
     fs::write(&source, b"original plus appended bytes").unwrap();
     let mut first = open_planned_archive_file(&plan[0]).unwrap();
     let mut second = open_planned_archive_file(&plan[0]).unwrap();
@@ -840,7 +857,9 @@ fn pinned_archive_readers_bound_growth_reject_truncation_and_have_independent_of
     fs::write(&source, b"short").unwrap();
     for format in [ArchiveFormat::Zip, ArchiveFormat::Tar] {
         assert_eq!(
-            write_archive_to_writer(&filesystem, &plan, format, Vec::new()).unwrap_err().kind(),
+            write_archive_to_writer(&filesystem, &plan, format, Vec::new())
+                .unwrap_err()
+                .kind(),
             ErrorKind::UnexpectedEof
         );
     }
@@ -855,30 +874,54 @@ fn archive_planning_checks_deadlines_cancellation_entry_boundaries_and_late_hard
     let selection = vec!["data.txt".to_string()];
     let mut control = ArchivePlanningControl::new();
     control.deadline = Instant::now();
-    assert!(matches!(collect_archive_plan_with_control(&filesystem, &selection, &control, |_| panic!("expired planning reached authorization")), Err(McBrowserError::RequestTimeout(_))));
+    assert!(matches!(
+        collect_archive_plan_with_control(&filesystem, &selection, &control, |_| panic!(
+            "expired planning reached authorization"
+        )),
+        Err(McBrowserError::RequestTimeout(_))
+    ));
     let control = ArchivePlanningControl::new();
     let guard = ArchivePlanningGuard(control.clone());
     drop(guard);
-    assert!(matches!(collect_archive_plan_with_control(&filesystem, &selection, &control, |_| panic!("cancelled planning reached authorization")), Err(McBrowserError::RequestTimeout(_))));
+    assert!(matches!(
+        collect_archive_plan_with_control(&filesystem, &selection, &control, |_| panic!(
+            "cancelled planning reached authorization"
+        )),
+        Err(McBrowserError::RequestTimeout(_))
+    ));
     let control = ArchivePlanningControl::new();
     let mut guard = Some(ArchivePlanningGuard(control.clone()));
-    assert!(matches!(collect_archive_plan_with_control(&filesystem, &selection, &control, |_| {
-        drop(guard.take());
-        Ok(())
-    }), Err(McBrowserError::RequestTimeout(_))));
+    assert!(matches!(
+        collect_archive_plan_with_control(&filesystem, &selection, &control, |_| {
+            drop(guard.take());
+            Ok(())
+        }),
+        Err(McBrowserError::RequestTimeout(_))
+    ));
     let plan = collect_archive_plan_with_auth(&filesystem, &selection, |_| Ok(())).unwrap();
     fs::hard_link(root.join("data.txt"), root.join("late-hardlink.txt")).unwrap();
     for format in ArchiveFormat::ALL {
-        assert_eq!(write_archive_to_writer(&filesystem, &plan, format, Vec::new()).unwrap_err().kind(), ErrorKind::PermissionDenied, "{format:?}");
+        assert_eq!(
+            write_archive_to_writer(&filesystem, &plan, format, Vec::new())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied,
+            "{format:?}"
+        );
     }
-    let limit_selection: Vec<String> = (0..MAX_SEARCH_ENTRIES).map(|index| format!("directory-{index:05}")).collect();
+    let limit_selection: Vec<String> = (0..MAX_SEARCH_ENTRIES)
+        .map(|index| format!("directory-{index:05}"))
+        .collect();
     for path in &limit_selection {
         fs::create_dir(root.join(path)).unwrap();
     }
     let plan = collect_archive_plan_with_auth(&filesystem, &limit_selection, |_| Ok(())).unwrap();
     assert_eq!(plan.len(), MAX_SEARCH_ENTRIES);
     fs::create_dir(root.join(&limit_selection[0]).join("child")).unwrap();
-    assert!(matches!(collect_archive_plan_with_auth(&filesystem, &limit_selection, |_| Ok(())), Err(McBrowserError::BadRequest(_))));
+    assert!(matches!(
+        collect_archive_plan_with_auth(&filesystem, &limit_selection, |_| Ok(())),
+        Err(McBrowserError::BadRequest(_))
+    ));
 }
 
 #[tokio::test]
@@ -897,34 +940,72 @@ async fn cancelled_archive_planning_retains_admission_until_the_blocking_worker_
         let _guard = ArchivePlanningGuard(control.clone());
         tokio::task::spawn_blocking(move || {
             let mut started_sender = Some(started_sender);
-            let result = collect_archive_plan_with_control(&filesystem, &["data.txt".to_string()], &control, |_| {
-                if let Some(sender) = started_sender.take() {
-                    sender.send(()).unwrap();
-                    release_receiver.recv().unwrap();
-                }
-                Ok(())
-            });
+            let result = collect_archive_plan_with_control(
+                &filesystem,
+                &["data.txt".to_string()],
+                &control,
+                |_| {
+                    if let Some(sender) = started_sender.take() {
+                        sender.send(()).unwrap();
+                        release_receiver.recv().unwrap();
+                    }
+                    Ok(())
+                },
+            );
             drop(permit);
-            finished_sender.send(matches!(result, Err(McBrowserError::RequestTimeout(_)))).unwrap();
-        }).await.unwrap();
+            finished_sender
+                .send(matches!(result, Err(McBrowserError::RequestTimeout(_))))
+                .unwrap();
+        })
+        .await
+        .unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(5), started_receiver).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started_receiver)
+        .await
+        .unwrap()
+        .unwrap();
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     assert_eq!(semaphore.available_permits(), 0);
     release_sender.send(()).unwrap();
-    assert!(tokio::time::timeout(Duration::from_secs(5), finished_receiver).await.unwrap().unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), finished_receiver)
+            .await
+            .unwrap()
+            .unwrap()
+    );
     assert_eq!(semaphore.available_permits(), 1);
 }
 
 #[tokio::test]
 async fn archive_ticket_creation_and_both_download_routes_wait_for_archive_admission() {
-    let permit = Arc::clone(&ARCHIVE_SEMAPHORE).acquire_many_owned(ARCHIVE_CONCURRENCY_LIMIT as u32).await.unwrap();
+    let permit = Arc::clone(&ARCHIVE_SEMAPHORE)
+        .acquire_many_owned(ARCHIVE_CONCURRENCY_LIMIT as u32)
+        .await
+        .unwrap();
     let user = human_user(12);
-    let request = || ArchiveRequest { paths: vec!["data.txt".to_string()], format: "zip".to_string() };
-    assert!(tokio::time::timeout(Duration::from_millis(25), create_archive_ticket(Extension(user.clone()), Json(request()))).await.is_err());
-    assert!(tokio::time::timeout(Duration::from_millis(25), download_archive(Extension(user.clone()), Json(request()))).await.is_err());
-    assert!(tokio::time::timeout(Duration::from_millis(25), download_archive_by_ticket(Extension(user), AxumPath("a".repeat(64)))).await.is_err());
+    let request = || ArchiveRequest {
+        paths: vec!["data.txt".to_string()],
+        format: "zip".to_string(),
+    };
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        create_archive_ticket(Extension(user.clone()), Json(request()))
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        download_archive(Extension(user.clone()), Json(request()))
+    )
+    .await
+    .is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(25),
+        download_archive_by_ticket(Extension(user), AxumPath("a".repeat(64)))
+    )
+    .await
+    .is_err());
     drop(permit);
 }
 
@@ -2089,8 +2170,14 @@ fn confined_alias_and_recursive_directory_copy_pin_sources_enforce_policy_hops_a
     execute_create_file_conn(&conn, &bfs, "real_dir/target.txt", Some("hello-target"), 88).unwrap();
     execute_create_file_conn(&conn, &bfs, "real_dir/sub/inner.txt", Some("inner-val"), 88).unwrap();
     execute_create_file_conn(&conn, &bfs, "normal_dir/plain.txt", Some("plain"), 88).unwrap();
-    execute_create_file_conn(&conn, &bfs, "secret_dir/secret.txt", Some("top-secret-data"), 88)
-        .unwrap();
+    execute_create_file_conn(
+        &conn,
+        &bfs,
+        "secret_dir/secret.txt",
+        Some("top-secret-data"),
+        88,
+    )
+    .unwrap();
     assert_eq!(read_used_bytes(&conn, 88), 41);
 
     symlink("real_dir/target.txt", user_root.join("file_alias.txt")).unwrap();
@@ -2212,16 +2299,18 @@ fn confined_alias_and_recursive_directory_copy_pin_sources_enforce_policy_hops_a
     .unwrap();
     fs::remove_file(user_root.join("file_alias.txt")).unwrap();
     symlink("secret_dir/secret.txt", user_root.join("file_alias.txt")).unwrap();
-    fs::write(user_root.join("real_dir/replacement.txt"), "different-inode").unwrap();
+    fs::write(
+        user_root.join("real_dir/replacement.txt"),
+        "different-inode",
+    )
+    .unwrap();
     fs::rename(
         user_root.join("real_dir/replacement.txt"),
         user_root.join("real_dir/target.txt"),
     )
     .unwrap();
     match plan {
-        CopySourcePlan::File {
-            mut file, size, ..
-        } => {
+        CopySourcePlan::File { mut file, size, .. } => {
             let mut pinned_accounting = true;
             copy_pinned_file_new_with_quota(
                 &conn,
@@ -2329,7 +2418,11 @@ fn confined_alias_and_recursive_directory_copy_pin_sources_enforce_policy_hops_a
     assert!(bfs.metadata("escape_copy").is_err());
 
     bfs.create_directory_all("broken_holder").unwrap();
-    symlink("does_not_exist.txt", user_root.join("broken_holder/broken.txt")).unwrap();
+    symlink(
+        "does_not_exist.txt",
+        user_root.join("broken_holder/broken.txt"),
+    )
+    .unwrap();
     assert!(matches!(
         execute_copy_for_user_with_conn(
             &conn,

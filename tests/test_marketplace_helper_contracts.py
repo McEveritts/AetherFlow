@@ -1,10 +1,14 @@
+import ast
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility (ubuntu-22.04)
+    tomllib = None
 import unittest
 from pathlib import Path
 
@@ -186,7 +190,15 @@ sys.modules["django.contrib.auth"] = auth
                                     text=True, capture_output=True,
                                     env={**os.environ, 'NOTIFIARR_UI_CREDENTIALS': credentials})
             self.assertEqual(result.returncode, 0, result.stderr)
-            parsed = tomllib.loads(config.read_text())
+            raw_toml = config.read_text()
+            if tomllib is not None:
+                parsed = tomllib.loads(raw_toml)
+            else:
+                parsed = {}
+                for line in raw_toml.splitlines():
+                    if "=" in line and not line.lstrip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        parsed[k.strip()] = ast.literal_eval(v.strip())
             self.assertEqual(parsed['ui_password'], credentials)
             self.assertEqual(parsed['api_key'], 'retain')
 

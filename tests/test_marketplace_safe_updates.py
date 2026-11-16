@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import hashlib
 import json
 import os
@@ -149,6 +150,16 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
     info.size = len(script)
     info.mode = 0o755
     tf.addfile(info, io.BytesIO(script))
+PYEOF
+            elif [[ "$* $out" == *sabnzbd* ]] && [[ "$out" == *.tar.gz || "$out" == *.tgz ]]; then
+                /usr/bin/python3 - "$out" <<'PYEOF'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as tf:
+    for rel_name, body in (("SABnzbd-4.3.3/SABnzbd.py", b"print('fixture')\n"), ("SABnzbd-4.3.3/requirements.txt", b"")):
+        info = tarfile.TarInfo(name=rel_name)
+        info.size = len(body)
+        info.mode = 0o644
+        tf.addfile(info, io.BytesIO(body))
 PYEOF
             else
                 printf '#!/bin/sh\nexit 0\n' > "$out"
@@ -577,6 +588,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "safe_config_python",
             "validate_config_paths",
             "write_config_file",
+            "derive_app_password",
             "set_config_file_mode",
             "verify_sha256",
             "set_config_value",
@@ -591,6 +603,8 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "_af_redact_ascii_fallback",
             "_af_truncate_receipt_field",
             "af_write_failure_receipt",
+            "af_prepare_logfile_path",
+            "af_validate_tar_archive",
             "report_progress",
             "check_disk_space",
         )
@@ -620,6 +634,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             "TEST_ROOT": root_posix,
             "TMPDIR": f"{root_posix}/tmp",
             "AETHERFLOW_INSTALL_ROOT": root_posix,
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
             "LOGFILE": f"{root_posix}/test.log",
             **environment,
         }
@@ -741,7 +756,7 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
     def test_calibreweb_existing_db_with_matching_port_succeeds(self):
         db_path = self.root / "var/lib/calibre-web/app.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(db_path)) as conn:
+        with contextlib.closing(sqlite3.connect(str(db_path))) as conn, conn:
             conn.execute("CREATE TABLE settings (config_port INTEGER);")
             conn.execute("INSERT INTO settings VALUES (17803);")
 
@@ -847,7 +862,8 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
             'statistics_password="custom-stats-password"\n'
             'enable_tls=true\n'
             'tls_cert_file="/etc/ssl/mycert.pem"\n'
-            'database_type="postgresql"\n'
+            'tls_key_file="/etc/ssl/mykey.pem"\n'
+            'database_type="bolt"\n'
         )
 
         result = self.run_script("librespeed", AF_APP_PORT="8999")
@@ -857,7 +873,13 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
         self.assertIn("listen_port=8999", toml_after)
         self.assertIn('statistics_password="custom-stats-password"', toml_after)
         self.assertIn("enable_tls=true", toml_after)
-        self.assertIn('database_type="postgresql"', toml_after)
+        self.assertIn('tls_cert_file="/etc/ssl/mycert.pem"', toml_after)
+        self.assertIn('tls_key_file="/etc/ssl/mykey.pem"', toml_after)
+        self.assertIn('database_type="sqlite"', toml_after)
+        self.assertNotIn('database_type="bolt"', toml_after)
+        self.assertIn("redact_ip_addresses=true", toml_after)
+        self.assertIn("enable_id_obfuscation=true", toml_after)
+        self.assertIn('trusted_proxies=["127.0.0.1", "::1"]', toml_after)
 
     def test_kasmvnc_update_preserves_custom_yaml(self):
         yaml_file = self.root / "var/lib/kasmvnc/.vnc/kasmvnc.yaml"

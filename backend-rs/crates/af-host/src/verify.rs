@@ -1765,6 +1765,17 @@ impl HostMaintenanceLockGuard {
                     "maintenance lockfile created concurrently during openat".to_string(),
                 ));
             }
+            if lock_fd >= 0 {
+                // Ensure group-writable permissions even under restrictive runner UMask=0077
+                if unsafe { libc::fchmod(lock_fd, 0o660) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    unsafe { libc::close(lock_fd) };
+                    return Err(AcquireAttemptError::Fatal(HostBackupError::io(
+                        format!("fchmod maintenance lockfile {}", path.display()),
+                        err,
+                    )));
+                }
+            }
         }
         if lock_fd < 0 {
             let open_err = std::io::Error::last_os_error();
@@ -2161,7 +2172,7 @@ pub fn open_or_create_provenance_dir_nofollow(dir: &Path, context: &str) -> Host
 }
 
 /// Opens or creates a maintenance lock parent directory with root-only ancestor ownership
-/// enforcement when running as `root` (`euid == 0`) and sticky shared permissions (`01770`, `root:target_gid`)
+/// enforcement when running as `root` (`euid == 0`) and restricted shared traversal (`0750`, `root:target_gid`)
 /// on `/run/aetherflow` (or `.../run/aetherflow`).
 #[cfg(unix)]
 pub(crate) fn open_or_create_lock_parent_dir_nofollow(
@@ -2173,7 +2184,7 @@ pub(crate) fn open_or_create_lock_parent_dir_nofollow(
     use std::os::unix::io::AsRawFd;
 
     let allow_service_owner = euid != 0;
-    let create_mode = if euid == 0 { 0o1770 } else { 0o750 };
+    let create_mode = 0o750;
     let dir_file =
         open_or_create_dir_nofollow_internal(dir, create_mode, None, allow_service_owner, context)?;
 
@@ -2212,8 +2223,8 @@ pub(crate) fn open_or_create_lock_parent_dir_nofollow(
                 ));
             }
         }
-        if (st_buf.st_mode & 0o7777) != 0o1770 {
-            let chmod_rc = unsafe { libc::fchmod(dir_file.as_raw_fd(), 0o1770) };
+        if (st_buf.st_mode & 0o7777) != 0o750 {
+            let chmod_rc = unsafe { libc::fchmod(dir_file.as_raw_fd(), 0o750) };
             if chmod_rc != 0 {
                 return Err(HostBackupError::io(
                     format!(

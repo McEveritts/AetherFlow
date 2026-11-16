@@ -97,7 +97,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Sonarr/Sonarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Sonarr/Sonarr.dll /opt/Sonarr/Sonarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Sonarr/Sonarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -131,7 +131,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Radarr/Radarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Radarr/Radarr.dll /opt/Radarr/Radarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Radarr/Radarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -165,7 +165,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Lidarr/Lidarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Lidarr/Lidarr.dll /opt/Lidarr/Lidarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Lidarr/Lidarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -200,7 +200,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Readarr/Readarr.dll /opt/Readarr/Readarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Readarr/Readarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -234,7 +234,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Prowlarr/Prowlarr.dll /opt/Prowlarr/Prowlarr.Core.dll 2>/dev/null | grep -A1 '^ProductVersion$' | tail -n1; strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -297,9 +297,10 @@
     "update_repo": "sct/overseerr",
     "update_repo_url": "https://github.com/sct/overseerr.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "node -p \"require('/opt/overseerr/package.json').version\" 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/overseerr/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -379,7 +380,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || git -C /opt/Tautulli rev-parse --short HEAD 2>/dev/null"
+      "if [ -s /opt/Tautulli/.af-version ]; then cat /opt/Tautulli/.af-version; elif [ -r /opt/Tautulli/.git/HEAD ]; then head -c 64 /opt/Tautulli/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -439,7 +440,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/flaresolverr/package.json 2>/dev/null | head -n1"
+      "jq -r '.version // empty' /opt/flaresolverr/package.json /opt/flaresolverr/_internal/package.json 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1091,9 +1092,10 @@
     "update_repo": "louislam/uptime-kuma",
     "update_repo_url": "https://github.com/louislam/uptime-kuma.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null || git -C /opt/uptime-kuma rev-parse --short HEAD 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/uptime-kuma/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1147,9 +1149,10 @@
     "require_download_sha256": true,
     "update_repo": "seerr-team/seerr",
     "version_command": [
-      "bash",
-      "-lc",
-      "node -p \"require('/opt/jellyseerr/package.json').version\" 2>/dev/null"
+      "jq",
+      "-r",
+      ".version // empty",
+      "/opt/jellyseerr/package.json"
     ],
     "sandbox_profile": "node",
     "sandbox_rw_paths": [
@@ -1245,7 +1248,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1 || git -C /var/www/rutorrent rev-parse --short HEAD 2>/dev/null"
+      "grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1342,9 +1345,9 @@
     "update_repo": "l3uddz/cloudplow",
     "update_repo_url": "https://github.com/l3uddz/cloudplow.git",
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py --version 2>/dev/null || git -C /opt/cloudplow rev-parse --short HEAD 2>/dev/null"
+      "/opt/cloudplow/.venv/bin/python",
+      "/opt/cloudplow/cloudplow.py",
+      "--version"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1442,7 +1445,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "/usr/local/bin/recyclarr --version 2>/dev/null"
+      "env -u RECYCLARR_APP_DATA HOME=/tmp /usr/local/bin/recyclarr --version 2>/dev/null"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1508,7 +1511,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "strings /opt/Kavita/Kavita.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+      "(strings -el /opt/Kavita/Kavita.Common.dll 2>/dev/null; strings /opt/Kavita/Kavita.dll 2>/dev/null) | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | grep -Ev '^(0\\.0\\.0\\.0|1\\.0\\.0(\\.0)?)$' | head -n1"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -1543,7 +1546,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "PYTHONPATH=/opt/calibre-web /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null || git -C /opt/calibre-web rev-parse --short HEAD 2>/dev/null"
+      "sed -nE \"s/^[[:space:]]*STABLE_VERSION[[:space:]]*=[[:space:]]*['\\\"]([^'\\\"]+)['\\\"].*/\\1/p\" /opt/calibre-web/cps/constants.py 2>/dev/null | grep -m1 . || if [ -s /opt/calibre-web/.af-version ]; then cat /opt/calibre-web/.af-version; elif [ -r /opt/calibre-web/.git/HEAD ]; then head -c 64 /opt/calibre-web/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -1574,26 +1577,14 @@
   "librespeed": {
     "update_source": "github",
     "require_download_sha256": true,
-    "update_repo": "librespeed/speedtest-go",
+    "update_repo": "McEveritts/AetherFlow",
     "version_command": [
-      "bash",
-      "-lc",
-      "/opt/librespeed/speedtest-go --version 2>/dev/null"
+      "cat",
+      "/opt/librespeed/.af-version"
     ],
-    "sandbox_profile": "go",
+    "sandbox_profile": "native",
     "sandbox_rw_paths": [
-      "/opt/librespeed",
-      "{{SERVICE_HOME}}",
-      "-/home/hdd",
-      "-/home/ramdisk",
-      "-/home/{{MASTER_USER}}/Google",
-      "-/home/{{MASTER_USER}}/.google_root",
-      "-/home/{{MASTER_USER}}/Google/Media/Movies",
-      "-/home/{{MASTER_USER}}/Google/Media/TV",
-      "-/home/{{MASTER_USER}}/Google/Media/Music",
-      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
-      "-/home/{{MASTER_USER}}/Google/Media/UFC",
-      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
+      "/opt/librespeed"
     ],
     "sandbox_service_units": [
       "librespeed.service"
@@ -1634,7 +1625,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' znc 2>/dev/null"
+      "dpkg-query -W -f='${Version}' znc 2>/dev/null || znc --version 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1786,7 +1777,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || git -C /var/www/organizr rev-parse --short HEAD 2>/dev/null"
+      "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1811,9 +1802,10 @@
     "require_download_sha256": true,
     "update_repo": "Dispatcharr/Dispatcharr",
     "version_command": [
-      "bash",
-      "-lc",
-      "git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null || git -C /opt/dispatcharr rev-parse --short HEAD 2>/dev/null"
+      "sed",
+      "-nE",
+      "s/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\\1/p",
+      "/opt/dispatcharr/version.py"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
@@ -2114,7 +2106,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "git -C /opt/seedcross rev-parse HEAD 2>/dev/null"
+      "if [ -s /opt/seedcross/.af-version ]; then cat /opt/seedcross/.af-version; elif [ -r /opt/seedcross/.git/HEAD ]; then head -c 64 /opt/seedcross/.git/HEAD; fi"
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [

@@ -1,6 +1,7 @@
 use crate::auth::{api_error, AuthUser};
 use crate::streaming_history::{
-    bounds, inclusion_predicate, query_filters, resolve_query_scope, scope_filters, HistoryError, HistoryQuery,
+    bounds, inclusion_predicate, query_filters, resolve_query_scope, scope_filters, HistoryError,
+    HistoryQuery,
 };
 use axum::extract::{Extension, Query};
 use axum::http::{header, StatusCode};
@@ -216,7 +217,8 @@ pub struct DrilldownReport {
 fn detect_dst_transitions(start_unix: i64, end_unix: i64, tz: &Tz) -> Vec<String> {
     let mut notes = Vec::new();
     let get_offset = |ts: i64| -> Option<i32> {
-        DateTime::from_timestamp(ts, 0).map(|dt| dt.with_timezone(tz).offset().fix().local_minus_utc())
+        DateTime::from_timestamp(ts, 0)
+            .map(|dt| dt.with_timezone(tz).offset().fix().local_minus_utc())
     };
     let mut prev_offset = match get_offset(start_unix) {
         Some(off) => off,
@@ -355,7 +357,13 @@ fn query_activity_patterns_impl(
     }
 
     let day_names = [
-        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     ];
     let mut weekday = (0..7)
         .map(|d| WeekdayActivity {
@@ -441,7 +449,9 @@ fn query_activity_patterns_impl(
 
     let transition_start = effective_start.max(effective_end - 366 * 86400);
     let mut dst_notes = detect_dst_transitions(transition_start, effective_end, &tz);
-    if transition_start > effective_start { dst_notes.push("DST transition listing is limited to the latest 366 days; activity buckets retain the full query window.".into()); }
+    if transition_start > effective_start {
+        dst_notes.push("DST transition listing is limited to the latest 366 days; activity buckets retain the full query window.".into());
+    }
 
     Ok(ActivityReport {
         timezone: query.timezone.clone(),
@@ -1705,13 +1715,13 @@ mod tests {
 
         let query = HistoryQuery::default();
 
-        let drill_unlinked =
-            query_drilldown(&conn, query.clone(), &unlinked_user, 1793500000).expect("drilldown query");
+        let drill_unlinked = query_drilldown(&conn, query.clone(), &unlinked_user, 1793500000)
+            .expect("drilldown query");
         assert_eq!(drill_unlinked.cohort_distinct_plays, 0);
         assert!(drill_unlinked.users.is_empty());
 
-        let drill_linked =
-            query_drilldown(&conn, query.clone(), &linked_user, 1793500000).expect("drilldown query");
+        let drill_linked = query_drilldown(&conn, query.clone(), &linked_user, 1793500000)
+            .expect("drilldown query");
         assert_eq!(drill_linked.cohort_distinct_plays, 1);
         assert_eq!(drill_linked.users.len(), 1);
         assert_eq!(drill_linked.users[0].user_id, "user_alice");

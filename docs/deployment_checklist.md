@@ -31,8 +31,8 @@ Configure runtime variables in `/etc/aetherflow/aetherflow.env` (`chmod 0640`, o
 
 | Variable | Description | Validation & Fail-Closed Behavior |
 | --- | --- | --- |
-| `JWT_SECRET` | Session JWT signing secret | Supply at least 32 cryptographically random bytes. The current helper uses an ephemeral process secret when unset and does not enforce a minimum configured length; deployment must enforce this requirement. |
-| `AES_MASTER_KEY` | AES-256-GCM key for encrypted provider API keys | Exactly 32 raw bytes or base64 decoding to exactly 32 bytes. Hex strings and arbitrary passphrases are not supported. Invalid nonempty keys stop initialization. |
+| `JWT_SECRET` | Session JWT signing secret | Must be at least 32 cryptographically random bytes. `aetherflow-api` (`validate_startup_jwt_secret`) fails closed at startup if `JWT_SECRET` is unset or shorter than 32 bytes. |
+| `AES_MASTER_KEY` | AES-256-GCM key for encrypted provider API keys | Exactly 32 raw bytes, 64 hex characters (32 decoded bytes), or base64 decoding to 32 bytes. `af-db::init_aes_key` fails closed under `AETHERFLOW_ENV=production` / `release` (or `GIN_MODE=release`) when unset, and always stops initialization on invalid nonempty keys. |
 | `AF_DB_PATH` / `DB_PATH` / `AETHERFLOW_DB_PATH` | Absolute path to the live SQLite database | Shared resolution uses this precedence, rejects conflicting overrides, and enforces an isolated root when supplied. Installed units default to `/var/lib/aetherflow/aetherflow.sqlite`. |
 | `ALLOWED_HOSTS` | Comma-separated allowlist of HTTP `Host` header values | Validated by host-check middleware (`localhost,localhost:8080,127.0.0.1,127.0.0.1:8080,<your-domain>`). Spoofed `Host` headers are rejected with HTTP `400`. |
 
@@ -141,8 +141,8 @@ Expected `/health/ready` response:
 ### Binary Baseline & Reproducibility
 
 - Prebuilt release archives (`aetherflow-linux-amd64.tar.gz`) must be built against the **Ubuntu 22.04 (`GLIBC 2.35`)** baseline (`.github/workflows/release.yml` and `.github/workflows/ci.yml`) so dynamically linked binaries run across Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13, and Kali Linux.
-- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af`).
-- Release archives package both `aetherflow-api` and `af` (`./af` and `./bin/af`), canonical `config/`, `packages/`, `deploy/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
+- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend`).
+- Release archives package `aetherflow-api`, `af` (`./af` and `./bin/af`), and `speedtest-backend` (`./speedtest-backend` and `./bin/speedtest-backend`), canonical `config/`, `packages/`, `deploy/`, and `.version`, accompanied by `SHA256SUMS` and GitHub build provenance attestations.
 
 ### Fresh Installation (`setup/AetherFlow-Setup`)
 
@@ -236,7 +236,7 @@ sudo sqlite3 /var/lib/aetherflow/aetherflow.sqlite \
 
 ## Rollback Plan
 
-> Do **not** remove `AES_MASTER_KEY`, `JWT_SECRET`, or `ALLOWED_HOSTS`, and do **not** downgrade encryption or authentication to plaintext/fail-open modes. Preserve the original encryption key during rollback. Missing-secret handling is not uniformly fail-closed: the current AES initializer permits an unset key unless the compatibility variable `GIN_MODE=release` is set, while an unset JWT secret produces a process-local key. Explicitly validate production configuration rather than relying on startup rejection.
+> Do **not** remove `AES_MASTER_KEY`, `JWT_SECRET`, or `ALLOWED_HOSTS`, and do **not** downgrade encryption or authentication to plaintext/fail-open modes. Preserve the original encryption key during rollback. In v4.0.0, `af-db::init_aes_key` fails closed whenever `AES_MASTER_KEY` is missing or malformed under `AETHERFLOW_ENV=production` / `AETHERFLOW_ENV=release` (or legacy `GIN_MODE=release`), and `af-api` (`validate_startup_jwt_secret`) fails closed at startup whenever `JWT_SECRET` is unset or shorter than `32` bytes. Always explicitly validate `/etc/aetherflow/aetherflow.env` before and after rollback.
 
 
 If an issue is encountered after deployment, execute an atomic rollback to `.previous_release` with WAL-safe database integrity verification:

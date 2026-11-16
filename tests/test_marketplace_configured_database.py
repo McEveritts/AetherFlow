@@ -1,13 +1,16 @@
 """Exercise configured database recovery against private, socket-only PostgreSQL."""
+import contextlib
 import json
 import os
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from installer_test_helpers import common_functions
 
 
@@ -97,6 +100,7 @@ class ConfiguredPostgreSQLRecovery(unittest.TestCase):
         wrapper_directory = self.workspace / 'bin'
         wrapper_directory.mkdir()
         wrapper = f'''#!/usr/bin/env python3
+import contextlib
 import json, os, sys
 from pathlib import Path
 with open(os.environ['AF_TEST_COMMANDS'], 'a') as output:
@@ -407,6 +411,7 @@ LOGFILE="$2/application.log"
 
     def test_mysql_and_mariadb_keep_existing_dump_restore_contract(self):
         wrapper = '''#!/usr/bin/env python3
+import contextlib
 import json, os, sys
 from pathlib import Path
 root = Path(os.environ['AF_TEST_ROOT'])
@@ -452,12 +457,12 @@ else:
             with self.subTest(backend=backend):
                 if self.backup.exists():
                     shutil.rmtree(self.backup)
-                with sqlite3.connect(self.database) as database:
+                with contextlib.closing(sqlite3.connect(self.database)) as database, database:
                     database.execute('CREATE TABLE IF NOT EXISTS retained(value text)')
                     database.execute('DELETE FROM retained')
                     database.execute("INSERT INTO retained VALUES ('before')")
                 self.helper('backup_configured_database', backend)
-                with sqlite3.connect(self.database) as database:
+                with contextlib.closing(sqlite3.connect(self.database)) as database, database:
                     database.execute("UPDATE retained SET value='after'")
                     database.execute('CREATE TABLE migration_only(value integer)')
                 for suffix in ('-wal', '-shm'):
@@ -465,7 +470,7 @@ else:
                 self.helper('restore_configured_database', backend)
                 for suffix in ('-wal', '-shm'):
                     self.assertFalse(Path(str(self.database) + suffix).exists())
-                with sqlite3.connect(self.database) as database:
+                with contextlib.closing(sqlite3.connect(self.database)) as database:
                     self.assertEqual(database.execute('SELECT value FROM retained').fetchone()[0], 'before')
                     self.assertIsNone(database.execute("SELECT name FROM sqlite_master WHERE name='migration_only'").fetchone())
 

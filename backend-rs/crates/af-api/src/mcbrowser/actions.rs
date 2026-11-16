@@ -1169,6 +1169,7 @@ fn check_compression_ratio(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preflight_authorize_and_check_destination_entry(
     conn: &Connection,
     _bfs: &BrowserFs,
@@ -1882,11 +1883,11 @@ fn is_zip_unix_symlink_or_special(unix_mode: Option<u32>) -> bool {
     let Some(mode) = unix_mode else {
         return false;
     };
-    let file_type = mode & (libc::S_IFMT as u32);
+    let file_type = mode & libc::S_IFMT;
     if file_type == 0 {
         return false;
     }
-    file_type != (libc::S_IFREG as u32) && file_type != (libc::S_IFDIR as u32)
+    file_type != libc::S_IFREG && file_type != libc::S_IFDIR
 }
 
 #[derive(Debug, Clone)]
@@ -2098,6 +2099,7 @@ fn is_allowed_tar_entry_type(entry_type: tar::EntryType) -> Result<Option<bool>,
     )))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preflight_tar_archive(
     conn: &Connection,
     bfs: &BrowserFs,
@@ -2414,10 +2416,8 @@ fn rollback_partial_extraction(
     match bfs.remove_tree_with_size(destination_dir) {
         Ok(removed_bytes) => {
             let to_release = removed_bytes.min(reserved_quota_bytes);
-            if to_release > 0 {
-                if release_user_quota_conn(conn, user_id, to_release).is_err() {
-                    return false;
-                }
+            if to_release > 0 && release_user_quota_conn(conn, user_id, to_release).is_err() {
+                return false;
             }
             removed_bytes >= reserved_quota_bytes
         }

@@ -87,9 +87,13 @@ fn replace_verified_recovery_codes(
     encrypted_secret: &str,
     password_hash: &str,
     code: &str,
-    password_verified: bool,
+    password_ok: bool,
 ) -> anyhow::Result<Option<Vec<String>>> {
-    let transaction = conn.unchecked_transaction()?;
+    if !password_ok || code.trim().is_empty() {
+        return Ok(None);
+    }
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let current: (String, bool, String) = transaction.query_row(
         "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
         params![user_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
@@ -97,8 +101,14 @@ fn replace_verified_recovery_codes(
     if !current.1 || current.0 != encrypted_secret || current.2 != password_hash {
         return Ok(None);
     }
-    let secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
-    if !password_verified && !crate::auth::consume_totp_code(&transaction, user_id, &secret, code) {
+    let secret = if current.0.is_empty() {
+        String::new()
+    } else {
+        af_db::decrypt_key(&current.0)?
+    };
+    if !crate::auth::consume_totp_code(&transaction, user_id, &secret, code)
+        && !crate::auth::validate_recovery_code(&transaction, user_id, code)
+    {
         return Ok(None);
     }
     let codes = generate_recovery_codes();
@@ -112,11 +122,11 @@ pub async fn regenerate_2fa_recovery_codes(
     headers: HeaderMap,
     Json(req): Json<RegenerateRecoveryReq>,
 ) -> Response {
-    if req.code.trim().is_empty() && req.password.is_empty() {
+    if req.code.trim().is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
-            "A valid TOTP code is required",
+            "A valid TOTP or recovery code is required",
         );
     }
 
@@ -136,17 +146,22 @@ pub async fn regenerate_2fa_recovery_codes(
         if !totp_enabled {
             return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Two-factor authentication is not enabled");
         }
-        let password_verified = !req.password.is_empty() && !password_hash.is_empty()
-            && crate::auth::verify_password(&req.password, &password_hash);
+        let password_ok = req.password.is_empty()
+            || (!password_hash.is_empty() && crate::auth::verify_password(&req.password, &password_hash));
         let result = (|| -> anyhow::Result<_> {
             let conn = af_db::get_conn()?;
-            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_verified)
+            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_ok)
         })();
         let codes = match result {
             Ok(Some(codes)) => codes,
-            Ok(None) => return api_error(StatusCode::FORBIDDEN,
-                if req.code.trim().is_empty() { "INVALID_CURRENT_PASSWORD" } else { "INVALID_2FA_CODE" },
-                "Invalid verification code or password"),
+            Ok(None) => {
+                let err_code = if !req.password.is_empty() && !password_ok {
+                    "INVALID_CURRENT_PASSWORD"
+                } else {
+                    "INVALID_2FA_CODE"
+                };
+                return api_error(StatusCode::FORBIDDEN, err_code, "Invalid verification code or password");
+            }
             Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to regenerate recovery codes"),
         };
         let ip = extract_client_ip(&headers);
@@ -269,28 +284,54 @@ pub async fn update_notification_rule(
     let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(ref name) = req.name {
-        if !name.is_empty() {
-            bind_params.push(Box::new(name.clone()));
-            set_clauses.push(format!("name = ?{}", bind_params.len()));
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Rule name must be between 1 and 128 characters",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("name = ?{}", bind_params.len()));
     }
     if let Some(ref ct) = req.condition_type {
-        if !ct.is_empty() {
-            bind_params.push(Box::new(ct.clone()));
-            set_clauses.push(format!("condition_type = ?{}", bind_params.len()));
+        let trimmed = ct.trim();
+        let valid_types = ["disk_usage", "cpu_usage", "memory_usage", "service_down"];
+        if !valid_types.contains(&trimmed) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("condition_type = ?{}", bind_params.len()));
     }
     if let Some(ref cv) = req.condition_value {
-        if !cv.is_empty() {
-            bind_params.push(Box::new(cv.clone()));
-            set_clauses.push(format!("condition_value = ?{}", bind_params.len()));
+        let trimmed = cv.trim();
+        if trimmed.is_empty() || trimmed.len() > 128 {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "condition_value must be non-empty",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("condition_value = ?{}", bind_params.len()));
     }
     if let Some(ref lvl) = req.level {
-        if !lvl.is_empty() {
-            bind_params.push(Box::new(lvl.clone()));
-            set_clauses.push(format!("level = ?{}", bind_params.len()));
+        let trimmed = lvl.trim();
+        let valid_levels = ["info", "warning", "critical", "error"];
+        if !valid_levels.contains(&trimmed) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid level. Allowed: info, warning, critical, error",
+            );
         }
+        bind_params.push(Box::new(trimmed.to_string()));
+        set_clauses.push(format!("level = ?{}", bind_params.len()));
     }
     if let Some(enabled) = req.enabled {
         bind_params.push(Box::new(enabled));
@@ -321,15 +362,15 @@ pub async fn update_notification_rule(
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = bind_params.iter().map(|b| b.as_ref()).collect();
-    if conn.execute(&query, param_refs.as_slice()).is_err() {
-        return api_error(
+    match conn.execute(&query, param_refs.as_slice()) {
+        Ok(0) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Rule not found"),
+        Ok(_) => Json(serde_json::json!({ "message": "Rule updated" })).into_response(),
+        Err(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to update rule",
-        );
+        ),
     }
-
-    Json(serde_json::json!({ "message": "Rule updated" })).into_response()
 }
 
 pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
@@ -356,6 +397,55 @@ pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
 // 6–8. Notification Channels CRUD & Test (`/notifications/channels`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn validate_notification_channel_config(
+    channel_type: &str,
+    cfg: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(obj) = cfg.as_object() else {
+        return Err("Channel config must be a JSON object".to_string());
+    };
+    let url_str = obj
+        .get("url")
+        .or_else(|| obj.get("webhook_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    match channel_type {
+        "telegram" => {
+            let bot_token = obj
+                .get("bot_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let chat_id = obj
+                .get("chat_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if bot_token.is_empty() || chat_id.is_empty() {
+                return Err("Telegram channel requires non-empty bot_token and chat_id".to_string());
+            }
+            if bot_token.bytes().any(|b| b <= 0x20 || b >= 0x7f || b == b'/' || b == b'?') {
+                return Err("Invalid Telegram bot_token format".to_string());
+            }
+            Ok(())
+        }
+        "discord" | "slack" | "gotify" | "webhook" | "custom" | "email" => {
+            if url_str.is_empty() {
+                return Err(format!(
+                    "{channel_type} channel requires a non-empty webhook url"
+                ));
+            }
+            parse_webhook_url(url_str).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        _ => Err(
+            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email, telegram, custom"
+                .to_string(),
+        ),
+    }
+}
+
 pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> Response {
     if req.name.trim().is_empty() || req.channel_type.trim().is_empty() || req.config.is_null() {
         return api_error(
@@ -372,14 +462,29 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email",
+            "Invalid channel type. Allowed: discord, slack, gotify, webhook, email, telegram, custom",
         );
     }
 
-    let config_str = match &req.config {
-        serde_json::Value::String(s) => s.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    let parsed_cfg: serde_json::Value = match &req.config {
+        serde_json::Value::String(s) => match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Channel config must be valid JSON",
+                );
+            }
+        },
+        other => other.clone(),
     };
+
+    if let Err(msg) = validate_notification_channel_config(&req.channel_type, &parsed_cfg) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", &msg);
+    }
+
+    let config_str = serde_json::to_string(&parsed_cfg).unwrap_or_else(|_| "{}".to_string());
 
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
@@ -785,11 +890,11 @@ pub async fn dispatch_to_channel(
                     channel.id,
                     &channel.channel_type,
                     notification_id,
-                    "delivered",
-                    1,
-                    "",
+                    "failed",
+                    0,
+                    "missing email webhook url",
                 );
-                return Ok(());
+                anyhow::bail!("missing email webhook url");
             }
             let body = serde_json::json!({
                 "level": level,
@@ -1120,8 +1225,18 @@ mod tests {
             1,
             "JBSWY3DPEHPK3PXP",
             "test-hash",
+            "",
+            true
+        )
+        .unwrap()
+        .is_none());
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_some());
@@ -1138,7 +1253,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_none());
@@ -1147,7 +1262,7 @@ mod tests {
             1,
             "JBSWY3DPEHPK3PXP",
             "stale-password-hash",
-            "",
+            &code,
             true
         )
         .unwrap()
@@ -1173,7 +1288,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .is_err());
         let old: String = conn
@@ -1193,7 +1308,7 @@ mod tests {
             "JBSWY3DPEHPK3PXP",
             "test-hash",
             &code,
-            false
+            true
         )
         .unwrap()
         .is_some());
@@ -1252,5 +1367,20 @@ mod tests {
         }
         assert!(parse_webhook_url("https://example.com/hook").is_ok());
         assert!(parse_webhook_url("https://8.8.8.8/hook").is_ok());
+    }
+
+    #[test]
+    fn channel_config_validation_blocks_ssrf_and_empty_email_relay() {
+        assert!(validate_notification_channel_config(
+            "discord",
+            &serde_json::json!({"url": "http://169.254.169.254/latest/meta-data/"})
+        )
+        .is_err());
+        assert!(validate_notification_channel_config("email", &serde_json::json!({})).is_err());
+        assert!(validate_notification_channel_config(
+            "discord",
+            &serde_json::json!({"url": "https://8.8.8.8/webhook"})
+        )
+        .is_ok());
     }
 }

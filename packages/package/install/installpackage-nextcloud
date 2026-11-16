@@ -20,7 +20,123 @@ PACKAGE_NAME="nextcloud"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8088}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
+if ! declare -F af_logged_stderr >/dev/null 2>&1; then
+    af_logged_stderr() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" 2>/dev/null; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" 2>&"$lock_fd" || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /var/www/nextcloud/config/config.php
@@ -61,14 +177,14 @@ fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Apache, MariaDB, and PHP extensions for Nextcloud..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     apache2 mariadb-server libapache2-mod-php \
     php php-cli php-mysql php-gd php-curl php-zip php-xml php-mbstring php-intl php-bcmath php-gmp \
-    unzip curl openssl ca-certificates >> "$LOGFILE" 2>&1
+    unzip curl openssl ca-certificates
 
-systemctl enable --now mariadb >> "$LOGFILE" 2>&1
-systemctl enable --now apache2 >> "$LOGFILE" 2>&1
+af_logged systemctl enable --now mariadb
+af_logged systemctl enable --now apache2
 
 report_progress 30 "Provisioning MariaDB database for Nextcloud..."
 ADMIN_USER="${MASTER_USER}"
@@ -110,20 +226,20 @@ rollback_web_runtime() {
             fi
         fi
         if [[ "$EXISTING_INSTALL" -eq 1 && -f /var/www/nextcloud/occ ]]; then
-            sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1 || true
+            af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off || true
             if [[ -f "$RUNTIME_BACKUP/0/config/config.php" ]]; then
                 safe_restore_path_from_backup "$RUNTIME_BACKUP/0/config/config.php" /var/www/nextcloud/config/config.php || restore_failed=true
             fi
         fi
-        [[ "$restore_failed" == false ]] && apache2ctl configtest >> "$LOGFILE" 2>&1 && systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+        [[ "$restore_failed" == false ]] && af_logged apache2ctl configtest && af_logged systemctl start apache2 || restore_failed=true
     elif [[ "${INSTALL_COMMITTED:-false}" != true && "$status" -ne 0 && "$APACHE_STOPPED" == true ]]; then
-        systemctl start apache2 >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl start apache2 || restore_failed=true
     fi
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$CREATED_FRESH_DB" == true ]]; then
-        mysql -u root --host=localhost --protocol=SOCKET -e 'DROP DATABASE IF EXISTS nextcloud;' >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged mysql -u root --host=localhost --protocol=SOCKET -e 'DROP DATABASE IF EXISTS nextcloud;' || restore_failed=true
     fi
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$CREATED_FRESH_DB_USER" == true ]]; then
-        mysql -u root --host=localhost --protocol=SOCKET -e "DROP USER IF EXISTS 'nextclouduser'@'localhost';" >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged mysql -u root --host=localhost --protocol=SOCKET -e "DROP USER IF EXISTS 'nextclouduser'@'localhost';" || restore_failed=true
     fi
     [[ -z "${BUILD_DIR:-}" ]] || rm -rf -- "$BUILD_DIR"
     if [[ "$restore_failed" == true ]]; then
@@ -141,9 +257,9 @@ trap 'exit 143' TERM
 report_progress 50 "Downloading and extracting latest Nextcloud Server..."
 BUILD_DIR="$(mktemp -d /var/www/.nextcloud-build.XXXXXX)"
 TMP_ZIP="$BUILD_DIR/nextcloud.zip"
-download_file "https://download.nextcloud.com/server/releases/latest.zip" "$TMP_ZIP" >> "$LOGFILE" 2>&1
+af_logged download_file "https://download.nextcloud.com/server/releases/latest.zip" "$TMP_ZIP"
 mkdir -p /var/www
-unzip -qo "$TMP_ZIP" -d "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged unzip -qo "$TMP_ZIP" -d "$BUILD_DIR"
 stop_systemd_unit apache2
 APACHE_STOPPED=true
 for runtime_index in "${!RUNTIME_PATHS[@]}"; do
@@ -156,11 +272,11 @@ RUNTIME_CHANGED=true
 mkdir -p /var/lib/nextcloud/data
 if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
     if [[ -f /var/www/nextcloud/occ ]]; then
-        sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on >> "$LOGFILE" 2>&1
+        af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on
     fi
-    if ! backup_configured_database "$RUNTIME_BACKUP/database" "$NC_DB_TYPE" "$NC_DB_NAME" "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_SQLITE_PATH" 2>> "$LOGFILE"; then
+    if ! af_logged_stderr backup_configured_database "$RUNTIME_BACKUP/database" "$NC_DB_TYPE" "$NC_DB_NAME" "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_SQLITE_PATH"; then
         if [[ -f /var/www/nextcloud/occ ]]; then
-            sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1 || true
+            af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off || true
         fi
         print_error "Cannot back up Nextcloud database; refusing to migrate"
         exit 1
@@ -168,13 +284,13 @@ if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
 fi
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
 DB_PASS="$(openssl rand -hex 16)"
-mysql -u root --host=localhost --protocol=SOCKET -e 'CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;' >> "$LOGFILE" 2>&1
+af_logged mysql -u root --host=localhost --protocol=SOCKET -e 'CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;'
 CREATED_FRESH_DB=true
-mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+af_logged mysql -u root --host=localhost --protocol=SOCKET <<EOF
 CREATE USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
 EOF
 CREATED_FRESH_DB_USER=true
-mysql -u root --host=localhost --protocol=SOCKET <<EOF >> "$LOGFILE" 2>&1
+af_logged mysql -u root --host=localhost --protocol=SOCKET <<EOF
 GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';
 FLUSH PRIVILEGES;
 EOF
@@ -182,7 +298,7 @@ nextcloud_database_ownership create "$NC_DB_OWNER_FILE" mysql nextcloud localhos
 fi
 
 if [[ "$EXISTING_INSTALL" == 1 && -f /var/www/nextcloud/occ ]]; then
-    sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on >> "$LOGFILE" 2>&1
+    af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on
 fi
 for app_directory in /var/www/nextcloud/apps/*; do
     [[ -d "$app_directory" && ! -L "$app_directory" ]] || continue
@@ -200,17 +316,17 @@ chown -hRP www-data:www-data /var/www/nextcloud /var/lib/nextcloud
 
 report_progress 75 "Running unattended Nextcloud initialization..."
 if [[ "$EXISTING_INSTALL" == 1 ]]; then
-    sudo -u www-data php /var/www/nextcloud/occ upgrade >> "$LOGFILE" 2>&1
-    sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1
+    af_logged sudo -u www-data php /var/www/nextcloud/occ upgrade
+    af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off
 else
 (
 export AF_NEXTCLOUD_DB_PASS="$DB_PASS" AF_NEXTCLOUD_ADMIN_PASS="$ADMIN_PASS"
-sudo --preserve-env=AF_NEXTCLOUD_DB_PASS,AF_NEXTCLOUD_ADMIN_PASS -u www-data php -f /dev/stdin -- maintenance:install \
+af_logged sudo --preserve-env=AF_NEXTCLOUD_DB_PASS,AF_NEXTCLOUD_ADMIN_PASS -u www-data php -f /dev/stdin -- maintenance:install \
     --database "mysql" \
     --database-name "nextcloud" \
     --database-user "nextclouduser" \
     --admin-user "${ADMIN_USER}" \
-    --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1 <<'PHPEOF'
+    --data-dir "/var/lib/nextcloud/data" <<'PHPEOF'
 <?php
 $_SERVER['argv'][0] = '/var/www/nextcloud/occ';
 $_SERVER['argv'][] = '--database-pass=' . getenv('AF_NEXTCLOUD_DB_PASS');
@@ -226,16 +342,16 @@ fi
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
 BASE_DOMAIN="$(get_base_domain || true)"
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost" >> "$LOGFILE" 2>&1
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1" >> "$LOGFILE" 2>&1
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}" >> "$LOGFILE" 2>&1
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)" >> "$LOGFILE" 2>&1
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 4 --value="nextcloud.aether.local" >> "$LOGFILE" 2>&1
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost"
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1"
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}"
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)"
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 4 --value="nextcloud.aether.local"
 if [[ -n "$BASE_DOMAIN" ]]; then
-    sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 5 --value="nextcloud.${BASE_DOMAIN}" >> "$LOGFILE" 2>&1
+    af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 5 --value="nextcloud.${BASE_DOMAIN}"
 fi
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1" >> "$LOGFILE" 2>&1
-sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1" >> "$LOGFILE" 2>&1
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1"
+af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1"
 fi
 
 NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"
@@ -244,7 +360,7 @@ if [[ -n "$NC_VER" ]]; then
 fi
 
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
-(umask 077; write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
+(umask 077; install -d -m 0700 /opt/AetherFlow/logs && chmod 0700 /opt/AetherFlow/logs && write_config_file /opt/AetherFlow/logs/nextcloud_credentials.txt 0600 <<EOF
 Nextcloud Admin User: ${ADMIN_USER}
 Nextcloud Admin Pass: ${ADMIN_PASS}
 Database Name: nextcloud
@@ -257,23 +373,21 @@ fi
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+validate_config_paths /etc/apache2/sites-available/nextcloud.conf
 if [[ -s /etc/apache2/sites-available/nextcloud.conf ]]; then
-    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/nextcloud.conf
+    safe_config_python /etc/apache2/sites-available/nextcloud.conf "${APP_PORT}" <<'NC_VHOST_PYEOF'
+import re, sys
+path, port = sys.argv[1], sys.argv[2]
+existing = safe_read_text(path)
+updated = re.sub(r"(<VirtualHost [^:>]+:)[0-9]+>", rf"\g<1>{port}>", existing)
+if updated != existing:
+    safe_write_text(path, updated, 0o644)
+NC_VHOST_PYEOF
 else
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
-Alias /nextcloud "/var/www/nextcloud/"
-
-<Directory /var/www/nextcloud/>
-    Require all granted
-    AllowOverride All
-    Options FollowSymLinks MultiViews
-    <IfModule mod_dav.c>
-        Dav off
-    </IfModule>
-</Directory>
-
-<VirtualHost *:@AF_APP_PORT@>
+    write_config_file /etc/apache2/sites-available/nextcloud.conf 0644 <<EOF
+<VirtualHost 127.0.0.1:${APP_PORT}>
     DocumentRoot /var/www/nextcloud
+    Alias /nextcloud "/var/www/nextcloud/"
     <Directory /var/www/nextcloud/>
         Require all granted
         AllowOverride All
@@ -286,12 +400,12 @@ Alias /nextcloud "/var/www/nextcloud/"
 EOF
 fi
 
-a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
-a2ensite nextcloud.conf >> "$LOGFILE" 2>&1
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl start apache2 >> "$LOGFILE" 2>&1
+af_logged a2enmod rewrite headers env dir mime
+af_logged a2ensite nextcloud.conf
+af_logged apache2ctl configtest
+af_logged systemctl start apache2
 APACHE_STOPPED=false
-systemctl reload apache2 >> "$LOGFILE" 2>&1
+af_logged systemctl reload apache2
 
 systemctl is-active --quiet apache2
 wait_for_service_ready apache2 "$APP_PORT" /status.php

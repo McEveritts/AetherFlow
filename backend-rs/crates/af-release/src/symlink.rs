@@ -97,7 +97,11 @@ pub fn atomic_replace_symlink(
     create_symlink_or_pointer(&tmp_link, target_dir).map_err(|e| ReleaseError::SymlinkSwap {
         link: current_link.to_path_buf(),
         target: target_dir.to_path_buf(),
-        reason: format!("failed to create temporary symlink {}: {}", tmp_link.display(), e),
+        reason: format!(
+            "failed to create temporary symlink {}: {}",
+            tmp_link.display(),
+            e
+        ),
     })?;
 
     #[cfg(not(unix))]
@@ -137,20 +141,14 @@ fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Re
         Ok(()) => Ok(()),
         Err(_) => {
             // Fallback for unprivileged Windows test environments without Developer Mode symlink privilege
-            fs::write(
-                link_path,
-                format!("AF_SYMLINK:{}\n", target_dir.display()),
-            )
+            fs::write(link_path, format!("AF_SYMLINK:{}\n", target_dir.display()))
         }
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Result<()> {
-    fs::write(
-        link_path,
-        format!("AF_SYMLINK:{}\n", target_dir.display()),
-    )
+    fs::write(link_path, format!("AF_SYMLINK:{}\n", target_dir.display()))
 }
 
 /// Executes Stage 2 Atomic Symlink Swap:
@@ -272,6 +270,19 @@ pub fn cleanup_old_releases(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(".staging.") || name.starts_with(".staging-") {
+            let is_stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
+                .map(|age| age >= std::time::Duration::from_secs(120 * 60))
+                .unwrap_or(false);
+            if is_stale {
+                let _ = fs::remove_dir_all(&path);
+            }
+            continue;
+        }
         if name.starts_with('.') {
             continue;
         }
@@ -314,9 +325,8 @@ pub fn cleanup_old_releases(
         {
             continue;
         }
-        fs::remove_dir_all(&dir).map_err(|e| {
-            ReleaseError::io(format!("pruning old release {}", dir.display()), e)
-        })?;
+        fs::remove_dir_all(&dir)
+            .map_err(|e| ReleaseError::io(format!("pruning old release {}", dir.display()), e))?;
         pruned.push(dir);
     }
 

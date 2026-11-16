@@ -32,7 +32,10 @@ pub const DEFAULT_SENTINEL_THRESHOLD: usize = 5;
 
 /// Regex pattern matching authentication failure indicators and extracting candidate IP strings.
 static AUTH_LOG_IP_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:Failed password|Invalid user|authentication failure).*?\bfrom\s+([0-9a-fA-F:.]+)").unwrap()
+    Regex::new(
+        r"(?i)(?:Failed password|Invalid user|authentication failure).*?\bfrom\s+([0-9a-fA-F:.]+)",
+    )
+    .unwrap()
 });
 
 /// Report produced by [`sentinel_scan_auth_log`].
@@ -69,9 +72,8 @@ pub fn sentinel_scan_auth_log(
         threshold
     };
 
-    let file = File::open(log_path).map_err(|e| {
-        HostBackupError::io(format!("opening auth log {}", log_path.display()), e)
-    })?;
+    let file = File::open(log_path)
+        .map_err(|e| HostBackupError::io(format!("opening auth log {}", log_path.display()), e))?;
 
     let reader = BufReader::new(file);
     let mut scanned_lines = 0usize;
@@ -430,7 +432,10 @@ pub fn inspect_home_disk_space(root: &Path) -> HostBackupResult<Vec<HomeSpaceEnt
     }
 
     let meta = fs::symlink_metadata(&home_dir).map_err(|e| {
-        HostBackupError::io(format!("inspecting home directory {}", home_dir.display()), e)
+        HostBackupError::io(
+            format!("inspecting home directory {}", home_dir.display()),
+            e,
+        )
     })?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return Ok(Vec::new());

@@ -197,22 +197,13 @@ fn rule_matches(rule: &PathRule, normalized_path: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub(super) struct PolicyDocument {
     pub permissions: PolicyPermissions,
     #[serde(default)]
     pub rules: Vec<PathRule>,
     #[serde(default)]
     pub scope: String,
-}
-
-impl Default for PolicyDocument {
-    fn default() -> Self {
-        Self {
-            permissions: PolicyPermissions::default(),
-            rules: Vec::new(),
-            scope: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1261,6 +1252,7 @@ pub(super) fn load_user_preferences_conn(
 ) -> Result<PreferencesDocument, McBrowserError> {
     ensure_policy_tables(conn)?;
 
+    #[allow(clippy::type_complexity)]
     let row: Option<(String, String, String, bool, bool, String, Option<String>)> = conn
         .query_row(
             "SELECT view_mode, sort_field, sort_direction, show_hidden, single_click, locale, extra_json \

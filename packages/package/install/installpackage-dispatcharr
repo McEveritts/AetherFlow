@@ -34,7 +34,123 @@ APP_PORT_SUPPLIED="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
 APP_PORT="${APP_PORT_SUPPLIED:-9191}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
+if ! declare -F af_logged_stderr >/dev/null 2>&1; then
+    af_logged_stderr() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" 2>/dev/null; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" 2>&"$lock_fd" || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 BUILD_DIR=""
 BACKUP_DIR=""
@@ -76,11 +192,11 @@ cleanup_dispatcharr() {
                 if [[ -f "${BACKUP_DIR}/$(basename "${service_file}")" ]]; then
                     safe_restore_path_from_backup "${BACKUP_DIR}/$(basename "${service_file}")" "${service_file}" || restore_failed=true
                 else
-                    systemctl disable "$(basename "${service_file}")" >> "$LOGFILE" 2>&1 || restore_failed=true
+                    af_logged systemctl disable "$(basename "${service_file}")" || restore_failed=true
                     rm -f -- "${service_file}" || restore_failed=true
                 fi
             done
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ -n "$BACKUP_DIR" && -f "$BACKUP_DIR/.af-database-ready" ]]; then
             if ! restore_postgresql_database "$BACKUP_DIR" dispatcharr; then
@@ -95,7 +211,7 @@ cleanup_dispatcharr() {
             fi
         fi
         if [[ "$restore_failed" == false && "${SERVICES_STOPPED}" -eq 1 && "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
-            systemctl start "${ACTIVE_UNITS[@]}" >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start "${ACTIVE_UNITS[@]}" || restore_failed=true
         fi
     fi
     if [[ -n "${BUILD_DIR}" && -d "${BUILD_DIR}" ]]; then
@@ -230,20 +346,20 @@ ADMIN_PASS="${MASTER_PASS}"
 ADMIN_EMAIL="${ADMIN_USER}@localhost"
 
 report_progress 20 "Installing system dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+if ! DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
     curl wget git jq ca-certificates build-essential pkg-config \
     libssl-dev libpcre2-dev python3 python3-venv python3-dev python3-pip \
-    libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps >> "$LOGFILE" 2>&1; then
+    libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps; then
     # Fallback if libpcre2-dev is unavailable on older Debian/Ubuntu
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
         curl wget git jq ca-certificates build-essential pkg-config \
         libssl-dev libpcre3-dev python3 python3-venv python3-dev python3-pip \
-        libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps >> "$LOGFILE" 2>&1 || \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps || \
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
         curl wget git jq ca-certificates build-essential pkg-config \
         libssl-dev python3 python3-venv python3-dev python3-pip \
-        libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps >> "$LOGFILE" 2>&1
+        libpq-dev redis-server postgresql postgresql-contrib openssl ffmpeg streamlink procps
 fi
 
 report_progress 30 "Provisioning Node.js runtime for web frontend build..."
@@ -287,7 +403,7 @@ for service_file in "${SERVICE_FILES[@]}"; do
 done
 CONFIG_CHANGED=1
 
-systemctl enable --now postgresql redis-server >> "$LOGFILE" 2>&1 || true
+af_logged systemctl enable --now postgresql redis-server || true
 
 # Wait for PostgreSQL to be ready (up to 30s)
 PG_READY=false
@@ -313,7 +429,7 @@ printf '%s\n' "${DB_PASS}" > "${DB_PASS_FILE}"
 chown root:root "${DB_PASS_FILE}"
 chmod 600 "${DB_PASS_FILE}"
 
-su - postgres -c 'psql -v ON_ERROR_STOP=1' >> "$LOGFILE" 2>&1 <<EOF
+af_logged su - postgres -c 'psql -v ON_ERROR_STOP=1' <<EOF
 BEGIN;
 DO \$aetherflow\$
 BEGIN
@@ -325,10 +441,10 @@ END;
 ALTER USER dispatcharr WITH PASSWORD '${DB_PASS}';
 COMMIT;
 EOF
-su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='dispatcharr'\" | grep -q 1 || psql -c \"CREATE DATABASE dispatcharr OWNER dispatcharr;\"" >> "$LOGFILE" 2>&1
-su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE dispatcharr TO dispatcharr;\"" >> "$LOGFILE" 2>&1
-su - postgres -c "psql -c \"ALTER DATABASE dispatcharr OWNER TO dispatcharr;\"" >> "$LOGFILE" 2>&1
-su - postgres -c "psql -d dispatcharr -c \"ALTER SCHEMA public OWNER TO dispatcharr;\"" >> "$LOGFILE" 2>&1
+af_logged su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='dispatcharr'\" | grep -q 1 || psql -c \"CREATE DATABASE dispatcharr OWNER dispatcharr;\""
+af_logged su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE dispatcharr TO dispatcharr;\""
+af_logged su - postgres -c "psql -c \"ALTER DATABASE dispatcharr OWNER TO dispatcharr;\""
+af_logged su - postgres -c "psql -d dispatcharr -c \"ALTER SCHEMA public OWNER TO dispatcharr;\""
 
 SECRET_FILE="${CONFIG_DIR}/secret_key"
 if [[ -f "${SECRET_FILE}" ]]; then
@@ -354,12 +470,12 @@ fi
 [[ "${LATEST_TAG}" == v* ]] || LATEST_TAG="v${LATEST_TAG}"
 
 BUILD_DIR="$(mktemp -d "${INSTALL_DIR}.af-build.XXXXXX")"
-git clone --depth 1 --branch "${LATEST_TAG}" https://github.com/Dispatcharr/Dispatcharr.git "${BUILD_DIR}" >> "$LOGFILE" 2>&1
+af_logged git clone --depth 1 --branch "${LATEST_TAG}" https://github.com/Dispatcharr/Dispatcharr.git "${BUILD_DIR}"
 SERVICES_STOPPED=1
 if [[ "${#ACTIVE_UNITS[@]}" -gt 0 ]]; then
-    systemctl stop "${ACTIVE_UNITS[@]}" >> "$LOGFILE" 2>&1
+    af_logged systemctl stop "${ACTIVE_UNITS[@]}"
 fi
-su - postgres -c 'pg_dump --format=custom dispatcharr' > "${BACKUP_DIR}/db.dump" 2>> "$LOGFILE"
+af_logged_stderr su - postgres -c 'pg_dump --format=custom dispatcharr' > "${BACKUP_DIR}/db.dump"
 backup_postgresql_database "$BACKUP_DIR" dispatcharr
 prepare_dispatcharr_data
 if [[ -d "$DATA_DIR" ]]; then
@@ -447,15 +563,15 @@ ENV_FILE_TMP=""
 ln -sfn "${CONFIG_DIR}/dispatcharr.env" "${INSTALL_DIR}/.env"
 
 report_progress 60 "Installing Python virtualenv and backend dependencies..."
-"${PYTHON_BIN}" -m venv "${INSTALL_DIR}/env" >> "$LOGFILE" 2>&1
-"${INSTALL_DIR}/env/bin/pip" install --upgrade pip wheel setuptools daphne gunicorn celery whitenoise >> "$LOGFILE" 2>&1
+af_logged "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/env"
+af_logged "${INSTALL_DIR}/env/bin/pip" install --upgrade pip wheel setuptools daphne gunicorn celery whitenoise
 if [[ -f "${INSTALL_DIR}/pyproject.toml" ]]; then
     # Run manage.py and services from this source tree. A regular wheel install
     # duplicates namespace apps such as apps.api in site-packages, which Django
     # rejects as having multiple filesystem locations.
-    "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu --editable "${INSTALL_DIR}" >> "$LOGFILE" 2>&1
+    af_logged "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu --editable "${INSTALL_DIR}"
 elif [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
-    "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r "${INSTALL_DIR}/requirements.txt" >> "$LOGFILE" 2>&1
+    af_logged "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r "${INSTALL_DIR}/requirements.txt"
 else
     log_error "Dispatcharr release is missing its Python dependency manifest."
     exit 1
@@ -467,9 +583,9 @@ fi
 if [[ -d "${INSTALL_DIR}/frontend" && -f "${INSTALL_DIR}/frontend/package.json" ]]; then
     report_progress 75 "Building ${APP_NAME} frontend web bundle..."
     pushd "${INSTALL_DIR}/frontend" >/dev/null
-    node_build npm install --legacy-peer-deps >> "$LOGFILE" 2>&1
+    af_logged node_build npm install --legacy-peer-deps
     rm -rf "${INSTALL_DIR}/frontend/dist"
-    node_build npm run build >> "$LOGFILE" 2>&1
+    af_logged node_build npm run build
     popd >/dev/null
 fi
 
@@ -657,17 +773,17 @@ chmod 755 "${INSTALL_DIR}" "${INSTALL_DIR}/env"
 
 report_progress 85 "Running database migrations and provisioning master account..."
 if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
-    su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py migrate --noinput" >> "$LOGFILE" 2>&1
-    (
+    af_logged su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py migrate --noinput"
+    af_logged bash -euc '
         set -a
-        source "${CONFIG_DIR}/dispatcharr.env"
+        source "$1/dispatcharr.env"
         set +a
-        cd "${INSTALL_DIR}"
-        "${INSTALL_DIR}/env/bin/python" manage.py collectstatic --noinput --clear
-    ) >> "$LOGFILE" 2>&1
+        cd "$2"
+        "$2/env/bin/python" manage.py collectstatic --noinput --clear
+    ' _ "${CONFIG_DIR}" "${INSTALL_DIR}"
     AF_ADMIN_USER="${ADMIN_USER}" AF_ADMIN_PASS="${AF_CONFIG_PASS:-$ADMIN_PASS}" AF_ADMIN_EMAIL="${ADMIN_EMAIL}" \
         AF_KEEP_EXISTING_SECRETS="${AF_KEEP_EXISTING_SECRETS:-1}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-}" \
-        su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
+        af_logged su -s /bin/bash "${APP_USER}" -c "set -a; source '${CONFIG_DIR}/dispatcharr.env'; set +a; cd '${INSTALL_DIR}' && '${INSTALL_DIR}/env/bin/python' manage.py shell" <<'PYEOF'
 import os
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -757,8 +873,8 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now dispatcharr.service dispatcharr-celery.service dispatcharr-celerybeat.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now dispatcharr.service dispatcharr-celery.service dispatcharr-celerybeat.service
 systemctl is-active --quiet dispatcharr.service
 systemctl is-active --quiet dispatcharr-celery.service
 systemctl is-active --quiet dispatcharr-celerybeat.service

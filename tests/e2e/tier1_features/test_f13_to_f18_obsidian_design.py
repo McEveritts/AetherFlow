@@ -110,7 +110,16 @@ class TestF15DesktopExpandableRail(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        self.assert_true(bool(sidebar and "isCollapsed ? 'md:w-16' : 'md:w-52'" in sidebar and "handleToggleCollapse" in sidebar and 'aria-expanded={!isCollapsed}' in sidebar and '/img/aetherflow-mark.svg' in sidebar), "F15: Sidebar must expose the logo toggle and distinct collapsed/expanded desktop widths")
+        has_widths_and_aria = bool(
+            sidebar
+            and (
+                ("isCollapsed ? 'md:w-16' : 'md:w-52'" in sidebar and "aria-expanded={!isCollapsed}" in sidebar)
+                or ("isExpanded ? 'md:w-64' : 'md:w-[4.5rem]'" in sidebar and "aria-expanded={isExpanded}" in sidebar)
+            )
+            and "handleToggleCollapse" in sidebar
+            and "/img/aetherflow-mark.svg" in sidebar
+        )
+        self.assert_true(has_widths_and_aria, "F15: Sidebar must expose the logo toggle and distinct collapsed/expanded desktop widths")
 
 class TestF15TouchTargetEnforcement(TestCase):
     def __init__(self):

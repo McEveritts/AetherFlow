@@ -88,7 +88,7 @@ function _depends() {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
-		for opt_pkg in dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
+		for opt_pkg in clang mold dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
 			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
 		done
 	elif [[ ${DISTRO} == Ubuntu ]]; then
@@ -106,7 +106,7 @@ function _depends() {
 		elif apt-cache show openjdk-8-jre-headless >/dev/null 2>&1; then
 			avail_opt_pkgs+=("openjdk-8-jre-headless")
 		fi
-		for opt_pkg in rar unrar ttf-mscorefonts-installer; do
+		for opt_pkg in clang mold rar unrar ttf-mscorefonts-installer; do
 			if apt-cache show "${opt_pkg}" >/dev/null 2>&1; then
 				avail_opt_pkgs+=("${opt_pkg}")
 			fi
@@ -173,8 +173,10 @@ case "${1:-}" in
 		;;
 	status)
 		shift
-		if [[ -x /opt/AetherFlow/current/af ]]; then
-			exec /opt/AetherFlow/current/af status "$@"
+		if [[ $# -eq 0 && -x /opt/AetherFlow/current/bin/af ]]; then
+			exec /opt/AetherFlow/current/bin/af status
+		elif [[ $# -eq 0 && -x /opt/AetherFlow/current/af ]]; then
+			exec /opt/AetherFlow/current/af status
 		fi
 		exec systemctl status aetherflow-api aetherflow-runner "$@"
 		;;

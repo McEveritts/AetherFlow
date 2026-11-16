@@ -20,7 +20,69 @@ PACKAGE_NAME="librespeed"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8988}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /opt/librespeed/settings.toml /opt/librespeed/.af-directory-check
@@ -28,8 +90,8 @@ validate_config_paths /opt/librespeed/settings.toml
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for LibreSpeed..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 curl tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq python3 curl tar ca-certificates
 
 if ! id -u librespeed >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/librespeed --shell /usr/sbin/nologin librespeed
@@ -45,42 +107,138 @@ case "$ARCH" in
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-report_progress 35 "Resolving latest speedtest-go release..."
-LS_VERSION="$(github_latest_tag "librespeed/speedtest-go" "1.1.6")"
-LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
+TARGET_VER_CLEAN="${AF_TARGET_VERSION:-}"
+TARGET_VER_CLEAN="${TARGET_VER_CLEAN#v}"
 
-report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
+LOCAL_SPEEDTEST_BIN=""
+for candidate in \
+    "${AF_SPEEDTEST_BACKEND_BIN:-}" \
+    "/opt/AetherFlow/current/bin/speedtest-backend" \
+    "/opt/AetherFlow/current/speedtest-backend" \
+    "/usr/local/lib/aetherflow/speedtest-backend"; do
+    if [[ -n "$candidate" && ! -L "$candidate" && -f "$candidate" && -x "$candidate" ]]; then
+        if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+            cand_dir="$(dirname "$candidate")"
+            read -r f_uid f_perm < <(stat -c '%u %a' "$candidate" 2>/dev/null || printf '65534 777')
+            read -r d_uid d_perm < <(stat -c '%u %a' "$cand_dir" 2>/dev/null || printf '65534 777')
+            if [[ "$f_uid" != "0" || "$d_uid" != "0" ]] || (( (8#$f_perm & 022) != 0 )) || (( (8#$d_perm & 022) != 0 )); then
+                log_warn "Skipping untrusted local speedtest-backend candidate (must be root-owned and non-group/world-writable): $candidate"
+                continue
+            fi
+        fi
+        if [[ -n "$TARGET_VER_CLEAN" ]]; then
+            CANDIDATE_VER="$("$candidate" --version 2>/dev/null | sed -n 's/^speedtest-backend[[:space:]]\{1,\}\([0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n1 || true)"
+            CANDIDATE_VER="${CANDIDATE_VER#v}"
+            if [[ "$CANDIDATE_VER" != "$TARGET_VER_CLEAN" ]]; then
+                continue
+            fi
+        fi
+        LOCAL_SPEEDTEST_BIN="$candidate"
+        break
+    fi
+done
+
+LS_VERSION="${AF_TARGET_VERSION:-}"
 TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
-download_file "$LS_URL" "$TMP_TAR" >> "$LOGFILE" 2>&1
-stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "" "${PACKAGE_NAME}" "." "" "preserve"
-rm -f "$TMP_TAR"
+if [[ -n "$LOCAL_SPEEDTEST_BIN" ]]; then
+    report_progress 35 "Staging local native LibreSpeed binary..."
+    TMP_STAGE_DIR=$(mktemp -d /tmp/librespeed-stage-XXXXXX)
+    cp --no-dereference "$LOCAL_SPEEDTEST_BIN" "${TMP_STAGE_DIR}/speedtest-backend"
+    chmod 755 "${TMP_STAGE_DIR}/speedtest-backend"
+    report_progress 60 "Packaging staged LibreSpeed binary..."
+    tar -czf "$TMP_TAR" -C "$TMP_STAGE_DIR" speedtest-backend
+    rm -rf -- "$TMP_STAGE_DIR"
+else
+    report_progress 35 "Resolving speedtest-backend release..."
+    if [[ -n "$TARGET_VER_CLEAN" ]]; then
+        LS_VERSION="v${TARGET_VER_CLEAN}"
+        LS_VER_CLEAN="$TARGET_VER_CLEAN"
+    elif [[ -f /opt/AetherFlow/current/.version ]]; then
+        SLOT_VER="$(sed -n '1s/^[[:space:]]*v\?\([0-9][0-9A-Za-z._-]*\)[[:space:]]*$/\1/p' /opt/AetherFlow/current/.version || true)"
+        if [[ -n "$SLOT_VER" ]]; then
+            LS_VERSION="v${SLOT_VER}"
+            LS_VER_CLEAN="$SLOT_VER"
+        else
+            LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
+            LS_VER_CLEAN="${LS_VERSION#v}"
+        fi
+    else
+        LS_VERSION="$(github_latest_tag "McEveritts/AetherFlow" "4.0.0")"
+        LS_VER_CLEAN="${LS_VERSION#v}"
+    fi
+    if [[ -z "${AF_FIXTURE_VERSION:-}" && "$LS_VER_CLEAN" =~ ^[0-3]\. ]]; then
+        V4_TAG="$(curl --proto '=https' --proto-redir '=https' -fsSL "https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=20" 2>/dev/null \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\(v\([4-9]\|[1-9][0-9]\{1,\}\)\.[0-9]\{1,\}\.[0-9]\{1,\}[^"]*\)".*/\1/p' | head -n1 || true)"
+        if [[ -n "$V4_TAG" ]]; then
+            LS_VERSION="$V4_TAG"
+            LS_VER_CLEAN="${V4_TAG#v}"
+        else
+            LS_VERSION="v4.0.0"
+            LS_VER_CLEAN="4.0.0"
+        fi
+    fi
+    LS_ARCHIVE_NAME="speedtest-backend_${LS_VER_CLEAN}_linux_${LS_ARCH}.tar.gz"
+    LS_URL="https://github.com/McEveritts/AetherFlow/releases/download/v${LS_VER_CLEAN}/${LS_ARCHIVE_NAME}"
+    report_progress 60 "Downloading and verifying LibreSpeed ${LS_VER_CLEAN}..."
+    af_logged download_file "$LS_URL" "$TMP_TAR"
 
-if [[ -f /opt/librespeed/speedtest-backend ]]; then
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        VERIFY_PROVENANCE_PY=""
+        for vp_candidate in \
+            "${AF_VERIFY_PROVENANCE_PY:-}" \
+            "${SELF_DIR}/../../../deploy/verify-provenance.py" \
+            "/opt/AetherFlow/current/deploy/verify-provenance.py" \
+            "/opt/AetherFlow/deploy/verify-provenance.py"; do
+            if [[ -n "$vp_candidate" && -f "$vp_candidate" ]]; then
+                VERIFY_PROVENANCE_PY="$vp_candidate"
+                break
+            fi
+        done
+        if [[ -z "$VERIFY_PROVENANCE_PY" ]]; then
+            rm -f -- "$TMP_TAR"
+            print_error "Refusing unverified speedtest-backend archive: deploy/verify-provenance.py not found"
+            exit 1
+        fi
+        LS_SHA256="$(sha256sum "$TMP_TAR" | awk '{print $1}')"
+        TMP_BUNDLE="$(mktemp /tmp/librespeed-bundle-XXXXXX.sigstore.json)"
+        BUNDLE_ARGS=()
+        if af_logged curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 "${LS_URL}.sigstore.json" -o "$TMP_BUNDLE" && [[ -s "$TMP_BUNDLE" ]]; then
+            BUNDLE_ARGS=(--bundle-file "$TMP_BUNDLE")
+        else
+            log_warn "Sidecar .sigstore.json unavailable for ${LS_ARCHIVE_NAME}; falling back to GitHub Attestations API verification"
+        fi
+        if ! af_logged python3 "$VERIFY_PROVENANCE_PY" \
+            --repo "McEveritts/AetherFlow" \
+            --digest "$LS_SHA256" \
+            --artifact-name "$LS_ARCHIVE_NAME" \
+            --tag "v${LS_VER_CLEAN}" \
+            "${BUNDLE_ARGS[@]}"; then
+            rm -f -- "$TMP_TAR" "$TMP_BUNDLE"
+            print_error "Sigstore SLSA provenance verification failed for ${LS_ARCHIVE_NAME}"
+            exit 1
+        fi
+        rm -f -- "$TMP_BUNDLE"
+    fi
+fi
+stage_app_archive "$TMP_TAR" "/opt/librespeed" "speedtest-backend|speedtest-go" "/etc/aetherflow/librespeed-proxy-token.conf" "${PACKAGE_NAME}" "." "" "preserve"
+rm -f -- "$TMP_TAR"
+
+if [[ -f /opt/librespeed/speedtest-backend && ! -L /opt/librespeed/speedtest-backend ]]; then
     chmod 755 /opt/librespeed/speedtest-backend
     ln -sfn /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go
-elif [[ -f /opt/librespeed/speedtest-go ]]; then
-    chmod 755 /opt/librespeed/speedtest-go
-    ln -sfn /opt/librespeed/speedtest-go /opt/librespeed/speedtest-backend
 else
-    print_error "LibreSpeed binary not found after extracting archive"
+    print_error "Native Rust speedtest-backend binary not found after extracting archive"
     exit 1
 fi
+
+BIN_VERSION=""
+if [[ -x /opt/librespeed/speedtest-backend ]]; then
+    BIN_VERSION="$(/opt/librespeed/speedtest-backend --version 2>/dev/null | sed -n 's/^speedtest-backend[[:space:]]\{1,\}\([0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n1 || true)"
+fi
+LS_VERSION="${BIN_VERSION:-${LS_VERSION:-4.0.0}}"
 queue_app_version /opt/librespeed/.af-version "${LS_VERSION#v}"
 
 report_progress 72 "Applying Obsidian V2 theme assets to LibreSpeed..."
-mkdir -p /opt/librespeed/assets
-TMP_SRC_DIR=$(mktemp -d /tmp/librespeed-src-XXXXXX)
-TMP_SRC_TAR=$(mktemp /tmp/librespeed-src-XXXXXX.tar.gz)
-LS_SOURCE_URL="https://github.com/librespeed/speedtest-go/archive/refs/tags/v${LS_VERSION}.tar.gz"
-if download_file "$LS_SOURCE_URL" "$TMP_SRC_TAR" >> "$LOGFILE" 2>&1 && \
-    verify_download_sha256 "$TMP_SRC_TAR" "$PACKAGE_NAME" "$LS_SOURCE_URL" >> "$LOGFILE" 2>&1 && \
-    tar -xzf "$TMP_SRC_TAR" -C "$TMP_SRC_DIR" --strip-components=1 >> "$LOGFILE" 2>&1; then
-    if [[ -d "${TMP_SRC_DIR}/web/assets" ]]; then
-        cp -rf "${TMP_SRC_DIR}/web/assets/." /opt/librespeed/assets/
-    fi
-fi
-rm -f -- "$TMP_SRC_TAR" "$TMP_SRC_TAR.sha256" "$TMP_SRC_TAR.sha256sum"
-
 OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
 if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/current/packages/package/assets/librespeed" ]]; then
     OBSIDIAN_ASSET_DIR="/opt/AetherFlow/current/packages/package/assets/librespeed"
@@ -88,36 +246,514 @@ elif [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/asset
     OBSIDIAN_ASSET_DIR="/opt/AetherFlow/packages/package/assets/librespeed"
 fi
 if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
-    cp -rf "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets/
-    rm -rf /opt/librespeed/assets/backend-patches
-    if [[ -d "${TMP_SRC_DIR}/web/assets" && -x /usr/local/go/bin/go ]]; then
-        cp -rf /opt/librespeed/assets/. "${TMP_SRC_DIR}/web/assets/"
-        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" ]]; then
-            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" "${TMP_SRC_DIR}/results/stats.go"
-        fi
-        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" ]]; then
-            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" "${TMP_SRC_DIR}/results/telemetry.go"
-        fi
-        (cd "$TMP_SRC_DIR" && /usr/local/go/bin/go build -ldflags "-w -s" -trimpath -o /opt/librespeed/speedtest-backend main.go) >> "$LOGFILE" 2>&1 || true
-    fi
+    rm -rf -- /opt/librespeed/assets.new
+    mkdir -p /opt/librespeed/assets.new
+    cp -R --no-preserve=ownership "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets.new/
+    rm -rf -- /opt/librespeed/assets
+    mv -fT /opt/librespeed/assets.new /opt/librespeed/assets
+else
+    mkdir -p /opt/librespeed/assets
 fi
-rm -rf "$TMP_SRC_DIR"
 
 if [[ -f /opt/librespeed/settings.toml ]]; then
     safe_config_python /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
-import re, sys
+import errno, os, re, shutil, stat, sys
+
+def split_toml_root_preamble(src: str):
+    n = len(src)
+    i = 0
+    in_str = None
+    bracket_depth = 0
+    at_line_start = True
+    line_start_idx = 0
+    while i < n:
+        ch = src[i]
+        if in_str is not None:
+            if in_str in ('"""', "'''"):
+                if src.startswith(in_str, i):
+                    i += 3
+                    in_str = None
+                    continue
+                if in_str == '"""' and ch == "\\":
+                    i += 2
+                    continue
+                i += 1
+                continue
+            else:
+                if in_str == '"' and ch == "\\":
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+        if ch == "\n":
+            at_line_start = True
+            line_start_idx = i + 1
+            i += 1
+            continue
+        if ch in (" ", "\t", "\r"):
+            i += 1
+            continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+            at_line_start = True
+            line_start_idx = i
+            continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_str = src[i : i + 3]
+            at_line_start = False
+            i += 3
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            at_line_start = False
+            i += 1
+            continue
+        if ch == "[" and bracket_depth == 0 and at_line_start:
+            return src[:line_start_idx], src[line_start_idx:]
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]" and bracket_depth > 0:
+            bracket_depth -= 1
+        at_line_start = False
+        i += 1
+    return src, ""
+
+def iter_toml_root_assignments(preamble: str):
+    """Yield (stmt_start, stmt_end, key, rhs_raw) for real root-table assignments outside strings/comments."""
+    n = len(preamble)
+    i = 0
+    while i < n:
+        stmt_start = i
+        while i < n and preamble[i] in (" ", "\t", "\r"):
+            i += 1
+        if i >= n:
+            break
+        if preamble[i] == "\n":
+            i += 1
+            continue
+        if preamble[i] == "#":
+            nl = preamble.find("\n", i)
+            i = n if nl == -1 else nl + 1
+            continue
+        k_start = i
+        if preamble[i] in ('"', "'"):
+            q = preamble[i]
+            i += 1
+            while i < n:
+                if q == '"' and preamble[i] == "\\":
+                    i += 2
+                    continue
+                if preamble[i] == q:
+                    i += 1
+                    break
+                i += 1
+            key = preamble[k_start + 1 : max(k_start + 1, i - 1)].strip()
+        else:
+            while i < n and (preamble[i].isalnum() or preamble[i] in ("_", "-")):
+                i += 1
+            key = preamble[k_start:i].strip()
+        while i < n and preamble[i] in (" ", "\t"):
+            i += 1
+        eq_pos = i if (i < n and preamble[i] == "=") else -1
+        if eq_pos != -1:
+            i += 1
+        rhs_start = i
+        in_str = None
+        bdepth = 0
+        comment_pos = None
+        while i < n:
+            ch = preamble[i]
+            if in_str is not None:
+                if in_str in ('"""', "'''"):
+                    if preamble.startswith(in_str, i):
+                        i += 3
+                        in_str = None
+                        continue
+                    i += 2 if (in_str == '"""' and ch == "\\") else 1
+                    continue
+                if in_str == '"' and ch == "\\":
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+            if ch == "#" and bdepth == 0:
+                if comment_pos is None:
+                    comment_pos = i
+                nl = preamble.find("\n", i)
+                if nl == -1:
+                    i = n
+                    break
+                i = nl + 1
+                break
+            if ch == "\n" and bdepth == 0:
+                i += 1
+                break
+            if preamble.startswith('"""', i) or preamble.startswith("'''", i):
+                in_str = preamble[i : i + 3]
+                i += 3
+                continue
+            if ch in ('"', "'"):
+                in_str = ch
+                i += 1
+                continue
+            if ch in ("[", "{"):
+                bdepth += 1
+            elif ch in ("]", "}") and bdepth > 0:
+                bdepth -= 1
+            i += 1
+        stmt_end = i
+        if key and eq_pos != -1:
+            rhs_end = comment_pos if comment_pos is not None else stmt_end
+            rhs_raw = preamble[rhs_start:rhs_end].strip()
+            yield (stmt_start, stmt_end, key, rhs_raw)
+
+def parse_toml_string_rhs(rhs_raw: str):
+    if len(rhs_raw) >= 6 and (
+        (rhs_raw.startswith('"""') and rhs_raw.endswith('"""'))
+        or (rhs_raw.startswith("'''") and rhs_raw.endswith("'''"))
+    ):
+        body = rhs_raw[3:-3]
+        if body.startswith("\r\n"):
+            body = body[2:]
+        elif body.startswith("\n"):
+            body = body[1:]
+        return body
+    if len(rhs_raw) >= 2 and (
+        (rhs_raw.startswith('"') and rhs_raw.endswith('"'))
+        or (rhs_raw.startswith("'") and rhs_raw.endswith("'"))
+    ):
+        inner = rhs_raw[1:-1]
+        if rhs_raw[0] == '"':
+            inner = inner.replace('\\"', '"').replace("\\\\", "\\")
+        return inner
+    return None
+
+def toml_root_has_key(preamble: str, target_key: str) -> bool:
+    return any(k == target_key for _, _, k, _ in iter_toml_root_assignments(preamble))
+
+def toml_root_get_str(preamble: str, target_key: str):
+    val = None
+    for _, _, k, rhs_raw in iter_toml_root_assignments(preamble):
+        if k == target_key:
+            parsed = parse_toml_string_rhs(rhs_raw)
+            if parsed is not None:
+                val = parsed
+    return val
+
+def toml_root_set_assignment(preamble: str, target_key: str, new_rhs: str, append_if_missing: bool = True) -> str:
+    matches = [item for item in iter_toml_root_assignments(preamble) if item[2] == target_key]
+    if not matches:
+        if not append_if_missing:
+            return preamble
+        if not preamble.strip():
+            return f"{target_key}={new_rhs}\n"
+        return preamble.rstrip("\n") + f"\n{target_key}={new_rhs}\n"
+    out = []
+    cursor = 0
+    for idx, (s_start, s_end, _, _) in enumerate(matches):
+        out.append(preamble[cursor:s_start])
+        if idx == 0:
+            lead_ws = ""
+            j = s_start
+            while j < s_end and preamble[j] in (" ", "\t"):
+                lead_ws += preamble[j]
+                j += 1
+            out.append(f"{lead_ws}{target_key}={new_rhs}\n")
+        cursor = s_end
+    out.append(preamble[cursor:])
+    return "".join(out)
+
 cfg_path, port = sys.argv[1], sys.argv[2]
-text = safe_read_text(cfg_path)
-if re.search(r"^listen_port\s*=", text, re.MULTILINE):
-    text = re.sub(r"^listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
+state_dir = os.path.dirname(os.path.abspath(cfg_path))
+confined_db = os.path.join(state_dir, "speedtest.db")
+full_text = safe_read_text(cfg_path)
+text, sections_tail = split_toml_root_preamble(full_text)
+text = toml_root_set_assignment(text, "listen_port", str(port), append_if_missing=True)
+cur_db_type = toml_root_get_str(text, "database_type")
+if cur_db_type is not None and cur_db_type.strip().lower() == "bolt":
+    text = toml_root_set_assignment(text, "database_type", '"sqlite"', append_if_missing=False)
+if not toml_root_has_key(text, "redact_ip_addresses"):
+    text = toml_root_set_assignment(text, "redact_ip_addresses", "true", append_if_missing=True)
+if not toml_root_has_key(text, "enable_id_obfuscation"):
+    text = toml_root_set_assignment(text, "enable_id_obfuscation", "true", append_if_missing=True)
+
+cur_db_type_after = toml_root_get_str(text, "database_type")
+db_type = cur_db_type_after.strip().lower() if cur_db_type_after is not None else "sqlite"
+raw_db_file_opt = toml_root_get_str(text, "database_file")
+if db_type not in ("none", "memory") and raw_db_file_opt is not None:
+    raw_db_file = raw_db_file_opt.strip()
+    if raw_db_file:
+        norm_state = os.path.normpath(state_dir)
+        resolved_db = os.path.normpath(
+            raw_db_file if os.path.isabs(raw_db_file) else os.path.join(norm_state, raw_db_file)
+        )
+        cur = os.path.dirname(resolved_db)
+        while cur and cur != os.sep:
+            if os.path.islink(cur):
+                raise SystemExit(f"Refusing symlinked parent directory for retained database_file: {cur}")
+            cur = os.path.dirname(cur)
+        in_state_dir = (resolved_db != norm_state) and resolved_db.startswith(norm_state + os.sep)
+        if in_state_dir:
+            if os.path.lexists(resolved_db):
+                st_in = os.lstat(resolved_db)
+                if not stat.S_ISREG(st_in.st_mode):
+                    raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
+            if raw_db_file != resolved_db:
+                text = toml_root_set_assignment(
+                    text, "database_file", f'"{resolved_db}"', append_if_missing=False
+                )
+        else:
+            allowed_ext_prefixes = (
+                "/var/lib/librespeed/",
+                "/var/opt/librespeed/",
+                "/srv/librespeed/",
+                "/opt/librespeed-",
+                "/opt/librespeed_",
+                "/opt/librespeed.",
+            )
+            if not any(resolved_db.startswith(pfx) for pfx in allowed_ext_prefixes):
+                raise SystemExit(
+                    f"Refusing external database_file outside dedicated LibreSpeed directories: {resolved_db}"
+                )
+            if not os.path.lexists(resolved_db):
+                raise SystemExit(
+                    f"Configured external database_file is missing; refusing to silently switch databases: {resolved_db}"
+                )
+            st = os.lstat(resolved_db)
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"Refusing non-regular or symlinked retained database_file: {resolved_db}")
+
+            o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+            fd_main = os.open(resolved_db, os.O_RDONLY | o_nofollow)
+            try:
+                fst = os.fstat(fd_main)
+                if not stat.S_ISREG(fst.st_mode):
+                    raise SystemExit(f"Refusing non-regular open descriptor for database_file: {resolved_db}")
+                hdr = os.read(fd_main, 32)
+                is_empty_db = fst.st_size == 0
+                is_sqlite_db = hdr.startswith(b"SQLite format 3\x00")
+                is_bolt_db = len(hdr) >= 20 and hdr[16:20] in (b"\xed\xda\x0c\xed", b"\xed\x0c\xda\xed")
+                if not (is_empty_db or is_sqlite_db or is_bolt_db):
+                    raise SystemExit(
+                        f"Refusing external database_file without valid SQLite or BoltDB header: {resolved_db}"
+                    )
+            finally:
+                os.close(fd_main)
+
+            if any(os.path.lexists(confined_db + sfx) for sfx in ("", "-wal", "-shm", "-journal")):
+                import time
+                ts_tag = int(time.time() * 1000)
+                bak_base = f"{confined_db}.pre-migrate.{ts_tag}.bak"
+                idx_bak = 0
+                while any(
+                    os.path.lexists(f"{bak_base}{'' if idx_bak == 0 else f'.{idx_bak}'}{sfx}")
+                    for sfx in ("", "-wal", "-shm", "-journal")
+                ):
+                    idx_bak += 1
+                if idx_bak > 0:
+                    bak_base = f"{bak_base}.{idx_bak}"
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    existing_p = confined_db + suffix
+                    if not os.path.lexists(existing_p):
+                        continue
+                    ex_st = os.lstat(existing_p)
+                    if not stat.S_ISREG(ex_st.st_mode) or ex_st.st_nlink != 1:
+                        raise SystemExit(f"Refusing non-regular, symlinked, or hardlinked local database artifact: {existing_p}")
+                    fd_ex = os.open(existing_p, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
+                    try:
+                        ex_fst = os.fstat(fd_ex)
+                        if not stat.S_ISREG(ex_fst.st_mode) or ex_fst.st_nlink != 1 or (ex_fst.st_dev, ex_fst.st_ino) != (ex_st.st_dev, ex_st.st_ino):
+                            raise SystemExit(f"Local database artifact changed inode or type before backup: {existing_p}")
+                        os.fchmod(fd_ex, 0o600)
+                    finally:
+                        os.close(fd_ex)
+                    os.rename(existing_p, bak_base + suffix)
+
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                src_p = resolved_db + suffix
+                dst_p = confined_db + suffix
+                if not os.path.lexists(src_p):
+                    continue
+                src_st = os.lstat(src_p)
+                if not stat.S_ISREG(src_st.st_mode):
+                    raise SystemExit(f"Refusing non-regular or symlinked SQLite sidecar: {src_p}")
+                fd_in = os.open(src_p, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
+                tmp_dst = dst_p + ".migrated.tmp"
+                try:
+                    if os.path.lexists(tmp_dst):
+                        tmp_st = os.lstat(tmp_dst)
+                        if stat.S_ISDIR(tmp_st.st_mode):
+                            raise SystemExit(f"Refusing directory at temporary migration path: {tmp_dst}")
+                        os.unlink(tmp_dst)
+                    with os.fdopen(fd_in, "rb") as f_in:
+                        if suffix == "":
+                            f_fst = os.fstat(f_in.fileno())
+                            if (f_fst.st_dev, f_fst.st_ino) != (fst.st_dev, fst.st_ino):
+                                raise SystemExit("External database_file changed inode during migration")
+                        fd_out = os.open(
+                            tmp_dst,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | getattr(os, "O_CLOEXEC", 0),
+                            0o600,
+                        )
+                        with os.fdopen(fd_out, "wb") as f_out:
+                            os.fchmod(f_out.fileno(), 0o600)
+                            shutil.copyfileobj(f_in, f_out)
+                            f_out.flush()
+                            os.fsync(f_out.fileno())
+                    os.replace(tmp_dst, dst_p)
+                except Exception:
+                    try:
+                        os.unlink(tmp_dst)
+                    except OSError:
+                        pass
+                    raise
+
+            if not os.path.isfile(confined_db) or os.path.islink(confined_db):
+                raise SystemExit(f"External database migration verification failed for {confined_db}")
+            if os.lstat(confined_db).st_size != fst.st_size:
+                raise SystemExit("External database migration byte-size verification failed")
+
+            src_salt = os.path.join(os.path.dirname(resolved_db), "idObfuscation_salt.bin")
+            dst_salt = os.path.join(os.path.dirname(confined_db), "idObfuscation_salt.bin")
+            if os.path.lexists(src_salt) and not os.path.lexists(dst_salt):
+                salt_lst = os.lstat(src_salt)
+                if stat.S_ISREG(salt_lst.st_mode) and salt_lst.st_nlink == 1 and salt_lst.st_size == 4:
+                    fd_salt_in = os.open(src_salt, os.O_RDONLY | o_nofollow | getattr(os, "O_CLOEXEC", 0))
+                    try:
+                        salt_fst = os.fstat(fd_salt_in)
+                        if (
+                            stat.S_ISREG(salt_fst.st_mode)
+                            and salt_fst.st_nlink == 1
+                            and salt_fst.st_size == 4
+                            and (salt_fst.st_dev, salt_fst.st_ino) == (salt_lst.st_dev, salt_lst.st_ino)
+                        ):
+                            salt_bytes = os.read(fd_salt_in, 5)
+                            if len(salt_bytes) == 4:
+                                tmp_salt = dst_salt + ".migrated.tmp"
+                                if os.path.lexists(tmp_salt):
+                                    os.unlink(tmp_salt)
+                                fd_salt_out = os.open(
+                                    tmp_salt,
+                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | getattr(os, "O_CLOEXEC", 0),
+                                    0o600,
+                                )
+                                try:
+                                    with os.fdopen(fd_salt_out, "wb") as f_salt_out:
+                                        os.fchmod(f_salt_out.fileno(), 0o600)
+                                        f_salt_out.write(salt_bytes)
+                                        f_salt_out.flush()
+                                        os.fsync(f_salt_out.fileno())
+                                    os.replace(tmp_salt, dst_salt)
+                                except Exception:
+                                    try:
+                                        os.unlink(tmp_salt)
+                                    except OSError:
+                                        pass
+                                    raise
+                    finally:
+                        os.close(fd_salt_in)
+
+            text = toml_root_set_assignment(
+                text, "database_file", f'"{confined_db}"', append_if_missing=False
+            )
+
+import ipaddress, secrets
+try:
+    import tomllib
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
+
+def _token_has_loopback(tok: str) -> bool:
+    cleaned = tok.strip().strip("\"'")
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    if not cleaned:
+        return False
+    if cleaned.lower() == "localhost":
+        return True
+    try:
+        if "/" in cleaned:
+            net = ipaddress.ip_network(cleaned, strict=False)
+            if net.is_loopback:
+                return True
+            if isinstance(net, ipaddress.IPv6Network) and net.network_address.ipv4_mapped:
+                return net.network_address.ipv4_mapped.is_loopback
+            return False
+        addr = ipaddress.ip_address(cleaned)
+        if addr.is_loopback:
+            return True
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return addr.ipv4_mapped.is_loopback
+    except ValueError:
+        pass
+    return False
+
+def _detect_loopback_trusted_proxy(toml_text: str, root_preamble: str) -> bool:
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(toml_text)
+            tp = parsed.get("trusted_proxies")
+            if isinstance(tp, str):
+                return any(_token_has_loopback(part) for part in tp.split(","))
+            if isinstance(tp, list):
+                return any(_token_has_loopback(str(part)) for part in tp)
+            return False
+        except Exception:
+            pass
+    for _, _, k, rhs_raw in iter_toml_root_assignments(root_preamble):
+        if k == "trusted_proxies":
+            if rhs_raw.startswith("[") and rhs_raw.endswith("]"):
+                return any(_token_has_loopback(part) for part in rhs_raw[1:-1].split(","))
+            s_val = parse_toml_string_rhs(rhs_raw)
+            if s_val is not None:
+                return any(_token_has_loopback(part) for part in s_val.split(","))
+    return False
+
+bind_val_raw = toml_root_get_str(text, "bind_address")
+bind_val = bind_val_raw.strip() if bind_val_raw is not None else None
+if not toml_root_has_key(text, "trusted_proxies"):
+    if bind_val is None or _token_has_loopback(bind_val):
+        text = toml_root_set_assignment(text, "trusted_proxies", '["127.0.0.1", "::1"]', append_if_missing=True)
+candidate_toml = (text.rstrip("\n") + "\n\n" + sections_tail) if sections_tail else text
+has_loopback_proxy = _detect_loopback_trusted_proxy(candidate_toml, text)
+if has_loopback_proxy and not toml_root_has_key(text, "trusted_proxy_secret"):
+    text = toml_root_set_assignment(
+        text, "trusted_proxy_secret", f'"{secrets.token_hex(32)}"', append_if_missing=True
+    )
+if sections_tail:
+    final_text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + sections_tail
 else:
-    text += f"\nlisten_port={port}\n"
-safe_write_text(cfg_path, text)
+    final_text = text if text.endswith("\n") else text + "\n"
+safe_write_text(cfg_path, final_text)
 PYEOF
 else
-    LS_STATS_PASS="$(AF_SEED_PASS="$MASTER_PASS" python3 - <<'PYEOF'
+    if declare -F derive_app_password >/dev/null 2>&1; then
+        LS_DERIVED_PASS="$(derive_app_password "${PACKAGE_NAME}")"
+    else
+        LS_DERIVED_PASS="$(AF_DERIVE_APP="${PACKAGE_NAME}" AF_DERIVE_SECRET="${MASTER_PASS:?MASTER_PASS is required}" python3 - <<'PYEOF'
+import hashlib, hmac, os
+app_id = os.environ["AF_DERIVE_APP"].strip().lower()
+secret = os.environ["AF_DERIVE_SECRET"].encode("utf-8")
+msg = f"aetherflow:{app_id}:webui:v1".encode("utf-8")
+print(hmac.new(secret, msg, hashlib.sha256).hexdigest()[:32])
+PYEOF
+)"
+    fi
+    LS_STATS_PASS="$(AF_DERIVED_PASS="$LS_DERIVED_PASS" python3 - <<'PYEOF'
 import json, os
-print(json.dumps(os.environ["AF_SEED_PASS"]))
+print(json.dumps(os.environ["AF_DERIVED_PASS"]))
+PYEOF
+)"
+    LS_PROXY_SECRET="$(python3 - <<'PYEOF'
+import secrets
+print(secrets.token_hex(32))
 PYEOF
 )"
     write_config_file /opt/librespeed/settings.toml <<EOF
@@ -125,52 +761,599 @@ bind_address="127.0.0.1"
 listen_port=${APP_PORT}
 url_base=""
 proxyprotocol_port=0
+trusted_proxies=["127.0.0.1", "::1"]
+trusted_proxy_secret="${LS_PROXY_SECRET}"
 server_lat=0
 server_lng=0
 ipinfo_api_key=""
 assets_path="/opt/librespeed/assets"
 statistics_password=${LS_STATS_PASS}
-redact_ip_addresses=false
-database_type="bolt"
+redact_ip_addresses=true
+database_type="sqlite"
 database_hostname=""
 database_name=""
 database_username=""
 database_password=""
 database_file="/opt/librespeed/speedtest.db"
+enable_id_obfuscation=true
 enable_tls=false
 tls_cert_file=""
 tls_key_file=""
 EOF
 fi
 
-chown -hRP librespeed:librespeed /opt/librespeed
-chmod 755 /opt/librespeed
-chmod 640 /opt/librespeed/settings.toml
+chown -h root:librespeed /opt/librespeed
+chmod 1770 /opt/librespeed
+chown -hRP root:librespeed /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go /opt/librespeed/assets
+chmod 755 /opt/librespeed/speedtest-backend
+python3 - /opt/librespeed /etc/aetherflow/librespeed-proxy-token.conf <<'PYEOF'
+import grp, os, pwd, re, stat, subprocess, sys
 
-report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
+state_dir = os.path.normpath(sys.argv[1])
+proxy_conf_path = os.path.normpath(sys.argv[2])
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+is_root = os.geteuid() == 0
+
+root_uid = 0
+ls_uid = pwd.getpwnam("librespeed").pw_uid if is_root else -1
+ls_gid = grp.getgrnam("librespeed").gr_gid if is_root else -1
+
+dir_fd = os.open(state_dir, os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    dst = os.fstat(dir_fd)
+    if not stat.S_ISDIR(dst.st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {state_dir}")
+
+    def harden_entry_in_dir(
+        parent_fd: int,
+        parent_label: str,
+        entry_name: str,
+        owner_user: str,
+        uid: int,
+        gid: int,
+        mode: int,
+        required: bool,
+    ) -> bytes:
+        full_label = os.path.join(parent_label, entry_name)
+        try:
+            fd = os.open(entry_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if required:
+                raise SystemExit(f"Missing required LibreSpeed artifact: {full_label}")
+            return b""
+        except OSError as exc:
+            raise SystemExit(f"Refusing symlinked or unsafe LibreSpeed artifact {full_label}: {exc}")
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                raise SystemExit(f"Refusing non-regular or hardlinked LibreSpeed artifact: {full_label}")
+            os.fchmod(fd, mode)
+            if is_root:
+                os.fchown(fd, uid, gid)
+            else:
+                subprocess.run(
+                    ["chown", "-h", f"{owner_user}:librespeed", full_label],
+                    check=True,
+                )
+            if entry_name == "settings.toml" and parent_fd == dir_fd:
+                if fst.st_size > 1048576:
+                    raise SystemExit(f"LibreSpeed settings.toml exceeds 1 MiB limit: {full_label}")
+                return os.pread(fd, 1048576, 0)
+            return b""
+        finally:
+            os.close(fd)
+
+    def harden_db_family(target_dir_fd: int, target_label: str, base_leaf: str) -> None:
+        exact = {
+            base_leaf,
+            f"{base_leaf}-wal",
+            f"{base_leaf}-shm",
+            f"{base_leaf}-journal",
+            f"{base_leaf}.bak",
+            f"{base_leaf}.bolt.bak",
+            "speedtest.bolt",
+            "speedtest.bolt.bak",
+            "speedtest.bolt.bolt.bak",
+            "idObfuscation_salt.bin",
+        }
+        prefixes = (
+            f"{base_leaf}.bak.",
+            f"{base_leaf}.bolt.bak.",
+            f"{base_leaf}.pre-migrate.",
+            "speedtest.bolt.bak.",
+            "speedtest.bolt.bolt.bak.",
+        )
+        for name in sorted(os.listdir(target_dir_fd)):
+            if name in exact or name.startswith(prefixes):
+                harden_entry_in_dir(
+                    target_dir_fd, target_label, name, "librespeed", ls_uid, ls_gid, 0o600, required=False
+                )
+
+    cfg_bytes = harden_entry_in_dir(
+        dir_fd, state_dir, "settings.toml", "root", root_uid, ls_gid, 0o640, required=True
+    )
+    harden_db_family(dir_fd, state_dir, "speedtest.db")
+
+    cfg_full_text = cfg_bytes.decode("utf-8", errors="replace")
+    try:
+        import tomllib as _tomllib
+    except ImportError:
+        _tomllib = None  # type: ignore[assignment]
+    def _root_preamble(src: str) -> str:
+        n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+        while i < n:
+            ch = src[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if src.startswith(in_s, i):
+                        i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+            if ch in (" ", "\t", "\r"): i += 1; continue
+            if ch == "#":
+                nl = src.find("\n", i)
+                if nl == -1: break
+                i = nl + 1; bol = True; lstart = i; continue
+            if src.startswith('"""', i) or src.startswith("'''", i):
+                in_s = src[i:i+3]; bol = False; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+            if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+            if ch == "[": bdepth += 1
+            elif ch == "]" and bdepth > 0: bdepth -= 1
+            bol = False; i += 1
+        return src
+    def _root_str_val(full_src: str, root_src: str, key_name: str) -> str:
+        if _tomllib is not None:
+            try:
+                parsed = _tomllib.loads(full_src)
+                v = parsed.get(key_name)
+                return v.strip() if isinstance(v, str) else ""
+            except Exception:
+                pass
+        n, i, res = len(root_src), 0, ""
+        while i < n:
+            while i < n and root_src[i] in (" ", "\t", "\r"): i += 1
+            if i >= n: break
+            if root_src[i] == "\n": i += 1; continue
+            if root_src[i] == "#":
+                nl = root_src.find("\n", i); i = n if nl == -1 else nl + 1; continue
+            ks = i
+            while i < n and (root_src[i].isalnum() or root_src[i] in ("_", "-")): i += 1
+            k = root_src[ks:i].strip()
+            while i < n and root_src[i] in (" ", "\t"): i += 1
+            eq = (i < n and root_src[i] == "=")
+            if eq: i += 1
+            rs, in_s, bd, cpos = i, None, 0, None
+            while i < n:
+                ch = root_src[i]
+                if in_s is not None:
+                    if in_s in ('"""', "'''"):
+                        if root_src.startswith(in_s, i): i += 3; in_s = None; continue
+                        i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                    i += 2 if (in_s == '"' and ch == "\\") else 1
+                    if ch == in_s: in_s = None
+                    continue
+                if ch == "#" and bd == 0:
+                    cpos = i; nl = root_src.find("\n", i); i = n if nl == -1 else nl + 1; break
+                if ch == "\n" and bd == 0: i += 1; break
+                if root_src.startswith('"""', i) or root_src.startswith("'''", i): in_s = root_src[i:i+3]; i += 3; continue
+                if ch in ('"', "'"): in_s = ch; i += 1; continue
+                if ch in ("[", "{"): bd += 1
+                elif ch in ("]", "}") and bd > 0: bd -= 1
+                i += 1
+            if eq and k == key_name:
+                rhs = root_src[rs:(cpos if cpos is not None else i)].strip()
+                if len(rhs) >= 6 and ((rhs.startswith('"""') and rhs.endswith('"""')) or (rhs.startswith("'''") and rhs.endswith("'''"))):
+                    res = rhs[3:-3].lstrip("\r\n").strip()
+                elif len(rhs) >= 2 and ((rhs.startswith('"') and rhs.endswith('"')) or (rhs.startswith("'") and rhs.endswith("'"))):
+                    res = rhs[1:-1].strip()
+        return res
+    cfg_text = _root_preamble(cfg_full_text)
+    raw_db = _root_str_val(cfg_full_text, cfg_text, "database_file")
+    if raw_db:
+        resolved_db = os.path.normpath(raw_db if os.path.isabs(raw_db) else os.path.join(state_dir, raw_db))
+        prefix = state_dir.rstrip("/") + "/"
+        if resolved_db.startswith(prefix):
+            rel_parts = [p for p in resolved_db[len(prefix):].split("/") if p and p != "."]
+            if rel_parts and ".." not in rel_parts:
+                if len(rel_parts) == 1 and rel_parts[0] != "speedtest.db":
+                    harden_db_family(dir_fd, state_dir, rel_parts[0])
+                elif len(rel_parts) > 1:
+                    opened_fds = []
+                    cur_fd = dir_fd
+                    cur_label = state_dir
+                    try:
+                        for seg in rel_parts[:-1]:
+                            cur_label = os.path.join(cur_label, seg)
+                            try:
+                                next_fd = os.open(
+                                    seg, os.O_RDONLY | o_directory | o_nofollow | o_cloexec, dir_fd=cur_fd
+                                )
+                            except FileNotFoundError:
+                                cur_fd = -1
+                                break
+                            except OSError as exc:
+                                raise SystemExit(f"Refusing symlinked LibreSpeed DB directory {cur_label}: {exc}")
+                            opened_fds.append(next_fd)
+                            sub_st = os.fstat(next_fd)
+                            if not stat.S_ISDIR(sub_st.st_mode):
+                                raise SystemExit(f"Refusing non-directory LibreSpeed DB parent: {cur_label}")
+                            os.fchmod(next_fd, 0o770)
+                            if is_root:
+                                os.fchown(next_fd, ls_uid, ls_gid)
+                            else:
+                                subprocess.run(["chown", "-h", "librespeed:librespeed", cur_label], check=True)
+                            cur_fd = next_fd
+                        if cur_fd != -1:
+                            harden_db_family(cur_fd, cur_label, rel_parts[-1])
+                    finally:
+                        for sub_fd in reversed(opened_fds):
+                            os.close(sub_fd)
+
+    proxy_secret = _root_str_val(cfg_full_text, cfg_text, "trusted_proxy_secret")
+    if proxy_secret and not re.fullmatch(r"[A-Za-z0-9_.:=-]{16,128}", proxy_secret):
+        raise SystemExit("Refusing unsafe trusted_proxy_secret characters in LibreSpeed settings.toml")
+
+    proxy_conf_dir = os.path.dirname(proxy_conf_path)
+    if not os.path.lexists(proxy_conf_dir):
+        os.makedirs(proxy_conf_dir, mode=0o750, exist_ok=True)
+    pdir_st = os.lstat(proxy_conf_dir)
+    if stat.S_ISLNK(pdir_st.st_mode) or not stat.S_ISDIR(pdir_st.st_mode):
+        raise SystemExit(f"Refusing non-directory or symlinked proxy config parent: {proxy_conf_dir}")
+    if os.path.lexists(proxy_conf_path):
+        ex_conf_st = os.lstat(proxy_conf_path)
+        if not stat.S_ISREG(ex_conf_st.st_mode):
+            raise SystemExit(f"Refusing symlinked or non-regular Apache proxy token snippet: {proxy_conf_path}")
+
+    snippet_body = (
+        f'# Managed by AetherFlow LibreSpeed installer (0600 root:root)\nRequestHeader set X-AetherFlow-Proxy-Token "{proxy_secret}"\n'
+        if proxy_secret
+        else "# Managed by AetherFlow LibreSpeed installer\nRequestHeader unset X-AetherFlow-Proxy-Token\n"
+    ).encode("utf-8")
+    tmp_snippet = f"{proxy_conf_path}.tmp.{os.getpid()}"
+    if os.path.lexists(tmp_snippet):
+        os.unlink(tmp_snippet)
+    sfd = os.open(
+        tmp_snippet,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | o_nofollow | o_cloexec,
+        0o600,
+    )
+    try:
+        os.fchmod(sfd, 0o600)
+        if is_root:
+            os.fchown(sfd, root_uid, root_uid)
+        with os.fdopen(sfd, "wb") as sfh:
+            sfh.write(snippet_body)
+            sfh.flush()
+            os.fsync(sfh.fileno())
+        os.replace(tmp_snippet, proxy_conf_path)
+    except Exception:
+        try:
+            os.unlink(tmp_snippet)
+        except OSError:
+            pass
+        raise
+finally:
+    os.close(dir_fd)
+PYEOF
+
+if [[ "${EUID}" -eq 0 && -d /etc/apache2/mods-available ]]; then
+    if command -v a2enmod >/dev/null 2>&1; then
+        if [[ ! -e /etc/apache2/mods-enabled/headers.load ]]; then
+            af_logged a2enmod -q headers || true
+        fi
+        if [[ ! -L /opt/librespeed && ! -L /opt/librespeed/settings.toml && -f /opt/librespeed/settings.toml ]] && awk '/^[[:space:]]*\[/{exit} tolower($0) ~ /^[[:space:]]*enable_tls[[:space:]]*=[[:space:]]*"?true"?([[:space:]]*(#.*)?)?$/{found=1; exit} END{exit !found}' /opt/librespeed/settings.toml; then
+            for _mod in ssl proxy proxy_http proxy_wstunnel rewrite; do
+                if [[ ! -e "/etc/apache2/mods-enabled/${_mod}.load" ]]; then
+                    af_logged a2enmod -q "${_mod}" || true
+                fi
+            done
+        fi
+    fi
+    if systemctl is-active --quiet apache2 2>/dev/null; then
+        af_logged systemctl reload apache2 || true
+    fi
+fi
+
+report_progress 85 "Configuring and starting librespeed.socket + librespeed.service on port ${APP_PORT}..."
+LS_SOCKET_LISTEN="127.0.0.1:${APP_PORT}"
+LS_READINESS_TARGET="/"
+if [[ -e /opt/librespeed/settings.toml || -L /opt/librespeed/settings.toml ]]; then
+    LS_SOCKET_LISTEN="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import os, re, stat, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
+    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
+finally:
+    os.close(dfd)
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
+        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
+    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
+finally:
+    os.close(fd)
+def _root_preamble(src: str) -> str:
+    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+    while i < n:
+        ch = src[i]
+        if in_s is not None:
+            if in_s in ('"""', "'''"):
+                if src.startswith(in_s, i):
+                    i += 3; in_s = None; continue
+                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+            i += 2 if (in_s == '"' and ch == "\\") else 1
+            if ch == in_s: in_s = None
+            continue
+        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+        if ch in (" ", "\t", "\r"): i += 1; continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1: break
+            i = nl + 1; bol = True; lstart = i; continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_s = src[i:i+3]; bol = False; i += 3; continue
+        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+        if ch == "[": bdepth += 1
+        elif ch == "]" and bdepth > 0: bdepth -= 1
+        bol = False; i += 1
+    return src
+txt_root = _root_preamble(txt)
+try:
+    import tomllib as _tomllib
+except ImportError:
+    _tomllib = None  # type: ignore[assignment]
+bind_raw = None
+if _tomllib is not None:
+    try:
+        v = _tomllib.loads(txt).get("bind_address")
+        if isinstance(v, str):
+            bind_raw = v.strip()
+    except Exception:
+        pass
+if bind_raw is None:
+    n, i = len(txt_root), 0
+    while i < n:
+        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
+        if i >= n: break
+        if txt_root[i] == "\n": i += 1; continue
+        if txt_root[i] == "#":
+            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
+        ks = i
+        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
+        k = txt_root[ks:i].strip()
+        while i < n and txt_root[i] in (" ", "\t"): i += 1
+        eq = (i < n and txt_root[i] == "=")
+        if eq: i += 1
+        rs, in_s, bd, cpos = i, None, 0, None
+        while i < n:
+            ch = txt_root[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "#" and bd == 0:
+                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
+            if ch == "\n" and bd == 0: i += 1; break
+            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; i += 1; continue
+            if ch in ("[", "{"): bd += 1
+            elif ch in ("]", "}") and bd > 0: bd -= 1
+            i += 1
+        if eq and k == "bind_address":
+            rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
+            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
+                bind_raw = rhs[1:-1].strip()
+bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "0.0.0.0"
+if bind_val == "*":
+    bind_val = "0.0.0.0"
+if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", bind_val):
+    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
+if ":" in bind_val and not bind_val.startswith("["):
+    bind_val = f"[{bind_val}]"
+print(f"{bind_val}:{port}")
+PYEOF
+)"
+    LS_READINESS_TARGET="$(python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import os, re, stat, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+parent_dir, base_name = os.path.split(os.path.normpath(cfg_path))
+o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+o_cloexec = getattr(os, "O_CLOEXEC", 0)
+o_directory = getattr(os, "O_DIRECTORY", 0)
+dfd = os.open(parent_dir or ".", os.O_RDONLY | o_directory | o_nofollow | o_cloexec)
+try:
+    if not stat.S_ISDIR(os.fstat(dfd).st_mode):
+        raise SystemExit(f"Refusing non-directory LibreSpeed state root: {parent_dir}")
+    fd = os.open(base_name, os.O_RDONLY | o_nofollow | o_cloexec, dir_fd=dfd)
+finally:
+    os.close(dfd)
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > 1048576:
+        raise SystemExit(f"Refusing unsafe LibreSpeed settings.toml descriptor: {cfg_path}")
+    txt = os.pread(fd, 1048576, 0).decode("utf-8", errors="replace")
+finally:
+    os.close(fd)
+def _root_preamble(src: str) -> str:
+    n, i, in_s, bdepth, bol, lstart = len(src), 0, None, 0, True, 0
+    while i < n:
+        ch = src[i]
+        if in_s is not None:
+            if in_s in ('"""', "'''"):
+                if src.startswith(in_s, i):
+                    i += 3; in_s = None; continue
+                i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+            i += 2 if (in_s == '"' and ch == "\\") else 1
+            if ch == in_s: in_s = None
+            continue
+        if ch == "\n": bol = True; lstart = i + 1; i += 1; continue
+        if ch in (" ", "\t", "\r"): i += 1; continue
+        if ch == "#":
+            nl = src.find("\n", i)
+            if nl == -1: break
+            i = nl + 1; bol = True; lstart = i; continue
+        if src.startswith('"""', i) or src.startswith("'''", i):
+            in_s = src[i:i+3]; bol = False; i += 3; continue
+        if ch in ('"', "'"): in_s = ch; bol = False; i += 1; continue
+        if ch == "[" and bdepth == 0 and bol: return src[:lstart]
+        if ch == "[": bdepth += 1
+        elif ch == "]" and bdepth > 0: bdepth -= 1
+        bol = False; i += 1
+    return src
+txt_root = _root_preamble(txt)
+try:
+    import tomllib as _tomllib
+except ImportError:
+    _tomllib = None  # type: ignore[assignment]
+tls_on = None
+bind_raw = None
+if _tomllib is not None:
+    try:
+        parsed = _tomllib.loads(txt)
+        tv = parsed.get("enable_tls")
+        if isinstance(tv, bool):
+            tls_on = tv
+        elif isinstance(tv, str):
+            tls_on = tv.strip().lower() == "true"
+        bv = parsed.get("bind_address")
+        if isinstance(bv, str):
+            bind_raw = bv.strip()
+    except Exception:
+        pass
+if tls_on is None or bind_raw is None:
+    n, i = len(txt_root), 0
+    while i < n:
+        while i < n and txt_root[i] in (" ", "\t", "\r"): i += 1
+        if i >= n: break
+        if txt_root[i] == "\n": i += 1; continue
+        if txt_root[i] == "#":
+            nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; continue
+        ks = i
+        while i < n and (txt_root[i].isalnum() or txt_root[i] in ("_", "-")): i += 1
+        k = txt_root[ks:i].strip()
+        while i < n and txt_root[i] in (" ", "\t"): i += 1
+        eq = (i < n and txt_root[i] == "=")
+        if eq: i += 1
+        rs, in_s, bd, cpos = i, None, 0, None
+        while i < n:
+            ch = txt_root[i]
+            if in_s is not None:
+                if in_s in ('"""', "'''"):
+                    if txt_root.startswith(in_s, i): i += 3; in_s = None; continue
+                    i += 2 if (in_s == '"""' and ch == "\\") else 1; continue
+                i += 2 if (in_s == '"' and ch == "\\") else 1
+                if ch == in_s: in_s = None
+                continue
+            if ch == "#" and bd == 0:
+                cpos = i; nl = txt_root.find("\n", i); i = n if nl == -1 else nl + 1; break
+            if ch == "\n" and bd == 0: i += 1; break
+            if txt_root.startswith('"""', i) or txt_root.startswith("'''", i): in_s = txt_root[i:i+3]; i += 3; continue
+            if ch in ('"', "'"): in_s = ch; i += 1; continue
+            if ch in ("[", "{"): bd += 1
+            elif ch in ("]", "}") and bd > 0: bd -= 1
+            i += 1
+        rhs = txt_root[rs:(cpos if cpos is not None else i)].strip()
+        if eq and k == "enable_tls" and tls_on is None:
+            tls_on = rhs.strip("\"'").strip().lower() == "true"
+        elif eq and k == "bind_address" and bind_raw is None:
+            if len(rhs) >= 2 and ((rhs[0] == '"' and rhs[-1] == '"') or (rhs[0] == "'" and rhs[-1] == "'")):
+                bind_raw = rhs[1:-1].strip()
+tls_on = bool(tls_on)
+bind_val = (bind_raw if bind_raw is not None else "127.0.0.1") or "127.0.0.1"
+host = {"*": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "[::1]", "[::]": "[::1]"}.get(bind_val, bind_val)
+if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", host):
+    raise SystemExit(f"Unsafe LibreSpeed bind_address in settings.toml: {bind_val!r}")
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
+if tls_on:
+    print(f"https://{host}:{port}/")
+elif host != "127.0.0.1":
+    print(f"http://{host}:{port}/")
+else:
+    print("/")
+PYEOF
+)"
+fi
+
+cat <<EOF > /etc/systemd/system/librespeed.socket
+[Unit]
+Description=LibreSpeed Speedtest Socket (PID 1 loopback port guard)
+PartOf=librespeed.service
+
+[Socket]
+ListenStream=${LS_SOCKET_LISTEN}
+NoDelay=true
+Backlog=1024
+
+[Install]
+WantedBy=sockets.target
+EOF
+
 cat <<'EOF' > /etc/systemd/system/librespeed.service
 [Unit]
-Description=LibreSpeed Speedtest Daemon (speedtest-go)
-After=network.target
+Description=LibreSpeed Speedtest Daemon (native Rust)
+After=network.target librespeed.socket
+Requires=librespeed.socket
 
 [Service]
 User=librespeed
 Group=librespeed
 Type=simple
 WorkingDirectory=/opt/librespeed
+UMask=0077
 ExecStart=/opt/librespeed/speedtest-backend -c /opt/librespeed/settings.toml
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/opt/librespeed
+ReadOnlyPaths=-/opt/librespeed/speedtest-backend -/opt/librespeed/assets -/opt/librespeed/settings.toml
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now librespeed >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now librespeed.socket
+af_logged systemctl restart librespeed.socket
+af_logged systemctl enable --now librespeed
+af_logged systemctl restart librespeed
 systemctl is-active --quiet librespeed
 
-finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "/"
+finish_app_archive_update "${PACKAGE_NAME}" "$APP_PORT" "$LS_READINESS_TARGET"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"

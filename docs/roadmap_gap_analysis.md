@@ -59,7 +59,7 @@ Milestone 2 through Milestone 5 introduced 19 high-impact bare-metal packages, b
 | 11 | **audiobookshelf** | Media | 13378 | `audiobookshelf.service` | Upstream official bare-metal package for self-hosted audiobooks and podcasts with sqlite storage. |
 | 12 | **kavita** | Media | 5002 | `kavita.service` | Native .NET binary server providing dedicated web reader for comics, manga, and ebooks. |
 | 13 | **calibreweb** | Media | 8083 | `calibreweb.service` | Python application providing an intuitive web interface for browsing and reading Calibre e-book libraries. |
-| 14 | **librespeed** | Network | 8988 | `librespeed.service` | Lightweight standalone Go binary (`speedtest-go`) providing local network speed benchmarking. |
+| 14 | **librespeed** | Network | 8988 | `librespeed.service` | First-party native Rust binary (`speedtest-backend` in `af-librespeed`, with `speedtest-go` symlink compatibility) providing local network speed benchmarking. |
 | 15 | **thelounge** | Network | 9000 | `thelounge.service` | Modern self-hosted web IRC client running natively under Node.js with push notifications and rich embeds. |
 | 16 | **znc** | Network | 6501 | `znc.service` | Upstream native IRC network bouncer supporting multi-network connections and SSL. |
 | 17 | **scrutiny** | Monitoring | 8098 | `scrutiny.service`, `scrutiny-collector.timer` | Hard drive SMART health dashboard with companion periodic SMART collector timer. |
@@ -98,7 +98,7 @@ To provide security without the virtualization penalty of containers, AetherFlow
     *   `mergerfs.service` (requires `CAP_SYS_ADMIN` and `/dev/fuse`)
     *   `rclone-vfs.service` (requires `/dev/fuse` and mount permissions)
     *   `scrutiny-collector.service` (requires raw disk ioctl access for `smartctl`)
-*   **Multi-Unit Service Resolution:** In `backend/services/service_manager.go`, `ResolveServiceUnits()` and `MatchesUnitFilter()` resolve companion services dynamically. Operations on `paperless-ngx` manage `paperless-webserver`, `paperless-worker`, and `paperless-scheduler` in unison; `scrutiny` manages both the web dashboard and `scrutiny-collector`; `recyclarr` manages both unit and timer; and `rclone` manages both `rclone.service` and `rclone-vfs.service`.
+*   **Multi-Unit Service Resolution:** In `backend-rs/crates/af-services/src/lib.rs`, companion service units and unit filters are resolved dynamically. Operations on `paperless-ngx` manage `paperless-webserver`, `paperless-worker`, and `paperless-scheduler` in unison; `scrutiny` manages both the web dashboard and `scrutiny-collector`; `recyclarr` manages both unit and timer; and `rclone` manages both `rclone.service` and `rclone-vfs.service`.
 
 ---
 

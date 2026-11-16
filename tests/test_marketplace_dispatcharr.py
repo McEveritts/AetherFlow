@@ -15,7 +15,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, replace_paths_once
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -358,7 +358,7 @@ class DispatcharrProvisioningTests(unittest.TestCase):
                 self.assertEqual(vars(user), before)
 
     def test_admin_credentials_survive_shell_and_python_boundaries(self):
-        block = SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
+        block = common_functions("af_logged") + "\n" + SOURCE.split('if [[ -f "${INSTALL_DIR}/manage.py" ]]; then\n', 1)[1].split('\nfi', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "env/bin").mkdir(parents=True)
@@ -471,7 +471,14 @@ elif command == "su":
 elif command == "systemctl":
     units = [arg for arg in args[1:] if arg.endswith(".service")]
     if args[0] == "is-active":
-        sys.exit(0 if (root / ("active-" + units[0])).exists() else 3)
+        is_up = (root / ("active-" + units[0])).exists()
+        if "--quiet" not in args:
+            print("active" if is_up else "inactive")
+        sys.exit(0 if is_up else 3)
+    elif args[0] == "show":
+        is_up = (root / ("active-" + units[0])).exists()
+        print(f"LoadState=loaded\nActiveState={'active' if is_up else 'inactive'}\nMainPID={1234 if is_up else 0}\nUnitFileState={'enabled' if is_up else 'disabled'}")
+        sys.exit(0)
     elif args[0] == "stop":
         for unit in units:
             (root / ("active-" + unit)).unlink(missing_ok=True)
@@ -549,10 +556,13 @@ lock_path() { printf '%s/install/.%s.lock\\n' "$TEST_ROOT" "$1"; }
         return result
 
     def run_install(self, **environment):
-        source = SOURCE
-        for prefix in ("/opt/", "/etc/", "/var/", "/data"):
-            source = source.replace(prefix, str(self.root) + prefix)
-        source = source.replace(" /install", " " + str(self.root / "install"))
+        source = replace_paths_once(
+            SOURCE,
+            [
+                *((prefix, str(self.root) + prefix) for prefix in ("/opt/", "/etc/", "/var/", "/data")),
+                (" /install", " " + str(self.root / "install")),
+            ],
+        )
         script = self.root / "installer.sh"
         script.write_text(source)
         result = subprocess.run(["bash", str(script)], text=True, capture_output=True, env={

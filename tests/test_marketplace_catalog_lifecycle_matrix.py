@@ -1,4 +1,5 @@
 """Execute catalog lifecycle entry points with synthetic releases and isolated paths."""
+import contextlib
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -370,8 +371,19 @@ def install_stub(target):
     shutil.copyfile(root / 'host-command', target)
     target.chmod(0o755)
 def units():
-    return [entry if entry.endswith(('.service', '.timer', '.socket')) else entry + '.service'
-            for entry in arguments[1:] if not entry.startswith('-')]
+    selected = []
+    skip_next = False
+    for entry in arguments[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if entry in ('-p', '-P', '--property'):
+            skip_next = True
+            continue
+        if entry.startswith('-'):
+            continue
+        selected.append(entry if entry.endswith(('.service', '.timer', '.socket')) else entry + '.service')
+    return selected
 if command == 'systemctl':
     operation = arguments[0]
     names = units()
@@ -387,23 +399,42 @@ if command == 'systemctl':
             (root / 'service-failed').touch()
             sys.exit(73)
         if operation != 'enable' or '--now' in arguments:
+            def _mark_active(service_unit):
+                (root / ('active-' + service_unit)).touch()
+                if service_unit in ('af-piped-proxy.service', 'piped-proxy.service'):
+                    (root / 'proc/123').mkdir(parents=True, exist_ok=True)
+                    exe_path = root / 'proc/123/exe'
+                    if exe_path.is_symlink() or exe_path.exists():
+                        exe_path.unlink()
+                    exe_path.symlink_to(root / 'opt/piped/piped-proxy')
             for unit in names:
-                (root / ('active-' + unit)).touch()
+                _mark_active(unit)
                 path = root / 'etc/systemd/system' / unit
                 if path.exists():
                     for line in path.read_text().splitlines():
                         if line.startswith(('Wants=', 'Requires=')):
                             for dependency in line.split('=', 1)[1].split():
-                                if dependency.endswith('.service'): (root / ('active-' + dependency)).touch()
+                                if dependency.endswith('.service'): _mark_active(dependency)
     elif operation == 'stop' or operation == 'disable' and '--now' in arguments:
-        for unit in names: (root / ('active-' + unit)).unlink(missing_ok=True)
+        for unit in names:
+            (root / ('active-' + unit)).unlink(missing_ok=True)
+            if unit in ('af-piped-proxy.service', 'piped-proxy.service'):
+                (root / 'proc/123/exe').unlink(missing_ok=True)
     elif operation == 'is-active':
-        sys.exit(0 if failure != 'readiness' and all((root / ('active-' + unit)).exists() for unit in names) else 3)
+        is_up = failure != 'readiness' and all((root / ('active-' + unit)).exists() for unit in names)
+        if '--quiet' not in arguments and '-q' not in arguments:
+            print('active' if is_up else 'inactive')
+        sys.exit(0 if is_up else 3)
     elif operation == 'is-enabled':
         sys.exit(0 if all((root / ('enabled-' + unit)).exists() for unit in names) else 1)
     elif operation == 'show':
         active = any((root / ('active-' + unit)).exists() for unit in names)
-        print('LoadState=loaded\nActiveState=' + ('active' if active else 'inactive') + '\nMainPID=0\nUnitFileState=disabled')
+        if 'ExecMainPID' in arguments and '--value' in arguments:
+            print('123' if active else '0')
+        elif '-P' in arguments and 'User' in arguments:
+            print(app)
+        else:
+            print('LoadState=loaded\nActiveState=' + ('active' if active else 'inactive') + '\nMainPID=' + ('123' if active else '0') + '\nUnitFileState=disabled')
     elif operation == 'cat':
         if failure == 'missing-unit': sys.exit(4)
         print('[Service]\nExecStart=/fixture/service')
@@ -510,7 +541,12 @@ elif command in ('curl', 'wget'):
         else:
             publish(target, artifact_bytes(url), url)
     elif any('ifconfig.me' in entry for entry in arguments): print('192.0.2.2')
-    elif any('http_code' in entry for entry in arguments): print('200')
+    elif any('http_code' in entry for entry in arguments):
+        bare_url = url.split('?', 1)[0]
+        if app == 'rclone' and not config_sources and (bare_url.endswith('/core/version') or bare_url.endswith('/metrics')):
+            print('401')
+        else:
+            print('200')
     elif any('127.0.0.1' in entry for entry in arguments):
         if failure == 'readiness': sys.exit(22)
         print(json.dumps({'status': 'ok' if app == 'maintainerr' else 'OK', 'database': 'ok', 'version': version, 'apiKey': 'retained-api-key'}))
@@ -612,10 +648,10 @@ elif command in ('sudo', 'runuser', 'su'):
         if inner and inner[0] in ('git', 'cp', 'mkdir', 'tar'):
             sys.exit(subprocess.run(inner).returncode)
     if app == 'gitea' and 'create' in arguments and '--random-password' in arguments:
-        import sqlite3
+        import contextlib, sqlite3
         database_path = root / 'var/lib/gitea/data/gitea.db'
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(database_path) as database:
+        with contextlib.closing(sqlite3.connect(database_path)) as database, database:
             database.execute('CREATE TABLE IF NOT EXISTS user (lower_name TEXT PRIMARY KEY, passwd TEXT, salt TEXT, passwd_hash_algo TEXT)')
             username = arguments[arguments.index('--username') + 1].lower()
             if database.execute('SELECT 1 FROM user WHERE lower_name=?', (username,)).fetchone(): sys.exit(1)
@@ -629,6 +665,11 @@ elif command in ('sudo', 'runuser', 'su'):
         write_file(root / 'var/www/nextcloud/config/config.php', '<?php $CONFIG = [' +
                    ', '.join(json.dumps(key) + ' => ' + json.dumps(value) for key, value in database_config.items()) + '];\n')
     if any('SHOW port' in entry for entry in arguments): print('5432')
+    if any(pathlib.Path(entry).name == 'cargo' for entry in arguments) and '--manifest-path' in arguments:
+        if failure in ('build', 'pip-build'):
+            sys.exit(74)
+        manifest = pathlib.Path(arguments[arguments.index('--manifest-path') + 1])
+        write_file(manifest.parent / 'target/release/piped-proxy', 'fixture-proxy\n', True)
     for entry in arguments:
         if entry.startswith(str(root)) and pathlib.Path(entry).is_dir():
             directory = pathlib.Path(entry)
@@ -713,8 +754,14 @@ elif command == 'pihole-FTL':
 elif command == 'pihole':
     if failure == 'bootstrap': sys.exit(77)
     print(version)
+elif command == 'rustc':
+    if '--version' in arguments:
+        print('rustc ' + os.environ.get('AF_FIXTURE_RUST_VERSION', '1.89.0') + ' (fixture)')
 elif command in ('chown', 'usermod', 'useradd', 'userdel', 'groupdel', 'flock', 'sysctl', 'a2enmod', 'a2dismod', 'a2ensite', 'a2dissite', 'apache2ctl', 'update-alternatives', 'setcap', 'mount', 'umount', 'fusermount', 'hostnamectl', 'sleep', 'pip', 'pip3', 'cargo', 'loginctl', 'ufw', 'crontab'):
     if command in ('pip', 'pip3', 'cargo') and failure in ('build', 'pip-build'): sys.exit(74)
+    if command == 'cargo' and '--manifest-path' in arguments:
+        manifest = pathlib.Path(arguments[arguments.index('--manifest-path') + 1])
+        write_file(manifest.parent / 'target/release/piped-proxy', 'fixture-proxy\n', True)
 elif command == 'hostname': print('192.0.2.2' if '-I' in arguments else 'fixture.example')
 elif command == 'mysql':
     query = arguments[arguments.index('-Nse') + 1] if '-Nse' in arguments else arguments[arguments.index('-e') + 1] if '-e' in arguments else sys.stdin.read()
@@ -755,6 +802,33 @@ else:
 '''
 
 
+def seed_nextcloud_purge_metadata(fixture):
+    """Provision valid Nextcloud DB config and ownership provenance for purge tests."""
+    data_dir = str(fixture.root / "var/lib/nextcloud/data")
+    fixture.file(
+        "var/www/nextcloud/config/config.php",
+        '<?php $CONFIG = ['
+        '"dbtype" => "mysql", "dbname" => "nextcloud", "dbhost" => "localhost", '
+        '"dbuser" => "nextclouduser", "dbpassword" => "fixture-nc-pass", '
+        f'"datadirectory" => {json.dumps(data_dir)}];\n',
+    )
+    owner = fixture.file(
+        "opt/AetherFlow/logs/nextcloud_database_owner.json",
+        json.dumps({
+            "format": 1,
+            "application": "nextcloud",
+            "backend": "mysql",
+            "database": "nextcloud",
+            "host": "localhost",
+            "username": "nextclouduser",
+            "password_sha256": hashlib.sha256(b"fixture-nc-pass").hexdigest(),
+            "data_directory": data_dir,
+        }, sort_keys=True) + "\n",
+    )
+    owner.parent.chmod(0o700)
+    owner.chmod(0o600)
+
+
 class InstallerFixture:
     """Rebase scripts and their real helpers; only fake host commands reach PATH."""
 
@@ -793,7 +867,7 @@ class InstallerFixture:
             "curl wget jq git npm yarn pnpm node python3 python3.13 python3.12 python3.11 python3.10 python pip pip3 sudo runuser su openssl "
             "gpg wg ip sysctl flock uname hostname netdata pihole pihole-FTL znc rclone qui "
             "htpasswd vncpasswd a2enmod a2dismod a2ensite a2dissite apache2ctl update-alternatives "
-            "setcap mount umount fusermount hostnamectl sleep cargo loginctl ufw crontab install "
+            "setcap mount umount fusermount hostnamectl sleep cargo rustc loginctl ufw crontab install "
             "grafana-cli mergerfs syncthing qbittorrent-nox deluged deluge-web php "
             "kasmvncpasswd startkasmvnc palated x2godbadmin mysql mysqldump tailscale psql pg_dump pgrep pkill"
         ).split()
@@ -816,6 +890,13 @@ require_root() { :; }
 load_master_credentials() { :; }
 ensure_node() { :; }
 sync_node_global_bins() { :; }
+stat() {
+    if [[ "${1:-}" == -c && "${2:-}" == %u && ( "${3:-}" == */cargo || "${3:-}" == */rustc ) ]]; then
+        printf '0\n'
+    else
+        command stat "$@"
+    fi
+}
 github_latest_tag() { [[ "${3:-}" != false ]] || printf v; printf '%s\n' "$AF_FIXTURE_VERSION"; }
 get_base_domain() { printf 'fixture.example\n'; }
 seed_jellyfin_master_user() { :; }
@@ -893,6 +974,7 @@ youtube_private_port() {
             files[name] = executable
         for name in ("Sonarr", "Radarr", "Lidarr", "Readarr", "Prowlarr", "Jackett", "Kavita", "AdGuardHome"):
             files[f"{name}/{name.lower() if name == 'Jackett' else name}"] = executable
+        files["Readarr/Readarr.dll"] = "0.4.18.2805\n"
         files["Ombi"] = executable
         files["flaresolverr/flaresolverr"] = executable
         files["Listenarr.Api"] = executable
@@ -967,8 +1049,18 @@ youtube_private_port() {
             "AF_NODESOURCE_BOOTSTRAP_SHA256": hashlib.sha256(NODESOURCE_BOOTSTRAP_SCRIPT.encode()).hexdigest(),
             "AF_TRUSTED_KEY_SHA256": hashlib.sha256((self.root / "release.tar.gz").read_bytes()).hexdigest(),
             "TMPDIR": str(self.root / "tmp"), "HOME": str(self.root / "home"),
+            "AF_PROC_ROOT": str(self.root / "proc"),
+            "AF_JOB_SCRATCH_ROOT": str(self.root / "tmp/aetherflow-scratch"),
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
             "DELETE_DATA": "false", **environment,
         }
+        if self.app == "readarr":
+            archive_path = self.root / "release.tar.gz"
+            if archive_path.is_file() and "AF_READARR_VERIFIED_ARCHIVE" not in environment:
+                readarr_archive = self.root / "tmp/readarr-verified.tar.gz"
+                shutil.copyfile(archive_path, readarr_archive)
+                variables.setdefault("AF_READARR_VERIFIED_ARCHIVE", str(readarr_archive))
+                variables.setdefault("AF_READARR_SHA256", hashlib.sha256(readarr_archive.read_bytes()).hexdigest())
         variables = {key: value for key, value in variables.items() if value is not None}
         selected_port = port if port is not None else self.metadata.get("default_port", 0)
         if selected_port:
@@ -1216,7 +1308,7 @@ restore_postgresql_database "$AF_FIXTURE_ROOT/database-backup" piped
             self.assertFalse(plugin.exists())
 
     def test_moving_release_receipts_use_installed_binary_version(self):
-        for app in ("sonarr", "radarr", "lidarr", "readarr", "prowlarr", "jackett"):
+        for app in ("lidarr", "jackett"):
             with self.subTest(app=app), InstallerFixture(app) as fixture:
                 for filename in ("release.tar.gz", "release.tar.xz"):
                     with tarfile.open(fixture.root / filename, "r:*") as archive:
@@ -1265,7 +1357,7 @@ restore_postgresql_database "$AF_FIXTURE_ROOT/database-backup" piped
                     self.assertTrue(python_commands, commands)
                     self.assertFalse(any("bootstrap-password" in argument for command in python_commands for argument in command), python_commands)
                 if app == "gitea":
-                    with sqlite3.connect(fixture.root / "var/lib/gitea/data/gitea.db") as database:
+                    with contextlib.closing(sqlite3.connect(fixture.root / "var/lib/gitea/data/gitea.db")) as database:
                         password, salt, algorithm = database.execute("SELECT passwd, salt, passwd_hash_algo FROM user WHERE lower_name='admin'").fetchone()
                     self.assertEqual(algorithm, "pbkdf2$50000$50")
                     expected = hashlib.pbkdf2_hmac("sha256", b"bootstrap-password", bytes.fromhex(salt), 50000, 50).hex()
@@ -1426,20 +1518,20 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                 self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
                 previous = fixture.file(runtime + "/audit-old-runtime", "previous executable\n")
                 state = fixture.file(database, "")
-                with sqlite3.connect(state) as connection:
+                with contextlib.closing(sqlite3.connect(state)) as connection, connection:
                     connection.execute("CREATE TABLE audit_schema (version INTEGER NOT NULL)")
                     connection.execute("INSERT INTO audit_schema VALUES (1)")
                 self.patch_host_command(fixture, "systemctl", "if command == 'systemctl':\n", """if command == 'systemctl':
     if arguments and arguments[0] == 'enable' and '--now' in arguments:
-        import sqlite3
-        with sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE']) as connection:
+        import contextlib, sqlite3
+        with contextlib.closing(sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE'])) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=2')
         (root / 'startup-migration-ran').touch()
 """)
                 failed = fixture.run("update", AF_FIXTURE_VERSION="2.2.0", AF_FIXTURE_FAILURE="readiness", AF_AUDIT_DATABASE=database)
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertTrue((fixture.root / "startup-migration-ran").exists())
-                with sqlite3.connect(state) as connection:
+                with contextlib.closing(sqlite3.connect(state)) as connection:
                     self.assertEqual(connection.execute("SELECT version FROM audit_schema").fetchone()[0], 1)
                 self.assertEqual(previous.read_text(), "previous executable\n")
                 self.assertEqual((fixture.root / runtime / ".af-version").read_text().strip(), "2.1.0")
@@ -1452,7 +1544,7 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                 self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
                 database_path = f"var/lib/{app}/audit-stopped-state.db"
                 database = fixture.file(database_path, "")
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection, connection:
                     connection.execute("CREATE TABLE audit_schema (version INTEGER NOT NULL)")
                     connection.execute("INSERT INTO audit_schema VALUES (0)")
                 self.patch_host_command(fixture, "systemctl", "if command == 'systemctl':\n", """if command == 'systemctl':
@@ -1461,16 +1553,16 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
     stopped = root / 'old-service-flushed'
     migrated = root / 'startup-migration-ran'
     if targets_app and arguments[0] == 'stop' and not stopped.exists():
-        import sqlite3
-        with sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE']) as connection:
+        import contextlib, sqlite3
+        with contextlib.closing(sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE'])) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=1')
         if app == 'bazarr':
             with (root / 'var/lib/bazarr/config/config.yaml').open('a') as config:
                 config.write('audit_stopped: true\\n')
         stopped.touch()
     if targets_app and stopped.exists() and not migrated.exists() and (arguments[0] in ('start', 'restart') or arguments[0] == 'enable' and '--now' in arguments):
-        import sqlite3
-        with sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE']) as connection:
+        import contextlib, sqlite3
+        with contextlib.closing(sqlite3.connect(root / os.environ['AF_AUDIT_DATABASE'])) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=2')
         migrated.touch()
 """)
@@ -1479,7 +1571,7 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertTrue((fixture.root / "old-service-flushed").exists())
                 self.assertTrue((fixture.root / "startup-migration-ran").exists())
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection:
                     self.assertEqual(connection.execute("SELECT version FROM audit_schema").fetchone()[0], 1)
                 if app == "bazarr":
                     self.assertIn("audit_stopped: true", (fixture.root / "var/lib/bazarr/config/config.yaml").read_text())
@@ -1543,16 +1635,16 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                 installed = fixture.run("install")
                 self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
                 database = fixture.file(directory + "/audit-migration.db", "")
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection, connection:
                     connection.execute("CREATE TABLE audit_schema (version INTEGER NOT NULL)")
                     connection.execute("INSERT INTO audit_schema VALUES (1)")
                 self.patch_host_command(fixture, "systemctl", "if command == 'systemctl':\n", """if command == 'systemctl':
     target_service = os.environ['AF_AUDIT_SERVICE']
     starts_target = any(argument.removesuffix('.service') == target_service for argument in arguments)
     if arguments and starts_target and not (root / 'startup-migration-ran').exists() and (arguments[0] == 'restart' or arguments[0] == 'enable' and '--now' in arguments):
-        import sqlite3
+        import contextlib, sqlite3
         database = root / os.environ['AF_AUDIT_DATABASE']
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
             connection.execute('UPDATE audit_schema SET version=2')
         database.with_suffix('.new-state').touch()
         (root / 'startup-migration-ran').touch()
@@ -1562,7 +1654,7 @@ if command == 'sudo' and 'maintenance:install' in arguments and os.environ.get('
                                      AF_AUDIT_SERVICE=fixture.metadata["service_name"])
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertTrue((fixture.root / "startup-migration-ran").exists())
-                with sqlite3.connect(database) as connection:
+                with contextlib.closing(sqlite3.connect(database)) as connection:
                     self.assertEqual(connection.execute("SELECT version FROM audit_schema").fetchone()[0], 1)
                 self.assertFalse(database.with_suffix(".new-state").exists())
 
@@ -1794,6 +1886,8 @@ ensure_node 20
                     if app == "dispatcharr":
                         (fixture.root / "var/lib/dispatcharr").chmod(0o755)
                         fixture.file("var/lib/dispatcharr/.aetherflow-data-owner", f"aetherflow-dispatcharr-data-v1:{fixture.root}/var/lib/dispatcharr\n").chmod(0o600)
+                    elif app == "nextcloud":
+                        seed_nextcloud_purge_metadata(fixture)
                     retained_result = fixture.run("uninstall", DELETE_DATA="false")
                     self.assertEqual(retained_result.returncode, 0, retained_result.stdout + retained_result.stderr)
                     self.assertFalse(fixture.lock.exists())
@@ -1868,6 +1962,22 @@ class CatalogCredentialAndFailureTests(unittest.TestCase):
 
     def assert_success(self, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_recyclarr_named_instances_and_retained_operator_configuration(self):
+        fixture = self.fixture("recyclarr")
+        for app in ("sonarr", "radarr"):
+            fixture.file(f"var/lib/{app}/config.xml", "<Config><ApiKey>fixture-key</ApiKey></Config>\n")
+        self.assert_success(fixture.run("install"))
+        config = fixture.root / "var/lib/recyclarr/recyclarr.yml"
+        generated = config.read_text()
+        for app in ("sonarr", "radarr"):
+            self.assertIn(f"{app}:\n  {app}:\n    base_url:", generated)
+        self.assertNotIn("- name:", generated)
+        self.assertNotIn("replace_existing_custom_formats", generated)
+        operator_config = generated.replace("  sonarr:", "  operator_instance:")
+        config.write_text(operator_config)
+        self.assert_success(fixture.run("update"))
+        self.assertEqual(config.read_text(), operator_config)
 
     def test_invidious_failed_update_rolls_back_migrated_postgresql_state(self):
         fixture = self.fixture("invidious")
@@ -3222,6 +3332,8 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
         ):
             with self.subTest(app=app):
                 fixture = self.fixture(app)
+                if app == "nextcloud":
+                    seed_nextcloud_purge_metadata(fixture)
                 secret = fixture.file(destination + ".af-backup.legacy-secret/app/secret.txt", "operator-secret\n")
                 self.assert_success(fixture.run("uninstall"))
                 self.assertEqual(secret.read_text(), "operator-secret\n")

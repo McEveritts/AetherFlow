@@ -29,7 +29,69 @@ SERVICE_FILE="/etc/systemd/system/duplicati.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8200}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -38,9 +100,9 @@ load_master_credentials
 ADMIN_PASS="${MASTER_PASS}"
 
 report_progress 20 "Installing Mono runtime, SQLite, and network utilities..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl wget jq ca-certificates apt-transport-https libicu-dev sqlite3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    curl wget jq ca-certificates apt-transport-https libicu-dev sqlite3
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -68,16 +130,16 @@ rollback_runtime() {
             runtime_path="${RUNTIME_PATHS[$runtime_index]}"
             safe_restore_path_from_backup "$BACKUP_DIR/$runtime_index" "$runtime_path" || restore_failed=true
         done
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$RUNTIME_HAD_PREVIOUS" -eq 1 ]]; then
             if [[ "$RUNTIME_WAS_ACTIVE" -eq 1 ]]; then
-                systemctl restart duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl restart duplicati.service || restore_failed=true
             fi
         else
-            systemctl disable duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl disable duplicati.service || restore_failed=true
         fi
     elif [[ "$status" -ne 0 && "$RUNTIME_MUTATED" -eq 0 && "$RUNTIME_WAS_ACTIVE" -eq 1 && "$RUNTIME_QUIESCE_STARTED" -eq 1 ]]; then
-        systemctl restart duplicati.service >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl restart duplicati.service || restore_failed=true
     fi
     [[ -z "${TMP_DEB:-}" ]] || rm -f -- "$TMP_DEB"
     if [[ "$restore_failed" == true ]]; then
@@ -124,7 +186,7 @@ fi
 
 report_progress 65 "Downloading Duplicati package (${LATEST_TAG})..."
 TMP_DEB="$(mktemp --suffix=.deb)"
-download_file "${DEB_URL}" "${TMP_DEB}" >> "$LOGFILE" 2>&1
+af_logged download_file "${DEB_URL}" "${TMP_DEB}"
 
 report_progress 75 "Installing Duplicati deb package..."
 if [[ "$RUNTIME_HAD_PREVIOUS" -eq 1 ]]; then
@@ -186,9 +248,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now duplicati.service >> "$LOGFILE" 2>&1
-systemctl restart duplicati.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now duplicati.service
+af_logged systemctl restart duplicati.service
 systemctl is-active --quiet duplicati.service
 wait_for_service_ready duplicati.service "$APP_PORT" "/"
 

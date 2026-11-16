@@ -205,6 +205,125 @@ PY
     fi
 }
 
+ACTIVE_STAGE_DIR=""
+RECOVERY_OPERATION_ID=""
+RECOVERY_STARTED_AT=""
+RECOVERY_COMMAND=""
+RECOVERY_CHANNEL=""
+RECOVERY_PHASE=""
+RECOVERY_CANDIDATE_RELEASE=""
+RECOVERY_PREVIOUS_RELEASE=""
+RECOVERY_SNAPSHOT_PATH=""
+RECOVERY_OWNS_JOURNAL=false
+INFERRED_POST_SWAP_CANDIDATE=""
+RECOVERY_FROM_UNFINISHED_POST_SWAP=false
+
+save_recovery_state() {
+    local phase="$1"
+    local err_msg="${2:-}"
+    [[ -n "${RELEASES_DIR:-}" && -n "${RECOVERY_OPERATION_ID:-}" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    RECOVERY_PHASE="${phase}"
+    RECOVERY_OWNS_JOURNAL=true
+    python3 - "${RELEASES_DIR}" "${RECOVERY_OPERATION_ID}" "${RECOVERY_COMMAND}" "${RECOVERY_CHANNEL}" "${DRY_RUN:-false}" "${phase}" "${RECOVERY_CANDIDATE_RELEASE}" "${RECOVERY_PREVIOUS_RELEASE}" "${RESOLVED_DB_PATH:-}" "${RESOLVED_DB_SOURCE:-}" "${RECOVERY_SNAPSHOT_PATH}" "${RECOVERY_STARTED_AT}" "${err_msg}" <<'PY'
+import datetime, json, os, pathlib, stat, sys, uuid
+
+(
+    releases_dir_s,
+    op_id,
+    cmd,
+    channel,
+    dry_run_s,
+    phase,
+    cand_rel,
+    prev_rel,
+    db_path,
+    db_source,
+    snap_path,
+    started_at,
+    err_msg,
+) = sys.argv[1:]
+
+releases_dir = pathlib.Path(releases_dir_s)
+if releases_dir.is_symlink():
+    raise SystemExit(f"Refusing symlinked releases directory: {releases_dir}")
+releases_dir.mkdir(parents=True, exist_ok=True)
+target = releases_dir / ".recovery_state.json"
+if target.is_symlink():
+    raise SystemExit(f"Refusing symlinked recovery journal: {target}")
+
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+payload = {
+    "operation_id": op_id,
+    "command": cmd,
+    "channel": "nightly" if channel == "experimental" else (channel or "stable"),
+    "dry_run": dry_run_s == "true",
+    "phase": phase,
+    "candidate_release": cand_rel or None,
+    "previous_release": prev_rel or None,
+    "resolved_db_path": db_path or None,
+    "resolved_db_source": db_source or None,
+    "snapshot_path": snap_path or None,
+    "started_at": started_at or now,
+    "updated_at": now,
+}
+if err_msg:
+    payload["last_error"] = err_msg
+
+data = json.dumps(payload, indent=2).encode("utf-8") + b"\n"
+tmp_name = releases_dir / f".recovery_state.json.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+fd = os.open(str(tmp_name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(str(tmp_name), str(target))
+    tmp_name = None
+finally:
+    if tmp_name is not None:
+        try:
+            os.unlink(str(tmp_name))
+        except OSError:
+            pass
+PY
+}
+
+finalize_recovery_state_on_exit() {
+    local rc="$1"
+    [[ "${rc}" -ne 0 && "${RECOVERY_OWNS_JOURNAL}" == true ]] || return 0
+    [[ "${RECOVERY_PHASE}" != "complete" && "${RECOVERY_PHASE}" != "failed" ]] || return 0
+    local msg="${LAST_LOG_ERROR:-release-manager exited with status ${rc}}"
+    case "${RECOVERY_PHASE}" in
+        stage0_fhs_layout|stage1_scaffold|stage1_5_snapshot)
+            if [[ -n "${RECOVERY_CANDIDATE_RELEASE}" && -d "${RECOVERY_CANDIDATE_RELEASE}" && ! -L "${RECOVERY_CANDIDATE_RELEASE}" ]]; then
+                local cur_real="" prev_real="" cand_real=""
+                [[ -L "${CURRENT_LINK:-}" ]] && cur_real="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                [[ -f "${RELEASES_DIR:-}/.previous_release" ]] && prev_real="$(readlink -f "$(cat "${RELEASES_DIR}/.previous_release")" 2>/dev/null || true)"
+                cand_real="$(readlink -f "${RECOVERY_CANDIDATE_RELEASE}" 2>/dev/null || true)"
+                if [[ -n "${cand_real}" && "${cand_real}" == "${RELEASES_DIR%/}/"* && "${cand_real}" != "${cur_real}" && "${cand_real}" != "${prev_real}" ]]; then
+                    rm -rf "${RECOVERY_CANDIDATE_RELEASE}" 2>/dev/null || true
+                fi
+            fi
+            save_recovery_state "failed" "${msg}" || true
+            ;;
+        stage5_cleanup|stage6_migrate_systemd)
+            save_recovery_state "failed" "${msg}" || true
+            ;;
+        stage4_rollback)
+            if [[ "${RECOVERY_FROM_UNFINISHED_POST_SWAP}" == true ]]; then
+                save_recovery_state "stage4_rollback" "${msg}" || true
+            else
+                save_recovery_state "failed" "${msg}" || true
+            fi
+            ;;
+        stage2_symlink_swap|stage3_health_probe)
+            save_recovery_state "${RECOVERY_PHASE}" "${msg}" || true
+            ;;
+    esac
+}
+
 finalize_self_update_status_on_exit() {
     local rc="$1"
     [[ -n "${SELF_UPDATE_STATUS_FILE}" ]] || return 0
@@ -216,10 +335,20 @@ finalize_self_update_status_on_exit() {
     fi
 }
 
+cleanup_on_exit() {
+    local rc="$1"
+    if [[ -n "${ACTIVE_STAGE_DIR:-}" && -d "${ACTIVE_STAGE_DIR}" && ! -L "${ACTIVE_STAGE_DIR}" ]]; then
+        rm -rf "${ACTIVE_STAGE_DIR}" 2>/dev/null || true
+    fi
+    ACTIVE_STAGE_DIR=""
+    finalize_recovery_state_on_exit "${rc}"
+    finalize_self_update_status_on_exit "${rc}"
+}
+
 if [[ -n "${SELF_UPDATE_STATUS_FILE}" ]]; then
     write_self_update_status_receipt "running" "false" "false" "null" "" || exit 1
-    trap 'finalize_self_update_status_on_exit $?' EXIT
 fi
+trap 'cleanup_on_exit $?' EXIT
 
 EFFECTIVE_RELEASE_ROOT=""
 if [[ -n "${CLI_ROOT_OVERRIDE}" && -n "${AETHERFLOW_RELEASE_ROOT:-}" ]]; then
@@ -552,16 +681,76 @@ if [[ "${DRY_RUN}" == true ]]; then
 fi
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-mkdir -p "$(dirname "${LOG_FILE}")"
+if [[ "${LOG_FILE}" != "/dev/null" ]]; then
+    _log_parent="$(dirname "${LOG_FILE}")"
+    if [[ -L "${_log_parent}" || -L "${LOG_FILE}" || ( -e "${LOG_FILE}" && ! -f "${LOG_FILE}" ) ]]; then
+        echo "[FATAL] Refusing unsafe or symlinked LOG_FILE path: ${LOG_FILE}" >&2
+        exit 4
+    fi
+    mkdir -p "${_log_parent}"
+fi
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "${s}"
+}
+
+append_log_line_locked() {
+    local line="$1"
+    [[ "${LOG_FILE}" != "/dev/null" ]] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${LOG_FILE}" "${line}" <<'PY' || return 1
+import fcntl, os, stat, sys
+
+target, line = sys.argv[1], sys.argv[2]
+parent = os.path.dirname(target) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(target, flags, 0o640)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise SystemExit(1)
+        data = (line + "\n").encode("utf-8", errors="replace")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PY
+        return 0
+    fi
+    if [[ -L "${LOG_FILE}" ]]; then
+        return 1
+    fi
+    printf '%s\n' "${line}" >> "${LOG_FILE}"
+}
 
 log() {
     local level="$1"
     shift
     local msg="$*"
-    local ts
+    local ts esc_level esc_msg
     ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    local line="{\"ts\":\"${ts}\",\"level\":\"${level}\",\"msg\":\"${msg}\"}"
-    echo "${line}" | tee -a "${LOG_FILE}"
+    esc_level="$(json_escape "${level}")"
+    esc_msg="$(json_escape "${msg}")"
+    local line="{\"ts\":\"${ts}\",\"level\":\"${esc_level}\",\"msg\":\"${esc_msg}\"}"
+    printf '%s\n' "${line}"
+    append_log_line_locked "${line}" || true
 }
 
 log_info()  { log "INFO"  "$@"; }
@@ -857,19 +1046,61 @@ ensure_fhs_layout() {
         if id -u aetherflow &>/dev/null; then
             chown -R aetherflow:aetherflow "${DATA_DIR}"
             chmod 0700 "${DATA_DIR}"
+            if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+                local host_dir
+                for host_dir in /var/log/aetherflow /run/aetherflow; do
+                    if [[ -L "${host_dir}" ]]; then
+                        log_fatal "Refusing symlinked host directory: ${host_dir}"
+                    fi
+                    mkdir -p "${host_dir}"
+                    chown root:aetherflow "${host_dir}"
+                    chmod 0750 "${host_dir}"
+                done
+            fi
         fi
     fi
 
     resolve_db_path
+
+    # Resolve any confined v3 release slot symlink (e.g. /opt/AetherFlow/current -> releases/v3.x.y)
+    # so upgrades from slot-based v3 layouts also migrate backend/data/aetherflow.sqlite and backend/.env.
+    local -a legacy_slot_roots=()
+    local slot_candidate resolved_slot canonical_releases_dir canonical_repo_dir canonical_leg_root
+    canonical_releases_dir="$(readlink -f "${RELEASES_DIR:-}" 2>/dev/null || true)"
+    canonical_repo_dir="$(readlink -f "${REPO_DIR:-}" 2>/dev/null || true)"
+    canonical_leg_root="$(readlink -f "${LEGACY_OPT_ROOT:-}" 2>/dev/null || true)"
+    for slot_candidate in "${CURRENT_LINK:-}" "${REPO_DIR:-}/current" "${LEGACY_OPT_ROOT:-}/current"; do
+        [[ -n "${slot_candidate}" && -e "${slot_candidate}" ]] || continue
+        resolved_slot="$(readlink -f "${slot_candidate}" 2>/dev/null || true)"
+        [[ -n "${resolved_slot}" && -d "${resolved_slot}" ]] || continue
+        if [[ ( -n "${canonical_releases_dir}" && "${resolved_slot}" == "${canonical_releases_dir}/"* ) || \
+              ( -n "${canonical_repo_dir}" && "${resolved_slot}" == "${canonical_repo_dir}/"* ) || \
+              ( -n "${canonical_leg_root}" && "${resolved_slot}" == "${canonical_leg_root}/"* ) ]]; then
+            legacy_slot_roots+=("${resolved_slot}")
+        fi
+    done
 
     # Only migrate a legacy DB when the resolved live path IS the FHS file and
     # that file is missing. Copying into DATA_DIR while the process uses another
     # path creates a divergent stale database (this host's /var/lib copy).
     local fhs_db="${CONFIG_DATA_DIR}/${SQLITE_DB}"
     if [[ "${RESOLVED_DB_PATH}" == "${fhs_db}" && ! -f "${fhs_db}" ]]; then
+        local -a legacy_db_candidates=(
+            "${LEGACY_OPT_ROOT}/backend/data/${SQLITE_DB}"
+            "${LEGACY_OPT_ROOT}/backend/${SQLITE_DB}"
+        )
+        if [[ ${#legacy_slot_roots[@]} -gt 0 ]]; then
+            local slot_root
+            for slot_root in "${legacy_slot_roots[@]}"; do
+                legacy_db_candidates+=(
+                    "${slot_root}/backend/data/${SQLITE_DB}"
+                    "${slot_root}/backend/${SQLITE_DB}"
+                )
+            done
+        fi
         local legacy_db
-        for legacy_db in "${LEGACY_OPT_ROOT}/backend/data/${SQLITE_DB}" "${LEGACY_OPT_ROOT}/backend/${SQLITE_DB}"; do
-            if [[ -f "${legacy_db}" ]]; then
+        for legacy_db in "${legacy_db_candidates[@]}"; do
+            if [[ -f "${legacy_db}" && ! -L "${legacy_db}" ]]; then
                 if [[ "${DRY_RUN}" == true ]]; then
                     log_info "[DRY-RUN] Would migrate legacy SQLite database from ${legacy_db} to ${fhs_db}; dry-run does not write outside ${DRY_RUN_ROOT}."
                     break
@@ -894,9 +1125,22 @@ ensure_fhs_layout() {
 
     # Migrate legacy .env only on a real deploy. Dry-run must not copy secrets.
     if [[ "${DRY_RUN}" == false && ! -f "${CONFIG_ENV_FILE}" ]]; then
+        local -a legacy_env_candidates=(
+            "${LEGACY_OPT_ROOT}/backend/.env"
+            "${LEGACY_OPT_ROOT}/.env"
+        )
+        if [[ ${#legacy_slot_roots[@]} -gt 0 ]]; then
+            local slot_root_env
+            for slot_root_env in "${legacy_slot_roots[@]}"; do
+                legacy_env_candidates+=(
+                    "${slot_root_env}/backend/.env"
+                    "${slot_root_env}/.env"
+                )
+            done
+        fi
         local legacy_env
-        for legacy_env in "${LEGACY_OPT_ROOT}/backend/.env" "${LEGACY_OPT_ROOT}/.env"; do
-            if [[ -f "${legacy_env}" ]]; then
+        for legacy_env in "${legacy_env_candidates[@]}"; do
+            if [[ -f "${legacy_env}" && ! -L "${legacy_env}" ]]; then
                 log_info "Migrating legacy environment secrets from ${legacy_env} to ${CONFIG_ENV_FILE}..."
                 mkdir -p "$(dirname "${CONFIG_ENV_FILE}")"
                 cp -pf "${legacy_env}" "${CONFIG_ENV_FILE}"
@@ -910,71 +1154,113 @@ ensure_fhs_layout() {
 ###############################################################################
 # STAGE 1: Release Scaffold (Pull Pre-Built Signed Artifact or Source Fallback)
 ###############################################################################
+is_v4_or_newer_release_tag() {
+    local tag="${1:-}"
+    [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
+}
+
+resolve_github_token_for_url() {
+    local url="$1"
+    [[ "${url}" == https://api.github.com/* || "${url}" == https://github.com/* ]] || return 1
+    local tok="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
+    [[ -n "${tok}" ]] || return 1
+    printf '%s' "${tok}"
+}
+
+github_https_curl() {
+    local max_bytes="$1"
+    local url="${!#}"
+    shift
+    local -a extra_args=("$@")
+    local hdr_file=""
+    local gh_tok=""
+    if gh_tok="$(resolve_github_token_for_url "${url}" 2>/dev/null)"; then
+        hdr_file="$(umask 0077; mktemp "${TMPDIR:-/tmp}/af-curl-hdr.XXXXXX")" || hdr_file=""
+        if [[ -n "${hdr_file}" ]]; then
+            printf 'Authorization: Bearer %s\n' "${gh_tok}" > "${hdr_file}"
+            extra_args=(-H "@${hdr_file}" "${extra_args[@]}")
+        fi
+    fi
+    local rc=0
+    curl --proto '=https' --proto-redir '=https' --max-filesize "${max_bytes}" "${extra_args[@]}" || rc=$?
+    [[ -n "${hdr_file}" ]] && rm -f "${hdr_file}"
+    return "${rc}"
+}
+
 resolve_release_tag() {
     local channel="$1"
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
     local releases_json
-    releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
+    releases_json="$(github_https_curl 16777216 -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
 
     if [[ "${channel}" == "nightly" ]]; then
         if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
             local nightly_tag=""
-            nightly_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+            nightly_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+nightly_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[Nn]ightly\.[0-9]+(?:\.[0-9]+)?$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft"):
+        if not isinstance(r, dict) or r.get("draft"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
+        if (
+            nightly_re.fullmatch(tag)
+            and target != "experimental"
+            and (bool(r.get("prerelease")) or target == "nightly")
+        ):
             print(tag)
             break
 except Exception:
     pass
 ' 2>/dev/null)"
-            if [[ -n "${nightly_tag}" ]]; then
-                echo "${nightly_tag}"
+            if [[ -n "${nightly_tag}" ]] && is_v4_or_newer_release_tag "${nightly_tag}"; then
+                printf '%s\n' "${nightly_tag}"
                 return 0
             fi
         fi
-        echo "nightly"
-        return 0
+        return 1
     fi
 
     if [[ -z "${releases_json}" ]]; then
         local latest_url latest_tag
-        latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
+        latest_url="$(github_https_curl 1048576 -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
         latest_tag="${latest_url##*/}"
-        [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+        [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]] || return 1
         printf '%s\n' "${latest_tag}"
         return 0
     fi
 
     if command -v python3 &>/dev/null; then
         local stable_tag=""
-        stable_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+        stable_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft") or r.get("prerelease"):
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and "-" not in tag and target != "nightly":
+        if tag_re.fullmatch(tag) and target not in ("nightly", "experimental"):
             print(tag)
             break
 except Exception:
     pass
 ' 2>/dev/null)"
         if [[ -n "${stable_tag}" ]]; then
-            echo "${stable_tag}"
+            printf '%s\n' "${stable_tag}"
             return 0
         fi
+        return 1
     fi
 
-    # Fallback: first release without a pre-release hyphen in tag_name
-    echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+    # Fallback: first v4+ release without a pre-release hyphen in tag_name
+    local fallback_tag=""
+    fallback_tag="$(printf '%s\n' "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$' | head -1 || true)"
+    [[ -n "${fallback_tag}" ]] || return 1
+    printf '%s\n' "${fallback_tag}"
 }
 
 validate_release_tarball() {
@@ -1033,36 +1319,54 @@ stage_running_release_manager() {
         return 1
     fi
     mkdir -p "${RELEASE_DIR}/deploy"
-    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" ]]; then
+    if [[ -L "${RELEASE_DIR}/deploy/release-manager.sh" || -L "${RELEASE_DIR}/deploy/release-manager.conf" || -L "${RELEASE_DIR}/deploy/verify-provenance.py" || -L "${RELEASE_DIR}/deploy/log-retention.py" ]]; then
         log_error "Refusing to overwrite symlink inside ${RELEASE_DIR}/deploy."
         return 1
     fi
-    if [[ -f "${SCRIPT_DIR}/release-manager.sh" ]]; then
-        rm -f "${RELEASE_DIR}/deploy/release-manager.sh"
+    if [[ -f "${RELEASE_DIR}/deploy/release-manager.sh" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/release-manager.sh"
+    elif [[ -f "${SCRIPT_DIR}/release-manager.sh" ]]; then
         cp -f "${SCRIPT_DIR}/release-manager.sh" "${RELEASE_DIR}/deploy/release-manager.sh"
-        chmod +x "${RELEASE_DIR}/deploy/release-manager.sh"
-        log_info "Staged the executing release-manager.sh into ${RELEASE_DIR}/deploy (published artifacts can predate this fix)."
+        chmod 0755 "${RELEASE_DIR}/deploy/release-manager.sh"
+        log_info "Backfilled missing release-manager.sh into ${RELEASE_DIR}/deploy."
+    fi
+    if [[ -f "${RELEASE_DIR}/deploy/verify-provenance.py" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/verify-provenance.py"
+    elif [[ -f "${SCRIPT_DIR}/verify-provenance.py" ]]; then
+        cp -f "${SCRIPT_DIR}/verify-provenance.py" "${RELEASE_DIR}/deploy/verify-provenance.py"
+        chmod 0755 "${RELEASE_DIR}/deploy/verify-provenance.py"
+    fi
+    if [[ -f "${RELEASE_DIR}/deploy/log-retention.py" ]]; then
+        chmod 0755 "${RELEASE_DIR}/deploy/log-retention.py"
+    elif [[ -f "${SCRIPT_DIR}/log-retention.py" ]]; then
+        cp -f "${SCRIPT_DIR}/log-retention.py" "${RELEASE_DIR}/deploy/log-retention.py"
+        chmod 0755 "${RELEASE_DIR}/deploy/log-retention.py"
     fi
     if [[ -f "${CONF_FILE}" ]]; then
         rm -f "${RELEASE_DIR}/deploy/release-manager.conf"
         cp -f "${CONF_FILE}" "${RELEASE_DIR}/deploy/release-manager.conf"
+        chmod 0644 "${RELEASE_DIR}/deploy/release-manager.conf"
     fi
 }
 
 pull_prebuilt_artifact() {
     local tag="$1"
+    if ! is_v4_or_newer_release_tag "${tag}"; then
+        log_error "Refusing unsupported pre-v4 or malformed release tag '${tag}'."
+        return 1
+    fi
     local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/af-release-XXXXXX")" || return 1
 
     log_info "Downloading pre-built release ${tag} (${ARTIFACT_NAME})..."
-    if ! curl -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
+    if ! github_https_curl 268435456 -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
         rm -rf "${tmp_dir}"
         return 1
     fi
 
     log_info "Downloading SHA-256 manifest (${CHECKSUM_NAME})..."
-    if ! curl -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
+    if ! github_https_curl 1048576 -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
         log_error "Missing SHA256SUMS manifest for release ${tag}. Refusing unverified binary."
         rm -rf "${tmp_dir}"
         return 1
@@ -1078,6 +1382,39 @@ pull_prebuilt_artifact() {
         return 1
     fi
     log_info "SHA-256 OK ${actual_hash}"
+
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        log_info "Verifying Sigstore + SLSA v1 GitHub Actions build provenance for ${tag}..."
+        local -a prov_args=(
+            --repo "${GITHUB_REPO}"
+            --digest "${actual_hash}"
+            --artifact-name "${ARTIFACT_NAME}"
+            --tag "${tag}"
+            --channel "${CHANNEL}"
+        )
+        local effective_bundle_file="${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}"
+        if [[ -z "${effective_bundle_file}" ]]; then
+            local candidate_bundle="${tmp_dir}/${ARTIFACT_NAME}.sigstore.json"
+            if github_https_curl 8388608 -fsSL --max-time 30 -o "${candidate_bundle}" "${base_url}/${ARTIFACT_NAME}.sigstore.json" 2>/dev/null && [[ -s "${candidate_bundle}" ]]; then
+                effective_bundle_file="${candidate_bundle}"
+                log_info "Using release-attached Sigstore bundle (${ARTIFACT_NAME}.sigstore.json)."
+            fi
+        fi
+        if [[ -n "${effective_bundle_file}" ]]; then
+            prov_args+=(--bundle-file "${effective_bundle_file}")
+        fi
+        local prov_out=""
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
+            [[ -n "${prov_out}" ]] && log_warn "Provenance verifier output: ${prov_out}"
+            log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
+            rm -rf "${tmp_dir}"
+            return 1
+        fi
+        [[ -n "${prov_out}" ]] && log_info "Provenance verifier: ${prov_out}"
+        log_info "Sigstore build provenance OK for ${tag}"
+    else
+        log_warn "AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set; bypassing Sigstore build provenance verification for ${tag}."
+    fi
 
     if ! validate_release_tarball "${tmp_dir}/${ARTIFACT_NAME}"; then
         rm -rf "${tmp_dir}"
@@ -1101,23 +1438,35 @@ pull_prebuilt_artifact() {
         rm -rf "${tmp_dir}"
         return 1
     fi
-    if [[ ! -s "${RELEASE_DIR}/.version" ]]; then
-        echo "${tag}" > "${RELEASE_DIR}/.version"
+    if [[ ! -f "${RELEASE_DIR}/.version" || -L "${RELEASE_DIR}/.version" || ! -s "${RELEASE_DIR}/.version" ]]; then
+        log_error "Release archive is missing a non-empty regular .version stamp. Refusing to continue."
+        rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+        return 1
+    fi
+    local archive_version
+    archive_version="$(tr -d '[:space:]' < "${RELEASE_DIR}/.version")"
+    if [[ "${archive_version}" != "${tag}" ]]; then
+        log_error "Release archive .version mismatch: expected '${tag}', got '${archive_version}'."
+        rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+        return 1
     fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
-    if [[ -f "${RELEASE_DIR}/af" && ! -L "${RELEASE_DIR}/af" ]]; then
-        chmod +x "${RELEASE_DIR}/af"
-        mkdir -p "${RELEASE_DIR}/bin"
-        if [[ ! -e "${RELEASE_DIR}/bin/af" && ! -L "${RELEASE_DIR}/bin/af" ]]; then
-            cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
+    local companion_bin
+    for companion_bin in af speedtest-backend; do
+        if [[ -f "${RELEASE_DIR}/${companion_bin}" && ! -L "${RELEASE_DIR}/${companion_bin}" ]]; then
+            chmod +x "${RELEASE_DIR}/${companion_bin}"
+            mkdir -p "${RELEASE_DIR}/bin"
+            if [[ ! -e "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
+                cp -f "${RELEASE_DIR}/${companion_bin}" "${RELEASE_DIR}/bin/${companion_bin}"
+            fi
+            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
+        elif [[ -f "${RELEASE_DIR}/bin/${companion_bin}" && ! -L "${RELEASE_DIR}/bin/${companion_bin}" ]]; then
+            chmod +x "${RELEASE_DIR}/bin/${companion_bin}"
+            rm -f "${RELEASE_DIR}/${companion_bin}"
+            cp -f "${RELEASE_DIR}/bin/${companion_bin}" "${RELEASE_DIR}/${companion_bin}"
+            chmod +x "${RELEASE_DIR}/${companion_bin}"
         fi
-        chmod +x "${RELEASE_DIR}/bin/af"
-    elif [[ -f "${RELEASE_DIR}/bin/af" && ! -L "${RELEASE_DIR}/bin/af" ]]; then
-        chmod +x "${RELEASE_DIR}/bin/af"
-        rm -f "${RELEASE_DIR}/af"
-        cp -f "${RELEASE_DIR}/bin/af" "${RELEASE_DIR}/af"
-        chmod +x "${RELEASE_DIR}/af"
-    fi
+    done
     if ! stage_running_release_manager; then
         rm -rf "${tmp_dir}"
         return 1
@@ -1148,8 +1497,11 @@ build_from_source() {
     local source_sha
     source_sha="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
 
-    rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
-        "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
+    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='backend-rs/target' --exclude='data-snapshot' --exclude='*.sqlite' \
+        "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
+        log_error "rsync source tree into ${RELEASE_DIR} failed."
+        return 1
+    fi
     if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
         echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version"
     fi
@@ -1158,45 +1510,83 @@ build_from_source() {
     cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing."
     export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${NODE_HEAP_MB}"
     export NEXT_STATIC_EXPORT="1"
-    npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1
-    npm run build >> "${LOG_FILE}" 2>&1
+    if ! npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1; then
+        log_error "Frontend npm ci failed."
+        return 1
+    fi
+    if ! npm run build >> "${LOG_FILE}" 2>&1; then
+        log_error "Frontend static export build failed."
+        return 1
+    fi
 
-    log_info "Embedding frontend static bundle into web/dist and backend/web/dist..."
-    rm -rf "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
-    mkdir -p "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist"
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/"
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/"
+    log_info "Embedding frontend static bundle into web/dist..."
+    rm -rf "${RELEASE_DIR}/web/dist"
+    mkdir -p "${RELEASE_DIR}/web/dist"
+    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/" || { log_error "Failed staging web/dist."; return 1; }
+    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" ]]; then
+        log_error "Frontend static export missing index.html."
+        return 1
+    fi
 
-    if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
-        log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
-        cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
-        local -a cargo_locked_args=(--locked)
-        if [[ ! -f Cargo.lock ]]; then
-            if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
-                cargo_locked_args=()
-            else
-                log_error "Missing backend-rs/Cargo.lock. Refusing unlocked source build."
-                return 1
-            fi
-        fi
-        cargo build --release "${cargo_locked_args[@]}" --bin aetherflow-api --bin af >> "${LOG_FILE}" 2>&1 || return 1
-        cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
-        if [[ -f "target/release/af" ]]; then
-            cp -f "target/release/af" "${RELEASE_DIR}/af"
-            mkdir -p "${RELEASE_DIR}/bin"
-            cp -f "target/release/af" "${RELEASE_DIR}/bin/af"
-            chmod +x "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
+    if [[ ! -d "${RELEASE_DIR}/backend-rs" ]] || ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+        log_error "Rust backend source (${RELEASE_DIR}/backend-rs), cargo, and rustc (>= 1.95.0) are required for source builds."
+        return 1
+    fi
+    local rustc_ver
+    rustc_ver="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
+    if [[ "${rustc_ver}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        local r_maj="${BASH_REMATCH[1]}" r_min="${BASH_REMATCH[2]}"
+        if (( 10#${r_maj} < 1 || (10#${r_maj} == 1 && 10#${r_min} < 95) )); then
+            log_error "Installed rustc ${rustc_ver} is older than required MSRV 1.95.0."
+            return 1
         fi
     else
-        log_info "Compiling single-binary AetherFlow Go control plane..."
-        cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
-        export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-        "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1 || return 1
+        log_error "Unable to verify rustc version '${rustc_ver}' (requires >= 1.95.0)."
+        return 1
     fi
+
+    log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
+    cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
+    local -a cargo_locked_args=(--locked)
+    if [[ ! -f Cargo.lock ]]; then
+        if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
+            cargo_locked_args=()
+        else
+            log_error "Missing backend-rs/Cargo.lock. Refusing unlocked source build."
+            return 1
+        fi
+    fi
+    local -a cargo_bin_args=(--bin aetherflow-api --bin af)
+    if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
+        cargo_bin_args+=(--bin speedtest-backend)
+    fi
+    local af_src_ver="source-${source_sha}"
+    if [[ -s "${RELEASE_DIR}/.version" ]]; then
+        af_src_ver="$(tr -d '\r\n' < "${RELEASE_DIR}/.version")"
+    fi
+    (
+        if ! command -v mold &>/dev/null; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+        fi
+        AF_BUILD_VERSION="${af_src_ver}" AETHERFLOW_VERSION="${af_src_ver}" \
+            cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1
+    ) || return 1
+    local cargo_target_dir="${CARGO_TARGET_DIR:-${RELEASE_DIR}/backend-rs/target}"
+    cp -f "${cargo_target_dir}/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api" || return 1
+    local built_bin
+    for built_bin in af speedtest-backend; do
+        if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
+            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/${built_bin}"
+            mkdir -p "${RELEASE_DIR}/bin"
+            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+            chmod +x "${RELEASE_DIR}/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+        fi
+    done
     chmod +x "${RELEASE_DIR}/aetherflow-api"
 
     # Retain only runtime essentials (binary, af, config, packages, deploy, .version)
-    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend/web/dist" "${RELEASE_DIR}/backend-rs/target"
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend-rs/target"
 }
 
 simulate_offline_artifact() {
@@ -1205,51 +1595,95 @@ simulate_offline_artifact() {
     echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
     echo "#!/bin/bash" > "${RELEASE_DIR}/af"
     cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-    chmod +x "${RELEASE_DIR}/aetherflow-api" "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
-    echo "v3.1.7-dryrun" > "${RELEASE_DIR}/.version"
+    echo "#!/bin/bash" > "${RELEASE_DIR}/speedtest-backend"
+    cp -f "${RELEASE_DIR}/speedtest-backend" "${RELEASE_DIR}/bin/speedtest-backend"
+    chmod +x \
+        "${RELEASE_DIR}/aetherflow-api" \
+        "${RELEASE_DIR}/af" \
+        "${RELEASE_DIR}/bin/af" \
+        "${RELEASE_DIR}/speedtest-backend" \
+        "${RELEASE_DIR}/bin/speedtest-backend"
+    echo "v4.0.0-dryrun" > "${RELEASE_DIR}/.version"
     stage_running_release_manager
 }
 
 release_scaffold() {
     log_info "=== STAGE 1: Release Scaffold (Channel: ${CHANNEL}) ==="
-    mkdir -p "${RELEASE_DIR}"
-
-    if [[ "${DRY_RUN}" == true && "${OFFLINE}" == true ]]; then
-        simulate_offline_artifact
-        return 0
-    fi
-
     if [[ "${OFFLINE}" == true && "${DRY_RUN}" == false ]]; then
         log_fatal "--offline is only valid with --dry-run. Refusing to deploy a placeholder binary."
     fi
 
-    if [[ "${FROM_SOURCE}" == false ]]; then
+    if [[ "${FROM_SOURCE}" == true && "${DRY_RUN}" == true ]]; then
+        log_error "[DRY-RUN] Refusing --from-source. Use a published artifact, or --offline for a placeholder."
+        exit 1
+    fi
+
+    mkdir -p "${RELEASES_DIR}"
+    if [[ -e "${RELEASE_DIR}" ]]; then
+        log_error "Release target already exists: ${RELEASE_DIR}"
+        exit 1
+    fi
+
+    local final_release_dir="${RELEASE_DIR}"
+    local stage_dir=""
+    stage_dir="$(mktemp -d "${RELEASES_DIR}/.staging.${EPOCH}.XXXXXX")" || log_fatal "Failed to create staging directory under ${RELEASES_DIR}"
+    chmod 0750 "${stage_dir}"
+    ACTIVE_STAGE_DIR="${stage_dir}"
+    RELEASE_DIR="${stage_dir}"
+
+    if [[ "${DRY_RUN}" == true && "${OFFLINE}" == true ]]; then
+        if ! simulate_offline_artifact; then
+            rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
+        fi
+    elif [[ "${FROM_SOURCE}" == false ]]; then
         local target_tag=""
         target_tag="$(resolve_release_tag "${CHANNEL}" || true)"
         if [[ -z "${target_tag}" ]]; then
             log_error "Could not resolve a release tag for channel ${CHANNEL}. Refusing implicit source-build fallback."
-            rm -rf "${RELEASE_DIR}"
+            rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
+            RELEASE_DIR="${final_release_dir}"
             exit 1
         fi
         log_info "Resolved release tag ${target_tag} for channel ${CHANNEL}."
-        if pull_prebuilt_artifact "${target_tag}"; then
-            log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
-            return 0
+        if ! pull_prebuilt_artifact "${target_tag}"; then
+            log_error "Pre-built artifact pull or verification failed for ${target_tag}. Refusing implicit source-build fallback."
+            rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
         fi
-        log_error "Pre-built artifact pull or verification failed for ${target_tag}. Refusing implicit source-build fallback."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
-    elif [[ "${DRY_RUN}" == true ]]; then
-        log_error "[DRY-RUN] Refusing --from-source. Use a published artifact, or --offline for a placeholder."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
+        if ! mv -T "${stage_dir}" "${final_release_dir}"; then
+            rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
+            RELEASE_DIR="${final_release_dir}"
+            log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
+        fi
+        ACTIVE_STAGE_DIR=""
+        RELEASE_DIR="${final_release_dir}"
+        log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
+        return 0
+    else
+        if ! build_from_source; then
+            log_error "Source build failed. Cleaning up ${stage_dir}."
+            rm -rf "${stage_dir}"
+            ACTIVE_STAGE_DIR=""
+            RELEASE_DIR="${final_release_dir}"
+            exit 1
+        fi
     fi
 
-    if ! build_from_source; then
-        log_error "Source build failed. Cleaning up ${RELEASE_DIR}."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
+    if ! mv -T "${stage_dir}" "${final_release_dir}"; then
+        rm -rf "${stage_dir}"
+        ACTIVE_STAGE_DIR=""
+        RELEASE_DIR="${final_release_dir}"
+        log_fatal "Failed to atomically promote staged release ${stage_dir} to ${final_release_dir}."
     fi
+    ACTIVE_STAGE_DIR=""
+    RELEASE_DIR="${final_release_dir}"
 
     log_info "=== STAGE 1 COMPLETE: Release ${EPOCH} scaffolded ==="
 }
@@ -1270,9 +1704,15 @@ prepare_release_permissions() {
     find "${RELEASE_DIR}" -type d -exec chmod 0755 {} + || return 1
     find "${RELEASE_DIR}" -type f -exec chmod a+r,go-w {} + || return 1
     chmod 0755 "${RELEASE_DIR}/aetherflow-api" || return 1
-    if [[ -f "${RELEASE_DIR}/af" ]]; then
-        chmod 0755 "${RELEASE_DIR}/af" || return 1
-    fi
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        if [[ -f "${RELEASE_DIR}/${companion_chmod}" ]]; then
+            chmod 0755 "${RELEASE_DIR}/${companion_chmod}" || return 1
+        fi
+        if [[ -f "${RELEASE_DIR}/bin/${companion_chmod}" ]]; then
+            chmod 0755 "${RELEASE_DIR}/bin/${companion_chmod}" || return 1
+        fi
+    done
     if [[ "${DRY_RUN}" == false ]]; then
         if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
             if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
@@ -1362,10 +1802,15 @@ state_snapshot() {
     fi
     log_info "Snapshot integrity check PASSED: ${bak_path}"
 
-    (
-        cd "${snapshot_dir}"
-        sha256sum -- *.bak > MANIFEST.sha256
-    ) || log_warn "Could not write snapshot SHA-256 manifest."
+    if ! (
+        umask 077
+        cd "${snapshot_dir}" &&
+        sha256sum -- *.bak > MANIFEST.sha256 &&
+        [[ -s MANIFEST.sha256 ]]
+    ); then
+        log_error "Failed to write snapshot SHA-256 manifest in ${snapshot_dir}. Aborting before symlink swap."
+        return 1
+    fi
 
     log_info "=== STAGE 1.5 COMPLETE: State snapshot captured ==="
 }
@@ -1438,14 +1883,32 @@ symlink_swap() {
 ###############################################################################
 install_packaged_unit() {
     local src="$1"
-    local dest="${SYSTEMD_UNITS_DST}/$(basename "${src}")"
-    [[ -f "${src}" ]] || return 0
+    local unit_name dest tmp_unit=""
+    unit_name="$(basename "${src}")"
+    dest="${SYSTEMD_UNITS_DST}/${unit_name}"
+    if [[ -L "${src}" || -L "${SYSTEMD_UNITS_DST}" || -L "${dest}" ]]; then
+        log_fatal "Refusing symlinked systemd unit path: ${dest} (source ${src})."
+    fi
+    [[ -e "${src}" ]] || return 0
+    if [[ ! -f "${src}" ]]; then
+        log_fatal "Refusing non-regular packaged systemd unit source: ${src}."
+    fi
     mkdir -p "${SYSTEMD_UNITS_DST}"
+    if [[ -L "${SYSTEMD_UNITS_DST}" ]]; then
+        log_fatal "Refusing symlinked systemd unit directory: ${SYSTEMD_UNITS_DST}."
+    fi
     if [[ -e "${dest}" ]]; then
+        if [[ ! -f "${dest}" ]]; then
+            log_fatal "Refusing non-regular installed systemd unit destination: ${dest}."
+        fi
         log_info "Keeping installed systemd unit ${dest}; not replacing it with ${src}."
         return 0
     fi
-    cp -f "${src}" "${dest}"
+    tmp_unit="$(mktemp "${SYSTEMD_UNITS_DST}/.${unit_name}.tmp.XXXXXX")" || log_fatal "Failed to create temporary unit file in ${SYSTEMD_UNITS_DST}."
+    if ! cp -f "${src}" "${tmp_unit}" || ! chmod 0644 "${tmp_unit}" || ! mv -f "${tmp_unit}" "${dest}"; then
+        rm -f "${tmp_unit}"
+        log_fatal "Failed to atomically install systemd unit ${dest} from ${src}."
+    fi
     log_info "Installed systemd unit ${dest} from ${src}."
 }
 
@@ -1454,13 +1917,67 @@ restart_systemd_units() {
     if [[ -d "${CURRENT_LINK}/deploy/systemd" ]]; then
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-runner.service"
         install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-api.service"
+        local -a dropin_units=(aetherflow-runner.service aetherflow-api.service)
         if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.service"
             install_packaged_unit "${CURRENT_LINK}/deploy/systemd/aetherflow-log-retention.timer"
+            dropin_units+=(aetherflow-log-retention.service)
         fi
+        if [[ -L "${SYSTEMD_UNITS_DST}" ]]; then
+            printf 'Refusing symlinked systemd destination: %s\n' "${SYSTEMD_UNITS_DST}" >&2
+            return 1
+        fi
+        mkdir -p "${SYSTEMD_UNITS_DST}"
+        local dropin_unit dropin_dir dropin_dest defaults_dest tmp_dropin tmp_defaults dropin_payload defaults_payload
+        for dropin_unit in "${dropin_units[@]}"; do
+            dropin_dir="${SYSTEMD_UNITS_DST}/${dropin_unit}.d"
+            defaults_dest="${dropin_dir}/05-aetherflow-unit-defaults.conf"
+            dropin_dest="${dropin_dir}/10-aetherflow-hardening.conf"
+            if [[ -L "${dropin_dir}" || -L "${defaults_dest}" || -L "${dropin_dest}" ]]; then
+                printf 'Refusing symlinked systemd drop-in path: %s\n' "${dropin_dest}" >&2
+                return 1
+            fi
+            mkdir -p "${dropin_dir}"
+            chmod 0755 "${dropin_dir}"
+            if [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
+                defaults_payload=$'[Service]\nTimeoutStartSec=120s\nTimeoutStopSec=30s\n'
+            else
+                defaults_payload=$'[Service]\nRestart=on-failure\nRestartSec=3s\nTimeoutStopSec=30s\n'
+            fi
+            if [[ "${dropin_unit}" == "aetherflow-runner.service" ]]; then
+                dropin_payload=$'[Service]\nUMask=0077\nRuntimeDirectory=aetherflow\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes\nLogsDirectory=aetherflow\nLogsDirectoryMode=0750\nLogsDirectoryPreserve=yes\nPrivateTmp=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nSystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap\n'
+            elif [[ "${dropin_unit}" == "aetherflow-log-retention.service" ]]; then
+                dropin_payload=$'[Service]\nUMask=0077\nNoNewPrivileges=yes\nPrivateTmp=yes\nPrivateNetwork=yes\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\n'
+            else
+                dropin_payload=$'[Service]\nUMask=0027\nLogsDirectory=\nProtectClock=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nLockPersonality=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'
+            fi
+            tmp_defaults="$(mktemp "${dropin_dir}/.05-aetherflow-unit-defaults.conf.tmp.XXXXXX")" || return 1
+            if ! printf '%s' "${defaults_payload}" > "${tmp_defaults}" || ! chmod 0644 "${tmp_defaults}" || ! mv -f "${tmp_defaults}" "${defaults_dest}"; then
+                rm -f "${tmp_defaults}"
+                return 1
+            fi
+            tmp_dropin="$(mktemp "${dropin_dir}/.10-aetherflow-hardening.conf.tmp.XXXXXX")" || return 1
+            if ! printf '%s' "${dropin_payload}" > "${tmp_dropin}" || ! chmod 0644 "${tmp_dropin}" || ! mv -f "${tmp_dropin}" "${dropin_dest}"; then
+                rm -f "${tmp_dropin}"
+                return 1
+            fi
+        done
     fi
 
-    systemctl daemon-reload
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]] && id -u aetherflow >/dev/null 2>&1; then
+        local host_dir
+        for host_dir in /var/log/aetherflow /run/aetherflow; do
+            if [[ -L "${host_dir}" ]]; then
+                printf 'Refusing symlinked host directory: %s\n' "${host_dir}" >&2
+                return 1
+            fi
+            mkdir -p "${host_dir}"
+            chown root:aetherflow "${host_dir}"
+            chmod 0750 "${host_dir}"
+        done
+    fi
+
+    systemctl daemon-reload || return 1
 
     if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
         systemctl start aetherflow-log-retention.service || return 1
@@ -1473,9 +1990,9 @@ restart_systemd_units() {
         pm2 delete aetherflow-frontend aetherflow-api 2>/dev/null || true
     fi
 
-    systemctl enable aetherflow-runner.service aetherflow-api.service >> "${LOG_FILE}" 2>&1 || true
-    systemctl restart aetherflow-runner.service
-    systemctl restart aetherflow-api.service
+    systemctl enable aetherflow-runner.service aetherflow-api.service >/dev/null 2>&1 || true
+    systemctl restart aetherflow-runner.service || return 1
+    systemctl restart aetherflow-api.service || return 1
 }
 
 # Top-level "status" from a /health/ready body. Key order and whitespace do not matter.
@@ -1517,7 +2034,10 @@ health_probe() {
         return 0
     fi
 
-    restart_systemd_units
+    if ! restart_systemd_units; then
+        log_error "Failed to restart required AetherFlow systemd services."
+        return 1
+    fi
 
     log_info "Polling ${HEALTH_ENDPOINT} (${HEALTH_RETRIES} attempts, ${HEALTH_INTERVAL}s interval)..."
     local attempt=1
@@ -1531,6 +2051,27 @@ health_probe() {
         if [[ "${http_code}" == "200" ]]; then
             status="$(parse_health_status "${body}" || true)"
             if [[ "${status}" == "ready" || "${status}" == "ok" ]]; then
+                if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" && -L "${CURRENT_LINK}" ]]; then
+                    if [[ -f "${SYSTEMD_UNITS_DST}/aetherflow-runner.service" ]] && ! systemctl is-active --quiet aetherflow-runner.service 2>/dev/null; then
+                        log_warn "Health probe HTTP 200 but aetherflow-runner.service is not active; retrying."
+                        sleep "${HEALTH_INTERVAL}"
+                        attempt=$((attempt + 1))
+                        continue
+                    fi
+                    local expected_release_dir main_pid proc_exe
+                    expected_release_dir="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                    main_pid="$(systemctl show -p MainPID --value aetherflow-api.service 2>/dev/null | tr -d '[:space:]' || true)"
+                    if [[ -n "${expected_release_dir}" && "${main_pid}" =~ ^[1-9][0-9]*$ && -e "/proc/${main_pid}/exe" ]]; then
+                        proc_exe="$(readlink -f "/proc/${main_pid}/exe" 2>/dev/null || true)"
+                        proc_exe="${proc_exe% (deleted)}"
+                        if [[ -n "${proc_exe}" && "${proc_exe}" != "${expected_release_dir}/"* ]]; then
+                            log_warn "Health probe HTTP 200 but MainPID ${main_pid} exe=${proc_exe} does not match ${expected_release_dir}; retrying."
+                            sleep "${HEALTH_INTERVAL}"
+                            attempt=$((attempt + 1))
+                            continue
+                        fi
+                    fi
+                fi
                 log_info "Health probe PASSED on attempt ${attempt}/${HEALTH_RETRIES} (status=${status})"
                 return 0
             fi
@@ -1649,7 +2190,7 @@ state_restore() {
         mv "${db_path}" "${db_path}.corrupted.$(date +%s)" || return 1
     fi
     cp -pf "${bak_path}" "${db_path}" || return 1
-    if id -u aetherflow >/dev/null 2>&1; then
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]] && id -u aetherflow >/dev/null 2>&1; then
         chown aetherflow:aetherflow "${db_path}" || return 1
     fi
     chmod 0600 "${db_path}" || return 1
@@ -1659,7 +2200,11 @@ state_restore() {
 rollback() {
     local snapshot_release="${1:-}"
     log_error "=== STAGE 4: ROLLBACK INITIATED ==="
+    save_recovery_state "stage4_rollback"
     local prev_file="${RELEASES_DIR}/.previous_release"
+    if [[ ! -f "${prev_file}" && -n "${RECOVERY_PREVIOUS_RELEASE}" && -d "${RECOVERY_PREVIOUS_RELEASE}" && ! -L "${prev_file}" ]]; then
+        printf '%s\n' "${RECOVERY_PREVIOUS_RELEASE}" > "${prev_file}"
+    fi
     if [[ ! -f "${prev_file}" ]]; then
         log_fatal "No previous release record found at ${prev_file}."
     fi
@@ -1670,6 +2215,11 @@ rollback() {
         log_fatal "Previous release directory missing: ${previous_target}."
     fi
 
+    local current_before_rollback=""
+    if [[ -L "${CURRENT_LINK}" ]]; then
+        current_before_rollback="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+    fi
+
     local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
     ln -s "${previous_target}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
@@ -1678,7 +2228,15 @@ rollback() {
     log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
 
     if [[ -z "${snapshot_release}" ]]; then
-        snapshot_release="${previous_target}"
+        local prev_canon
+        prev_canon="$(readlink -f "${previous_target}" 2>/dev/null || printf '%s' "${previous_target}")"
+        if [[ -n "${INFERRED_POST_SWAP_CANDIDATE}" && -d "${INFERRED_POST_SWAP_CANDIDATE}/data-snapshot" ]]; then
+            snapshot_release="${INFERRED_POST_SWAP_CANDIDATE}"
+        elif [[ -n "${current_before_rollback}" && "${current_before_rollback}" != "${prev_canon}" && -d "${current_before_rollback}/data-snapshot" ]]; then
+            snapshot_release="${current_before_rollback}"
+        else
+            snapshot_release="${previous_target}"
+        fi
     fi
     log_info "Database recovery snapshot release: ${snapshot_release}"
 
@@ -1690,9 +2248,13 @@ rollback() {
     fi
 
     if [[ "${DRY_RUN}" == false ]]; then
-        restart_systemd_units
+        if ! health_probe; then
+            log_fatal "Health probe failed after rollback to ${previous_target}."
+        fi
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
+    RECOVERY_PREVIOUS_RELEASE="${previous_target}"
+    save_recovery_state "complete"
 }
 
 ###############################################################################
@@ -1700,6 +2262,10 @@ rollback() {
 ###############################################################################
 cleanup_old_releases() {
     log_info "=== STAGE 5: Pruning Old Releases (retaining ${MAX_RELEASES}) ==="
+
+    if [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]]; then
+        find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d \( -name '.staging.*' -o -name '.staging-*' \) -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+    fi
 
     local current_target=""
     [[ -L "${CURRENT_LINK}" ]] && current_target="$(readlink -f "${CURRENT_LINK}")"
@@ -1710,7 +2276,7 @@ cleanup_old_releases() {
     local releases=()
     while IFS= read -r dir; do
         releases+=("${dir}")
-    done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -n)
+    done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort -n)
 
     local count=${#releases[@]}
     [[ ${count} -le ${MAX_RELEASES} ]] && return 0
@@ -1743,7 +2309,6 @@ migrate_systemd() {
         pm2 unstartup >> "${LOG_FILE}" 2>&1 || true
         sleep 2
     fi
-    restart_systemd_units
     if ! health_probe; then
         log_fatal "Health probe failed after systemd migration."
     fi
@@ -1765,28 +2330,58 @@ if not header:
 if header != b"SQLite format 3\0":
     sys.exit(0 if command == "rollback" else "Cannot verify application lifecycle journal: invalid SQLite header")
 try:
-    connection = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
-    table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
-    if not table:
-        sys.exit(0)
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
-    if "owner_id" in columns:
-        for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
-            try:
-                uuid.UUID(owner)
-                lease_path = database.with_suffix(".lifecycle-owners") / owner
-                descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(descriptor, "rb") as lease:
-                    if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
+        if not table:
+            sys.exit(0)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
+        stale = []
+        held_leases = []
+        try:
+            if "owner_id" in columns:
+                for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+                    lease = None
+                    try:
+                        uuid.UUID(owner)
+                        lease_path = database.with_suffix(".lifecycle-owners") / owner
+                        descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
+                        lease = os.fdopen(descriptor, "rb")
+                        if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+                            lease.close()
+                            continue
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        held_leases.append(lease)
+                        stale.append((package, job, owner))
+                    except (OSError, ValueError):
+                        if lease is not None:
+                            lease.close()
                         continue
-                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    connection.execute("UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
-                                       (datetime.datetime.now(datetime.timezone.utc).isoformat(), package, job, owner))
-            except (OSError, ValueError):
-                continue
-        connection.commit()
-    if connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone():
-        sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+            if stale:
+                rw = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
+                try:
+                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    for package, job, owner in stale:
+                        rw.execute(
+                            "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                            (now, package, job, owner),
+                        )
+                    rw.commit()
+                    active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                finally:
+                    rw.close()
+            else:
+                active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+        finally:
+            for held in held_leases:
+                try:
+                    held.close()
+                except OSError:
+                    pass
+        if active:
+            sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+    finally:
+        connection.close()
 except sqlite3.DatabaseError as error:
     code = getattr(error, "sqlite_errorcode", None)
     # Python 3.10 has neither sqlite_errorcode nor the SQLITE_* constants.
@@ -1800,6 +2395,137 @@ PY
     then
         log_fatal "Application lifecycle admission is unavailable; release was not started."
     fi
+}
+
+guard_and_init_recovery_state() {
+    local parsed=""
+    if ! parsed="$(python3 - "${RELEASES_DIR}" "${CURRENT_LINK}" "${COMMAND}" "${CHANNEL:-stable}" "${DRY_RUN:-false}" "${AETHERFLOW_UPDATE_OPERATION_ID:-}" <<'PY'
+import datetime, json, os, pathlib, shutil, stat, sys, uuid
+
+releases_dir_s, current_link_s, cmd, channel, dry_run_s, env_op_id = sys.argv[1:]
+releases_dir = pathlib.Path(releases_dir_s)
+current_link = pathlib.Path(current_link_s)
+state_file = releases_dir / ".recovery_state.json"
+prev_file = releases_dir / ".previous_release"
+
+if state_file.is_symlink():
+    sys.stderr.write(f"Refusing symlinked recovery journal: {state_file}\n")
+    raise SystemExit(1)
+
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+valid_env_op = ""
+if env_op_id:
+    try:
+        valid_env_op = str(uuid.UUID(env_op_id))
+    except ValueError:
+        valid_env_op = ""
+
+op_id = valid_env_op or str(uuid.uuid4())
+started_at = now
+rec_cmd = cmd
+rec_channel = "nightly" if channel == "experimental" else (channel or "stable")
+rec_cand = ""
+rec_prev = ""
+rec_snap = ""
+inferred_cand = ""
+from_post_swap = "false"
+
+if state_file.exists():
+    st = state_file.lstat()
+    if not stat.S_ISREG(st.st_mode):
+        sys.stderr.write(f"Refusing non-regular recovery journal: {state_file}\n")
+        raise SystemExit(1)
+    try:
+        existing = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            raise ValueError("not a JSON object")
+    except Exception as exc:
+        sys.stderr.write(f"Corrupted recovery journal {state_file}: {exc}\n")
+        raise SystemExit(1)
+
+    phase = str(existing.get("phase") or "")
+    ex_cmd = str(existing.get("command") or "")
+    ex_dry = bool(existing.get("dry_run", False))
+    is_unfinished = phase not in ("complete", "completed", "failed")
+    post_swap_deploy = (
+        is_unfinished
+        and ex_cmd in ("", "deploy")
+        and not ex_dry
+        and phase in ("stage2_symlink_swap", "stage3_health_probe", "stage4_rollback")
+    )
+
+    if post_swap_deploy:
+        if cmd != "rollback":
+            sys.stderr.write(
+                f"Refusing to run '{cmd}' while an interrupted deployment "
+                f"(operation_id={existing.get('operation_id')}, phase={phase}, "
+                f"candidate={existing.get('candidate_release')}, previous_release={existing.get('previous_release')}) "
+                f"is unfinished after symlink swap; run 'rollback' first so '.previous_release' is not overwritten.\n"
+            )
+            raise SystemExit(2)
+        ex_prev = existing.get("previous_release")
+        if isinstance(ex_prev, str) and ex_prev and pathlib.Path(ex_prev).is_dir():
+            if prev_file.is_symlink():
+                sys.stderr.write(f"Refusing symlinked .previous_release: {prev_file}\n")
+                raise SystemExit(1)
+            tmp_prev = releases_dir / f".previous_release.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+            tmp_prev.write_text(ex_prev + "\n", encoding="utf-8")
+            os.replace(str(tmp_prev), str(prev_file))
+            rec_prev = ex_prev
+        ex_cand = existing.get("candidate_release")
+        if isinstance(ex_cand, str) and ex_cand:
+            rec_cand = ex_cand
+            if (pathlib.Path(ex_cand) / "data-snapshot").is_dir():
+                inferred_cand = ex_cand
+        ex_snap = existing.get("snapshot_path")
+        if isinstance(ex_snap, str) and ex_snap:
+            rec_snap = ex_snap
+        op_id = valid_env_op or str(existing.get("operation_id") or op_id)
+        started_at = str(existing.get("started_at") or now)
+        rec_cmd = ex_cmd or "rollback"
+        rec_channel = str(existing.get("channel") or rec_channel)
+        from_post_swap = "true"
+    elif is_unfinished and phase in ("stage0_fhs_layout", "stage1_scaffold", "stage1_5_snapshot") and cmd != "rollback":
+        ex_cand = existing.get("candidate_release")
+        if isinstance(ex_cand, str) and ex_cand:
+            cand_p = pathlib.Path(ex_cand)
+            try:
+                cand_res = cand_p.resolve(strict=False)
+                rel_res = releases_dir.resolve(strict=False)
+                cur_res = current_link.resolve(strict=False) if current_link.is_symlink() else None
+                prev_res = pathlib.Path(prev_file.read_text(encoding="utf-8").strip()).resolve(strict=False) if prev_file.is_file() else None
+                if (
+                    cand_p.is_dir()
+                    and not cand_p.is_symlink()
+                    and str(cand_res).startswith(str(rel_res) + "/")
+                    and cand_res != cur_res
+                    and cand_res != prev_res
+                ):
+                    shutil.rmtree(cand_p, ignore_errors=True)
+            except OSError:
+                pass
+    elif cmd == "rollback":
+        ex_prev = existing.get("previous_release")
+        if isinstance(ex_prev, str) and ex_prev:
+            rec_prev = ex_prev
+
+for val in (op_id, started_at, rec_cmd, rec_channel, rec_cand, rec_prev, rec_snap, inferred_cand, from_post_swap):
+    sys.stdout.write(val.replace("\n", "") + "\n")
+PY
+    )"; then
+        log_fatal "Recovery state admission refused command '${COMMAND}'; run 'rollback' first or inspect ${RELEASES_DIR}/.recovery_state.json."
+    fi
+    {
+        IFS= read -r RECOVERY_OPERATION_ID
+        IFS= read -r RECOVERY_STARTED_AT
+        IFS= read -r RECOVERY_COMMAND
+        IFS= read -r RECOVERY_CHANNEL
+        IFS= read -r RECOVERY_CANDIDATE_RELEASE
+        IFS= read -r RECOVERY_PREVIOUS_RELEASE
+        IFS= read -r RECOVERY_SNAPSHOT_PATH
+        IFS= read -r INFERRED_POST_SWAP_CANDIDATE
+        IFS= read -r RECOVERY_FROM_UNFINISHED_POST_SWAP
+    } <<< "${parsed}"
 }
 
 acquire_release_lock() {
@@ -1842,7 +2568,7 @@ acquire_release_lock() {
             runtime_svc_gid="$(id -gn "${runtime_svc_user}" 2>/dev/null || echo "${runtime_svc_user}")"
             chown --no-dereference "root:${runtime_svc_gid}" "${shared_lock_dir}" 2>/dev/null || true
         fi
-        chmod 1770 "${shared_lock_dir}" 2>/dev/null || true
+        chmod 0750 "${shared_lock_dir}" 2>/dev/null || true
     fi
     if [[ -L "${shared_db_lock}" ]]; then
         log_fatal "Maintenance lockfile is a symbolic link: ${shared_db_lock}"
@@ -1896,21 +2622,54 @@ acquire_release_lock() {
     if ! flock -w "${SNAPSHOT_TIMEOUT}" 201; then
         log_fatal "Could not acquire release lock ${release_lock} within ${SNAPSHOT_TIMEOUT}s."
     fi
+    guard_and_init_recovery_state
 }
 
 case "${COMMAND}" in
     deploy)
         acquire_release_lock
+        save_recovery_state "stage0_fhs_layout"
         ensure_fhs_layout
+        RECOVERY_CANDIDATE_RELEASE="${RELEASE_DIR}"
+        save_recovery_state "stage1_scaffold"
         release_scaffold
         prepare_release_permissions || exit 1
+        save_recovery_state "stage1_5_snapshot"
         state_snapshot || exit 1
+        if [[ -f "${RELEASE_DIR}/data-snapshot/${SQLITE_DB}.bak" ]]; then
+            RECOVERY_SNAPSHOT_PATH="${RELEASE_DIR}/data-snapshot/${SQLITE_DB}.bak"
+        fi
+        PRIOR_PREVIOUS_RELEASE=""
+        if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
+            PRIOR_PREVIOUS_RELEASE="$(cat "${RELEASES_DIR}/.previous_release")"
+        fi
+        if [[ -L "${CURRENT_LINK}" ]]; then
+            RECOVERY_PREVIOUS_RELEASE="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+        else
+            RECOVERY_PREVIOUS_RELEASE="${PRIOR_PREVIOUS_RELEASE}"
+        fi
+        save_recovery_state "stage2_symlink_swap"
         symlink_swap
+        if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
+            RECOVERY_PREVIOUS_RELEASE="$(cat "${RELEASES_DIR}/.previous_release")"
+        fi
+        save_recovery_state "stage3_health_probe"
         if ! health_probe; then
+            RECOVERY_FROM_UNFINISHED_POST_SWAP=true
+            save_recovery_state "stage4_rollback" "${LAST_LOG_ERROR:-Health probe failed}"
             rollback "${RELEASE_DIR}"
+            if [[ -n "${PRIOR_PREVIOUS_RELEASE}" && -d "${PRIOR_PREVIOUS_RELEASE}" ]]; then
+                REVERTED_CANON="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                PRIOR_CANON="$(readlink -f "${PRIOR_PREVIOUS_RELEASE}" 2>/dev/null || printf '%s' "${PRIOR_PREVIOUS_RELEASE}")"
+                if [[ "${PRIOR_CANON}" != "${REVERTED_CANON}" && ! -L "${RELEASES_DIR}/.previous_release" ]]; then
+                    printf '%s\n' "${PRIOR_PREVIOUS_RELEASE}" > "${RELEASES_DIR}/.previous_release"
+                fi
+            fi
             exit 2
         fi
+        save_recovery_state "stage5_cleanup"
         cleanup_old_releases
+        save_recovery_state "complete"
         if [[ "${DRY_RUN}" == true ]]; then
             log_info "DRY-RUN SUCCESSFUL: Release ${EPOCH} (${CHANNEL}) staged at ${CURRENT_LINK}. Systemd was not restarted."
         else
@@ -1923,11 +2682,15 @@ case "${COMMAND}" in
         ;;
     cleanup)
         acquire_release_lock
+        save_recovery_state "stage5_cleanup"
         cleanup_old_releases
+        save_recovery_state "complete"
         ;;
     migrate-systemd)
         acquire_release_lock
+        save_recovery_state "stage6_migrate_systemd"
         migrate_systemd
+        save_recovery_state "complete"
         ;;
     *)
         echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly] [--from-source] [--dry-run] [--offline]"

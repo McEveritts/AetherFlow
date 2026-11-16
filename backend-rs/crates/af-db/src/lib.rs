@@ -27,21 +27,211 @@ use std::time::{Duration, Instant};
 pub mod streaming;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AES-256-GCM Secret Encryption (`backend/api/crypto.go`)
+// AES-256-GCM Secret Encryption
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CIPHERTEXT_PREFIX: &str = "enc:v1:";
 
 static AES_MASTER_KEY: Lazy<RwLock<Option<[u8; 32]>>> = Lazy::new(|| RwLock::new(None));
 
-/// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (32 raw bytes or Base64).
+pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = raw.trim();
+    if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut arr = [0u8; 32];
+        for (idx, dst) in arr.iter_mut().enumerate() {
+            let hex_pair = &trimmed[idx * 2..idx * 2 + 2];
+            *dst = u8::from_str_radix(hex_pair, 16)?;
+        }
+        return Ok(arr);
+    }
+    if let Ok(decoded) = BASE64_STD.decode(trimmed) {
+        if decoded.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&decoded);
+            return Ok(arr);
+        }
+    }
+    if trimmed.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(trimmed.as_bytes());
+        return Ok(arr);
+    }
+    if raw.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(raw.as_bytes());
+        return Ok(arr);
+    }
+    anyhow::bail!(
+        "FATAL: AES_MASTER_KEY must decode to 32 bytes (32-byte raw, base64, or 64-char hex). Got {} chars.",
+        trimmed.len()
+    )
+}
+
+pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
+    if let Ok(guard) = AES_MASTER_KEY.read() {
+        if let Some(key) = *guard {
+            return Some(key);
+        }
+    }
+    if let Ok(raw) = env::var("AES_MASTER_KEY") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Ok(key) = parse_aes_key_bytes(trimmed) {
+                return Some(key);
+            }
+        }
+    }
+    if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() == Ok("1") {
+        return None;
+    }
+    let env_file = env::var("AETHERFLOW_ENV_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())?;
+    if let Some(clean) = read_last_aes_key_from_env_file(Path::new(&env_file)) {
+        if let Ok(key) = parse_aes_key_bytes(&clean) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Some(parent) = path.parent() {
+        let pmeta = fs::symlink_metadata(parent).ok()?;
+        if pmeta.file_type().is_symlink() || !pmeta.is_dir() {
+            return None;
+        }
+    }
+    let lmeta = fs::symlink_metadata(path).ok()?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return None;
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(0o0400000); // O_NOFOLLOW on Linux
+    }
+    let mut file = opts.open(path).ok()?;
+    let fmeta = file.metadata().ok()?;
+    if !fmeta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if lmeta.dev() != fmeta.dev() || lmeta.ino() != fmeta.ino() {
+            return None;
+        }
+    }
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents).ok()?;
+    let mut last_raw: Option<String> = None;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
+            let clean = val.trim().trim_matches('"').trim_matches('\'');
+            if !clean.is_empty() {
+                last_raw = Some(clean.to_string());
+            }
+        }
+    }
+    last_raw
+}
+
+fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| anyhow::anyhow!("gcm encryption failed: {}", e))?;
+    let mut combined = Vec::with_capacity(12 + ciphertext.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&ciphertext);
+    Ok(format!(
+        "{}{}",
+        CIPHERTEXT_PREFIX,
+        BASE64_STD.encode(combined)
+    ))
+}
+
+fn decrypt_with_key(payload: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+    let data = BASE64_STD
+        .decode(payload)
+        .map_err(|e| anyhow::anyhow!("versioned ciphertext base64 decode failed: {}", e))?;
+    if data.len() < 12 {
+        anyhow::bail!("ciphertext too short");
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow::anyhow!("gcm decryption failed: {}", e))?;
+    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e))
+}
+
+pub fn encrypt_secret_if_configured(plaintext: &str) -> anyhow::Result<String> {
+    match resolve_runtime_aes_key() {
+        Some(key) => encrypt_with_key(plaintext, &key),
+        None => Ok(plaintext.to_string()),
+    }
+}
+
+pub fn decrypt_secret_if_needed(value: &str) -> anyhow::Result<String> {
+    if let Some(payload) = value.strip_prefix(CIPHERTEXT_PREFIX) {
+        let key = resolve_runtime_aes_key().ok_or_else(|| {
+            anyhow::anyhow!("AES_MASTER_KEY is required to decrypt enc:v1: secret")
+        })?;
+        return decrypt_with_key(payload, &key);
+    }
+    Ok(value.to_string())
+}
+
+/// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (or `AETHERFLOW_ENV_FILE`).
 pub fn init_aes_key() -> anyhow::Result<()> {
-    let raw = env::var("AES_MASTER_KEY").unwrap_or_default();
+    let mut raw = env::var("AES_MASTER_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if raw.is_empty() {
-        let mode = env::var("GIN_MODE").unwrap_or_default();
-        if mode == "release" {
+        let explicit_env_file = env::var("AETHERFLOW_ENV_FILE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        if let Some(ref explicit_path) = explicit_env_file {
+            if let Some(from_file) = read_last_aes_key_from_env_file(Path::new(explicit_path)) {
+                raw = from_file;
+            }
+        } else if env::var("AETHERFLOW_SKIP_ENV_FILES").as_deref() != Ok("1") {
+            let default_env = Path::new("/etc/aetherflow/aetherflow.env");
+            if let Some(from_file) = read_last_aes_key_from_env_file(default_env) {
+                raw = from_file;
+            }
+        }
+    }
+    if raw.is_empty() {
+        let af_env = env::var("AETHERFLOW_ENV").unwrap_or_default();
+        let gin_mode = env::var("GIN_MODE").unwrap_or_default();
+        let is_production = af_env.trim().eq_ignore_ascii_case("production")
+            || af_env.trim().eq_ignore_ascii_case("release")
+            || gin_mode.trim().eq_ignore_ascii_case("release");
+        if is_production {
             anyhow::bail!(
-                "FATAL: AES_MASTER_KEY is required in production (GIN_MODE=release). \
+                "FATAL: AES_MASTER_KEY is required in production (AETHERFLOW_ENV=production or GIN_MODE=release). \
                  Set a 32-byte key (raw or base64-encoded) to enable API key encryption."
             );
         }
@@ -54,31 +244,7 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let key_bytes: [u8; 32] = if let Ok(decoded) = BASE64_STD.decode(&raw) {
-        if decoded.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&decoded);
-            arr
-        } else if raw.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(raw.as_bytes());
-            arr
-        } else {
-            anyhow::bail!(
-                "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} bytes.",
-                raw.len()
-            );
-        }
-    } else if raw.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(raw.as_bytes());
-        arr
-    } else {
-        anyhow::bail!(
-            "FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got {} raw bytes.",
-            raw.len()
-        );
-    };
+    let key_bytes = parse_aes_key_bytes(&raw)?;
 
     if let Ok(mut guard) = AES_MASTER_KEY.write() {
         *guard = Some(key_bytes);
@@ -98,26 +264,7 @@ pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
     let Some(key) = key_opt else {
         return Ok(plaintext.to_string());
     };
-
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| anyhow::anyhow!("gcm encryption failed: {}", e))?;
-
-    let mut combined = Vec::with_capacity(12 + ciphertext.len());
-    combined.extend_from_slice(&nonce_bytes);
-    combined.extend_from_slice(&ciphertext);
-
-    Ok(format!(
-        "{}{}",
-        CIPHERTEXT_PREFIX,
-        BASE64_STD.encode(combined)
-    ))
+    encrypt_with_key(plaintext, &key)
 }
 
 /// Decrypts a versioned `"enc:v1:<base64>"` string produced by Go or Rust.
@@ -128,52 +275,139 @@ pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     };
 
     if let Some(payload) = encoded.strip_prefix(CIPHERTEXT_PREFIX) {
-        let data = BASE64_STD
-            .decode(payload)
-            .map_err(|e| anyhow::anyhow!("versioned ciphertext base64 decode failed: {}", e))?;
-        if data.len() < 12 {
-            anyhow::bail!("ciphertext too short");
-        }
-        let (nonce_bytes, ciphertext) = data.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| anyhow::anyhow!("gcm decryption failed: {}", e))?;
-        return String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e));
+        return decrypt_with_key(payload, &key);
     }
 
     anyhow::bail!("ciphertext tampered or missing required version prefix")
 }
 
-/// Migrates any plaintext `gemini_api_key` in `settings` to `enc:v1:` format.
+/// Migrates any unprefixed plaintext secrets in `settings`, `users`, and `streaming_servers` to `enc:v1:` format.
 pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
     if !is_encryption_enabled() {
         return Ok(());
     }
     let conn = get_conn()?;
-    let api_key: String = conn
-        .query_row(
-            "SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1",
-            [],
+    let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+    let mut migrated = 0usize;
+
+    let has_table = |name: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![name],
             |r| r.get(0),
         )
-        .unwrap_or_default();
+    };
+    let has_column = |table: &str, col: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"),
+            params![col],
+            |r| r.get(0),
+        )
+    };
 
-    if !api_key.is_empty() && !api_key.starts_with(CIPHERTEXT_PREFIX) {
-        let enc = encrypt_key(&api_key)?;
-        conn.execute(
-            "UPDATE settings SET gemini_api_key = ?1 WHERE id = 1",
-            params![enc],
-        )?;
-        tracing::info!("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format");
+    if has_table("settings")? {
+        for col in ["gemini_api_key", "openai_api_key", "anthropic_api_key"] {
+            if !has_column("settings", col)? {
+                continue;
+            }
+            let raw: Option<String> = tx
+                .query_row(
+                    &format!("SELECT COALESCE({col}, '') FROM settings WHERE id = 1"),
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(val) = raw {
+                if !val.is_empty() && !val.starts_with(CIPHERTEXT_PREFIX) {
+                    let enc = encrypt_key(&val)?;
+                    tx.execute(
+                        &format!("UPDATE settings SET {col} = ?1 WHERE id = 1"),
+                        params![enc],
+                    )?;
+                    migrated += 1;
+                }
+            }
+        }
+    }
+
+    if has_table("users")? && has_column("users", "totp_secret")? {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, COALESCE(totp_secret, '') FROM users WHERE COALESCE(totp_secret, '') != ''")?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut batch = Vec::new();
+        for (uid, raw) in rows {
+            if !raw.is_empty() && !raw.starts_with(CIPHERTEXT_PREFIX) {
+                let enc = encrypt_key(&raw)?;
+                batch.push(serde_json::json!({ "id": uid, "enc": enc }));
+            }
+        }
+        if !batch.is_empty() {
+            let payload = serde_json::Value::Array(batch.clone()).to_string();
+            tx.execute(
+                "UPDATE users
+                 SET totp_secret = (
+                     SELECT json_extract(value, '$.enc')
+                     FROM json_each(?1)
+                     WHERE CAST(json_extract(value, '$.id') AS INTEGER) = users.id
+                 )
+                 WHERE id IN (
+                     SELECT CAST(json_extract(value, '$.id') AS INTEGER)
+                     FROM json_each(?1)
+                 )",
+                params![payload],
+            )?;
+            migrated += batch.len();
+        }
+    }
+
+    if has_table("streaming_servers")? && has_column("streaming_servers", "api_key")? {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT provider, COALESCE(api_key, '') FROM streaming_servers WHERE COALESCE(api_key, '') != ''",
+            )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut batch = Vec::new();
+        for (provider, raw) in rows {
+            if !raw.is_empty() && !raw.starts_with(CIPHERTEXT_PREFIX) {
+                let enc = encrypt_key(&raw)?;
+                batch.push(serde_json::json!({ "provider": provider, "enc": enc }));
+            }
+        }
+        if !batch.is_empty() {
+            let payload = serde_json::Value::Array(batch.clone()).to_string();
+            tx.execute(
+                "UPDATE streaming_servers
+                 SET api_key = (
+                     SELECT json_extract(value, '$.enc')
+                     FROM json_each(?1)
+                     WHERE json_extract(value, '$.provider') = streaming_servers.provider
+                 )
+                 WHERE provider IN (
+                     SELECT json_extract(value, '$.provider')
+                     FROM json_each(?1)
+                 )",
+                params![payload],
+            )?;
+            migrated += batch.len();
+        }
+    }
+
+    tx.commit()?;
+    if migrated > 0 {
+        tracing::info!(
+            "[crypto] Successfully migrated {migrated} legacy secret(s) to enc:v1: format"
+        );
     }
     Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLite Connection Pool, WAL PRAGMAs & Schema Migrations (`backend/db/db.go`)
+// SQLite Connection Pool, WAL PRAGMAs & Schema Migrations
 // ─────────────────────────────────────────────────────────────────────────────
 
 static DB_POOL: Lazy<RwLock<Option<Pool<SqliteConnectionManager>>>> =
@@ -289,35 +523,39 @@ fn apply_pragmas(conn: &Connection) {
     }
 }
 
-fn migrate(conn: &Connection, version: i32, description: &str, stmts: &[&str]) {
-    let count: i32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
-            params![version],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+fn migrate(
+    conn: &Connection,
+    version: i32,
+    description: &str,
+    stmts: &[&str],
+) -> anyhow::Result<()> {
+    let count: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+        params![version],
+        |r| r.get(0),
+    )?;
     if count > 0 {
-        return;
+        return Ok(());
     }
 
     for stmt in stmts {
         if let Err(err) = conn.execute_batch(stmt) {
-            let msg = err.to_string();
-            if msg.contains("duplicate column name") {
-                tracing::info!(version, "migration already applied (duplicate column)");
+            let msg = err.to_string().to_ascii_lowercase();
+            if msg.contains("duplicate column name") || msg.contains("already exists") {
+                tracing::info!(version, "migration DDL already applied");
                 continue;
             }
-            tracing::error!(version, error = %msg, "migration failed");
-            return;
+            tracing::error!(version, error = %err, "migration failed");
+            return Err(err.into());
         }
     }
 
-    let _ = conn.execute(
+    conn.execute(
         "INSERT INTO schema_versions (version, description) VALUES (?1, ?2)",
         params![version, description],
-    );
+    )?;
     tracing::info!(version, description, "migration applied");
+    Ok(())
 }
 
 pub fn init_db() -> anyhow::Result<()> {
@@ -348,13 +586,13 @@ pub fn init_db() -> anyhow::Result<()> {
     let conn = pool.get()?;
     apply_pragmas(&conn);
 
-    // Core tables (`backend/db/db.go`)
+    // Core tables
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
             ai_model TEXT DEFAULT 'gemini-4-argon',
-            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
+            system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a consolidated Next.js + Rust aetherflow-api environment. Always prioritize safe and performant configurations.',
             language TEXT DEFAULT 'en',
             timezone TEXT DEFAULT 'UTC',
             update_channel TEXT DEFAULT 'stable',
@@ -572,19 +810,19 @@ pub fn init_db() -> anyhow::Result<()> {
         1,
         "Add setup_completed to settings",
         &["ALTER TABLE settings ADD COLUMN setup_completed BOOLEAN DEFAULT 0;"],
-    );
+    )?;
     migrate(
         &conn,
         2,
         "Add gemini_api_key to settings",
         &["ALTER TABLE settings ADD COLUMN gemini_api_key TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         3,
         "Add password_hash to users",
         &["ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         4,
@@ -593,7 +831,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN backup_schedule_mode TEXT DEFAULT 'manual';",
             "ALTER TABLE settings ADD COLUMN backup_optimal_window TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         5,
@@ -611,19 +849,19 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_client ON oidc_auth_codes(client_id);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_expires ON oidc_auth_codes(expires_at);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_client ON oidc_refresh_tokens(client_id);",
-            "CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
             "CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_expires ON oidc_device_codes(expires_at);",
             "CREATE INDEX IF NOT EXISTS idx_cluster_nodes_status ON cluster_nodes(status);",
             "CREATE INDEX IF NOT EXISTS idx_billing_provider_event ON billing_webhook_events(provider, event_id);",
             "CREATE INDEX IF NOT EXISTS idx_log_bookmarks_user ON log_bookmarks(user_id);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         6,
         "Persist smart backup next run time",
         &["ALTER TABLE settings ADD COLUMN backup_next_run_at TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         7,
@@ -639,7 +877,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_oidc_consents_user_client ON oidc_consents(user_id, client_id);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         8,
@@ -656,7 +894,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id);",
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_expires ON active_sessions(expires_at);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         9,
@@ -676,7 +914,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         10,
@@ -696,7 +934,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_delivery_log_channel ON notification_delivery_log(channel_id);",
             "CREATE INDEX IF NOT EXISTS idx_delivery_log_status ON notification_delivery_log(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         11,
@@ -718,7 +956,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_audit_log_action ON admin_audit_log(action);",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         12,
@@ -728,7 +966,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN lm_studio_endpoint TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN ollama_endpoint TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         13,
@@ -737,7 +975,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN anthropic_api_key TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN anthropic_endpoint TEXT DEFAULT '';",
         ],
-    );
+    )?;
     migrate(
         &conn,
         14,
@@ -746,7 +984,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT '';",
             "ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0;",
         ],
-    );
+    )?;
     migrate(
         &conn,
         15,
@@ -759,7 +997,7 @@ pub fn init_db() -> anyhow::Result<()> {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );"#],
-    );
+    )?;
     migrate(
         &conn,
         16,
@@ -779,7 +1017,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         17,
@@ -796,13 +1034,13 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ingress_configs_app_name ON app_ingress_configs(app_name);",
         ],
-    );
+    )?;
     migrate(
         &conn,
         18,
         "Add base_domain to settings for automatic app subdomain provisioning",
         &["ALTER TABLE settings ADD COLUMN base_domain TEXT DEFAULT '';"],
-    );
+    )?;
     migrate(
         &conn,
         19,
@@ -878,7 +1116,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);",
         ],
-    );
+    )?;
 
     streaming::migrate_history(&conn, &db_path)?;
     migrate(
@@ -898,7 +1136,7 @@ pub fn init_db() -> anyhow::Result<()> {
             );"#,
             "CREATE INDEX IF NOT EXISTS idx_plugins_registry_enabled ON plugins_registry(enabled);",
         ],
-    );
+    )?;
 
     migrate(&conn, 22, "Persist MFA replay guards and OIDC nonces", &[
         "ALTER TABLE users ADD COLUMN last_totp_step INTEGER NOT NULL DEFAULT -1;",
@@ -906,7 +1144,7 @@ pub fn init_db() -> anyhow::Result<()> {
         "CREATE TABLE IF NOT EXISTS mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL);",
         "CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expiry ON mfa_challenges(expires_at);",
         "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
-    ]);
+    ])?;
 
     let security_migration: i64 = conn.query_row(
         "SELECT COUNT(*) FROM schema_versions WHERE version = 22",
@@ -927,7 +1165,7 @@ pub fn init_db() -> anyhow::Result<()> {
             "ALTER TABLE settings ADD COLUMN local_provider TEXT DEFAULT '';",
             "ALTER TABLE settings ADD COLUMN local_model TEXT DEFAULT '';",
         ],
-    );
+    )?;
     let local_settings_migration: i64 = conn.query_row(
         "SELECT COUNT(*) FROM schema_versions WHERE version = 23",
         [],
@@ -937,6 +1175,8 @@ pub fn init_db() -> anyhow::Result<()> {
         local_settings_migration == 1,
         "Local AI settings migration v23 failed"
     );
+
+    ensure_security_schema_invariants(&conn)?;
 
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(
@@ -985,14 +1225,110 @@ pub fn init_db() -> anyhow::Result<()> {
     *DB_PATH_RESOLVED.write().unwrap() = db_path.clone();
     *DB_POOL.write().unwrap() = Some(pool);
     *DB_READ_POOL.write().unwrap() = read_pool;
+    if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
+        map.clear();
+    }
     invalidate_ingress_cache();
 
     tracing::info!(path = %db_path, "SQLite WAL database connected");
     Ok(())
 }
 
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_ddl: &str,
+) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&pragma)?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name.eq_ignore_ascii_case(column));
+    if !exists {
+        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_ddl);
+        conn.execute(&alter, [])?;
+    }
+    Ok(())
+}
+
+fn ensure_security_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    ensure_column(
+        conn,
+        "users",
+        "sessions_revoked_after",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "active_sessions",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "oidc_refresh_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "mfa_challenges",
+        "credential_ver",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "revoked_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "revoked_tokens",
+        "user_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    let existing_index_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_oidc_device_codes_user_code'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let needs_unique_index = match existing_index_sql {
+        Some(sql) => !sql.to_ascii_uppercase().contains("UNIQUE"),
+        None => true,
+    };
+    if needs_unique_index {
+        conn.execute_batch(
+            "DELETE FROM oidc_device_codes
+             WHERE rowid NOT IN (
+                 SELECT MAX(rowid) FROM oidc_device_codes GROUP BY user_code
+             );
+             DROP INDEX IF EXISTS idx_oidc_device_codes_user_code;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_active_sessions_family ON active_sessions(family_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_oidc_refresh_family ON oidc_refresh_tokens(family_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_revoked_tokens_family ON revoked_tokens(family_id)",
+        [],
+    )?;
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Health Check & Data Pruning (`backend/db/db.go`)
+// Health Check & Data Pruning
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
@@ -1034,9 +1370,10 @@ pub fn prune_expired_data() {
     };
     let now = Utc::now().to_rfc3339();
     let param_queries = [
-        "DELETE FROM oidc_auth_codes WHERE expires_at < ?1 OR used = 1",
+        // Retain used = 1 authorization-code tombstones until expires_at for RFC 6749 §4.1.2 reuse detection.
+        "DELETE FROM oidc_auth_codes WHERE expires_at < ?1",
         "DELETE FROM oidc_device_codes WHERE expires_at < ?1",
-        "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1 OR revoked = 1",
+        "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1",
         "DELETE FROM active_sessions WHERE expires_at < ?1",
     ];
     for query_sql in param_queries {
@@ -1048,9 +1385,10 @@ pub fn prune_expired_data() {
     );
 
     let static_queries = [
+        "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
         "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
-        "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')",
-        "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
+        "DELETE FROM login_history WHERE replace(CAST(created_at AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
+        "DELETE FROM streaming_bandwidth_samples WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
     ];
     for query_sql in static_queries {
         let _ = conn.execute(query_sql, []);
@@ -1058,7 +1396,7 @@ pub fn prune_expired_data() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App Ingress Configs & Base Domain (`backend/db/db.go`)
+// App Ingress Configs & Base Domain
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct IngressCache {
@@ -1127,7 +1465,7 @@ pub fn get_base_domain() -> String {
             }
         }
     }
-    let domain = get_conn()
+    let domain = get_read_conn()
         .ok()
         .and_then(|c| {
             c.query_row(
@@ -1168,7 +1506,10 @@ fn parse_sqlite_dt(s: &str) -> DateTime<Utc> {
 }
 
 pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
-    let generation = INGRESS_CACHE.read().map(|guard| guard.generation).unwrap_or(0);
+    let generation = INGRESS_CACHE
+        .read()
+        .map(|guard| guard.generation)
+        .unwrap_or(0);
     if let Ok(guard) = INGRESS_CACHE.read() {
         if let (Some(ref cfgs), Some(at)) = (&guard.configs, guard.configs_at) {
             if at.elapsed() < INGRESS_CACHE_TTL {
@@ -1177,7 +1518,7 @@ pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
         }
     }
 
-    let conn = get_conn()?;
+    let conn = get_read_conn()?;
     let mut stmt = conn.prepare(
         "SELECT app_name, public_domain, external_access_enabled, listen_port, tls_enabled, \
          COALESCE(CAST(created_at AS TEXT), ''), COALESCE(CAST(updated_at AS TEXT), '') \
@@ -1284,7 +1625,7 @@ pub fn delete_app_ingress_config(app_name: &str) -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Admin Audit Trail (`backend/db/audit.go`)
+// Admin Audit Trail
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1407,7 +1748,7 @@ pub fn query_audit_log(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Action Approval Gates (`backend/db/action_gates.go`)
+// Action Approval Gates
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1557,7 +1898,7 @@ pub fn resolve_action(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Session Revocation, 2FA Pending & MFA Challenge Store (`backend/db/redis.go`)
+// Session Revocation, 2FA Pending & MFA Challenge Store
 // ─────────────────────────────────────────────────────────────────────────────
 
 static TOKEN_BLACKLIST: Lazy<Mutex<HashMap<String, Instant>>> =
@@ -1566,40 +1907,190 @@ static PENDING_2FA_CACHE: Lazy<Mutex<HashMap<i64, (String, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
-    )
-    .is_ok()
+    if conn
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS revoked_tokens (
+                jti TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL,
+                family_id TEXT NOT NULL DEFAULT '',
+                user_id INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let _ = ensure_column(
+        conn,
+        "revoked_tokens",
+        "family_id",
+        "TEXT NOT NULL DEFAULT ''",
+    );
+    let _ = ensure_column(
+        conn,
+        "revoked_tokens",
+        "user_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    );
+    true
 }
 
-pub fn revoke_token(jti: &str, ttl: Duration) {
+pub fn cache_revoked_token(jti: &str, ttl: Duration) {
     if jti.is_empty() {
         return;
     }
-    // Refresh still accepts a token for 7200s after exp, and exp itself is 900s.
-    let ttl = ttl.max(Duration::from_secs(8100));
+    let ttl = ttl.max(Duration::from_secs(8160));
     let exp = Instant::now() + ttl;
     if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
         map.retain(|_, v| *v > Instant::now());
         map.insert(jti.to_string(), exp);
     }
-    if let Ok(conn) = get_conn() {
-        if !ensure_revoked_tokens_table(&conn) {
-            let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
-            return;
-        }
-        let exp_rfc3339 =
-            (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
-            params![jti, exp_rfc3339],
-        );
-        let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
-        let _ = conn.execute(
-            "DELETE FROM revoked_tokens WHERE expires_at < ?1",
-            params![Utc::now().to_rfc3339()],
-        );
+}
+
+pub fn revoke_token_in_tx(conn: &Connection, jti: &str, ttl: Duration) -> anyhow::Result<()> {
+    if jti.is_empty() {
+        return Ok(());
     }
+    let ttl = ttl.max(Duration::from_secs(8160));
+    if !ensure_revoked_tokens_table(conn) {
+        anyhow::bail!("failed to ensure revoked_tokens table");
+    }
+    let mut family_id = String::new();
+    let mut user_id = 0i64;
+    if let Ok(Some((fam, uid))) = conn
+        .query_row(
+            "SELECT COALESCE(family_id, ''), user_id FROM active_sessions WHERE jti = ?1",
+            params![jti],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+    {
+        family_id = if fam.trim().is_empty() {
+            jti.to_string()
+        } else {
+            fam
+        };
+        user_id = uid;
+    } else if let Ok(Some((fam, uid))) = conn
+        .query_row(
+            "SELECT COALESCE(family_id, ''), COALESCE(user_id, 0) FROM revoked_tokens WHERE jti = ?1",
+            params![jti],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+    {
+        family_id = fam;
+        user_id = uid;
+    }
+    let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, family_id, user_id) VALUES (?1, ?2, ?3, ?4)",
+        params![jti, exp_rfc3339, family_id, user_id],
+    )?;
+    let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
+    Ok(())
+}
+
+/// Atomically marks `jti` as revoked inside an active `BEGIN IMMEDIATE` transaction
+/// ONLY if it is not currently revoked. Returns `Ok(true)` exclusively for the single
+/// winning caller that consumed `jti`.
+pub fn try_consume_session_jti_in_tx(
+    conn: &Connection,
+    jti: &str,
+    ttl: Duration,
+) -> anyhow::Result<bool> {
+    if jti.is_empty() {
+        return Ok(false);
+    }
+    let ttl = ttl.max(Duration::from_secs(8160));
+    if token_revocation_status_with_conn(conn, jti)? {
+        return Ok(false);
+    }
+    let _ = conn.execute("DELETE FROM revoked_tokens WHERE jti = ?1", params![jti]);
+    let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
+        params![jti, exp_rfc3339],
+    )?;
+    Ok(inserted == 1)
+}
+
+pub fn record_revoked_token_lineage_in_tx(
+    conn: &Connection,
+    jti: &str,
+    family_id: &str,
+    user_id: i64,
+) -> anyhow::Result<()> {
+    if jti.is_empty() || family_id.trim().is_empty() {
+        return Ok(());
+    }
+    match conn.execute(
+        "UPDATE revoked_tokens SET family_id = ?1, user_id = ?2 WHERE jti = ?3",
+        params![family_id.trim(), user_id, jti],
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("family_id") || e.to_string().contains("user_id") => {
+            let _ = ensure_column(
+                conn,
+                "revoked_tokens",
+                "family_id",
+                "TEXT NOT NULL DEFAULT ''",
+            );
+            let _ = ensure_column(
+                conn,
+                "revoked_tokens",
+                "user_id",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            conn.execute(
+                "UPDATE revoked_tokens SET family_id = ?1, user_id = ?2 WHERE jti = ?3",
+                params![family_id.trim(), user_id, jti],
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn resolve_revoked_token_family_in_tx(
+    conn: &Connection,
+    jti: &str,
+    user_id: i64,
+) -> anyhow::Result<Option<String>> {
+    if jti.is_empty() {
+        return Ok(None);
+    }
+    let query = || {
+        conn.query_row(
+            "SELECT COALESCE(family_id, '') FROM revoked_tokens \
+             WHERE jti = ?1 AND (COALESCE(user_id, 0) = 0 OR user_id = ?2) LIMIT 1",
+            params![jti, user_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+    };
+    let fam: Option<String> = match query() {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("family_id") || e.to_string().contains("user_id") => None,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(fam.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+}
+
+pub fn revoke_token(jti: &str, ttl: Duration) -> anyhow::Result<()> {
+    if jti.is_empty() {
+        return Ok(());
+    }
+    // Refresh accepts a token for 7200s after exp (900s), plus 60s clock skew tolerance = 8160s.
+    let ttl = ttl.max(Duration::from_secs(8160));
+    let conn = get_conn()?;
+    revoke_token_in_tx(&conn, jti, ttl)?;
+    let _ = conn.execute(
+        "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND TRIM(expires_at) != '' AND datetime(expires_at) IS NOT NULL AND datetime(expires_at) <= datetime('now')",
+        [],
+    );
+    cache_revoked_token(jti, ttl);
+    Ok(())
 }
 
 /// Errors are distinct from a confirmed revocation so rotation grace cannot mask a DB failure.
@@ -1619,7 +2110,18 @@ pub fn token_revocation_status(jti: &str) -> anyhow::Result<bool> {
     token_revocation_status_with_conn(&conn, jti)
 }
 
-fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Result<bool> {
+fn parse_revocation_expiry_utc(raw: &str) -> anyhow::Result<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Ok(naive.and_utc());
+    }
+    anyhow::bail!("invalid revoked_tokens.expires_at timestamp: {}", trimmed)
+}
+
+pub fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Result<bool> {
     let expiry: Option<String> = conn
         .query_row(
             "SELECT expires_at FROM revoked_tokens WHERE jti = ?1",
@@ -1629,7 +2131,7 @@ fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Re
         .optional()?;
     match expiry {
         None => Ok(false),
-        Some(expiry) => Ok(DateTime::parse_from_rfc3339(&expiry)?.with_timezone(&Utc) > Utc::now()),
+        Some(expiry) => Ok(parse_revocation_expiry_utc(&expiry)? > Utc::now()),
     }
 }
 
@@ -1662,34 +2164,142 @@ pub fn delete_2fa_pending(user_id: i64) {
 
 pub const MAX_MFA_ATTEMPTS: i64 = 5;
 
-pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) -> anyhow::Result<()> {
-    let conn = get_conn()?;
+pub fn store_mfa_challenge_in_tx(
+    conn: &Connection,
+    token: &str,
+    user_id: i64,
+    credential_ver: i64,
+    ttl: Duration,
+) -> anyhow::Result<()> {
     let now = Utc::now().timestamp();
+    let exp = now + ttl.as_secs().min(300) as i64;
     conn.execute(
         "DELETE FROM mfa_challenges WHERE expires_at <= ?1",
         params![now],
     )?;
-    conn.execute(
-        "INSERT INTO mfa_challenges (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
-        params![token, user_id, now + ttl.as_secs().min(300) as i64],
-    )?;
+    match conn.execute(
+        "INSERT INTO mfa_challenges (token, user_id, credential_ver, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        params![token, user_id, credential_ver, exp],
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("credential_ver") => {
+            ensure_column(
+                conn,
+                "mfa_challenges",
+                "credential_ver",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            conn.execute(
+                "INSERT INTO mfa_challenges (token, user_id, credential_ver, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                params![token, user_id, credential_ver, exp],
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) -> anyhow::Result<()> {
+    let conn = get_conn()?;
+    let ver: i64 = conn
+        .query_row(
+            "SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    store_mfa_challenge_in_tx(&conn, token, user_id, ver, ttl)
+}
+
+pub fn delete_user_mfa_challenges_in_tx(conn: &Connection, user_id: i64) -> anyhow::Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'mfa_challenges'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if exists {
+        conn.execute(
+            "DELETE FROM mfa_challenges WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
     Ok(())
 }
 
 /// Call within the same write transaction as factor verification and consumption.
 /// Failed verification must commit this attempt; successful consumption must commit with the factor.
+pub fn begin_mfa_attempt_with_epoch(
+    conn: &Connection,
+    token: &str,
+) -> anyhow::Result<Option<(i64, i64)>> {
+    let now = Utc::now().timestamp();
+    match conn
+        .query_row(
+            "UPDATE mfa_challenges SET attempts = attempts + 1 \
+             WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 \
+             RETURNING user_id, COALESCE(credential_ver, 0)",
+            params![token, MAX_MFA_ATTEMPTS, now],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+    {
+        Ok(res) => Ok(res),
+        Err(e) if e.to_string().contains("credential_ver") => Ok(conn
+            .query_row(
+                "UPDATE mfa_challenges SET attempts = attempts + 1 \
+                 WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 \
+                 RETURNING user_id",
+                params![token, MAX_MFA_ATTEMPTS, now],
+                |r| Ok((r.get(0)?, 0i64)),
+            )
+            .optional()?),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn begin_mfa_attempt(conn: &Connection, token: &str) -> anyhow::Result<Option<i64>> {
-    Ok(conn.query_row(
-        "UPDATE mfa_challenges SET attempts = attempts + 1 WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 RETURNING user_id",
-        params![token, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
-    ).optional()?)
+    Ok(begin_mfa_attempt_with_epoch(conn, token)?.map(|(uid, _)| uid))
+}
+
+pub fn consume_mfa_challenge_with_epoch(
+    conn: &Connection,
+    token: &str,
+    user_id: i64,
+    credential_ver: i64,
+) -> anyhow::Result<bool> {
+    let now = Utc::now().timestamp();
+    match conn
+        .query_row(
+            "DELETE FROM mfa_challenges \
+             WHERE token = ?1 AND user_id = ?2 AND COALESCE(credential_ver, 0) = ?3 \
+               AND attempts <= ?4 AND expires_at > ?5 \
+             RETURNING user_id",
+            params![token, user_id, credential_ver, MAX_MFA_ATTEMPTS, now],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+    {
+        Ok(consumed) => Ok(consumed == Some(user_id)),
+        Err(e) if e.to_string().contains("credential_ver") => {
+            if credential_ver != 0 {
+                return Ok(false);
+            }
+            consume_mfa_challenge(conn, token, user_id)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn consume_mfa_challenge(conn: &Connection, token: &str, user_id: i64) -> anyhow::Result<bool> {
-    let consumed: Option<i64> = conn.query_row(
-        "DELETE FROM mfa_challenges WHERE token = ?1 AND user_id = ?2 AND attempts <= ?3 AND expires_at > ?4 RETURNING user_id",
-        params![token, user_id, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
-    ).optional()?;
+    let consumed: Option<i64> = conn
+        .query_row(
+            "DELETE FROM mfa_challenges WHERE token = ?1 AND user_id = ?2 AND attempts <= ?3 AND expires_at > ?4 RETURNING user_id",
+            params![token, user_id, MAX_MFA_ATTEMPTS, Utc::now().timestamp()],
+            |r| r.get(0),
+        )
+        .optional()?;
     Ok(consumed == Some(user_id))
 }
 
@@ -1855,6 +2465,237 @@ pub(crate) mod tests {
             assert_eq!(action.resolved_by.as_deref(), Some("audit-admin"));
             assert!(action.resolved_at.is_some());
             assert!(resolve_action(action_id, new_status, "audit-admin").is_err());
+        }
+    }
+
+    #[test]
+    fn test_round3_64hex_aes_key_schema24_and_revoked_lineage_epoch_mfa() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let hex_key: String = (0u8..32).map(|b| format!("{b:02x}")).collect();
+        let parsed = parse_aes_key_bytes(&hex_key).expect("64-char hex AES key must decode");
+        assert_eq!(parsed[0], 0x00);
+        assert_eq!(parsed[1], 0x01);
+        assert!(parse_aes_key_bytes(&hex_key[..16]).is_err());
+        assert!(parse_aes_key_bytes(&"z".repeat(64)).is_err());
+
+        env::set_var("AES_MASTER_KEY", &hex_key);
+        init_aes_key().unwrap();
+        let ct = encrypt_key("hex-key-secret-value").unwrap();
+        assert!(ct.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&ct).unwrap(), "hex-key-secret-value");
+
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 24, "MAX(schema_versions.version) must remain 24");
+
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (777, 'r3_db_user', 'user')",
+            [],
+        )
+        .unwrap();
+
+        revoke_token_in_tx(&conn, "r3-jti-1", Duration::from_secs(600)).unwrap();
+        record_revoked_token_lineage_in_tx(&conn, "r3-jti-1", "r3-family-99", 777).unwrap();
+        assert_eq!(
+            resolve_revoked_token_family_in_tx(&conn, "r3-jti-1", 777)
+                .unwrap()
+                .as_deref(),
+            Some("r3-family-99")
+        );
+
+        store_mfa_challenge_in_tx(&conn, "r3-mfa-tok", 777, 10, Duration::from_secs(300)).unwrap();
+        let (_, ver) = begin_mfa_attempt_with_epoch(&conn, "r3-mfa-tok")
+            .unwrap()
+            .expect("challenge must exist");
+        assert_eq!(ver, 10);
+        assert!(!consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 11).unwrap());
+        assert!(consume_mfa_challenge_with_epoch(&conn, "r3-mfa-tok", 777, 10).unwrap());
+    }
+
+    #[test]
+    fn test_round7_migrate_legacy_secrets_encrypts_settings_totp_and_streaming() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        env::set_var("AES_MASTER_KEY", "c".repeat(64));
+        init_aes_key().unwrap();
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+
+        {
+            let conn = get_conn().unwrap();
+            conn.execute(
+                "UPDATE settings SET gemini_api_key = 'plain-gemini', openai_api_key = 'plain-openai', anthropic_api_key = 'plain-anthropic' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role, totp_secret, totp_enabled) VALUES (888, 'r7_mfa_user', 'admin', 'JBSWY3DPEHPK3PXP', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO streaming_servers (provider, name, url, api_key, enabled) VALUES ('jellyfin', 'JF', 'http://127.0.0.1:8096', 'plain-jf-api-key', 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        migrate_legacy_secrets().expect("migrate_legacy_secrets must succeed");
+
+        let conn = get_conn().unwrap();
+        let (gem, oai, ant): (String, String, String) = conn
+            .query_row(
+                "SELECT gemini_api_key, openai_api_key, anthropic_api_key FROM settings WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(gem.starts_with("enc:v1:"));
+        assert!(oai.starts_with("enc:v1:"));
+        assert!(ant.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&gem).unwrap(), "plain-gemini");
+        assert_eq!(decrypt_key(&oai).unwrap(), "plain-openai");
+        assert_eq!(decrypt_key(&ant).unwrap(), "plain-anthropic");
+
+        let totp_enc: String = conn
+            .query_row("SELECT totp_secret FROM users WHERE id = 888", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(totp_enc.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&totp_enc).unwrap(), "JBSWY3DPEHPK3PXP");
+
+        let stream_enc: String = conn
+            .query_row(
+                "SELECT api_key FROM streaming_servers WHERE provider = 'jellyfin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(stream_enc.starts_with("enc:v1:"));
+        assert_eq!(decrypt_key(&stream_enc).unwrap(), "plain-jf-api-key");
+    }
+
+    #[test]
+    fn test_round8_env_file_aes_fallback_and_rfc3339_prune_expired_data() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let env_path = std::env::temp_dir().join(format!(
+            "af_r8_env_file_{}_{}.env",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::write(&env_path, format!("AES_MASTER_KEY={}\n", "e".repeat(64))).unwrap();
+        env::remove_var("AES_MASTER_KEY");
+        env::set_var("AETHERFLOW_ENV_FILE", &env_path);
+        init_aes_key().expect("init_aes_key must load AES_MASTER_KEY from AETHERFLOW_ENV_FILE");
+        let ct = encrypt_key("r8-env-secret").unwrap();
+        assert!(
+            ct.starts_with("enc:v1:"),
+            "expected AES-256-GCM ciphertext prefix enc:v1:, got {ct}"
+        );
+        assert_eq!(decrypt_key(&ct).unwrap(), "r8-env-secret");
+        env::remove_var("AETHERFLOW_ENV_FILE");
+        let _ = std::fs::remove_file(&env_path);
+        env::set_var("AES_MASTER_KEY", "c".repeat(64));
+        init_aes_key().unwrap();
+
+        env::set_var("DB_PATH", ":memory:");
+        init_db().unwrap();
+        let now_rfc3339 = Utc::now().to_rfc3339();
+        {
+            let conn = get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO login_history (user_id, ip_address, user_agent, created_at) \
+                 VALUES (1, '10.0.0.1', 'ua-old', '2020-01-01T00:00:00+00:00'), \
+                        (1, '10.0.0.2', 'ua-fresh', ?1)",
+                params![now_rfc3339],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO metrics_history (cpu_avg, timestamp) \
+                 VALUES (1.0, '2020-01-01T00:00:00+00:00'), \
+                        (2.0, ?1)",
+                params![now_rfc3339],
+            )
+            .unwrap();
+        }
+        prune_expired_data();
+        let conn = get_conn().unwrap();
+        let login_rem: Vec<String> = conn
+            .prepare("SELECT user_agent FROM login_history")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(login_rem, vec!["ua-fresh".to_string()]);
+        let metrics_cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM metrics_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(metrics_cnt, 1);
+
+        let future_exp = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        let past_exp = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, expires_at, used) \
+             VALUES ('live-used-tombstone', 'cid', 1, 'https://app.example/cb', 'openid', ?1, 1), \
+                    ('expired-used-code', 'cid', 1, 'https://app.example/cb', 'openid', ?2, 1)",
+            params![future_exp, past_exp],
+        )
+        .unwrap();
+        drop(conn);
+        prune_expired_data();
+        let conn = get_conn().unwrap();
+        let remaining_codes: Vec<String> = conn
+            .prepare("SELECT code FROM oidc_auth_codes")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(remaining_codes, vec!["live-used-tombstone".to_string()]);
+    }
+
+    #[test]
+    fn test_init_aes_key_requires_key_when_aetherflow_env_production() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_aes = env::var("AES_MASTER_KEY").ok();
+        let prev_af_env = env::var("AETHERFLOW_ENV").ok();
+        let prev_gin = env::var("GIN_MODE").ok();
+        let prev_skip = env::var("AETHERFLOW_SKIP_ENV_FILES").ok();
+
+        env::remove_var("AES_MASTER_KEY");
+        env::remove_var("GIN_MODE");
+        env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+        env::set_var("AETHERFLOW_ENV", "production");
+
+        let err = init_aes_key()
+            .expect_err("AETHERFLOW_ENV=production without AES_MASTER_KEY must fail closed");
+        assert!(err
+            .to_string()
+            .contains("AES_MASTER_KEY is required in production"));
+
+        env::set_var("AETHERFLOW_ENV", "disposable-guest-lifecycle-drill");
+        init_aes_key().expect("explicit non-production drill environment may omit AES_MASTER_KEY");
+
+        match prev_aes {
+            Some(v) => env::set_var("AES_MASTER_KEY", v),
+            None => env::remove_var("AES_MASTER_KEY"),
+        }
+        match prev_af_env {
+            Some(v) => env::set_var("AETHERFLOW_ENV", v),
+            None => env::remove_var("AETHERFLOW_ENV"),
+        }
+        match prev_gin {
+            Some(v) => env::set_var("GIN_MODE", v),
+            None => env::remove_var("GIN_MODE"),
+        }
+        match prev_skip {
+            Some(v) => env::set_var("AETHERFLOW_SKIP_ENV_FILES", v),
+            None => env::remove_var("AETHERFLOW_SKIP_ENV_FILES"),
         }
     }
 }

@@ -23,10 +23,10 @@ graph TD
 
 ## Rust Control Plane Workspace (`backend-rs`)
 
-Eleven workspace crates compile into `aetherflow-api` (serving the unprivileged HTTP/WebSocket control plane and the `aetherflow-api runner` root socket daemon), the unified `af` (`af-cli`) administrative CLI binary, and the streaming verification harness (`af-streaming-tests`).
+Twelve workspace crates compile into `aetherflow-api` (serving the unprivileged HTTP/WebSocket control plane, the zero-CDN OpenAPI 3.1 viewer, and the `aetherflow-api runner` root socket daemon), the unified `af` (`af-cli`) administrative CLI binary, the native `speedtest-backend` (`af-librespeed`) LibreSpeed daemon, and the streaming verification harness (`af-streaming-tests`).
 
 ### 1. `af-api` (`backend-rs/crates/af-api`) — HTTP/WS Control Plane & Embedded SPA
-- **Zero Production Node.js Runtime**: Next.js 16 compiles to a static export (`NEXT_STATIC_EXPORT=1`) during CI, is staged into `backend/web/dist/`, and is embedded into `aetherflow-api` via `rust-embed` (`backend-rs/crates/af-api/src/embed.rs`).
+- **Zero Production Node.js Runtime**: Next.js 16 compiles to a static export (`NEXT_STATIC_EXPORT=1`) during CI, is staged into `web/dist/`, and is embedded into `aetherflow-api` via `rust-embed` (`backend-rs/crates/af-api/src/embed.rs`).
 - **5-Step Static & RSC Resolution**: `serve_spa_request` resolves exact asset paths, `<route>/index.html`, `<route>.html`, and dynamic Next.js route shells (`/marketplace/[id]` -> `/marketplace/__placeholder__/index.html`, plus RSC `.txt` payload fallback) while serving `/_next/static/*` with `Cache-Control: public, max-age=31536000, immutable`.
 - **Security, Plugin RBAC & Gateway Middleware**: Enforces HS256 JWT session validation (`aetherflow_session` cookie or `Authorization: Bearer`), plugin-scoped JWT route-scope verification (`plugin_id` + `plugin_scopes`), SQLite-backed token revocation and active session tracking, TOTP 2FA, OIDC/OAuth2 PKCE, state-changing CSRF origin/token checks, per-IP rate limiting, and streaming subdomain & plugin reverse proxying (`Body::from_stream` without full-body RAM buffering).
 - **Control Plane Subsystems**: Hosts REST and WebSocket endpoints for Marketplace management, Native McBrowser file operations (`af-files`), FlowAI multi-provider intelligence (`intelligence.rs`), canonical Streaming History & reconciliation, MediaFlow transcoding/polling, GitHub release update checking (with 5-minute response cache, `X-RateLimit-Reset` / `Retry-After` backoff, `stable`/`nightly` channel filtering, and branch-head SHA fallback), backup archive chunked uploads/restores, multi-node cluster enrollment, and user storage quotas.
@@ -50,7 +50,7 @@ Eleven workspace crates compile into `aetherflow-api` (serving the unprivileged 
 - Dynamically loads `libnvidia-ml.so.1` via `libloading` FFI for zero-fork NVIDIA GPU utilization, VRAM, temperature, and power telemetry.
 
 ### 6. `af-services` (`backend-rs/crates/af-services`) — Catalog, Mutators, Plugins & Workers
-- **Catalog & Blueprints**: Loads `backend/config/packages.json` (77 bare-metal apps including Tailscale, Palate, Maintainerr, McVNC, KasmVNC, Piped, and Invidious) and `package_automation.json`, resolves dependency graphs, and checks runtime systemd/process states.
+- **Catalog & Blueprints**: Loads canonical `config/packages.json` (77 bare-metal apps including Tailscale, Palate, Maintainerr, McVNC, KasmVNC, Piped, Invidious, and native Rust LibreSpeed) and `config/package_automation.json`, resolves dependency graphs, and checks runtime systemd/process states.
 - **Native Config Mutators**: Pure-Rust mutators (`mutators.rs`) for XML (`xml_xpath`), INI (`ini_key`), JSON (`json_key`), SQLite (`sqlite_query`), Pi-hole (`pihole_Config`), and Apache2 domain/TLS virtual hosts (`apache_vhosts`).
 - **Native Plugin Runtime (`plugins.rs`)**: Discovers and validates `plugins/*/plugin.manifest.json`, allocates deterministic/dynamic loopback ports (`21000..=21999`), and verifies segment-boundary `api_scopes`.
 - **Background Workers & Cluster Daemon**: Runs the periodic metrics recorder, `af-heal` health evaluator, smart backup scheduler (wired to `af-host` for WAL-safe SQLite snapshots + `.manifest.json` + `.sha256`), upstream release watcher, MediaFlow queue poller (`workers.rs`), and multi-node cluster heartbeat daemon (`cluster_daemon.rs`).
@@ -69,6 +69,6 @@ Eleven workspace crates compile into `aetherflow-api` (serving the unprivileged 
 - **Immutable Releases**: `/opt/AetherFlow/releases/<timestamp>` symlinked atomically to `/opt/AetherFlow/current`.
 - **Mutable State**: `/var/lib/aetherflow/aetherflow.sqlite` (`StateDirectory=aetherflow`, `0700`).
 - **Environment Secrets**: `/etc/aetherflow/aetherflow.env` (`0600`).
-- **Pull-Based CD**: GitHub Actions (`.github/workflows/release.yml`) and `scripts/build_gold.sh` run Gitleaks, frontend static export (`NEXT_STATIC_EXPORT=1`), `cargo test --workspace`, and `cargo build --release --bin aetherflow-api --bin af`, packaging `aetherflow-linux-<arch>.tar.gz` + `SHA256SUMS`.
+- **Pull-Based CD**: GitHub Actions (`.github/workflows/release.yml`) and `scripts/build_gold.sh` run Gitleaks, frontend static export (`NEXT_STATIC_EXPORT=1`), `cargo test --workspace`, and `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend`, packaging `aetherflow-linux-<arch>.tar.gz` + `SHA256SUMS`.
 
 See [docs/rust-migration-status.md](rust-migration-status.md) for the complete crate-by-crate and contract-by-contract migration status matrix.

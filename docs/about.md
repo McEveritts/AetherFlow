@@ -15,7 +15,7 @@ Rather than treating the server as a loose collection of scripts and container p
 
 AetherFlow is engineered for bare-metal performance and strict privilege separation:
 
-- **11-Crate Single-Binary Rust Control Plane**: The compiled **Rust (`Axum` + `Tokio`)** backend (`backend-rs`) embeds the **Next.js 16 (Obsidian V2)** static export directly via `rust-embed` (`af-api`), eliminating separate Node.js runtime daemons and external Redis dependencies.
+- **12-Crate Single-Binary Rust Control Plane**: The compiled **Rust (`Axum` + `Tokio`)** backend (`backend-rs`) embeds the **Next.js 16 (Obsidian V2)** static export directly via `rust-embed` (`af-api`), eliminating separate Node.js runtime daemons, Go binaries, and external Redis dependencies.
 - **Zero-Sudo Socket Boundary (`aetherflow-runner`)**: Privileged root operations (`systemctl`, Marketplace installers, WireGuard/Tailscale control, quotas, and isolated `aetherflow-self-update.service` deployments) are isolated behind `/run/aetherflow/runner.sock` (`aetherflow-runner.service`) with strict allowlists and ancestor-symlink guards.
 - **Native McBrowser (`af-files`)**: Built-in left-sidebar file manager with capability-scoped per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads up to 64 GiB, ETag-guarded Ace code editing, 9-format archive tools, and FlowAI natural-language BFS file search.
 - **Frame-0 Real-Time Telemetry**: Immediate hardware, process, and NVML GPU telemetry delivered via full-duplex WebSockets ("Hyperspeed") with decoupled UI layout updates.

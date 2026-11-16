@@ -14,6 +14,9 @@ PACKAGE_DIR = REPO / "packages" / "package"
 
 MOCK_COMMON = r'''
 source "$REAL_COMMON"
+export AF_JOB_SCRATCH_ROOT="${AF_JOB_SCRATCH_ROOT:-$TEST_ROOT/tmp}"
+export AF_JOB_SCRATCH_DIR="${AF_JOB_SCRATCH_DIR:-$TEST_ROOT/tmp/af-scratch}"
+mkdir -p "$AF_JOB_SCRATCH_DIR"
 record() { printf '%s\n' "$*" >> "$TEST_ROOT/commands"; }
 apt-get() {
     record "apt-get $*"
@@ -21,7 +24,84 @@ apt-get() {
 }
 systemctl() {
     record "systemctl $*"
-    if [[ "$1" == restart && "$MOCK_FAIL_START" == 1 ]]; then return 42; fi
+    local sub="${1:-}"
+    shift || true
+    local quiet=false
+    local units=()
+    local skip_next=false
+    for arg in "$@"; do
+        if [[ "$skip_next" == true ]]; then
+            skip_next=false
+            continue
+        fi
+        case "$arg" in
+            --quiet|-q) quiet=true ;;
+            -p) skip_next=true ;;
+            --*) ;;
+            *) units+=("$arg") ;;
+        esac
+    done
+    local state_dir="$TEST_ROOT/systemctl-state"
+    mkdir -p "$state_dir"
+    case "$sub" in
+        restart|start)
+            if [[ "$sub" == restart && "${MOCK_FAIL_START:-0}" == 1 ]]; then return 42; fi
+            for u in "${units[@]}"; do
+                touch "$state_dir/$u"
+            done
+            ;;
+        stop)
+            for u in "${units[@]}"; do
+                rm -f "$state_dir/$u"
+            done
+            ;;
+        enable)
+            for u in "${units[@]}"; do
+                touch "$state_dir/$u.enabled"
+            done
+            ;;
+        disable)
+            for u in "${units[@]}"; do
+                rm -f "$state_dir/$u.enabled"
+            done
+            ;;
+        is-enabled)
+            for u in "${units[@]}"; do
+                if [[ -f "$state_dir/$u.enabled" ]]; then
+                    [[ "$quiet" == true ]] || printf 'enabled\n'
+                    return 0
+                fi
+            done
+            [[ "$quiet" == true ]] || printf 'disabled\n'
+            return 1
+            ;;
+        is-active)
+            local all_active=true
+            for u in "${units[@]}"; do
+                [[ -f "$state_dir/$u" ]] || all_active=false
+            done
+            if [[ "${#units[@]}" -gt 0 && "$all_active" == true ]]; then
+                [[ "$quiet" == true ]] || printf 'active\n'
+                return 0
+            fi
+            [[ "$quiet" == true ]] || printf 'inactive\n'
+            return 3
+            ;;
+        show)
+            local u="${units[${#units[@]}-1]:-unknown}"
+            local active_state="inactive" main_pid="0" unit_file_state="disabled"
+            if [[ -f "$state_dir/$u" ]]; then
+                active_state="active"
+                main_pid="1234"
+            fi
+            if [[ -f "$state_dir/$u.enabled" ]]; then
+                unit_file_state="enabled"
+            fi
+            printf 'LoadState=loaded\nActiveState=%s\nMainPID=%s\nUnitFileState=%s\n' \
+                "$active_state" "$main_pid" "$unit_file_state"
+            return 0
+            ;;
+    esac
 }
 id() { return 0; }
 getent() { return 0; }
@@ -41,10 +121,12 @@ chown() { :; }
 sleep() { :; }
 git() {
     record "git $*"
-    local last
-    for last; do :; done
-    mkdir -p "$last/target/release"
-    printf '#!/bin/sh\necho "mcvnc 0.10.1"\n' > "$last/target/release/mcvnc"
+    if [[ "${1:-}" == clone ]]; then
+        local last
+        for last; do :; done
+        mkdir -p "$last/target/release"
+        printf '#!/bin/sh\necho "mcvnc 0.10.1"\n' > "$last/target/release/mcvnc"
+    fi
 }
 cargo() { record "cargo $*"; }
 install() {
@@ -143,11 +225,11 @@ class RemoteDesktopPackagesTest(unittest.TestCase):
         script = (PACKAGE_DIR / action / (action + "package-" + package)).read_text()
         script = 'set -euo pipefail\nsource "$TEST_ROOT/common.sh"\n' + script.split("require_root\n", 1)[1]
         script = re.sub(r"/(?:etc|opt|var/lib|var/log|tmp|usr/local/bin|usr/bin|usr/sbin|usr/lib|usr/share|install|root)/", lambda match: str(self.root) + match.group(), script)
-        script = script.replace("| " + str(self.root) + "/usr/bin/kasmvncpasswd ", "| kasmvncpasswd ")
+        script = script.replace(str(self.root) + "/usr/bin/kasmvncpasswd ", "kasmvncpasswd ")
         script = script.replace('ARCH="$(dpkg --print-architecture)"', 'ARCH="amd64"')
         script_path = self.root / "run.sh"
         script_path.write_text(script)
-        return subprocess.run(["bash", str(script_path)], env=dict(self.env, **environment), capture_output=True, text=True, timeout=15)
+        return subprocess.run(["bash", str(script_path)], cwd=str(self.root), env=dict(self.env, **environment), capture_output=True, text=True, timeout=15)
 
     def commands(self):
         path = self.root / "commands"

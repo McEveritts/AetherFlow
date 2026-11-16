@@ -33,7 +33,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Upgrading from v3.2.x to v4.0.0
 
-v4.0.0 replaces the legacy Go control plane with the 11-crate **Rust (`Axum` + `Tokio`)** `aetherflow-api` binary and adds the unified `af` (`af-cli`) binary. The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
+v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 12-crate **Rust (`Axum` + `Tokio`)** workspace compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`). The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
 
 ### Live SQLite Database Path Resolution
 Both `af-release` and `deploy/release-manager.sh` resolve the live SQLite database in this exact 4-tier order:
@@ -66,7 +66,7 @@ If the post-swap `/health/ready` readiness probe fails, `current` automatically 
 To compile and package the v4.0.0 single-binary Rust release bundle locally:
 
 ```bash
-# Build Next.js 16 static export, run 11-crate Rust tests, and package aetherflow-api + af
+# Build Next.js 16 static export, run Zero-Go Rust workspace tests, and package aetherflow-api + af + speedtest-backend
 bash scripts/build_gold.sh
 ```
 
@@ -76,12 +76,12 @@ Or step-by-step:
 # 1. Build Frontend Static Export
 npm ci
 cd frontend && NEXT_STATIC_EXPORT=1 npm run build && cd ..
-rm -rf backend/web/dist && mkdir -p backend/web/dist
-cp -R frontend/out/. backend/web/dist/
+rm -rf web/dist && mkdir -p web/dist
+cp -R frontend/out/. web/dist/
 
-# 2. Build Rust Control Plane & Admin CLI
+# 2. Build Pure-Rust Control Plane, Admin CLI & Native LibreSpeed Backend
 cd backend-rs
-cargo build --release --bin aetherflow-api --bin af
+cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
 ```
 
 ---
@@ -92,4 +92,8 @@ cargo build --release --bin aetherflow-api --bin af
 **A:** No. AetherFlow updates only swap `/opt/AetherFlow/current` and restart `aetherflow-runner` and `aetherflow-api`. Your 77 Marketplace applications (Plex, Jellyfin, qBittorrent, Arr stack, etc.) run in independent `af-<app>.service` systemd units and continue running uninterrupted.
 
 **Q: Do I need to re-enroll 2FA or re-enter AI API keys after upgrading to v4.0.0?**  
-**A:** No. TOTP secrets, user accounts, and `AES-256-GCM` encrypted credentials in SQLite are 100% compatible between v3.2.x and v4.0.0 as long as `AES_MASTER_KEY` and `JWT_SECRET` in `/etc/aetherflow/aetherflow.env` remain unchanged.
+**A:** TOTP secrets, user accounts, and `AES-256-GCM` encrypted credentials in SQLite are 100% compatible between v3.2.x and v4.0.0 as long as `AES_MASTER_KEY` and `JWT_SECRET` in `/etc/aetherflow/aetherflow.env` remain unchanged. Note: if 2FA was enrolled on an early v3 build that stored legacy unsalted 64-hex SHA-256 recovery code hashes, v4.0.0 rejects unsalted recovery hashes fail-closed (only salted `sha256:v1:<salt>:<hash>` and legacy `$2*` bcrypt hashes are accepted); after signing in with your TOTP authenticator app, regenerate fresh salted `sha256:v1:` recovery codes via **Settings → Security → Regenerate Recovery Codes** (`POST /api/v1/auth/user/2fa/recovery/regenerate`).
+
+**Q: What happens to existing LibreSpeed BoltDB databases (`speedtest.db`) and result share links on upgrade?**
+
+**A:** When `speedtest-backend` (`af-librespeed`) starts against a pre-v4 BoltDB file at `/opt/librespeed/speedtest.db` (or discovers an un-imported `.bolt.bak` / `speedtest.bolt` archive in the database directory), it atomically renames any active BoltDB file aside with `0600` owner-only permissions, initializes a WAL-mode SQLite telemetry database (`0600`), and imports legacy BoltDB telemetry rows transactionally into SQLite (`telemetry_bolt_migrations` tracks completed imports so interrupted startups resume cleanly on next boot). On upgrade, `installpackage-librespeed` enables `enable_id_obfuscation=true` when omitted (preserving any explicit `enable_id_obfuscation=false`), while `telemetry_legacy_raw_ids` preserves every pre-upgrade BoltDB, pre-obfuscation SQLite, and unobfuscated share ID so historical `/results?id=<id>` links keep resolving even as all new post-upgrade results require obfuscated tokens. If `settings.toml` previously pointed to an external SQLite/BoltDB file under `/var/lib/librespeed/` or `/srv/librespeed/`, `installpackage-librespeed` validates and migrates that configured database into `/opt/librespeed/speedtest.db` (archiving any stale local `/opt/librespeed/speedtest.db` to `speedtest.db.pre-migrate.<ts>.bak`).

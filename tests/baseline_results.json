@@ -1407,7 +1407,7 @@
       "test_id": "T1_F32_01",
       "feature_id": "F32",
       "tier": 1,
-      "description": "modern_stack.sh builds Next.js static export before compiling Go backend",
+      "description": "modern_stack.sh builds Next.js static export before compiling Rust backend",
       "status": "PASS",
       "duration_ms": 0.09,
       "error": ""
@@ -1416,7 +1416,7 @@
       "test_id": "T1_F32_02",
       "feature_id": "F32",
       "tier": 1,
-      "description": "modern_stack.sh copies frontend build artifacts into backend/web/dist/",
+      "description": "modern_stack.sh copies frontend build artifacts into web/dist/",
       "status": "PASS",
       "duration_ms": 0.08,
       "error": ""
@@ -1425,7 +1425,7 @@
       "test_id": "T1_F32_03",
       "feature_id": "F32",
       "tier": 1,
-      "description": "Go backend compiles to single executable 'aetherflow-api'",
+      "description": "Rust backend compiles to single executable 'aetherflow-api'",
       "status": "PASS",
       "duration_ms": 0.15,
       "error": ""

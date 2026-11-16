@@ -134,7 +134,7 @@ pub fn get_retained_app_ingress_config(app: &str) -> anyhow::Result<Option<AppIn
 }
 
 fn read_retained_config(conn: &Connection, app: &str) -> anyhow::Result<Option<AppIngressConfig>> {
-    schema(&conn)?;
+    schema(conn)?;
     let raw: Option<String> = conn
         .query_row(
             "SELECT config_json FROM retained_app_ingress_configs WHERE app_name=?1",
@@ -322,9 +322,8 @@ pub fn list_reserved_ports_excluding(
         |row| row.get(0),
     )?;
     if has_retained {
-        let mut stmt = conn.prepare(
-            "SELECT app_name, config_json FROM retained_app_ingress_configs",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT app_name, config_json FROM retained_app_ingress_configs")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;

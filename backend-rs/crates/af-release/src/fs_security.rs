@@ -23,12 +23,20 @@ pub fn ensure_no_symlink_ancestors(path: &Path) -> ReleaseResult<()> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(ReleaseError::PathValidation {
                     path: accum,
-                    reason: format!("refusing operation through symlink while checking '{}'", path.display()),
+                    reason: format!(
+                        "refusing operation through symlink while checking '{}'",
+                        path.display()
+                    ),
                 });
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(ReleaseError::io(format!("inspecting {}", accum.display()), error)),
+            Err(error) => {
+                return Err(ReleaseError::io(
+                    format!("inspecting {}", accum.display()),
+                    error,
+                ))
+            }
         }
     }
     Ok(())
@@ -53,7 +61,10 @@ pub fn create_dir_all_no_symlinks(dir: &Path, mode: u32) -> ReleaseResult<()> {
     let mut accum = PathBuf::new();
     for comp in dir.components() {
         accum.push(comp);
-        if matches!(comp, Component::Prefix(_) | Component::RootDir | Component::CurDir) {
+        if matches!(
+            comp,
+            Component::Prefix(_) | Component::RootDir | Component::CurDir
+        ) {
             continue;
         }
         match fs::symlink_metadata(&accum) {
@@ -208,7 +219,11 @@ pub fn open_exclusive_private_file(path: &Path, mode: u32) -> ReleaseResult<File
     }
     let file = opts.open(path).map_err(|e| {
         ReleaseError::io(
-            format!("creating exclusive file {} (mode {:o})", path.display(), mode),
+            format!(
+                "creating exclusive file {} (mode {:o})",
+                path.display(),
+                mode
+            ),
             e,
         )
     })?;
@@ -239,20 +254,19 @@ pub fn atomic_write_bytes_with_mode(
     mode: u32,
 ) -> ReleaseResult<()> {
     ensure_no_symlink_ancestors(target)?;
-    let parent = target.parent().ok_or_else(|| ReleaseError::PathValidation {
-        path: target.to_path_buf(),
-        reason: "target file has no parent directory".to_string(),
-    })?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: target.to_path_buf(),
+            reason: "target file has no parent directory".to_string(),
+        })?;
     if !parent.try_exists().map_err(|error| {
         ReleaseError::io(format!("inspecting parent {}", parent.display()), error)
     })? {
         create_dir_all_no_symlinks(parent, 0o755)?;
     }
 
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tmp");
+    let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let tmp_path = parent.join(format!(
         ".{}.tmp.{}.{}",
         file_name,
@@ -277,7 +291,11 @@ pub fn atomic_write_bytes_with_mode(
     fs::rename(&tmp_path, target).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         ReleaseError::io(
-            format!("atomically renaming {} -> {}", tmp_path.display(), target.display()),
+            format!(
+                "atomically renaming {} -> {}",
+                tmp_path.display(),
+                target.display()
+            ),
             e,
         )
     })?;
@@ -304,10 +322,7 @@ pub fn atomic_copy_file_with_mode(
         create_dir_all_no_symlinks(parent, 0o755)?;
     }
 
-    let file_name = dest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("copy");
+    let file_name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("copy");
     let tmp_path = parent.join(format!(
         ".{}.tmp.{}.{}",
         file_name,
@@ -472,6 +487,33 @@ pub fn apply_data_dir_ownership_and_mode(data_dir: &Path) -> ReleaseResult<()> {
                     if unsafe { libc::geteuid() } == 0 {
                         return Err(ReleaseError::io(
                             format!("chown aetherflow:aetherflow on {}", data_dir.display()),
+                            err,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Ensures `dir` exists without symlinks, has mode `0750`, and when running as `root`
+/// (`euid == 0`) with an `aetherflow` account present, owns `dir` as `root:aetherflow`.
+pub fn apply_root_aetherflow_dir_ownership_and_mode(dir: &Path) -> ReleaseResult<()> {
+    create_dir_all_no_symlinks(dir, 0o750)?;
+    set_dir_mode(dir, 0o750)?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        if unsafe { libc::geteuid() } == 0 {
+            if let Some((_, gid)) = lookup_aetherflow_ugid() {
+                if let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) {
+                    let rc = unsafe { libc::lchown(c_path.as_ptr(), 0, gid) };
+                    if rc != 0 {
+                        let err = std::io::Error::last_os_error();
+                        return Err(ReleaseError::io(
+                            format!("chown root:aetherflow on {}", dir.display()),
                             err,
                         ));
                     }

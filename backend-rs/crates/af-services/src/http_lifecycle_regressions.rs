@@ -14,10 +14,7 @@ async fn runner_controls_require_complete_success_acknowledgements() {
         "systemctl",
         "printf 'unexpected fallback\\n' >> \"$AF_STATUS_CALLS\"; exit 93",
     );
-    let sock_name = format!(
-        "hc-{}.sock",
-        &uuid::Uuid::new_v4().to_string()[..8]
-    );
+    let sock_name = format!("hc-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]);
     let candidate = env::var_os("TMPDIR")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)

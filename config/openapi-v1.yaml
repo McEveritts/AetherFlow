@@ -1,207 +1,5662 @@
 openapi: 3.1.0
 info:
   title: AetherFlow API
-  version: 3.1.0
-  description: >
-    **NON-AUTHORITATIVE / PENDING FINAL ROLLOUT**: The backend is currently migrating 
-    to a stricter `/api/v1/public`, `/api/v1/auth`, and `/api/v1/admin` namespacing model 
-    (see `route_inventory.md`). This schema provides a structural reference but paths may 
-    differ until the migration is finalize.
+  version: 4.0.0
+  description: Authoritative OpenAPI 3.1 specification for the AetherFlow v4.0.0 pure-Rust control plane (`af-api`). Endpoints under `/api/v1` are namespaced by trust tier (`/public`, `/auth`, and `/admin`). Authenticated state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require a valid `X-CSRF-Token` header.
 servers:
-  - { url: /api/v1, description: Canonical v1 }
-  - { url: /api, description: Legacy compatibility }
+  - url: /api/v1
+    description: Canonical v1
+  - url: /api
+    description: Legacy compatibility (Deprecated)
 tags:
-  - { name: Auth }
-  - { name: System }
-  - { name: Services }
-  - { name: Marketplace }
-  - { name: Files }
-  - { name: Backup }
-  - { name: Users }
-  - { name: Quotas }
-  - { name: Notifications }
-  - { name: OIDC }
-  - { name: AI }
-  - { name: Cluster }
-  - { name: Network }
-  - { name: Operator, description: Headless Operator APIs - CLI/Automation Integration Only }
+  - name: Auth
+    description: Session authentication, MFA, OAuth, and user profile management
+  - name: System
+    description: Control-plane health, metrics, settings, updates, logs, and audit trail
+  - name: Services
+    description: Managed systemd service lifecycle and ingress routing
+  - name: Marketplace
+    description: Bare-metal package catalog, installation, updates, blueprints, and MediaFlow
+  - name: Files
+    description: Shared file uploads, downloads, and filesystem browsing
+  - name: McBrowser
+    description: Capability-scoped native file manager, TUS uploads, media previews, and public shares
+  - name: Streaming
+    description: Canonical playback history, analytics patterns, reconciliation, and portability
+  - name: Plugins
+    description: Sandboxed native Rust plugin UI, proxy, lifecycle control, and scoped tokens
+  - name: Backup
+    description: WAL-safe encrypted system backups and step-up verified downloads
+  - name: Users
+    description: Administrator user and RBAC management
+  - name: Quotas
+    description: Per-user storage quota configuration and accounting
+  - name: Notifications
+    description: In-app notifications, alert rules, and outbound webhook channels
+  - name: OIDC
+    description: OpenID Connect provider, device flow, and client registration
+  - name: AI
+    description: FlowAI assistant, metadata scanning, bandwidth optimization, and predictive scaling
+  - name: Cluster
+    description: Multi-node worker enrollment and telemetry
+  - name: Network
+    description: WireGuard, Tailscale, and host network diagnostics
+  - name: Operator
+    description: Headless Operator APIs for CLI (`af`) and automation integration
 paths:
-  /openapi.yaml: { get: { tags: [System], summary: Download schema, responses: { '200': { description: OK, content: { application/yaml: { schema: { type: string } } } } } } }
-  /ws: { get: { tags: [System], summary: Metrics websocket, responses: { '101': { description: Switching Protocols }, '401': { $ref: '#/components/responses/Error' } } } }
-  /ws/logs: { get: { tags: [System], summary: Logs websocket, responses: { '101': { description: Switching Protocols }, '401': { $ref: '#/components/responses/Error' } } } }
-  /auth/google/login: { get: { tags: [Auth], summary: Start Google OAuth, responses: { '307': { description: Redirect } } } }
-  /auth/google/callback: { get: { tags: [Auth], summary: Finish Google OAuth, responses: { '307': { description: Redirect } } } }
-  /auth/login: { post: { tags: [Auth], summary: Login with username and password, requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { message: { type: string }, user: { $ref: '#/components/schemas/User' } } } } } }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' } } } }
-  /auth/setup: { post: { tags: [Auth], summary: Create initial admin, requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } }, '409': { $ref: '#/components/responses/Error' } } } }
-  /auth/setup/check: { get: { tags: [Auth], summary: Check setup state, responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { setupRequired: { type: boolean } } } } } } } } }
-  /auth/session: { get: { tags: [Auth], summary: Get current session, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, '401': { $ref: '#/components/responses/Error' } } } }
-  /auth/logout: { post: { tags: [Auth], summary: Clear session, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /auth/profile: { put: { tags: [Auth], summary: Update current profile, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string } } } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /settings:
-    get: { tags: [System], summary: Get settings, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } } } }
-    put: { tags: [System], summary: Update settings, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { message: { type: string }, data: { $ref: '#/components/schemas/Settings' } } } } } } } }
-  /settings/test-ai: { post: { tags: [AI], summary: Test AI provider, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /system/metrics: { get: { tags: [System, Operator], summary: Current metrics, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SystemMetrics' } } } } } } }
-  /system/hardware: { get: { tags: [System], summary: Hardware inventory, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/HardwareInfo' } } } } } } }
-  /system/update/check: { get: { tags: [System], summary: Check release update, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /system/update/run: { post: { tags: [System], summary: Run release update, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /services: { get: { tags: [Services], summary: List services, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceMap' } } } } } } }
-  /services/{name}/control: { post: { tags: [Services], summary: Control a service, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/ServiceName' } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceControlRequest' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /marketplace: { get: { tags: [Marketplace], summary: List marketplace apps, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/MarketplaceApp' } } } } } } } }
-  /packages/{id}/install: { post: { tags: [Marketplace], summary: Install a package, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/PackageID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /packages/{id}/uninstall: { post: { tags: [Marketplace], summary: Uninstall a package, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/PackageID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /packages/{id}/progress: { get: { tags: [Marketplace], summary: Package progress, parameters: [ { $ref: '#/components/parameters/PackageID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PackageProgress' } } } } } } }
-  /fileshare: { get: { tags: [Files], summary: List uploaded files, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/FileInfo' } } } } } } } }
-  /fileshare/upload: { post: { tags: [Files], summary: Upload a file, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { multipart/form-data: { schema: { type: object, required: [file], properties: { file: { type: string, format: binary } } } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } }, '507': { $ref: '#/components/responses/Error' } } } }
-  /fileshare/download/{filename}: { get: { tags: [Files], summary: Download a fileshare item, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/Filename' } ], responses: { '200': { description: File stream, content: { application/octet-stream: { schema: { type: string, format: binary } } } } } } }
-  /backup/run: { post: { tags: [Backup], summary: Run backup, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /backup/list: { get: { tags: [Backup], summary: List backups, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
+  /admin/actions/pending:
+    get:
+      tags:
+        - System
+        - Operator
+      summary: Get actions pending
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/actions/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - System
+        - Operator
+      summary: Get actions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/actions/{id}/approve:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - System
+        - Operator
+      summary: Execute actions approve
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/actions/{id}/reject:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - System
+        - Operator
+      summary: Execute actions reject
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/backup/optimal-window:
+    get:
+      tags:
+        - AI
+      summary: Get ai backup optimal window
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/ai/backup/schedule:
+    post:
+      tags:
+        - AI
+      summary: Execute ai backup schedule
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+    put:
+      tags:
+        - AI
+      summary: Update ai backup schedule
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/bandwidth/analyze:
+    post:
+      tags:
+        - AI
+      summary: Execute ai bandwidth analyze
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/bandwidth/apply:
+    post:
+      tags:
+        - AI
+      summary: Execute ai bandwidth apply
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/metadata/results:
+    get:
+      tags:
+        - AI
+      summary: Get ai metadata results
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/ai/metadata/scan:
+    post:
+      tags:
+        - AI
+      summary: Execute ai metadata scan
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/metadata/status:
+    get:
+      tags:
+        - AI
+      summary: Get ai metadata status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/ai/predictions:
+    get:
+      tags:
+        - AI
+        - Operator
+      summary: Get ai predictions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/ai/predictions/analyze:
+    post:
+      tags:
+        - AI
+        - Operator
+      summary: Execute ai predictions analyze
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ai/predictions/history:
+    get:
+      tags:
+        - AI
+        - Operator
+      summary: Get ai predictions history
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/audit-log:
+    get:
+      tags:
+        - System
+        - Operator
+      summary: Get audit log
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
   /admin/backup/download/{filename}:
     parameters:
-      - { $ref: '#/components/parameters/Filename' }
+      - in: path
+        name: filename
+        required: true
+        schema:
+          type: string
     post:
-      tags: [Backup]
+      tags:
+        - Backup
       summary: Authorize one browser backup download
-      description: >
-        Requires an administrator session and CSRF verification. Validates the current
-        password and issues an HttpOnly SameSite Strict af_backup_download cookie,
-        scoped to /api/v1/admin/backup/download/. The cookie expires after 60 seconds,
-        is single use, and is bound to the administrator, session, and filename.
-        Reauthorize after a server restart or expiry. Does not read the backup stream.
-      security: [ { cookieAuth: [] } ]
+      description: 'Requires an administrator session, CSRF verification, and step-up reauthentication: `X-Reauth-Password` for local-password admins, `X-Reauth-TOTP` (TOTP or bcrypt recovery code) for 2FA-enabled OAuth-only admins, or `X-Reauth-Confirm: DOWNLOAD-BACKUP` (or `oauth`) with a fresh session (`<= 300s` old) for OAuth-only admins without local password or TOTP. Issues a single-use 60s HttpOnly SameSite=Strict `af_backup_download` cookie scoped to `/api/v1/admin/backup/download/`.'
+      security:
+        - cookieAuth: []
       parameters:
-        - { in: header, name: X-Reauth-Password, required: true, schema: { type: string, minLength: 1, maxLength: 1024 }, description: Current administrator password }
-        - { in: header, name: X-CSRF-Token, required: true, schema: { type: string }, description: CSRF token for the authenticated session }
+        - $ref: '#/components/parameters/CsrfToken'
+        - in: header
+          name: X-Reauth-Password
+          required: false
+          schema:
+            type: string
+            maxLength: 1024
+          description: Current administrator password (required when account has a local password)
+        - in: header
+          name: X-Reauth-TOTP
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+          description: 6-digit TOTP or bcrypt recovery code (required for 2FA-enabled OAuth-only admins)
+        - in: header
+          name: X-Reauth-Confirm
+          required: false
+          schema:
+            type: string
+            enum:
+              - DOWNLOAD-BACKUP
+              - oauth
+          description: Explicit confirmation for fresh-session (<=300s) OAuth-only admins without password or TOTP
       responses:
         '200':
           description: Download authorization issued
-          headers:
-            Set-Cookie: { description: Short lived HttpOnly download proof, schema: { type: string } }
-            Cache-Control: { schema: { type: string, const: no-store } }
           content:
             application/json:
               schema:
                 type: object
-                required: [url]
+                required:
+                  - url
                 properties:
-                  url: { type: string, description: Local native download URL }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { description: Administrator access, CSRF verification, or current password check failed }
-        '503': { description: Authorization capacity unavailable }
+                  url:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
     get:
-      tags: [Backup]
+      tags:
+        - Backup
       summary: Stream a verified backup
-      description: >
-        Requires an administrator session and either the single use download proof
-        issued by POST on this path or X-Reauth-Password for command line clients.
-        A native browser navigation uses the HttpOnly proof and streams without buffering
-        the entire backup in browser memory. Invalid, expired, or replayed proofs require
-        fresh authorization. Each chunk request also requires fresh authorization.
-      security: [ { cookieAuth: [] } ]
+      description: Streams a SHA-256 verified backup archive or byte-range chunk. Requires an administrator session plus either the single-use `af_backup_download` cookie issued by `POST /admin/backup/download/{filename}` or direct step-up reauthentication headers (`X-Reauth-Password`, `X-Reauth-TOTP`, or `X-Reauth-Confirm`).
+      security:
+        - cookieAuth: []
       parameters:
-        - { in: header, name: X-Reauth-Password, required: false, schema: { type: string, maxLength: 1024 }, description: Current password for clients without a valid download proof }
-        - { in: query, name: chunk, required: false, schema: { type: integer, minimum: 0 }, description: Optional zero based chunk index }
-        - { in: query, name: chunk_size, required: false, schema: { type: integer, minimum: 1, maximum: 67108864, default: 10485760 }, description: Chunk size in bytes }
+        - in: header
+          name: X-Reauth-Password
+          required: false
+          schema:
+            type: string
+            maxLength: 1024
+        - in: header
+          name: X-Reauth-TOTP
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+        - in: header
+          name: X-Reauth-Confirm
+          required: false
+          schema:
+            type: string
+            enum:
+              - DOWNLOAD-BACKUP
+              - oauth
+        - in: query
+          name: chunk
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: chunk_size
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 67108864
+            default: 10485760
       responses:
         '200':
           description: Verified backup stream
-          headers:
-            Cache-Control: { schema: { type: string, const: no-store } }
-            X-Checksum-SHA256: { schema: { type: string } }
-          content: { application/octet-stream: { schema: { type: string, format: binary } } }
-        '206': { description: Verified backup chunk stream, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { description: Administrator access or reauthentication required }
-        '409': { description: Backup verification failed or backup unavailable }
-        '416': { description: Chunk is outside the backup }
-        '503': { description: Backup capacity unavailable }
-  /backup/upload/{filename}: { post: { tags: [Backup], summary: Upload backup chunk, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/Filename' } ], requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /users: { get: { tags: [Users], summary: List users, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/User' } } } } } } } }
-  /users/{id}/role: { put: { tags: [Users], summary: Update user role, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { role: { type: string } }, required: [role] } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /users/{id}: { delete: { tags: [Users], summary: Delete user, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /user/quota: { get: { tags: [Quotas], summary: Get current user quota, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserQuota' } } } } } } }
-  /quotas: { get: { tags: [Quotas], summary: List quotas, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { quotas: { type: array, items: { $ref: '#/components/schemas/UserQuota' } } } } } } } } } }
-  /quotas/{id}: { put: { tags: [Quotas], summary: Set quota, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { message: { type: string }, quota: { $ref: '#/components/schemas/UserQuota' } } } } } } } } }
-  /quotas/{id}/refresh: { post: { tags: [Quotas], summary: Refresh quota usage, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { quota: { $ref: '#/components/schemas/UserQuota' } } } } } } } } }
-  /notifications: { get: { tags: [Notifications], summary: List notifications, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /notifications/{id}/read: { put: { tags: [Notifications], summary: Mark notification as read, parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /notifications/dismiss-all: { post: { tags: [Notifications], summary: Dismiss all notifications, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /notifications/rules: { get: { tags: [Notifications, Operator], summary: List notification rules, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } }, post: { tags: [Notifications, Operator], summary: Create notification rule, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /notifications/rules/{id}: { put: { tags: [Notifications, Operator], summary: Update notification rule, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } }, delete: { tags: [Notifications, Operator], summary: Delete notification rule, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /notifications/channels: { get: { tags: [Notifications, Operator], summary: List notification channels, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } }, post: { tags: [Notifications, Operator], summary: Create notification channel, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /notifications/channels/{id}/test: { post: { tags: [Notifications, Operator], summary: Test notification channel, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /notifications/channels/{id}: { delete: { tags: [Notifications, Operator], summary: Delete notification channel, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /cluster/nodes: { get: { tags: [Cluster, Operator], summary: List cluster nodes, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } }, post: { tags: [Cluster, Operator], summary: Enroll worker, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /cluster/nodes/{id}: { delete: { tags: [Cluster, Operator], summary: Remove worker, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /cluster/nodes/{id}/metrics: { get: { tags: [Cluster, Operator], summary: Worker metrics, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /oidc/clients: { get: { tags: [OIDC, Operator], summary: List OIDC clients, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } }, post: { tags: [OIDC, Operator], summary: Create OIDC client, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /oidc/clients/{id}: { delete: { tags: [OIDC, Operator], summary: Delete OIDC client, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /oidc/jwks: { get: { tags: [OIDC], summary: JWKS endpoint, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /oidc/authorize: { get: { tags: [OIDC], summary: OIDC authorize endpoint, responses: { '302': { description: Redirect } } } }
-  /oidc/token: { post: { tags: [OIDC], summary: OIDC token endpoint, requestBody: { required: true, content: { application/x-www-form-urlencoded: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /oidc/userinfo: { get: { tags: [OIDC], summary: OIDC userinfo endpoint, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /oidc/revoke: { post: { tags: [OIDC], summary: OIDC revoke endpoint, requestBody: { required: true, content: { application/x-www-form-urlencoded: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { type: object } } } } } } }
-  /ai/chat: { post: { tags: [AI], summary: Chat with FlowAI, requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/support: { post: { tags: [AI], summary: AI support helper, requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/metadata/scan: { post: { tags: [AI], summary: Start metadata scan, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/metadata/status: { get: { tags: [AI], summary: Metadata scan status, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/metadata/results: { get: { tags: [AI], summary: Metadata scan results, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /ai/bandwidth/analyze: { post: { tags: [AI], summary: Analyze bandwidth, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/bandwidth/apply: { post: { tags: [AI], summary: Apply bandwidth plan, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/predictions: { get: { tags: [AI, Operator], summary: Predictive scaling data, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/predictions/analyze: { post: { tags: [AI, Operator], summary: Run predictive analysis, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/predictions/history: { get: { tags: [AI, Operator], summary: Predictive history, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /ai/backup/optimal-window: { get: { tags: [AI], summary: Recommended backup window, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /ai/backup/schedule: { post: { tags: [AI], summary: Set backup schedule, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /logs: { get: { tags: [System], summary: Query logs, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /logs/sources: { get: { tags: [System], summary: List log sources, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /logs/bookmarks:
-    get: { tags: [System], summary: List saved log bookmarks, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } }
-    post: { tags: [System], summary: Bookmark log entry, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } }
-  /network/status: { get: { tags: [Network, Operator], summary: Network status, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /network/wireguard/peers: { get: { tags: [Network, Operator], summary: List WireGuard peers, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } }, post: { tags: [Network, Operator], summary: Add WireGuard peer, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /network/wireguard/peers/{key}: { delete: { tags: [Network, Operator], summary: Remove WireGuard peer, security: [ { cookieAuth: [] } ], parameters: [ { in: path, name: key, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
-  /network/wireguard/keygen: { post: { tags: [Network, Operator], summary: Generate WireGuard keys, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /network/tailscale/status: { get: { tags: [Network, Operator], summary: Tailscale status, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-  /network/tailscale/peers: { get: { tags: [Network, Operator], summary: List Tailscale peers, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /network/tailscale/routes: { post: { tags: [Network, Operator], summary: Advertise Tailscale routes, security: [ { cookieAuth: [] } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
-components:
-  securitySchemes: { cookieAuth: { type: apiKey, in: cookie, name: aetherflow_session } }
-  parameters:
-    UserID: { in: path, name: id, required: true, schema: { type: integer } }
-    PackageID: { in: path, name: id, required: true, schema: { type: string } }
-    ServiceName: { in: path, name: name, required: true, schema: { type: string } }
-    Filename: { in: path, name: filename, required: true, schema: { type: string } }
-  responses:
-    Error: { description: Error response, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-  schemas:
-    ErrorResponse: 
-      type: object
-      required: [code, message]
-      properties: 
-        code: 
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Verified backup chunk stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '416':
+          $ref: '#/components/responses/Error'
+  /admin/backup/list:
+    get:
+      tags:
+        - Backup
+      summary: Get backup list
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/backup/run:
+    post:
+      tags:
+        - Backup
+      summary: Execute backup run
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/backup/upload/{filename}:
+    parameters:
+      - in: path
+        name: filename
+        required: true
+        schema:
           type: string
-          description: Machine-readable error code (e.g. AUTH_EXPIRED)
-        message: 
+    post:
+      tags:
+        - Backup
+      summary: Execute backup upload
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/blueprints/{appName}/sync:
+    parameters:
+      - in: path
+        name: appName
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute blueprints sync
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/cluster/enroll:
+    post:
+      tags:
+        - Cluster
+        - Operator
+      summary: Execute cluster enroll
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/cluster/nodes:
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: Get cluster nodes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/cluster/nodes/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    delete:
+      tags:
+        - Cluster
+        - Operator
+      summary: Delete cluster nodes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/cluster/nodes/{id}/metrics:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      tags:
+        - Cluster
+        - Operator
+      summary: Get cluster nodes metrics
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/fileshare/download/{filename}:
+    parameters:
+      - in: path
+        name: filename
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Files
+      summary: Get fileshare download
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/fileshare/upload:
+    post:
+      tags:
+        - Files
+      summary: Execute fileshare upload
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+  /admin/fileshare/{filename}:
+    parameters:
+      - in: path
+        name: filename
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Files
+      summary: Delete fileshare
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/ingress/apps/{appName}:
+    parameters:
+      - in: path
+        name: appName
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - Services
+      summary: Update ingress apps
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/ingress/configs:
+    get:
+      tags:
+        - Services
+      summary: Get ingress configs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/logs:
+    get:
+      tags:
+        - System
+      summary: Get logs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/logs/bookmarks:
+    get:
+      tags:
+        - System
+      summary: Get logs bookmarks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - System
+      summary: Execute logs bookmarks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/logs/sources:
+    get:
+      tags:
+        - System
+      summary: Get logs sources
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/mediaflow/approve/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute mediaflow approve
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/mediaflow/decline/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute mediaflow decline
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/mediaflow/queue:
+    get:
+      tags:
+        - Marketplace
+      summary: Get mediaflow queue
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/mediaflow/scan:
+    post:
+      tags:
+        - Marketplace
+      summary: Execute mediaflow scan
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/diagnostics:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network diagnostics
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/network/status:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/network/tailscale/connect:
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network tailscale connect
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/tailscale/disconnect:
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network tailscale disconnect
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/tailscale/logout:
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network tailscale logout
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/tailscale/peers:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network tailscale peers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/network/tailscale/routes:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network tailscale routes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network tailscale routes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/tailscale/settings:
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network tailscale settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/tailscale/status:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network tailscale status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/network/wireguard/keygen:
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network wireguard keygen
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/wireguard/peers:
+    get:
+      tags:
+        - Network
+        - Operator
+      summary: Get network wireguard peers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network wireguard peers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/wireguard/peers/{key}:
+    parameters:
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Network
+        - Operator
+      summary: Delete network wireguard peers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    put:
+      tags:
+        - Network
+        - Operator
+      summary: Update network wireguard peers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/network/{provider}/service:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Network
+        - Operator
+      summary: Execute network service
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/notifications/channels:
+    get:
+      tags:
+        - Notifications
+        - Operator
+      summary: Get notifications channels
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Notifications
+        - Operator
+      summary: Execute notifications channels
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/notifications/channels/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Notifications
+        - Operator
+      summary: Delete notifications channels
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/notifications/channels/{id}/test:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Notifications
+        - Operator
+      summary: Execute notifications channels test
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/notifications/rules:
+    get:
+      tags:
+        - Notifications
+        - Operator
+      summary: Get notifications rules
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Notifications
+        - Operator
+      summary: Execute notifications rules
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/notifications/rules/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Notifications
+        - Operator
+      summary: Delete notifications rules
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    put:
+      tags:
+        - Notifications
+        - Operator
+      summary: Update notifications rules
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/oidc/clients:
+    get:
+      tags:
+        - OIDC
+        - Operator
+      summary: Get oidc clients
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - OIDC
+        - Operator
+      summary: Execute oidc clients
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/oidc/clients/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - OIDC
+        - Operator
+      summary: Delete oidc clients
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/packages/updates/check:
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages updates check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/packages/{id}/check-update:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages check update
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/packages/{id}/install:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages install
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/packages/{id}/reinstall:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages reinstall
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/packages/{id}/uninstall:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages uninstall
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/packages/{id}/update:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute packages update
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/plugins:
+    get:
+      tags:
+        - Plugins
+      summary: Get plugins
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/plugins/{id}/control:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Plugins
+      summary: Execute plugins control
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/plugins/{id}/token:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Plugins
+      summary: Execute plugins token
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/quotas:
+    get:
+      tags:
+        - Quotas
+      summary: Get quotas
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/quotas/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    put:
+      tags:
+        - Quotas
+      summary: Update quotas
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/quotas/{id}/refresh:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    post:
+      tags:
+        - Quotas
+      summary: Execute quotas refresh
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/services:
+    get:
+      tags:
+        - Services
+      summary: Get services
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/services/restart/status:
+    get:
+      tags:
+        - Services
+      summary: Get services restart status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/services/{name}/control:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Services
+      summary: Execute services control
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/settings:
+    get:
+      tags:
+        - System
+      summary: Get settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - System
+      summary: Update settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/settings/test-ai:
+    post:
+      tags:
+        - AI
+      summary: Execute settings test ai
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/demo:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming demo
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/imports/events:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming imports events
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/imports/status:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming imports status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/streaming/imports/upstream-probe:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming imports upstream probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/policies:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming policies
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - Streaming
+      summary: Update streaming policies
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/portability/export:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming portability export
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/streaming/portability/preview:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming portability preview
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/portability/restore:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming portability restore
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/reconciliation/apply:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming reconciliation apply
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/reconciliation/preview:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming reconciliation preview
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/servers/test:
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming servers test
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/servers/{provider}:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - Streaming
+      summary: Update streaming servers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/servers/{provider}/sync:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming servers sync
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/sessions/{sessionId}/command:
+    parameters:
+      - in: path
+        name: sessionId
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Streaming
+      summary: Execute streaming sessions command
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/streaming/user-links:
+    delete:
+      tags:
+        - Streaming
+      summary: Delete streaming user links
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming user links
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - Streaming
+      summary: Update streaming user links
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/system/metrics:
+    get:
+      tags:
+        - System
+      summary: Get system metrics
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/system/update/check:
+    get:
+      tags:
+        - System
+      summary: Get system update check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/system/update/run:
+    post:
+      tags:
+        - System
+      summary: Execute system update run
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /admin/system/update/status:
+    get:
+      tags:
+        - System
+      summary: Get system update status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/users:
+    get:
+      tags:
+        - Users
+      summary: Get users
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /admin/users/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    delete:
+      tags:
+        - Users
+      summary: Delete users
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /admin/users/{id}/role:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    put:
+      tags:
+        - Users
+      summary: Update users role
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/ai/chat:
+    post:
+      tags:
+        - AI
+      summary: Execute ai chat
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/ai/support:
+    post:
+      tags:
+        - AI
+      summary: Execute ai support
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/blueprints:
+    get:
+      tags:
+        - Marketplace
+      summary: Get blueprints
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/blueprints/{appName}:
+    parameters:
+      - in: path
+        name: appName
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Marketplace
+      summary: Get blueprints
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/deploy/stream:
+    get:
+      tags:
+        - Marketplace
+      summary: Get deploy stream
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/deploy/{appName}:
+    parameters:
+      - in: path
+        name: appName
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Marketplace
+      summary: Execute deploy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/fileshare:
+    get:
+      tags:
+        - Files
+      summary: Get fileshare
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/fileshare/download/{filename}:
+    parameters:
+      - in: path
+        name: filename
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Files
+      summary: Get fileshare download
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/fs:
+    get:
+      tags:
+        - Files
+      summary: Get fs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/logout:
+    post:
+      tags:
+        - Auth
+      summary: Execute logout
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /auth/mcbrowser/actions:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser actions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/archive:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser archive
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/archive-ticket:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser archive ticket
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/archive/{ticket}:
+    parameters:
+      - in: path
+        name: ticket
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser archive
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/audit-events:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser audit events
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/content:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser content
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - McBrowser
+      summary: Update mcbrowser content
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/copy:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser copy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/csv:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser csv
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/delete-recursive:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser delete recursive
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/directory:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser directory
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/download:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser download
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/entries:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser entries
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/entry:
+    delete:
+      tags:
+        - McBrowser
+      summary: Delete mcbrowser entry
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /auth/mcbrowser/epub:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser epub
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/events:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser events
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/events/queue:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser events queue
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/events/queue/{event_id}/ack:
+    parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser events queue ack
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/events/settings:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser events settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - McBrowser
+      summary: Update mcbrowser events settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/file:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser file
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/info:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser info
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/media:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser media
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/media-info:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser media info
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/policy:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser policy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/policy/{user_id}:
+    parameters:
+      - in: path
+        name: user_id
+        required: true
+        schema:
+          type: integer
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser policy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - McBrowser
+      summary: Update mcbrowser policy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/preferences:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser preferences
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    put:
+      tags:
+        - McBrowser
+      summary: Update mcbrowser preferences
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/preview:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser preview
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/preview/big:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser preview big
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/preview/thumb:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser preview thumb
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/rename:
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser rename
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/search:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser search
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/shares:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser shares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser shares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/shares/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - McBrowser
+      summary: Delete mcbrowser shares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /auth/mcbrowser/subtitle:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser subtitle
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/subtitles:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser subtitles
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/thumbnail:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser thumbnail
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/mcbrowser/upload:
+    put:
+      tags:
+        - McBrowser
+      summary: Update mcbrowser upload
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/uploads:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser uploads
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser uploads
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/uploads/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - McBrowser
+      summary: Delete mcbrowser uploads
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    head:
+      tags:
+        - McBrowser
+      summary: Inspect mcbrowser uploads
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    patch:
+      tags:
+        - McBrowser
+      summary: Patch mcbrowser uploads
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/mcbrowser/usage:
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser usage
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/notifications:
+    get:
+      tags:
+        - Notifications
+      summary: Get notifications
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/notifications/dismiss-all:
+    post:
+      tags:
+        - Notifications
+      summary: Execute notifications dismiss all
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/notifications/{id}/read:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - Notifications
+      summary: Update notifications read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/oidc/consent:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc consent
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/oidc/device/consent:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc device consent
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/oidc/device/verify:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc device verify
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/packages/{id}/progress:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Marketplace
+      summary: Get packages progress
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/plugins:
+    get:
+      tags:
+        - Plugins
+      summary: Get plugins
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/plugins/{id}/proxy:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Plugins
+      summary: Delete plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    get:
+      tags:
+        - Plugins
+      summary: Get plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Plugins
+      summary: Execute plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+    put:
+      tags:
+        - Plugins
+      summary: Update plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/plugins/{id}/proxy/{rest}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: rest
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Plugins
+      summary: Delete plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    get:
+      tags:
+        - Plugins
+      summary: Get plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+    post:
+      tags:
+        - Plugins
+      summary: Execute plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+    put:
+      tags:
+        - Plugins
+      summary: Update plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/plugins/{id}/ui:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Plugins
+      summary: Get plugins ui
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/profile:
+    put:
+      tags:
+        - Auth
+      summary: Update profile
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/profile/avatar:
+    delete:
+      tags:
+        - Auth
+      summary: Delete profile avatar
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+    put:
+      tags:
+        - Auth
+      summary: Update profile avatar
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/profile/password:
+    put:
+      tags:
+        - Auth
+      summary: Update profile password
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/ready:
+    get:
+      tags:
+        - Auth
+      summary: Get ready
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/refresh:
+    post:
+      tags:
+        - Auth
+      summary: Execute refresh
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /auth/services:
+    get:
+      tags:
+        - Services
+      summary: Get services
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/session:
+    get:
+      tags:
+        - Auth
+      summary: Get session
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/sessions:
+    get:
+      tags:
+        - Auth
+      summary: Get sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/sessions/{jti}:
+    parameters:
+      - in: path
+        name: jti
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+        - Auth
+      summary: Delete sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+  /auth/settings:
+    get:
+      tags:
+        - Auth
+      summary: Get settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/artwork/{itemId}:
+    parameters:
+      - in: path
+        name: itemId
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming artwork
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/dashboard:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming dashboard
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown/clients:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown clients
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown/genres:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown genres
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown/items:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown items
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown/libraries:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown libraries
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/drilldown/users:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming drilldown users
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/history:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming history
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/history/export:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming history export
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/patterns:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming patterns
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/patterns/activity:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming patterns activity
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/streaming/patterns/concurrency:
+    get:
+      tags:
+        - Streaming
+      summary: Get streaming patterns concurrency
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/hardware:
+    get:
+      tags:
+        - Auth
+      summary: Get system hardware
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/metrics:
+    get:
+      tags:
+        - Auth
+      summary: Get system metrics
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/metrics/history:
+    get:
+      tags:
+        - Auth
+      summary: Get system metrics history
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/topology:
+    get:
+      tags:
+        - Auth
+      summary: Get system topology
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/update/check:
+    get:
+      tags:
+        - Auth
+      summary: Get system update check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/system/update/status:
+    get:
+      tags:
+        - Auth
+      summary: Get system update status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/user/2fa/disable:
+    post:
+      tags:
+        - Auth
+      summary: Execute user 2fa disable
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/user/2fa/recovery/regenerate:
+    post:
+      tags:
+        - Auth
+      summary: Execute user 2fa recovery regenerate
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/user/2fa/setup:
+    post:
+      tags:
+        - Auth
+      summary: Execute user 2fa setup
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/user/2fa/verify:
+    post:
+      tags:
+        - Auth
+      summary: Execute user 2fa verify
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /auth/user/quota:
+    get:
+      tags:
+        - Quotas
+      summary: Get user quota
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/ws:
+    get:
+      tags:
+        - Auth
+      summary: Authenticated WebSocket stream
+      responses:
+        '101':
+          description: Switching Protocols
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/ws/logs:
+    get:
+      tags:
+        - Auth
+      summary: Authenticated WebSocket stream
+      responses:
+        '101':
+          description: Switching Protocols
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /auth/ws/ticket:
+    get:
+      tags:
+        - Auth
+      summary: Get ws ticket
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /deploy/stream:
+    get:
+      tags:
+        - Marketplace
+      summary: Get deploy stream
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /fs:
+    get:
+      tags:
+        - Files
+      summary: Get fs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /ingress/apps/{appName}:
+    parameters:
+      - in: path
+        name: appName
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - Services
+      summary: Update ingress apps
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /ingress/configs:
+    get:
+      tags:
+        - Services
+      summary: Get ingress configs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+  /public/auth/google/callback:
+    get:
+      tags:
+        - Auth
+      summary: Get auth google callback
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/auth/google/login:
+    get:
+      tags:
+        - Auth
+      summary: Get auth google login
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/auth/login:
+    post:
+      tags:
+        - Auth
+      summary: Execute auth login
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+  /public/auth/mfa/verify:
+    post:
+      tags:
+        - Auth
+      summary: Execute auth mfa verify
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/auth/refresh:
+    post:
+      tags:
+        - Auth
+      summary: Execute auth refresh
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/auth/setup:
+    post:
+      tags:
+        - Auth
+      summary: Execute auth setup
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+  /public/auth/setup/check:
+    get:
+      tags:
+        - Auth
+      summary: Get auth setup check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/auth/verify:
+    get:
+      tags:
+        - Auth
+      summary: Get auth verify
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/csrf-token:
+    get:
+      tags:
+        - Auth
+      summary: Get csrf token
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/marketplace:
+    get:
+      tags:
+        - Marketplace
+      summary: Get marketplace
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/mcbrowser/shares/{token}:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser shares
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/mcbrowser/shares/{token}/download:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser shares download
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/mcbrowser/shares/{token}/entries:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - McBrowser
+      summary: Get mcbrowser shares entries
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/mcbrowser/shares/{token}/unlock:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - McBrowser
+      summary: Execute mcbrowser shares unlock
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/oidc/authorize:
+    get:
+      tags:
+        - OIDC
+      summary: Get oidc authorize
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/oidc/device/authorize:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc device authorize
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/oidc/introspect:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc introspect
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/oidc/jwks:
+    get:
+      tags:
+        - OIDC
+      summary: Get oidc jwks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/oidc/revoke:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc revoke
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/oidc/token:
+    post:
+      tags:
+        - OIDC
+      summary: Execute oidc token
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+  /public/oidc/userinfo:
+    get:
+      tags:
+        - OIDC
+      summary: Get oidc userinfo
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+  /public/openapi.yaml:
+    get:
+      tags:
+        - System
+      summary: Download raw OpenAPI 3.1 YAML specification
+      responses:
+        '200':
+          description: OpenAPI YAML document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /public/swagger:
+    get:
+      tags:
+        - System
+      summary: Interactive offline OpenAPI documentation viewer
+      responses:
+        '200':
+          description: HTML documentation viewer
+          content:
+            text/html:
+              schema:
+                type: string
+  /public/swagger/:
+    get:
+      tags:
+        - System
+      summary: Interactive offline OpenAPI documentation viewer
+      responses:
+        '200':
+          description: HTML documentation viewer
+          content:
+            text/html:
+              schema:
+                type: string
+  /public/swagger/{any}:
+    parameters:
+      - in: path
+        name: any
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - System
+      summary: Interactive offline OpenAPI documentation viewer
+      responses:
+        '200':
+          description: HTML documentation viewer
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: aetherflow_session
+  parameters:
+    CsrfToken:
+      in: header
+      name: X-CSRF-Token
+      required: true
+      schema:
+        type: string
+      description: Double-submit CSRF token bound to the authenticated session
+  responses:
+    Error:
+      description: Structured API error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+        message:
           type: string
           description: Human-readable error description
-        details: 
+        details:
           type: object
-          description: Optional structured context
-    MessageResponse: { type: object, properties: { message: { type: string } } }
-    LoginRequest: { type: object, required: [username, password], properties: { username: { type: string }, password: { type: string } } }
-    User: { type: object, properties: { id: { type: integer }, username: { type: string }, email: { type: string }, avatar_url: { type: string }, role: { type: string }, is_oauth: { type: boolean } } }
-    Settings: { type: object, properties: { aiModel: { type: string }, systemPrompt: { type: string }, language: { type: string }, timezone: { type: string }, updateChannel: { type: string }, defaultDashboard: { type: string }, setupCompleted: { type: boolean }, geminiApiKey: { type: string } } }
-    ServiceControlRequest: { type: object, required: [action], properties: { action: { type: string, enum: [start, stop, restart] }, managed_by: { type: string }, process: { type: string } } }
-    ServiceInfo: { type: object, properties: { status: { type: string }, version: { type: string }, uptime: { type: string }, managed_by: { type: string }, process: { type: string } } }
-    ServiceMap: { type: object, additionalProperties: { $ref: '#/components/schemas/ServiceInfo' } }
-    MarketplaceApp: { type: object, properties: { id: { type: string }, name: { type: string }, desc: { type: string }, hits: { type: integer }, category: { type: string }, status: { type: string }, progress: { type: integer }, started_at: { type: string }, log_line: { type: string }, installed_version: { type: string }, latest_version: { type: string }, update_available: { type: boolean }, update_checked_at: { type: string }, update_url: { type: string }, update_error: { type: string } } }
-    PackageProgress: { type: object, properties: { status: { type: string }, progress: { type: integer }, started_at: { type: string }, log_line: { type: string }, log_lines: { type: integer } } }
-    FileInfo: { type: object, properties: { name: { type: string }, size: { type: integer }, modTime: { type: string }, extension: { type: string } } }
-    UserQuota: { type: object, properties: { user_id: { type: integer }, username: { type: string }, quota_bytes: { type: integer }, used_bytes: { type: integer }, available_bytes: { type: integer }, usage_pct: { type: number }, configured: { type: boolean }, status: { type: string }, source: { type: string }, updated_at: { type: string } } }
-    GenericObject: { type: object, additionalProperties: true }
-    GenericArray: { type: array, items: { type: object, additionalProperties: true } }
-    SystemMetrics: { type: object, properties: { cpu_usage: { type: number }, memory: { type: object, properties: { used: { type: number }, total: { type: number } } }, network: { type: object, properties: { down: { type: string }, up: { type: string } } }, disk_io: { type: object, properties: { read_bytes_sec: { type: integer }, write_bytes_sec: { type: integer } } }, disks: { type: array, items: { type: object, properties: { mount_point: { type: string }, used_pct: { type: number } } } } } }
-    HardwareInfo: { type: object, properties: { cpu: { type: object, properties: { model: { type: string } } }, memory: { type: object, properties: { total_gb: { type: number } } }, storage: { type: array, items: { type: object, properties: { model: { type: string } } } } } }
+          additionalProperties: true
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+        avatar_url:
+          type: string
+        role:
+          type: string
+        is_oauth:
+          type: boolean
+    Settings:
+      type: object
+      properties:
+        aiModel:
+          type: string
+        systemPrompt:
+          type: string
+        language:
+          type: string
+        timezone:
+          type: string
+        updateChannel:
+          type: string
+        defaultDashboard:
+          type: string
+        setupCompleted:
+          type: boolean
+        geminiApiKey:
+          type: string
+    ServiceControlRequest:
+      type: object
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          enum:
+            - start
+            - stop
+            - restart
+        managed_by:
+          type: string
+        process:
+          type: string
+    ServiceInfo:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        uptime:
+          type: string
+        managed_by:
+          type: string
+        process:
+          type: string
+    ServiceMap:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/ServiceInfo'
+    MarketplaceApp:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        desc:
+          type: string
+        hits:
+          type: integer
+        category:
+          type: string
+        status:
+          type: string
+        progress:
+          type: integer
+        installed_version:
+          type: string
+        latest_version:
+          type: string
+        update_available:
+          type: boolean
+    PackageProgress:
+      type: object
+      properties:
+        status:
+          type: string
+        progress:
+          type: integer
+        started_at:
+          type: string
+        log_line:
+          type: string
+        log_lines:
+          type: integer
+    FileInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        size:
+          type: integer
+        modTime:
+          type: string
+        extension:
+          type: string
+    UserQuota:
+      type: object
+      properties:
+        user_id:
+          type: integer
+        username:
+          type: string
+        quota_bytes:
+          type: integer
+        used_bytes:
+          type: integer
+        available_bytes:
+          type: integer
+        usage_pct:
+          type: number
+        configured:
+          type: boolean
+        status:
+          type: string
+    SystemMetrics:
+      type: object
+      properties:
+        cpu_usage:
+          type: number
+        memory:
+          type: object
+          additionalProperties:
+            type: number
+        disk_space:
+          type: object
+          additionalProperties:
+            type: number
+    HardwareInfo:
+      type: object
+      additionalProperties: true
+    GenericObject:
+      type: object
+      additionalProperties: true
+    GenericArray:
+      type: array
+      items:
+        type: object
+        additionalProperties: true

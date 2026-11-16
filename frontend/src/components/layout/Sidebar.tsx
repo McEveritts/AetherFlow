@@ -27,8 +27,7 @@ import {
     X,
     Radio,
     Boxes,
-    ChevronLeft,
-    ChevronRight
+    ChevronLeft
 } from 'lucide-react';
 
 export const NAVIGATION = [
@@ -76,7 +75,6 @@ export default function Sidebar() {
     const {
         activeTab,
         setActiveTab,
-        isSidebarHovered,
         setIsSidebarHovered,
         isMobileMenuOpen,
         setIsMobileMenuOpen,
@@ -85,7 +83,6 @@ export default function Sidebar() {
         useShallow((state) => ({
             activeTab: state.activeTab,
             setActiveTab: state.setActiveTab,
-            isSidebarHovered: state.isSidebarHovered,
             setIsSidebarHovered: state.setIsSidebarHovered,
             isMobileMenuOpen: state.isMobileMenuOpen,
             setIsMobileMenuOpen: state.setIsMobileMenuOpen,
@@ -105,8 +102,7 @@ export default function Sidebar() {
     const savedPin = useSyncExternalStore(subscribeSidebarPin, readSidebarPin, () => false);
     const [pinOverride, setPinOverride] = useState<boolean | null>(null);
     const isPinned = pinOverride ?? savedPin;
-    const [isFocusWithin, setIsFocusWithin] = useState(false);
-    const isExpanded = isSidebarHovered || isPinned || isFocusWithin;
+    const isExpanded = isPinned;
     const isSecondaryTab = !MOBILE_DOCK_ITEMS.some((dockItem) => dockItem.id === activeTab);
 
     useEffect(() => {
@@ -183,13 +179,12 @@ export default function Sidebar() {
 
     const handleToggleCollapse = () => {
         triggerHaptic(6, hapticFeedback);
-        const nextPinned = !isPinned;
-        if (!nextPinned) brandButtonRef.current?.focus();
-        setPinOverride(nextPinned);
-        setIsSidebarHovered(nextPinned);
-        setIsFocusWithin(false);
+        const nextExpanded = !isExpanded;
+        if (!nextExpanded) brandButtonRef.current?.focus();
+        setPinOverride(nextExpanded);
+        setIsSidebarHovered(nextExpanded);
         try {
-            localStorage.setItem('aetherflow-sidebar-pinned', String(nextPinned));
+            localStorage.setItem('aetherflow-sidebar-pinned', String(nextExpanded));
         } catch {
             return;
         }
@@ -377,16 +372,6 @@ export default function Sidebar() {
             >
                 <aside
                     id="desktop-sidebar-navigation"
-                    onMouseEnter={() => setIsSidebarHovered(true)}
-                    onMouseLeave={() => {
-                        if (!isPinned) setIsSidebarHovered(false);
-                    }}
-                    onFocusCapture={() => setIsFocusWithin(true)}
-                    onBlurCapture={(event) => {
-                        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
-                            setIsFocusWithin(false);
-                        }
-                    }}
                     className={`fixed inset-y-0 left-0 z-40 flex flex-col obs-gpu-120hz-rail ${
                         isExpanded ? 'md:w-64' : 'md:w-[4.5rem]'
                     }`}
@@ -402,11 +387,11 @@ export default function Sidebar() {
                                     type="button"
                                     onClick={handleToggleCollapse}
                                     ref={brandButtonRef}
-                                    aria-label={isPinned ? 'Collapse Sidebar' : isExpanded ? 'Pin Sidebar' : 'Expand Sidebar'}
+                                    aria-label={isExpanded ? 'Collapse Sidebar' : 'Expand Sidebar'}
                                     aria-expanded={isExpanded}
-                                    aria-pressed={isPinned}
+                                    aria-pressed={isExpanded}
                                     aria-controls="desktop-sidebar-navigation"
-                                    title={isPinned ? 'Collapse Sidebar' : 'Pin Sidebar'}
+                                    title={isExpanded ? 'Collapse Sidebar' : 'Expand Sidebar'}
                                     className="obs-brand-logo w-10 h-10 min-h-[40px] min-w-[40px] shrink-0 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                                 >
                                     <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="obs-brand-mark w-8 h-8" />
@@ -429,12 +414,11 @@ export default function Sidebar() {
                                 <button
                                     type="button"
                                     onClick={handleToggleCollapse}
-                                    aria-label={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
-                                    aria-pressed={isPinned}
-                                    title={isPinned ? 'Unpin and collapse sidebar' : 'Pin sidebar open'}
-                                    className="obs-touch-target-standard shrink-0 flex items-center justify-center rounded-lg text-slate-400 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                    aria-label="Collapse sidebar rail"
+                                    title="Collapse sidebar rail"
+                                    className="obs-touch-target-standard h-10 w-10 min-h-[40px] min-w-[40px] shrink-0 flex items-center justify-center rounded-lg text-slate-400 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                                 >
-                                    {isExpanded ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+                                    <ChevronLeft size={16} />
                                 </button>
                             )}
                         </div>

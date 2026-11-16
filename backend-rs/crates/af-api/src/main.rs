@@ -10,6 +10,7 @@ pub mod middlewares;
 pub mod network;
 pub mod notifications_ext;
 pub mod oidc;
+pub mod openapi_ui;
 pub mod plugins;
 #[cfg(test)]
 mod plugins_router_tests;
@@ -141,19 +142,29 @@ fn build_cors_layer() -> CorsLayer {
             })
             .collect()
     } else {
-        [
-            "http://localhost",
-            "https://localhost",
-            "http://localhost:3000",
-            "http://localhost:8080",
-            "http://127.0.0.1",
-            "https://127.0.0.1",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:8080",
-        ]
-        .iter()
-        .filter_map(|s| HeaderValue::from_str(s).ok())
-        .collect()
+        let port = env::var("PORT")
+            .ok()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "8080".to_string());
+        let mut defaults = vec![
+            "http://localhost:3000".to_string(),
+            "http://localhost:8080".to_string(),
+            "http://127.0.0.1:3000".to_string(),
+            "http://127.0.0.1:8080".to_string(),
+        ];
+        let custom_local = format!("http://localhost:{}", port);
+        if !defaults.contains(&custom_local) {
+            defaults.push(custom_local);
+        }
+        let custom_loopback = format!("http://127.0.0.1:{}", port);
+        if !defaults.contains(&custom_loopback) {
+            defaults.push(custom_loopback);
+        }
+        defaults
+            .iter()
+            .filter_map(|s| HeaderValue::from_str(s).ok())
+            .collect()
     };
 
     CorsLayer::new()
@@ -164,9 +175,17 @@ fn build_cors_layer() -> CorsLayer {
         .allow_credentials(true)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Populate process environment before spawning multi-threaded Tokio worker threads
+    // so `dotenvy::from_path` (`setenv`) executes strictly single-threaded.
     load_env_files();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let _ = af_runner::af_release::runtime::runtime_identity();
 
     tracing_subscriber::fmt()
@@ -183,6 +202,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Fail closed if JWT_SECRET is missing or too short when starting the HTTP control plane
+    auth::validate_startup_jwt_secret()?;
+
     // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
     af_db::init_db()?;
     af_services::initialize_package_jobs(rusqlite::Connection::open(af_db::get_db_path())?)?;
@@ -193,7 +215,9 @@ async fn main() -> anyhow::Result<()> {
             match tokio::task::spawn_blocking(af_services::reconcile_package_jobs).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "package lifecycle reconciliation failed"),
-                Err(error) => tracing::warn!(%error, "package lifecycle reconciliation task failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "package lifecycle reconciliation task failed")
+                }
             }
         }
     });

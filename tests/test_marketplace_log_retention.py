@@ -134,7 +134,25 @@ printf 'bash-after\n' >&3
             self.assertEqual(reads.call_count, 1)
             self.assertEqual(self.archive().stat().st_size, 64)
             os.write(descriptor, b"after\n")
-            self.assertEqual(path.read_bytes(), b"after\n")
+            self.assertEqual(path.read_bytes(), (b"concurrent" * 100)[-64:] + b"after\n")
+        finally:
+            os.close(descriptor)
+
+    def test_concurrent_append_during_copy_is_preserved_in_live_inode(self):
+        path = self.write("install-sonarr.log", b"x" * 96)
+        real_read = os.pread
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND)
+
+        def append_small_tail(source, size, offset):
+            os.write(descriptor, b"mid-copy-line\n")
+            return real_read(source, size, offset)
+
+        try:
+            with mock.patch.object(retention.os, "pread", side_effect=append_small_tail):
+                self.assertEqual(self.rotate(), (1, []))
+            self.assertEqual(self.archive().read_bytes(), b"x" * 64)
+            os.write(descriptor, b"after-rotate\n")
+            self.assertEqual(path.read_bytes(), b"mid-copy-line\nafter-rotate\n")
         finally:
             os.close(descriptor)
 
@@ -475,7 +493,7 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
 
     def test_shipped_unit_references_delivered_helper_and_explicit_policy(self):
         service = (self.current / "deploy/systemd/aetherflow-log-retention.service").read_text()
-        self.assertIn("ExecStart=/usr/bin/python3 -B /opt/AetherFlow/current/deploy/log-retention.py", service)
+        self.assertIn("ExecStart=/usr/bin/python3 -I -B /opt/AetherFlow/current/deploy/log-retention.py", service)
         self.assertTrue((self.current / "deploy/log-retention.py").is_file())
         self.assertIn("Environment=AF_LOG_RETENTION_MAX_BYTES=10485760", service)
         self.assertIn("Environment=AF_LOG_RETENTION_KEEP=3", service)
@@ -486,6 +504,101 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
         self.assertIn("OnUnitInactiveSec=1min", timer)
         self.assertIn("Unit=aetherflow-log-retention.service", timer)
         self.assertIn("WantedBy=timers.target", timer)
+
+    def test_release_installs_hardening_dropins_without_mutating_operator_units(self):
+        self.units.mkdir()
+        custom_api = "[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nReadWritePaths=-/opt/AetherFlow/backend/data\n"
+        custom_runner = "[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\n"
+        (self.units / "aetherflow-api.service").write_text(custom_api)
+        (self.units / "aetherflow-runner.service").write_text(custom_runner)
+
+        result = self.restart()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.units / "aetherflow-api.service").read_text(), custom_api)
+        self.assertEqual((self.units / "aetherflow-runner.service").read_text(), custom_runner)
+
+        runner_dropin = (self.units / "aetherflow-runner.service.d/10-aetherflow-hardening.conf").read_text()
+        api_dropin = (self.units / "aetherflow-api.service.d/10-aetherflow-hardening.conf").read_text()
+        self.assertIn("UMask=0077", runner_dropin)
+        self.assertIn("LogsDirectory=aetherflow", runner_dropin)
+        self.assertIn("LogsDirectoryMode=0750", runner_dropin)
+        self.assertIn("UMask=0027", api_dropin)
+        self.assertIn("LogsDirectory=\n", api_dropin)
+
+
+class CommonShLogSymlinkTests(unittest.TestCase):
+    def test_common_sh_log_refuses_symlink_and_hardlink(self):
+        with tempfile.TemporaryDirectory(prefix="af-common-sh-") as tmp:
+            root = Path(tmp)
+            lock_dir = root / "lock"
+            lock_dir.mkdir()
+            env = {
+                **os.environ,
+                "LOCK_DIR": str(lock_dir),
+                "MASTER_USER": "admin",
+                "MASTER_PASS": "unit-test-fixture",
+            }
+            victim = root / "victim.txt"
+            victim.write_text("UNTOUCHED\n")
+            sym_log = root / "install-symlink.log"
+            sym_log.symlink_to(victim)
+
+            res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "should-not-write"',
+                    "--",
+                    str(sym_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+            hard_log = root / "install-hardlink.log"
+            os.link(victim, hard_log)
+            res_hard = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "should-not-write"',
+                    "--",
+                    str(hard_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(res_hard.returncode, 0)
+            self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+            regular_log = root / "install-regular.log"
+            res_ok = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'export LOGFILE="$1"; source "$2"; log "hello-hardened"; log "second-line"',
+                    "--",
+                    str(regular_log),
+                    str(ROOT / "packages/common.sh"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
+            lines = regular_log.read_text().splitlines(keepends=True)
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(lines[0].endswith("hello-hardened\n"))
+            self.assertTrue(lines[1].endswith("second-line\n"))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,69 @@ PACKAGE_NAME="overseerr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5056}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+mkdir -p /install /run/lock
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 exec 9>/run/lock/aetherflow-overseerr.lock
 flock -n 9 || { log_error "Another Overseerr installation is running."; exit 1; }
 
@@ -56,13 +118,13 @@ cleanup() {
             if [[ -f "$BACKUP_DIR/overseerr.service" ]]; then
                 safe_restore_path_from_backup "$BACKUP_DIR/overseerr.service" /etc/systemd/system/overseerr.service || restore_failed=true
             else
-                systemctl disable overseerr >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl disable overseerr || restore_failed=true
                 rm -f /etc/systemd/system/overseerr.service || restore_failed=true
             fi
-            systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl daemon-reload || restore_failed=true
         fi
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" -eq 1 ]]; then
-            systemctl start overseerr >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start overseerr || restore_failed=true
         fi
     fi
     if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
@@ -82,9 +144,9 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 print_warn "Overseerr upstream is archived and superseded by Seerr; no new features or major updates are planned. Existing configuration and data are preserved; migration requires an explicit operator decision."
 report_progress 10 "Installing system and Node.js prerequisites for Overseerr..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    curl git gnupg ca-certificates build-essential python3 python3-setuptools
 
 ensure_node 20
 
@@ -96,15 +158,15 @@ mkdir -p /var/lib/overseerr /opt /var/backups
 
 report_progress 30 "Cloning Overseerr repository into staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.overseerr-build.XXXXXX)"
-git clone https://github.com/sct/overseerr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+af_logged git clone https://github.com/sct/overseerr.git "$BUILD_DIR"
 cd "$BUILD_DIR"
 if ! command_exists yarn; then
-    node_build npm install --prefix "$BUILD_DIR/.aetherflow-tools" --no-audit --no-fund --ignore-scripts yarn@1.22.22 >> "$LOGFILE" 2>&1
+    af_logged node_build npm install --prefix "$BUILD_DIR/.aetherflow-tools" --no-audit --no-fund --ignore-scripts yarn@1.22.22
     export PATH="$BUILD_DIR/.aetherflow-tools/node_modules/.bin:$PATH"
 fi
 LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 if [[ -n "$LATEST_TAG" ]]; then
-    git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
+    af_logged git checkout "$LATEST_TAG" || true
 fi
 
 OVERSEERR_VERSION="$(git_checkout_version "$BUILD_DIR" /opt/overseerr/.af-version)"
@@ -113,8 +175,8 @@ queue_app_version "/opt/overseerr/.af-version" "${OVERSEERR_VERSION#v}" "$BUILD_
 
 report_progress 55 "Installing Overseerr dependencies and building production bundle..."
 export CYPRESS_INSTALL_BINARY=0
-(cd "$BUILD_DIR" && (node_build yarn install --production=false --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || node_build yarn install --production=false --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1))
-(cd "$BUILD_DIR" && node_build yarn build >> "$LOGFILE" 2>&1)
+(cd "$BUILD_DIR" && (af_logged node_build yarn install --production=false --ignore-engines --frozen-lockfile --network-timeout 1000000 || af_logged node_build yarn install --production=false --ignore-engines --network-timeout 1000000))
+(cd "$BUILD_DIR" && af_logged node_build yarn build)
 test -s "$BUILD_DIR/dist/index.js" || { log_error "Failed to verify Overseerr build output"; exit 1; }
 
 chown -hRP overseerr:overseerr "$BUILD_DIR" /var/lib/overseerr
@@ -166,8 +228,8 @@ WantedBy=multi-user.target
 EOF
 UNIT_WRITTEN=1
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now overseerr >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now overseerr
 
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 wait_for_service_ready "overseerr.service" "$APP_PORT" "$READY_URL"

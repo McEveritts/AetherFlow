@@ -19,8 +19,69 @@ check_disk_space "${AF_JOB_SCRATCH_DIR}" 512
 check_disk_space "/opt" 512
 
 require_root
+PACKAGE_NAME="${PACKAGE_NAME:-kasmvnc}" # Fallback when test harnesses enter past preflight.
 validate_config_paths /var/lib/kasmvnc/.kasmpasswd /var/lib/kasmvnc/.vnc/xstartup /etc/kasmvnc/aetherflow-password /etc/kasmvnc/kasmvnc.crt /etc/kasmvnc/kasmvnc.key /etc/kasmvnc/kasmvnc.yaml
 export LOGFILE="/var/log/aetherflow/install-kasmvnc.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 APP_PORT="${AF_APP_PORT:-6081}"
 DATA_DIR="/var/lib/kasmvnc"
 CONFIG_DIR="/etc/kasmvnc"
@@ -46,14 +107,15 @@ begin_state_transaction "af-kasmvnc.service" "0" "/" "/var/lib/kasmvnc" "/etc/ka
 cleanup_kasmvnc() {
     local rc="$?"
     local status="$rc"
+    set +e
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR" || true
-    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
-        af_cleanup_job_scratch "$rc"
-    fi
     cleanup_state_transaction "$status" return
     status=$?
     if [[ "${INSTALL_COMMITTED:-false}" != true && "$KASMVNC_WAS_ENABLED" != true ]]; then
-        systemctl disable af-kasmvnc.service >> "$LOGFILE" 2>&1 || true
+        af_logged systemctl disable af-kasmvnc.service || true
+    fi
+    if declare -F af_cleanup_job_scratch >/dev/null 2>&1; then
+        af_cleanup_job_scratch "$rc" || true
     fi
     exit "$status"
 }
@@ -62,8 +124,8 @@ trap cleanup_kasmvnc EXIT
 prepare_apt_package_transaction /var/lib/kasmvnc/.af-version kasmvncserver
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq python3 python3-yaml curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
+af_logged apt-get update -qq
+af_logged apt-get install --no-remove -y -qq python3 python3-yaml curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth
 
 report_progress 30 "Resolving the matching KasmVNC release..."
 TMP_DIR="$(mktemp -d "${AF_JOB_SCRATCH_DIR}/kasmvnc.XXXXXX")"
@@ -95,13 +157,17 @@ fi
 
 report_progress 50 "Downloading and verifying KasmVNC ${VERSION}..."
 download_file "$ASSET_URL" "${TMP_DIR}/kasmvnc.deb" kasmvnc "${ASSET_DIGEST#sha256:}"
-printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | sha256sum -c - >> "$LOGFILE" 2>&1
+printf '%s  %s\n' "${ASSET_DIGEST#sha256:}" "${TMP_DIR}/kasmvnc.deb" | af_logged sha256sum -c -
 KASMVNC_DEB_VERSION="$(dpkg-deb -f "${TMP_DIR}/kasmvnc.deb" Version)"
-apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb" >> "$LOGFILE" 2>&1
+af_logged apt-get install --no-remove -y "${TMP_DIR}/kasmvnc.deb"
 verify_deb_installed kasmvncserver "$KASMVNC_DEB_VERSION"
 
 if ! id -u af-kasmvnc >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-kasmvnc
+fi
+if [[ -L "$DATA_DIR" || -L "${DATA_DIR}/.vnc" ]]; then
+    print_error "Refusing symlinked KasmVNC state directory"
+    exit 1
 fi
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "$DATA_DIR"
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "${DATA_DIR}/.vnc"
@@ -116,29 +182,34 @@ if [[ ! -s "${DATA_DIR}/.kasmpasswd" ]]; then
     chmod 600 "${CONFIG_DIR}/aetherflow-password"
     chown root:root "${CONFIG_DIR}/aetherflow-password"
     PASSWORD="$(cat "${CONFIG_DIR}/aetherflow-password")"
-    printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | /usr/bin/kasmvncpasswd -u admin -r -w "${DATA_DIR}/.kasmpasswd" >> "$LOGFILE" 2>&1
+    printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | af_logged /usr/bin/kasmvncpasswd -u admin -r -w "${DATA_DIR}/.kasmpasswd"
     unset PASSWORD
 fi
 chmod 600 "${DATA_DIR}/.kasmpasswd"
 chown af-kasmvnc:af-kasmvnc "${DATA_DIR}/.kasmpasswd"
 TLS_CERT="/etc/kasmvnc/kasmvnc.crt"
 TLS_KEY="/etc/kasmvnc/kasmvnc.key"
-validate_config_paths "$TLS_CERT" "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-cert.pem" "${DATA_DIR}/.vnc/aetherflow-key.pem"
+VNC_TLS_CERT="${DATA_DIR}/.vnc/aetherflow-cert.pem"
+VNC_TLS_KEY="${DATA_DIR}/.vnc/aetherflow-key.pem"
+if [[ -L "$VNC_TLS_CERT" ]]; then rm -f -- "$VNC_TLS_CERT"; fi
+if [[ -L "$VNC_TLS_KEY" ]]; then rm -f -- "$VNC_TLS_KEY"; fi
+validate_config_paths "$TLS_CERT" "$TLS_KEY" "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 if [[ ! -s "$TLS_CERT" || ! -s "$TLS_KEY" ]]; then
-    (umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$TLS_KEY" -out "$TLS_CERT") >> "$LOGFILE" 2>&1
+    af_logged bash -euc 'umask 077; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout "$1" -out "$2"' _ "$TLS_KEY" "$TLS_CERT"
 fi
 chmod 0600 "$TLS_KEY" "$TLS_CERT"
 chown af-kasmvnc:af-kasmvnc "$TLS_KEY" "$TLS_CERT"
-ln -sf "$TLS_CERT" "${DATA_DIR}/.vnc/aetherflow-cert.pem"
-ln -sf "$TLS_KEY" "${DATA_DIR}/.vnc/aetherflow-key.pem"
+install -m 0600 "$TLS_CERT" "$VNC_TLS_CERT"
+install -m 0600 "$TLS_KEY" "$VNC_TLS_KEY"
+chown af-kasmvnc:af-kasmvnc "$VNC_TLS_CERT" "$VNC_TLS_KEY"
 
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-    apt-get install --no-remove -y -qq python3-yaml >> "$LOGFILE" 2>&1 || true
+    af_logged apt-get install --no-remove -y -qq python3-yaml || true
 fi
 
 for cfg_yaml in "/etc/kasmvnc/kasmvnc.yaml" "${DATA_DIR}/.vnc/kasmvnc.yaml"; do
     validate_config_paths "$cfg_yaml"
-    python3 - "$cfg_yaml" "$TLS_CERT" "$TLS_KEY" "$APP_PORT" <<'PYEOF'
+    python3 - "$cfg_yaml" "$VNC_TLS_CERT" "$VNC_TLS_KEY" "$APP_PORT" <<'PYEOF'
 import os, sys, tempfile
 try:
     import yaml
@@ -248,6 +319,53 @@ EOF
 fi
 chown -hRP af-kasmvnc:af-kasmvnc "${DATA_DIR}/.vnc"
 
+PROC_NET_UNIX_PATH="${AF_PROC_NET_UNIX:-/proc/net/unix}"
+x11_display_free() {
+    local disp="$1"
+    [[ ! -e "/tmp/.X${disp}-lock" && ! -L "/tmp/.X${disp}-lock" && ! -e "/tmp/.X11-unix/X${disp}" && ! -L "/tmp/.X11-unix/X${disp}" ]] || return 1
+    if [[ -r "$PROC_NET_UNIX_PATH" ]] && grep -Eq "\.X11-unix/X${disp}([[:space:]]|$)" "$PROC_NET_UNIX_PATH" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+KASMVNC_DISPLAY=""
+if [[ -f /etc/systemd/system/af-kasmvnc.service ]]; then
+    EXISTING_DISPLAY="$(sed -n 's|.*ExecStart=/usr/bin/vncserver :\([0-9][0-9]*\).*|\1|p' /etc/systemd/system/af-kasmvnc.service | head -n1 || true)"
+    if [[ -n "$EXISTING_DISPLAY" ]]; then
+        af_logged systemctl stop af-kasmvnc.service || true
+        af_logged python3 - "$EXISTING_DISPLAY" <<'PYEOF' || true
+import os, pwd, stat, sys
+disp = sys.argv[1]
+try:
+    uid = pwd.getpwnam("af-kasmvnc").pw_uid
+except KeyError:
+    raise SystemExit(0)
+for path in (f"/tmp/.X{disp}-lock", f"/tmp/.X11-unix/X{disp}"):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
+        os.unlink(path)
+PYEOF
+        if x11_display_free "$EXISTING_DISPLAY"; then
+            KASMVNC_DISPLAY="$EXISTING_DISPLAY"
+        fi
+    fi
+fi
+if [[ -z "$KASMVNC_DISPLAY" ]]; then
+    for candidate_display in $(seq 20 59); do
+        if x11_display_free "$candidate_display"; then
+            KASMVNC_DISPLAY="$candidate_display"
+            break
+        fi
+    done
+fi
+if [[ -z "$KASMVNC_DISPLAY" ]]; then
+    print_error "No free X display found in range :20..:59 for KasmVNC."
+    exit 1
+fi
+
 cat > /etc/systemd/system/af-kasmvnc.service <<EOF
 [Unit]
 Description=AetherFlow KasmVNC Desktop
@@ -259,7 +377,7 @@ User=af-kasmvnc
 Group=af-kasmvnc
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/bin/vncserver :20 -fg -interface 127.0.0.1 -cert ${TLS_CERT} -key ${TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
+ExecStart=/usr/bin/vncserver :${KASMVNC_DISPLAY} -fg -interface 127.0.0.1 -cert ${VNC_TLS_CERT} -key ${VNC_TLS_KEY} -xstartup ${DATA_DIR}/.vnc/xstartup
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -270,8 +388,8 @@ EOF
 
 report_progress 90 "Starting KasmVNC..."
 systemctl daemon-reload
-systemctl enable af-kasmvnc.service >> "$LOGFILE" 2>&1
-systemctl restart af-kasmvnc.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable af-kasmvnc.service
+af_logged systemctl restart af-kasmvnc.service
 systemctl is-active --quiet af-kasmvnc.service
 READY=false
 for attempt in {1..30}; do
@@ -286,7 +404,7 @@ for attempt in {1..30}; do
     sleep 1
 done
 if [[ "$READY" != "true" ]]; then
-    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :20."
+    print_error "KasmVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-kasmvnc and check for a conflicting X display :${KASMVNC_DISPLAY}."
     exit 1
 fi
 VERSION_FILE=/var/lib/kasmvnc/.af-version

@@ -13,12 +13,12 @@ use crate::snapshot::{
     SqliteSnapshotReceipt,
 };
 use crate::verify::{
-    checksum_sidecar_path, create_unique_private_staging_dir,
-    create_unique_private_temp_file, ensure_private_dir_all, open_existing_regular_file_nofollow,
-    open_or_create_dir_nofollow, parse_exact_chunk_index, reject_if_symlink, reject_symlink_chain,
-    safe_backup_file_path, split_backup_into_chunks, sync_parent_directory,
-    validate_backup_filename, validate_no_parent_traversal, validate_relative_backup_path,
-    verify_file_with_sidecar, verify_file_with_sidecar_and_trusted_uid, write_sha256_sidecar,
+    checksum_sidecar_path, create_unique_private_staging_dir, create_unique_private_temp_file,
+    ensure_private_dir_all, open_existing_regular_file_nofollow, open_or_create_dir_nofollow,
+    parse_exact_chunk_index, reject_if_symlink, reject_symlink_chain, safe_backup_file_path,
+    split_backup_into_chunks, sync_parent_directory, validate_backup_filename,
+    validate_no_parent_traversal, validate_relative_backup_path, verify_file_with_sidecar,
+    verify_file_with_sidecar_and_trusted_uid, write_sha256_sidecar,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use flate2::write::GzEncoder;
@@ -263,11 +263,8 @@ pub fn create_host_archive_backup(
 
     let mut manifest = BackupManifest::new(&config.app_version, &archive_filename)?;
 
-    let (tmp_archive_path, tar_file) = create_unique_private_temp_file(
-        &archive_path,
-        "archive-tmp",
-        "temporary tar.gz archive",
-    )?;
+    let (tmp_archive_path, tar_file) =
+        create_unique_private_temp_file(&archive_path, "archive-tmp", "temporary tar.gz archive")?;
 
     let staging_dir = create_unique_private_staging_dir(
         &config.backup_dir,
@@ -383,14 +380,18 @@ pub fn create_host_archive_backup(
             ));
         }
 
-        let gz_encoder = tar_builder.into_inner().map_err(|err| HostBackupError::Archive {
-            archive: archive_path.clone(),
-            reason: format!("finalizing tar stream failed: {}", err),
-        })?;
-        let inner_file = gz_encoder.finish().map_err(|err| HostBackupError::Archive {
-            archive: archive_path.clone(),
-            reason: format!("finalizing gzip stream failed: {}", err),
-        })?;
+        let gz_encoder = tar_builder
+            .into_inner()
+            .map_err(|err| HostBackupError::Archive {
+                archive: archive_path.clone(),
+                reason: format!("finalizing tar stream failed: {}", err),
+            })?;
+        let inner_file = gz_encoder
+            .finish()
+            .map_err(|err| HostBackupError::Archive {
+                archive: archive_path.clone(),
+                reason: format!("finalizing gzip stream failed: {}", err),
+            })?;
         inner_file.sync_all().map_err(|err| {
             HostBackupError::io(
                 format!("syncing temporary archive {}", tmp_archive_path.display()),
@@ -517,17 +518,22 @@ fn snapshot_file_once_into_staging(
     let mut total_bytes = 0u64;
     loop {
         let bytes_read = source_file.read(&mut buffer).map_err(|err| {
-            HostBackupError::io(format!("reading source file {}", source_path.display()), err)
+            HostBackupError::io(
+                format!("reading source file {}", source_path.display()),
+                err,
+            )
         })?;
         if bytes_read == 0 {
             break;
         }
-        staged_file.write_all(&buffer[..bytes_read]).map_err(|err| {
-            HostBackupError::io(
-                format!("writing staged snapshot {}", staged_path.display()),
-                err,
-            )
-        })?;
+        staged_file
+            .write_all(&buffer[..bytes_read])
+            .map_err(|err| {
+                HostBackupError::io(
+                    format!("writing staged snapshot {}", staged_path.display()),
+                    err,
+                )
+            })?;
         hasher.update(&buffer[..bytes_read]);
         total_bytes += bytes_read as u64;
     }
@@ -664,18 +670,24 @@ fn append_verified_file_to_tar(
     header.set_cksum();
 
     let append_res = (|| -> HostBackupResult<()> {
-        let (mut payload_file, _, _, _) =
-            open_existing_regular_file_nofollow(&staged_payload_path, None, "staged archive payload")?
-                .ok_or_else(|| HostBackupError::PathValidation {
-                    path: staged_payload_path.clone(),
-                    reason: "staged archive payload file does not exist".to_string(),
-                })?;
+        let (mut payload_file, _, _, _) = open_existing_regular_file_nofollow(
+            &staged_payload_path,
+            None,
+            "staged archive payload",
+        )?
+        .ok_or_else(|| HostBackupError::PathValidation {
+            path: staged_payload_path.clone(),
+            reason: "staged archive payload file does not exist".to_string(),
+        })?;
         #[cfg(unix)]
         if let Some((exp_dev, exp_ino)) = expected_dev_ino {
             use std::os::unix::fs::MetadataExt;
             let current_meta = payload_file.metadata().map_err(|err| {
                 HostBackupError::io(
-                    format!("fstat staged archive payload {}", staged_payload_path.display()),
+                    format!(
+                        "fstat staged archive payload {}",
+                        staged_payload_path.display()
+                    ),
                     err,
                 )
             })?;
@@ -700,7 +712,10 @@ fn append_verified_file_to_tar(
         use std::io::{Seek, SeekFrom};
         payload_file.seek(SeekFrom::Start(0)).map_err(|err| {
             HostBackupError::io(
-                format!("rewinding staged archive payload {}", staged_payload_path.display()),
+                format!(
+                    "rewinding staged archive payload {}",
+                    staged_payload_path.display()
+                ),
                 err,
             )
         })?;
@@ -736,7 +751,10 @@ fn append_directory_tree_to_tar(
         })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| {
-            HostBackupError::io(format!("iterating directory {}", current_dir.display()), err)
+            HostBackupError::io(
+                format!("iterating directory {}", current_dir.display()),
+                err,
+            )
         })?;
 
     entries.sort_by_key(|dir_entry| dir_entry.file_name());
@@ -760,12 +778,12 @@ fn append_directory_tree_to_tar(
             });
         }
 
-        let rel_from_root = path.strip_prefix(root_dir).map_err(|_| {
-            HostBackupError::PathValidation {
-                path: path.clone(),
-                reason: "failed to strip directory root prefix".to_string(),
-            }
-        })?;
+        let rel_from_root =
+            path.strip_prefix(root_dir)
+                .map_err(|_| HostBackupError::PathValidation {
+                    path: path.clone(),
+                    reason: "failed to strip directory root prefix".to_string(),
+                })?;
         let combined_rel = archive_prefix.join(rel_from_root);
         let rel_str = combined_rel.to_string_lossy().replace('\\', "/");
 
@@ -799,7 +817,9 @@ fn append_directory_tree_to_tar(
         } else {
             return Err(HostBackupError::PathValidation {
                 path,
-                reason: "special non-regular file inside backed-up configuration directory is forbidden".to_string(),
+                reason:
+                    "special non-regular file inside backed-up configuration directory is forbidden"
+                        .to_string(),
             });
         }
     }
@@ -890,7 +910,11 @@ pub fn list_backup_inventory(backup_dir: &Path) -> HostBackupResult<Vec<BackupIn
         });
     }
 
-    items.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| b.filename.cmp(&a.filename)));
+    items.sort_by(|a, b| {
+        b.modified_at
+            .cmp(&a.modified_at)
+            .then_with(|| b.filename.cmp(&a.filename))
+    });
     Ok(items)
 }
 
@@ -910,7 +934,10 @@ fn safe_primary_check(name: &str) -> bool {
 ///    and if `<filename>.manifest.json` exists it must pass `BackupManifest::load_from_path(..., true)`
 ///    with `manifest.primary_artifact == filename`.
 /// 3. Uses dirfd-relative `unlink_file_at_destination` (`unlinkat` on Unix) after rejecting symlinks.
-pub fn delete_backup_artifacts(backup_dir: &Path, filename: &str) -> HostBackupResult<Vec<PathBuf>> {
+pub fn delete_backup_artifacts(
+    backup_dir: &Path,
+    filename: &str,
+) -> HostBackupResult<Vec<PathBuf>> {
     let clean_filename = validate_backup_filename(filename)?;
     if !(clean_filename.ends_with(".sqlite") || clean_filename.ends_with(".tar.gz")) {
         return Err(HostBackupError::PathValidation {
@@ -1137,7 +1164,10 @@ pub fn verify_backup_artifact_with_trusted_uid(
             if !meta.is_file() {
                 return Err(HostBackupError::ChunkError {
                     artifact: artifact_path.clone(),
-                    reason: format!("chunk path '{}' is not a regular file", chunk_path.display()),
+                    reason: format!(
+                        "chunk path '{}' is not a regular file",
+                        chunk_path.display()
+                    ),
                 });
             }
             disk_chunks.push((idx, chunk_path));
@@ -1154,7 +1184,11 @@ pub fn verify_backup_artifact_with_trusted_uid(
         }
 
         if filename.ends_with(".tar.gz") {
-            verify_tar_gz_against_manifest_with_trusted_uid(&artifact_path, manifest_val, trusted_uid)?;
+            verify_tar_gz_against_manifest_with_trusted_uid(
+                &artifact_path,
+                manifest_val,
+                trusted_uid,
+            )?;
         } else if filename.ends_with(".sqlite") {
             let Some(ref snap) = manifest_val.sqlite_snapshot else {
                 return Err(HostBackupError::InvalidManifest(format!(
@@ -1168,7 +1202,10 @@ pub fn verify_backup_artifact_with_trusted_uid(
                     snap.snapshot_relative_path, filename
                 )));
             }
-            if !checksum_res.actual_sha256.eq_ignore_ascii_case(&snap.sha256) {
+            if !checksum_res
+                .actual_sha256
+                .eq_ignore_ascii_case(&snap.sha256)
+            {
                 return Err(HostBackupError::ChecksumMismatch {
                     artifact: artifact_path.display().to_string(),
                     expected: snap.sha256.clone(),

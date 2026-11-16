@@ -21,8 +21,10 @@ class RustBuildToolsTests(unittest.TestCase):
         (self.root / "backend-rs/Cargo.lock").write_text("# lockfile\n")
         (self.root / "backend-rs/crates/af-cli").mkdir(parents=True)
         (self.root / "backend-rs/crates/af-cli/Cargo.toml").write_text('[package]\nname = "af-cli"\n')
-        (self.root / "backend/config").mkdir(parents=True)
-        (self.root / "backend/config/packages.json").write_text("[]")
+        (self.root / "backend-rs/crates/af-librespeed").mkdir(parents=True)
+        (self.root / "backend-rs/crates/af-librespeed/Cargo.toml").write_text('[package]\nname = "af-librespeed"\n')
+        (self.root / "config").mkdir(parents=True)
+        (self.root / "config/packages.json").write_text("[]")
         (self.root / "packages").mkdir()
         (self.root / "deploy").mkdir()
         (self.root / "deploy/release-manager.sh").write_text("#!/bin/bash\n")
@@ -42,10 +44,15 @@ with Path(os.environ["TEST_CARGO_LOG"]).open("a") as log:
 if arguments[0] == "test":
     sys.exit(int(os.environ.get("TEST_CARGO_FAILURE", "0")))
 target = arguments[arguments.index("--target") + 1]
-binary = arguments[arguments.index("--bin") + 1]
+bins = [
+    arguments[i + 1]
+    for i, arg in enumerate(arguments)
+    if arg == "--bin" and i + 1 < len(arguments)
+]
 directory = Path(os.environ.get("CARGO_TARGET_DIR", "target")) / target / "release"
 directory.mkdir(parents=True, exist_ok=True)
-(directory / binary).write_text(target)
+for binary in bins:
+    (directory / binary).write_text(target)
 """)
         cargo.chmod(0o755)
         self.environment = os.environ.copy()
@@ -72,10 +79,23 @@ directory.mkdir(parents=True, exist_ok=True)
                               ("arm64", "aarch64-unknown-linux-gnu")):
             artifact = self.root / "output" / ("linux-" + label) / "aetherflow-api"
             cli_artifact = self.root / "output" / ("linux-" + label) / "af"
+            speedtest_artifact = self.root / "output" / ("linux-" + label) / "speedtest-backend"
             self.assertEqual(artifact.read_text(), triple)
             self.assertEqual(cli_artifact.read_text(), triple)
+            self.assertEqual(speedtest_artifact.read_text(), triple)
             self.assertTrue((self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).exists())
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
+
+    def test_standalone_speedtest_archive_and_armv7_target_support(self):
+        self.environment["TARGETS"] = "armv7"
+        self.environment["PACKAGE_SPEEDTEST_STANDALONE"] = "1"
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "output/aetherflow-linux-armv7.tar.gz").exists())
+        self.assertTrue((self.root / "output/speedtest-backend_4.0.0_linux_armv7.tar.gz").exists())
+        sums = (self.root / "output/SHA256SUMS").read_text()
+        self.assertIn("aetherflow-linux-armv7.tar.gz", sums)
+        self.assertIn("speedtest-backend_4.0.0_linux_armv7.tar.gz", sums)
 
     def test_test_failure_is_not_retried_or_packaged(self):
         self.environment["TEST_CARGO_FAILURE"] = "17"
@@ -110,6 +130,38 @@ directory.mkdir(parents=True, exist_ok=True)
         self.assertIn("example-plugin", manifest)
         self.assertNotIn("{{PLUGIN_ID}}", manifest)
         self.assertTrue((target / "backend/Cargo.toml").exists())
+
+    def test_plugin_sdk_defaults_to_rust_and_rejects_go(self):
+        shutil.copytree(ROOT / "plugins/sdk-template-rust", self.root / "plugins/sdk-template-rust")
+        default_target = self.root / "generated-default"
+        result_default = subprocess.run(
+            [
+                "bash",
+                str(self.root / "scripts/create-plugin-sdk.sh"),
+                "example-default",
+                "Example Default",
+                str(default_target),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result_default.returncode, 0, result_default.stderr)
+        self.assertTrue((default_target / "backend/Cargo.toml").exists())
+
+        go_target = self.root / "generated-go"
+        result_go = subprocess.run(
+            [
+                "bash",
+                str(self.root / "scripts/create-plugin-sdk.sh"),
+                "example-go",
+                "Example Go",
+                str(go_target),
+                "go",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result_go.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -139,7 +139,7 @@ const SETTINGS_DEFAULTS = {
     aiModel: 'gemini-4-argon',
     localRuntime: DEFAULT_LOCAL_RUNTIME_ID as string,
     localModel: DEFAULT_LOCAL_MODEL_ID,
-    systemPrompt: 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
+    systemPrompt: 'You are FlowAI, a highly intelligent infrastructure assistant connected to a consolidated Next.js + Rust aetherflow-api environment. Always prioritize safe and performant configurations.',
     geminiApiKey: '',
     openaiApiKey: '',
     anthropicApiKey: '',

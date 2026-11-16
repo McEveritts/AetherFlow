@@ -66,8 +66,9 @@ function _boot() {
 	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
 	systemctl restart aetherflow-api.service >/dev/null 2>&1 || true
 
-	# Automatically seed the master administrator account in the Control Plane SQLite database
-	if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
+	# Wait for Control Plane readiness; only auto-seed /api/v1/public/auth/setup when an explicit
+	# dedicated web admin password (AETHERFLOW_WEB_ADMIN_PASSWORD) is supplied — never reuse ${passwd}.
+	if [[ -n "${username:-}" ]]; then
 		local _api_try=0
 		while (( _api_try < 20 )); do
 			if curl -fsS --max-time 1 "http://127.0.0.1:8080/health/ready" >/dev/null 2>&1; then
@@ -76,15 +77,18 @@ function _boot() {
 			sleep 0.5
 			_api_try=$((_api_try + 1))
 		done
-		python3 -c '
-import json, sys, urllib.request
-payload = json.dumps({"username": sys.argv[1], "password": sys.argv[2]}).encode("utf-8")
+		AF_SETUP_USER="${username}" AF_SETUP_WEB_PASS="${AETHERFLOW_WEB_ADMIN_PASSWORD:-}" python3 -c '
+import json, os, urllib.request
+web_pass = os.environ.get("AF_SETUP_WEB_PASS", "")
+if not web_pass:
+    raise SystemExit(0)
+payload = json.dumps({"username": os.environ["AF_SETUP_USER"], "password": web_pass}).encode("utf-8")
 req = urllib.request.Request("http://127.0.0.1:8080/api/v1/public/auth/setup", data=payload, headers={"Content-Type": "application/json"}, method="POST")
 try:
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
-' "${username}" "${passwd}" >/dev/null 2>&1 || true
+' >/dev/null 2>&1 || true
 	fi
 
 	mkdir -p /opt/AetherFlow/config
@@ -127,15 +131,26 @@ _harden_permissions() {
 	# Ensure the service user exists
 	_ensure_aetherflow_user
 
-	# Ownership: aetherflow:aetherflow for the entire tree
+	# Ownership: root:aetherflow for immutable code, releases, and scripts; only mutable data dirs are writable by aetherflow
 	if [[ -d "${af_root}" ]]; then
-		chown -R aetherflow:aetherflow "${af_root}" >>"${OUTTO}" 2>&1
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -exec chown -h root:aetherflow {} + >>"${OUTTO}" 2>&1
 
-		# Directories: 755 (rwxr-xr-x)
-		find "${af_root}" -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
+		# Directories: 755 (rwxr-xr-x), pruning sensitive mutable/snapshot/credential directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
 
-		# Regular files: 644 (rw-r--r--)
-		find "${af_root}" -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+		# Regular files: 644 (rw-r--r--), pruning sensitive mutable/snapshot/credential directories
+		find "${af_root}" \( -path "${af_root}/backend/data" -o -path "${af_root}/dashboard/db" -o -path "${af_root}/logs" -o -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+
+		# Enforce root-only 0700/0600 confinement on /opt/AetherFlow/logs bootstrap credential receipts
+		if [[ -L "${af_root}/logs" ]]; then
+			echo "[ERROR] Refusing symlinked ${af_root}/logs directory" >>"${OUTTO}"
+			return 1
+		elif [[ -d "${af_root}/logs" ]]; then
+			chown -h root:root "${af_root}/logs" >>"${OUTTO}" 2>&1
+			chmod 700 "${af_root}/logs" >>"${OUTTO}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type d -exec chown -h root:root {} + -exec chmod 700 {} + >>"${OUTTO}" 2>&1
+			find -P "${af_root}/logs" -mindepth 1 -type f -exec chown -h root:root {} + -exec chmod 600 {} + >>"${OUTTO}" 2>&1
+		fi
 
 		# Executables: restore execute permission on known binaries
 		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
@@ -151,7 +166,7 @@ _harden_permissions() {
 			chmod 755 "${af_root}/current/bin/af"
 		fi
 		if [[ -d "${af_root}/releases" ]]; then
-			find "${af_root}/releases" -type f \( -name "aetherflow-api" -o -name "af" -o -name "*.sh" \) -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/releases" -type f \( -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" \) -exec chmod 755 {} + 2>/dev/null || true
 			find "${af_root}/releases" -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
 		fi
 
@@ -162,58 +177,156 @@ _harden_permissions() {
 			find "${af_root}/frontend/node_modules/.bin" -type l -exec chmod 755 {} + 2>/dev/null || true
 		fi
 
-		# Shell scripts in setup, packages, deploy, scripts, and root need execute and root ownership
-		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
-			chown root:aetherflow "${af_root}/backend/aetherflow-api" 2>/dev/null || true
-		fi
-		if [[ -f "${af_root}/current/aetherflow-api" ]]; then
-			chown root:aetherflow "${af_root}/current/aetherflow-api" 2>/dev/null || true
-		fi
-		if [[ -f "${af_root}/current/af" ]]; then
-			chown root:aetherflow "${af_root}/current/af" 2>/dev/null || true
-		fi
-		if [[ -f "${af_root}/current/bin/af" ]]; then
-			chown root:aetherflow "${af_root}/current/bin/af" 2>/dev/null || true
-		fi
 		if [[ -d "${af_root}/setup" ]]; then
-			chown -R root:aetherflow "${af_root}/setup" 2>/dev/null || true
 			find "${af_root}/setup" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
 			if [[ -f "${af_root}/setup/AetherFlow-Setup" ]]; then
 				chmod 755 "${af_root}/setup/AetherFlow-Setup"
 			fi
 		fi
 		if [[ -d "${af_root}/packages" ]]; then
-			chown -R root:aetherflow "${af_root}/packages" 2>/dev/null || true
 			find "${af_root}/packages" -type f -exec chmod 755 {} + 2>/dev/null || true
 		fi
 		if [[ -d "${af_root}/deploy" ]]; then
-			chown -R root:aetherflow "${af_root}/deploy" 2>/dev/null || true
-			find "${af_root}/deploy" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/deploy" \( -name "*.sh" -o -name "*.py" \) -type f -exec chmod 755 {} + 2>/dev/null || true
 		fi
 		if [[ -d "${af_root}/scripts" ]]; then
-			chown -R root:aetherflow "${af_root}/scripts" 2>/dev/null || true
-			find "${af_root}/scripts" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/scripts" \( -name "*.sh" -o -name "*.py" \) -type f -exec chmod 755 {} + 2>/dev/null || true
 		fi
 		if [[ -f "${af_root}/build_gold.sh" ]]; then
-			chown root:aetherflow "${af_root}/build_gold.sh" 2>/dev/null || true
 			chmod 755 "${af_root}/build_gold.sh"
 		fi
 
-		# Database directories: writable by the service user
+		# Database & runtime state directories: exclusively writable by the service user
 		mkdir -p "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow
-		if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
-			python3 -c '
-import json, sys, hashlib
-u, p = sys.argv[1], sys.argv[2]
+		chmod 700 /var/lib/aetherflow "${af_root}/backend/data" 2>/dev/null || true
+		if [[ -n "${username:-}" && ! -f /var/lib/aetherflow/.master.creds ]]; then
+			AF_SETUP_USER="${username}" AF_MASTER_SECRET="${AETHERFLOW_MASTER_CREDS_SECRET:-}" python3 - <<'PY' 2>/dev/null || true
+import base64, binascii, ctypes, ctypes.util, hashlib, importlib.util, json, os, secrets, stat, tempfile
+
+destination = "/var/lib/aetherflow/.master.creds"
+directory = "/var/lib/aetherflow"
+u = os.environ["AF_SETUP_USER"]
+p = os.environ.get("AF_MASTER_SECRET", "").strip() or secrets.token_hex(16)
 h = hashlib.md5(p.encode("utf-8")).hexdigest()
-open("/var/lib/aetherflow/.master.creds", "w", encoding="utf-8").write(json.dumps({"username": u, "password": p, "ha1": h}) + "\n")
-' "${username}" "${passwd}" 2>/dev/null || true
+
+if os.path.lexists(directory) and stat.S_ISLNK(os.lstat(directory).st_mode):
+    raise SystemExit("Refusing symlinked /var/lib/aetherflow")
+if os.path.lexists(destination) and stat.S_ISLNK(os.lstat(destination).st_mode):
+    raise SystemExit("Refusing symlinked .master.creds")
+
+def resolve_aes_key():
+    raw = os.environ.get("AES_MASTER_KEY", "").strip()
+    if not raw:
+        env_path = os.environ.get("AETHERFLOW_ENV_FILE", "/etc/aetherflow/aetherflow.env")
+        if os.path.isfile(env_path) and not os.path.islink(env_path):
+            fd = os.open(env_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:
+                    for line in fh:
+                        s = line.strip()
+                        if not s or s.startswith("#"):
+                            continue
+                        if s.startswith("export "):
+                            s = s[7:].strip()
+                        if s.startswith("AES_MASTER_KEY="):
+                            cand = s.split("=", 1)[1].strip().strip("\"'")
+                            if cand:
+                                raw = cand
+            finally:
+                os.close(fd)
+    if not raw:
+        return None
+    if len(raw) == 64:
+        if all(ch in "0123456789abcdefABCDEF" for ch in raw):
+            return bytes.fromhex(raw)
+        raise SystemExit("Invalid 64-character hex AES_MASTER_KEY")
+    decoded_b64 = None
+    try:
+        decoded_b64 = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        decoded_b64 = None
+    if decoded_b64 is not None and len(decoded_b64) == 32:
+        return decoded_b64
+    rb = raw.encode("utf-8")
+    if len(rb) == 32:
+        return rb
+    raise SystemExit("Invalid AES_MASTER_KEY length; expected 32 bytes, base64(32B), or 64-char hex")
+
+def encrypt_if_key(pt_str, key):
+    if key is None:
+        return pt_str
+    nonce = os.urandom(12)
+    pt = pt_str.encode("utf-8")
+    if importlib.util.find_spec("cryptography") is not None:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        ct = AESGCM(key).encrypt(nonce, pt, None)
+        return "enc:v1:" + base64.b64encode(nonce + ct).decode("ascii")
+    found = ctypes.util.find_library("crypto")
+    for name in ([found] if found else []) + ["libcrypto.so.3", "libcrypto.so.1.1"]:
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            lib = None
+    if lib is None:
+        raise RuntimeError("libcrypto unavailable")
+    lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+    lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+    lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+    lib.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    lib.EVP_EncryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    lib.EVP_EncryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int]
+    lib.EVP_EncryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    ctx = lib.EVP_CIPHER_CTX_new()
+    try:
+        key_buf = (ctypes.c_ubyte * 32).from_buffer_copy(key)
+        iv_buf = (ctypes.c_ubyte * 12).from_buffer_copy(nonce)
+        lib.EVP_EncryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None)
+        lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 12, None)
+        lib.EVP_EncryptInit_ex(ctx, None, None, ctypes.byref(key_buf), ctypes.byref(iv_buf))
+        out_buf = (ctypes.c_ubyte * max(1, len(pt) + 16))()
+        out_len = ctypes.c_int(0)
+        if pt:
+            pt_buf = (ctypes.c_ubyte * len(pt)).from_buffer_copy(pt)
+            lib.EVP_EncryptUpdate(ctx, ctypes.byref(out_buf), ctypes.byref(out_len), ctypes.byref(pt_buf), len(pt))
+        final_len = ctypes.c_int(0)
+        tail_ptr = ctypes.cast(ctypes.addressof(out_buf) + out_len.value, ctypes.c_void_p)
+        lib.EVP_EncryptFinal_ex(ctx, tail_ptr, ctypes.byref(final_len))
+        tag_buf = (ctypes.c_ubyte * 16)()
+        lib.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, ctypes.byref(tag_buf))
+        ct = bytes(out_buf[:out_len.value + final_len.value]) + bytes(tag_buf)
+        return "enc:v1:" + base64.b64encode(nonce + ct).decode("ascii")
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+key = resolve_aes_key()
+fd, tmp_path = tempfile.mkstemp(prefix=".master.creds.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        json.dump({"username": u, "password": encrypt_if_key(p, key), "ha1": encrypt_if_key(h, key)}, fh)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, destination)
+    tmp_path = None
+finally:
+    if tmp_path and os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+PY
 			chmod 600 /var/lib/aetherflow/.master.creds 2>/dev/null || true
 		fi
-		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow 2>/dev/null || true
-		chmod 750 "${af_root}/backend/data" /var/log/aetherflow 2>/dev/null || true
-		chmod 700 /var/lib/aetherflow 2>/dev/null || true
+		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow 2>/dev/null || true
+		chown root:aetherflow /var/log/aetherflow 2>/dev/null || true
+		chmod 750 /var/log/aetherflow 2>/dev/null || true
+		chmod 700 /var/lib/aetherflow "${af_root}/backend/data" 2>/dev/null || true
+		find "${af_root}/backend/data" /var/lib/aetherflow -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null || true
+		if [[ -d "${af_root}/releases" ]]; then
+			find "${af_root}/releases" -path "*/data-snapshot" -type d -exec chmod 700 {} + 2>/dev/null || true
+			find "${af_root}/releases" -path "*/data-snapshot/*" -type f -exec chmod 600 {} + 2>/dev/null || true
+		fi
 		if [[ -d "${af_root}/dashboard/db" ]]; then
+			chown -R aetherflow:aetherflow "${af_root}/dashboard/db" 2>/dev/null || true
 			chmod 750 "${af_root}/dashboard/db"
 		fi
 
@@ -304,11 +417,11 @@ function _finished() {
 	echo -e "  ${green}aetherflow status${normal}  - Check status of backend & frontend"
 	echo
 	
+	install -m 0600 /dev/null /root/information.info
 	cat >/root/information.info <<EOF
 AetherFlow Seedbox Initialized successfully.
 Dashboard Onboarding: http://${ip}:8080
 Admin Username: ${username}
-Admin Password: ${passwd}
 EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
 		rm -rf "$0" >>"${OUTTO}" 2>&1

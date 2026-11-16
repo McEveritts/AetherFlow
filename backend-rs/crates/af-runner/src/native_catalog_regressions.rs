@@ -612,7 +612,17 @@ async fn canonical_master_credentials() {
     let persisted_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&persisted_path).unwrap()).unwrap();
     assert_eq!(persisted_json["username"], "admin");
-    assert_eq!(persisted_json["password"], p3);
+    let raw_persisted_pw = persisted_json["password"].as_str().unwrap();
+    if af_db::resolve_runtime_aes_key().is_some() {
+        assert!(raw_persisted_pw.starts_with("enc:v1:"));
+    }
+    assert_eq!(
+        af_db::decrypt_secret_if_needed(raw_persisted_pw).unwrap(),
+        p3
+    );
+    let (u3_reload, p3_reload) = resolve_master_credentials(Some(&root_gen));
+    assert_eq!(u3_reload, "admin");
+    assert_eq!(p3_reload, p3);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

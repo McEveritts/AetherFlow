@@ -406,6 +406,7 @@ pub fn open_user_browser_fs_at(
     })
 }
 
+#[allow(dead_code)]
 fn open_configured_user_browser_fs(user_id: i64) -> Result<BrowserFs, McBrowserError> {
     let connection = af_db::get_conn().map_err(|_| {
         McBrowserError::Internal("Database unavailable for scope check".to_string())
@@ -620,6 +621,7 @@ pub(crate) fn release_user_quota_conn(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn reserve_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
     let conn = af_db::get_conn().map_err(|_| {
         McBrowserError::Internal("Database unavailable for quota reservation".to_string())
@@ -627,6 +629,7 @@ pub(crate) fn reserve_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<()
     reserve_user_quota_atomic(&conn, user_id, delta_bytes)
 }
 
+#[allow(dead_code)]
 pub(crate) fn release_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
     let conn = af_db::get_conn().map_err(|_| {
         McBrowserError::Internal("Database unavailable for quota update".to_string())

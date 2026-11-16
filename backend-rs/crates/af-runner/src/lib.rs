@@ -1,8 +1,8 @@
 use af_models::{
-    AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse,
-    NetworkRunnerRequest, Package, PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest,
-    RunnerResponse, SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest,
-    SelfUpdateStatusRequest, SystemctlRequest,
+    AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse, NetworkRunnerRequest, Package,
+    PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse,
+    SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest, SelfUpdateStatusRequest,
+    SystemctlRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -50,6 +50,7 @@ mod lifecycle_tests;
 pub mod network;
 pub mod package_executor;
 pub mod package_lifecycle;
+pub mod probe_metadata;
 pub mod quota;
 pub mod self_update;
 
@@ -334,6 +335,10 @@ pub fn build_runner_router() -> Router {
         .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
         .route(
+            "/v1/package/probe-version",
+            post(handle_package_version_probe),
+        )
+        .route(
             "/v1/dispatcharr-credentials",
             post(handle_dispatcharr_credentials),
         )
@@ -373,6 +378,148 @@ fn deferred_restart_arguments(service: &str) -> Result<Vec<String>, String> {
     ])
 }
 
+pub fn is_managed_runner_systemd_unit(raw_unit: &str) -> bool {
+    let trimmed = raw_unit.trim();
+    if trimmed.is_empty() || !SAFE_SERVICE_NAME.is_match(trimmed) || trimmed.contains("..") {
+        return false;
+    }
+    let strip_suffixes = |s: &str| -> String {
+        s.trim()
+            .trim_end_matches(".service")
+            .trim_end_matches(".timer")
+            .trim_end_matches(".socket")
+            .to_ascii_lowercase()
+    };
+    let lower = strip_suffixes(trimmed);
+    if lower.is_empty() {
+        return false;
+    }
+
+    if let Some((prefix, instance)) = lower.split_once('@') {
+        if instance.is_empty() {
+            return false;
+        }
+        return matches!(
+            prefix,
+            "wg-quick"
+                | "rtorrent"
+                | "deluged"
+                | "deluge-web"
+                | "qbittorrent-nox"
+                | "syncthing"
+                | "irssi"
+                | "autodl"
+                | "flood"
+        );
+    }
+
+    if matches!(
+        lower.as_str(),
+        "aetherflow-api"
+            | "aetherflow-runner"
+            | "aetherflow-frontend"
+            | "apache2"
+            | "nginx"
+            | "fail2ban"
+            | "pihole-ftl"
+            | "netdata"
+            | "node_exporter"
+            | "prometheus"
+            | "mariadb"
+            | "mysql"
+            | "postgresql"
+            | "redis"
+            | "redis-server"
+            | "tailscale"
+            | "tailscaled"
+            | "wireguard"
+            | "mergerfs"
+            | "rclone"
+            | "rclone-vfs"
+            | "deluge"
+            | "deluged"
+            | "deluge-web"
+            | "qbittorrent"
+            | "qbittorrent-nox"
+            | "rtorrent"
+            | "transmission-daemon"
+            | "paperless"
+            | "paperless-ngx"
+            | "paperless-webserver"
+            | "paperless-worker"
+            | "paperless-scheduler"
+            | "scrutiny"
+            | "scrutiny-collector"
+            | "recyclarr"
+            | "dispatcharr"
+            | "dispatcharr-celery"
+            | "dispatcharr-celerybeat"
+            | "novnc"
+            | "novnc-xvnc"
+            | "x2goserver"
+            | "xrdp"
+            | "xrdp-sesman"
+            | "vsftpd"
+            | "proftpd"
+            | "znc"
+            | "thelounge"
+            | "quasselcore"
+            | "syncthing"
+            | "maintainerr"
+            | "af-maintainerr"
+            | "palate"
+            | "af-palate"
+            | "kasmvnc"
+            | "af-kasmvnc"
+            | "mcvnc"
+            | "af-mcvnc"
+    ) {
+        return true;
+    }
+
+    let Ok(raw_pkgs) = try_load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        "packages.json",
+        EMBEDDED_PACKAGES_JSON,
+    ) else {
+        return false;
+    };
+    if let Ok(pkgs) = serde_json::from_str::<Vec<Package>>(&raw_pkgs) {
+        for p in &pkgs {
+            if strip_suffixes(&p.name) == lower
+                || (!p.service_name.trim().is_empty() && strip_suffixes(&p.service_name) == lower)
+                || p.sandbox_service_ids
+                    .iter()
+                    .any(|u| strip_suffixes(u) == lower)
+            {
+                return true;
+            }
+        }
+    }
+
+    let Ok(raw_auto) = try_load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "package_automation.json",
+        EMBEDDED_AUTOMATION_JSON,
+    ) else {
+        return false;
+    };
+    if let Ok(auto_map) = serde_json::from_str::<HashMap<String, PackageAutomation>>(&raw_auto) {
+        for (pkg_id, auto) in &auto_map {
+            if strip_suffixes(pkg_id) == lower
+                || auto
+                    .sandbox_service_ids
+                    .iter()
+                    .any(|u| strip_suffixes(u) == lower)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Json<RunnerResponse>) {
     if !ALLOWED_SERVICE_ACTIONS.contains(req.action.as_str()) {
         return (
@@ -391,6 +538,16 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
                 success: false,
                 output: String::new(),
                 error: "invalid service name".to_string(),
+            }),
+        );
+    }
+    if !is_managed_runner_systemd_unit(&req.service) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "unmanaged systemd unit".to_string(),
             }),
         );
     }
@@ -747,7 +904,10 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
 }
 
 async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
-    if !matches!(req.action.as_str(), "install" | "reinstall" | "remove" | "update") {
+    if !matches!(
+        req.action.as_str(),
+        "install" | "reinstall" | "remove" | "update"
+    ) {
         return (StatusCode::BAD_REQUEST, "disallowed package action").into_response();
     }
     if !SAFE_SCRIPT_NAME.is_match(&req.script_name) || !SAFE_SCRIPT_NAME.is_match(&req.package_id) {
@@ -1471,10 +1631,14 @@ pub async fn execute_self_update_request(
         let receipt_directory_identity = match _launch_owner.directory_identity() {
             Ok(identity) => identity,
             Err(error) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, RunnerResponse {
-                    success: false, output: String::new(),
-                    error: format!("Cannot bind updater receipt directory: {error}"),
-                });
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!("Cannot bind updater receipt directory: {error}"),
+                    },
+                );
             }
         };
         let mut unit_args = vec![
@@ -1502,8 +1666,14 @@ pub async fn execute_self_update_request(
                 job_status_path.to_string_lossy().into_owned(),
             ),
             ("AETHERFLOW_SELF_UPDATE_JOB_UNIT", unit_name.clone()),
-            ("AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV", receipt_directory_identity.0.to_string()),
-            ("AETHERFLOW_SELF_UPDATE_DIRECTORY_INO", receipt_directory_identity.1.to_string()),
+            (
+                "AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV",
+                receipt_directory_identity.0.to_string(),
+            ),
+            (
+                "AETHERFLOW_SELF_UPDATE_DIRECTORY_INO",
+                receipt_directory_identity.1.to_string(),
+            ),
             (
                 "AETHERFLOW_RELEASE_CONF",
                 job_conf_path.to_string_lossy().into_owned(),
@@ -1551,7 +1721,7 @@ pub async fn execute_self_update_request(
                         });
                     }
                 };
-                return (
+                (
                     StatusCode::OK,
                     self_update_launch_response(
                         "legacy_bash_release",
@@ -1559,7 +1729,7 @@ pub async fn execute_self_update_request(
                         &channel_str,
                         &observed,
                     ),
-                );
+                )
             }
             Err((code, err_msg)) => {
                 if code != StatusCode::GATEWAY_TIMEOUT {
@@ -2811,50 +2981,123 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
-fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str) -> String {
+pub fn open_and_read_regular_config(path: &Path) -> std::io::Result<String> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = {
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("config file is a symlink: {}", path.display()),
+            ));
+        }
+        fs::File::open(path)?
+    };
+
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config file is not a regular file: {}", path.display()),
+        ));
+    }
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    Ok(contents)
+}
+
+pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(libc::ENOTDIR)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let running_as_root = unsafe { libc::geteuid() == 0 };
+    #[cfg(not(unix))]
+    let running_as_root = false;
+
+    let mut candidates = Vec::new();
+    if !running_as_root {
+        candidates.extend([
+            PathBuf::from("config").join(filename),
+            PathBuf::from("../config").join(filename),
+            PathBuf::from("../../config").join(filename),
+        ]);
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("config").join(filename));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
+        // Legacy v3 host upgrade fallback only
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
+    ]);
+    candidates
+}
+
+pub(crate) fn try_load_runner_config_or_embedded(
+    env_var: &str,
+    filename: &str,
+    embedded: &str,
+) -> anyhow::Result<String> {
     if let Ok(explicit) = env::var(env_var) {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
-            if let Ok(s) = fs::read_to_string(trimmed) {
-                return s;
+            let p = Path::new(trimmed);
+            return open_and_read_regular_config(p)
+                .map_err(|e| anyhow::anyhow!("cannot read config {}: {e}", p.display()));
+        }
+    }
+    for c in canonical_config_candidates(filename) {
+        match open_and_read_regular_config(&c) {
+            Ok(s) => return Ok(s),
+            Err(err) if is_missing_config_candidate(&err) => continue,
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing unsafe or unreadable config candidate {}: {err}",
+                    c.display()
+                ))
             }
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        PathBuf::from("backend/config").join(filename),
-        PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.insert(2, exe_dir.join("config").join(filename));
-        }
-    }
-    for c in candidates {
-        if let Ok(s) = fs::read_to_string(&c) {
-            return s;
-        }
-    }
-    embedded.to_string()
+    Ok(embedded.to_string())
 }
 
 pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
-    let raw_pkgs = load_runner_config_or_embedded(
+    let raw_pkgs = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
-    );
-    let raw_auto = load_runner_config_or_embedded(
+    )
+    .ok()?;
+    let raw_auto = try_load_runner_config_or_embedded(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
-    );
+    )
+    .ok()?;
 
     let mut pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
     let auto_map: HashMap<String, PackageAutomation> =
@@ -2977,13 +3220,19 @@ pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[Stri
         "yes"
     };
 
+    let protect_home = if norm_unit == "librespeed.service" {
+        "yes"
+    } else {
+        "read-only"
+    };
+
     let mut lines = vec![
         "[Service]".to_string(),
         "NoNewPrivileges=yes".to_string(),
         "PrivateTmp=yes".to_string(),
         format!("PrivateDevices={}", private_devices),
         "ProtectSystem=strict".to_string(),
-        "ProtectHome=read-only".to_string(),
+        format!("ProtectHome={}", protect_home),
         "ProtectClock=yes".to_string(),
         "ProtectControlGroups=yes".to_string(),
         "ProtectKernelLogs=yes".to_string(),
@@ -3289,8 +3538,15 @@ pub fn validate_hosts_domain(domain: &str) -> Result<String, RunnerError> {
         || domain.starts_with('.')
         || domain.ends_with('.')
         || domain.contains("..")
-        || domain.chars().any(|c| matches!(c, ' ' | '\t' | '\r' | '\n' | ';' | '"' | '\'' | '$' | '`' | '\\'))
-        || domain.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        || domain.chars().any(|c| {
+            matches!(
+                c,
+                ' ' | '\t' | '\r' | '\n' | ';' | '"' | '\'' | '$' | '`' | '\\'
+            )
+        })
+        || domain
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
     {
         return Err(RunnerError::InvalidRequest(format!(
             "invalid domain format: {:?}",
@@ -3308,7 +3564,9 @@ pub async fn apply_hosts_update(req: HostsUpdateRequest) -> Result<RunnerRespons
     let is_reconcile = req.action.eq_ignore_ascii_case("reconcile");
     let is_remove = req.action.eq_ignore_ascii_case("remove");
     if domains.is_empty() && !is_reconcile {
-        return Err(RunnerError::InvalidRequest("no domains specified".to_string()));
+        return Err(RunnerError::InvalidRequest(
+            "no domains specified".to_string(),
+        ));
     }
 
     let ip = if !req.ip.is_empty() {
@@ -3442,17 +3700,10 @@ pub fn remove_hosts_file_at_path(hosts_path: &Path, domains: &[String]) -> anyho
 
 fn resolve_hosts_lock_path(hosts_path: &Path) -> PathBuf {
     if hosts_path == Path::new("/etc/hosts") {
-        let var_lock = Path::new("/var/lock");
-        if var_lock.is_dir() {
-            var_lock.join("aetherflow-hosts.lock")
-        } else {
-            let run_lock = Path::new("/run/lock");
-            if run_lock.is_dir() {
-                run_lock.join("aetherflow-hosts.lock")
-            } else {
-                hosts_path.with_extension("lock")
-            }
-        }
+        // A shared sticky /var/lock may contain a user-owned legacy lock.
+        // Linux protected_regular rejects O_CREAT on that file even for root.
+        // Use the runner's protected runtime directory and verified lock opener.
+        PathBuf::from("/run/aetherflow/hosts.lock")
     } else {
         hosts_path.with_extension("lock")
     }
@@ -3469,16 +3720,14 @@ pub enum RunnerError {
 }
 
 pub fn validate_hosts_ip(ip: &str) -> Result<std::net::IpAddr, RunnerError> {
-    if ip.is_empty()
-        || ip != ip.trim()
-        || ip.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
+    if ip.is_empty() || ip != ip.trim() || ip.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(RunnerError::InvalidRequest(
             "Invalid IP address for hosts modification".into(),
         ));
     }
-    ip.parse::<std::net::IpAddr>()
-        .map_err(|_| RunnerError::InvalidRequest("Invalid IP address for hosts modification".into()))
+    ip.parse::<std::net::IpAddr>().map_err(|_| {
+        RunnerError::InvalidRequest("Invalid IP address for hosts modification".into())
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3502,25 +3751,15 @@ pub fn modify_hosts_file_at_path(
         }
         HostsModifyAction::Remove => None,
     };
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|e| anyhow::anyhow!("failed to open hosts lockfile {}: {}", lock_path.display(), e))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(anyhow::anyhow!(
-                "failed to acquire exclusive lock on {}: {}",
+    let hosts_lock =
+        af_host::HostMaintenanceLockGuard::acquire(lock_path, std::time::Duration::from_secs(10))
+            .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to acquire hosts lock {}: {}",
                 lock_path.display(),
-                std::io::Error::last_os_error()
-            ).into());
-        }
-    }
+                e
+            )
+        })?;
 
     let existing = match fs::read_to_string(hosts_path) {
         Ok(s) => s,
@@ -3530,7 +3769,8 @@ pub fn modify_hosts_file_at_path(
                 "failed to read hosts file {}: {}",
                 hosts_path.display(),
                 e
-            ).into());
+            )
+            .into());
         }
     };
 
@@ -3677,6 +3917,9 @@ pub fn modify_hosts_file_at_path(
         out.push('\n');
     }
 
+    hosts_lock
+        .verify_still_active()
+        .map_err(anyhow::Error::from)?;
     write_hosts_file_atomically(hosts_path, &out).map_err(RunnerError::from)
 }
 
@@ -3710,18 +3953,32 @@ pub fn update_hosts_file_with_ip_at_path(
     } else {
         let validated_ip = validate_hosts_ip(ip)?;
         let canonical_ip = validated_ip.to_string();
-        modify_hosts_file_at_path(hosts_path, lock_path, domains, HostsModifyAction::Update { ip: &canonical_ip })
+        modify_hosts_file_at_path(
+            hosts_path,
+            lock_path,
+            domains,
+            HostsModifyAction::Update { ip: &canonical_ip },
+        )
     }
 }
 
-pub fn update_hosts_file_at_path(hosts_path: &Path, domains: &[String], remove: bool) -> anyhow::Result<()> {
+pub fn update_hosts_file_at_path(
+    hosts_path: &Path,
+    domains: &[String],
+    remove: bool,
+) -> anyhow::Result<()> {
     let lock_path = resolve_hosts_lock_path(hosts_path);
     if remove {
         modify_hosts_file_at_path(hosts_path, &lock_path, domains, HostsModifyAction::Remove)?;
     } else {
         let validated_ip = validate_hosts_ip("127.0.0.1")?;
         let canonical_ip = validated_ip.to_string();
-        modify_hosts_file_at_path(hosts_path, &lock_path, domains, HostsModifyAction::Update { ip: &canonical_ip })?;
+        modify_hosts_file_at_path(
+            hosts_path,
+            &lock_path,
+            domains,
+            HostsModifyAction::Update { ip: &canonical_ip },
+        )?;
     }
     Ok(())
 }
@@ -3734,7 +3991,12 @@ pub fn reconcile_hosts_file_at_path(
 ) -> Result<(), RunnerError> {
     let validated_ip = validate_hosts_ip(ip)?;
     let canonical_ip = validated_ip.to_string();
-    modify_hosts_file_at_path(hosts_path, lock_path, domains, HostsModifyAction::Reconcile { ip: &canonical_ip })
+    modify_hosts_file_at_path(
+        hosts_path,
+        lock_path,
+        domains,
+        HostsModifyAction::Reconcile { ip: &canonical_ip },
+    )
 }
 
 pub fn reconcile_hosts_file(domains: &[String], ip: &str) -> Result<(), RunnerError> {
@@ -3777,7 +4039,8 @@ fn render_dnsmasq_content(
     domains: &[String],
     is_reconcile: bool,
 ) -> String {
-    let mut domain_set: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut domain_set: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     if !is_reconcile {
         if let Some(content) = existing {
             for line in content.lines() {
@@ -4027,12 +4290,8 @@ pub fn sync_dns_provider_files_with_mode(
                     ));
                 }
             };
-            let payload = render_dnsmasq_content(
-                existing.as_deref(),
-                &canonical_ip,
-                domains,
-                is_reconcile,
-            );
+            let payload =
+                render_dnsmasq_content(existing.as_deref(), &canonical_ip, domains, is_reconcile);
             write_hosts_file_atomically(&conf_path, &payload)?;
         }
     }
@@ -4051,12 +4310,8 @@ pub fn sync_dns_provider_files_with_mode(
                 ));
             }
         };
-        let payload = reconcile_pihole_custom_list_content(
-            &existing,
-            &canonical_ip,
-            domains,
-            is_reconcile,
-        );
+        let payload =
+            reconcile_pihole_custom_list_content(&existing, &canonical_ip, domains, is_reconcile);
         write_hosts_file_atomically(&custom_list, &payload)?;
     }
     Ok(())
@@ -4152,14 +4407,22 @@ pub fn execute_hosts_cli_command(
             let canonical_ip = validated_ip.to_string();
             reconcile_hosts_file(domains, &canonical_ip)?;
             sync_dns_provider_files_with_mode(&canonical_ip, domains, true)?;
-            Ok(format!("reconciled {} domain(s) to {}", domains.len(), canonical_ip))
+            Ok(format!(
+                "reconciled {} domain(s) to {}",
+                domains.len(),
+                canonical_ip
+            ))
         }
         "update" | "add" => {
             let validated_ip = validate_hosts_ip(ip)?;
             let canonical_ip = validated_ip.to_string();
             update_hosts_file(domains, &canonical_ip)?;
             sync_dns_provider_files_with_mode(&canonical_ip, domains, false)?;
-            Ok(format!("updated {} domain(s) to {}", domains.len(), canonical_ip))
+            Ok(format!(
+                "updated {} domain(s) to {}",
+                domains.len(),
+                canonical_ip
+            ))
         }
         "remove" => {
             update_hosts_file_local(domains, true)?;
@@ -4168,7 +4431,10 @@ pub fn execute_hosts_cli_command(
             }
             Ok(format!("removed {} domain(s)", domains.len()))
         }
-        other => anyhow::bail!("unknown hosts action {:?}, expected reconcile, update, or remove", other),
+        other => anyhow::bail!(
+            "unknown hosts action {:?}, expected reconcile, update, or remove",
+            other
+        ),
     }
 }
 
@@ -4202,7 +4468,10 @@ pub fn run_hosts_cli(args: &[String]) -> anyhow::Result<String> {
             let domains = args[1..].to_vec();
             execute_hosts_cli_command("remove", "127.0.0.1", &domains)
         }
-        other => anyhow::bail!("unknown hosts action {:?}, expected reconcile, update, or remove", other),
+        other => anyhow::bail!(
+            "unknown hosts action {:?}, expected reconcile, update, or remove",
+            other
+        ),
     }
 }
 
@@ -4227,16 +4496,19 @@ fn write_hosts_file_atomically(hosts_path: &Path, content: &str) -> anyhow::Resu
 
     if let Err(err) = fs::rename(&temp_path, hosts_path) {
         #[cfg(unix)]
-        let is_cross_device = err.raw_os_error() == Some(libc::EXDEV)
-            || err.raw_os_error() == Some(libc::EBUSY);
+        let is_cross_device =
+            err.raw_os_error() == Some(libc::EXDEV) || err.raw_os_error() == Some(libc::EBUSY);
         #[cfg(not(unix))]
         let is_cross_device = false;
 
         if is_cross_device {
             use std::io::Write;
+            // Open without truncating upfront so contents aren't cleared before flock is held.
+            #[allow(clippy::suspicious_open_options)]
             let dest_file = fs::OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false)
                 .open(hosts_path)?;
             #[cfg(unix)]
             {
@@ -4394,7 +4666,9 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
 
     // Legacy setdisk only accepts whole MB/GB/TB. Exact byte requests must
     // use setquota directly rather than failing inside the legacy script.
-    if let Some(bin_setdisk) = bin_setdisk_opt.filter(|_| Regex::new(r"(?i)^[0-9]+[MGT]B$").unwrap().is_match(size)) {
+    if let Some(bin_setdisk) =
+        bin_setdisk_opt.filter(|_| Regex::new(r"(?i)^[0-9]+[MGT]B$").unwrap().is_match(size))
+    {
         let out = Command::new("bash")
             .arg(&bin_setdisk)
             .arg("--username")
@@ -4432,7 +4706,9 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("invalid quota size: {:?}", size))?;
     let block_str = blocks_1k.to_string();
     let mut command = Command::new("setquota");
-    command.args(["-u", username, &block_str, &block_str, "0", "0", "-a"]).kill_on_drop(true);
+    command
+        .args(["-u", username, &block_str, &block_str, "0", "0", "-a"])
+        .kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(20), command.output()).await??;
     let combined = format!(
         "{}{}",
@@ -4495,7 +4771,7 @@ async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Privileged Application Runtime Metadata Extraction (`app_credentials.go`)
+// Privileged Application Runtime Metadata Extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -5708,7 +5984,9 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "uptime-kuma" => {
-            if let Some(content) = read_runner_config_text("/etc/systemd/system/uptime-kuma.service") {
+            if let Some(content) =
+                read_runner_config_text("/etc/systemd/system/uptime-kuma.service")
+            {
                 let port = extract_runner_systemd_or_apache_port(&content);
                 if port > 0 {
                     meta.configured_port = port;
@@ -5934,7 +6212,8 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         "autoscan" => {
             for raw_path in &["/etc/autoscan/config.yml", "/var/lib/autoscan/config.yml"] {
                 if let Some(content) = read_runner_config_text(raw_path) {
-                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                    let port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -5944,7 +6223,10 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "librespeed" => {
-            for raw_path in &["/opt/librespeed/settings.toml", "/etc/librespeed/settings.toml"] {
+            for raw_path in &[
+                "/opt/librespeed/settings.toml",
+                "/etc/librespeed/settings.toml",
+            ] {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     let port = parse_valid_runner_port(&extract_runner_ini_value(
                         &content,
@@ -5965,8 +6247,9 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
                 "/etc/systemd/system/scrutiny.service",
             ] {
                 if let Some(content) = read_runner_config_text(raw_path) {
-                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]))
-                        .max(extract_runner_systemd_or_apache_port(&content));
+                    let port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]))
+                            .max(extract_runner_systemd_or_apache_port(&content));
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -6159,7 +6442,8 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
                 "/var/lib/invidious/config/config.yml",
             ] {
                 if let Some(content) = read_runner_config_text(raw_path) {
-                    let port = parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                    let port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -6216,10 +6500,8 @@ fn extract_runner_systemd_or_apache_port(text: &str) -> i32 {
         .unwrap()
     });
     static CLI_PORT_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?i)(?:--(?:webservice-)?port|-port|-p)(?:\s+|=)["']?([0-9]{2,5})\b"#)
+            .unwrap()
     });
     static CLI_ADDR_FLAG_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
@@ -6395,8 +6677,88 @@ async fn handle_app_meta(
     )
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageVersionProbeRunnerRequest {
+    pub package_id: String,
+}
+
+async fn handle_package_version_probe(
+    Json(req): Json<PackageVersionProbeRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    if !SAFE_SCRIPT_NAME.is_match(&req.package_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "invalid package identifier".to_string(),
+            }),
+        );
+    }
+    let pkg_id = req.package_id;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let env_cfg = package_executor::PackageExecutionEnv::default();
+        package_lifecycle::probe_live_runtime_version(&pkg_id, &env_cfg)
+    })
+    .await;
+
+    match outcome {
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::Verified(ver)) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: ver,
+                error: String::new(),
+            }),
+        ),
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::Failed(err)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err,
+            }),
+        ),
+        Ok(package_lifecycle::LiveRuntimeProbeOutcome::NotConfigured) => (
+            StatusCode::NOT_FOUND,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "no live version probe configured".to_string(),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: format!("probe task failed: {}", e),
+            }),
+        ),
+    }
+}
+
+pub async fn probe_package_version_via_runner(package_id: &str) -> anyhow::Result<String> {
+    let req = PackageVersionProbeRunnerRequest {
+        package_id: package_id.to_string(),
+    };
+    let result =
+        post_runner_json("/v1/package/probe-version", &req, Duration::from_secs(12)).await?;
+    if !result.success {
+        anyhow::bail!(
+            "{}",
+            if result.error.is_empty() {
+                "runner version probe failed".to_string()
+            } else {
+                result.error
+            }
+        );
+    }
+    Ok(result.output)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// UNIX Domain Socket Client Dispatchers (`backend/services/privileged_runner.go`)
+// UNIX Domain Socket Client Dispatchers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Retryable lifecycle exclusion, kept typed across runner and API boundaries.
@@ -7130,6 +7492,20 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     let sock_path = runner_socket_path();
     if let Some(dir) = Path::new(&sock_path).parent() {
         fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() == 0 } {
+            // Keep /run/aetherflow non-group-writable (0750 root:aetherflow) to prevent lock DoS,
+            // and pre-create shared 0660 root:aetherflow lockfiles for aetherflow-api access.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o750));
+            for lock_name in [".snapshot.lock", "hosts.lock"] {
+                let lock_path = dir.join(lock_name);
+                if let Ok(_guard) =
+                    af_host::HostMaintenanceLockGuard::acquire(&lock_path, Duration::from_secs(1))
+                {
+                    let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o660));
+                }
+            }
+        }
     }
     let _ = fs::remove_file(&sock_path);
 
@@ -7985,9 +8361,16 @@ mod tests {
             assert_eq!(parsed_bash["completed"], false);
             assert_eq!(parsed_bash["engine"], "legacy_bash_release");
             let logged_bash = fs::read_to_string(&args_log).unwrap();
-            let directory = fs::metadata(test_dir.join("var/lib/aetherflow/.self-update-jobs")).unwrap();
-            assert!(logged_bash.contains(&format!("--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV={}", std::os::unix::fs::MetadataExt::dev(&directory))));
-            assert!(logged_bash.contains(&format!("--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_INO={}", std::os::unix::fs::MetadataExt::ino(&directory))));
+            let directory =
+                fs::metadata(test_dir.join("var/lib/aetherflow/.self-update-jobs")).unwrap();
+            assert!(logged_bash.contains(&format!(
+                "--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV={}",
+                std::os::unix::fs::MetadataExt::dev(&directory)
+            )));
+            assert!(logged_bash.contains(&format!(
+                "--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_INO={}",
+                std::os::unix::fs::MetadataExt::ino(&directory)
+            )));
             assert!(logged_bash.contains("/bin/bash"));
             assert!(logged_bash.contains("rollback"));
             assert!(logged_bash.contains("--root"));
@@ -8368,6 +8751,45 @@ mod tests {
     }
 
     #[test]
+    fn production_hosts_lock_uses_protected_runtime_directory() {
+        assert_eq!(
+            resolve_hosts_lock_path(Path::new("/etc/hosts")),
+            Path::new("/run/aetherflow/hosts.lock")
+        );
+        assert_eq!(
+            resolve_hosts_lock_path(Path::new("/tmp/fixture/hosts")),
+            Path::new("/tmp/fixture/hosts.lock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosts_reconciliation_rejects_a_symlink_lock_without_changing_hosts() {
+        let scratch_dir =
+            env::temp_dir().join(format!("af-hosts-lock-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch_dir).unwrap();
+        let hosts_file = scratch_dir.join("hosts");
+        let lock_file = scratch_dir.join("hosts.lock");
+        let unrelated_file = scratch_dir.join("unrelated");
+        fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+        fs::write(&unrelated_file, "preserve me").unwrap();
+        std::os::unix::fs::symlink(&unrelated_file, &lock_file).unwrap();
+        assert!(reconcile_hosts_file_at_path(
+            &hosts_file,
+            &lock_file,
+            &["app.aether.local".into()],
+            "127.0.0.1"
+        )
+        .is_err());
+        assert_eq!(
+            fs::read_to_string(&hosts_file).unwrap(),
+            "127.0.0.1 localhost\n"
+        );
+        assert_eq!(fs::read_to_string(&unrelated_file).unwrap(), "preserve me");
+        fs::remove_dir_all(&scratch_dir).unwrap();
+    }
+
+    #[test]
     fn test_hosts_file_preserves_unrelated_host_aliases_and_multi_app() {
         let scratch_dir = env::temp_dir().join(format!("af-hosts-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir).unwrap();
@@ -8411,7 +8833,8 @@ mod tests {
     #[test]
     fn test_hosts_managed_block_preserves_comments_and_multi_alias_lines() {
         let _env_guard = ENV_TEST_MUTEX.blocking_lock();
-        let scratch_dir = env::temp_dir().join(format!("af-hosts-comment-test-{}", uuid::Uuid::new_v4()));
+        let scratch_dir =
+            env::temp_dir().join(format!("af-hosts-comment-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir).unwrap();
         let hosts_file = scratch_dir.join("hosts");
         let lock_file = scratch_dir.join("hosts.lock");
@@ -8430,8 +8853,14 @@ mod tests {
         // 1. Update: add app3.aether.local
         update_hosts_file_at_path(&hosts_file, &["app3.aether.local".to_string()], false).unwrap();
         let content_after_update = fs::read_to_string(&hosts_file).unwrap();
-        assert!(content_after_update.contains("# Internal managed note"), "managed comments must be preserved");
-        assert!(content_after_update.contains("10.0.0.5\tcustom.lan # note"), "non-aether alias must be preserved with comment");
+        assert!(
+            content_after_update.contains("# Internal managed note"),
+            "managed comments must be preserved"
+        );
+        assert!(
+            content_after_update.contains("10.0.0.5\tcustom.lan # note"),
+            "non-aether alias must be preserved with comment"
+        );
         assert!(content_after_update.contains("app1.aether.local"));
         assert!(content_after_update.contains("app2.aether.local"));
         assert!(content_after_update.contains("app3.aether.local"));
@@ -8446,7 +8875,13 @@ mod tests {
         assert!(content_after_remove.contains("app3.aether.local"));
 
         // 3. Reconcile: authoritative list is [app4.aether.local]
-        reconcile_hosts_file_at_path(&hosts_file, &lock_file, &["app4.aether.local".to_string()], "127.0.0.1").unwrap();
+        reconcile_hosts_file_at_path(
+            &hosts_file,
+            &lock_file,
+            &["app4.aether.local".to_string()],
+            "127.0.0.1",
+        )
+        .unwrap();
         let content_after_reconcile = fs::read_to_string(&hosts_file).unwrap();
         assert!(content_after_reconcile.contains("# Internal managed note"));
         assert!(content_after_reconcile.contains("10.0.0.5\tcustom.lan # note"));
@@ -8460,8 +8895,14 @@ mod tests {
         fs::create_dir_all(&dnsmasq_dir).unwrap();
         fs::create_dir_all(&pihole_dir).unwrap();
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_DNSMASQ_DIR",
+            dnsmasq_dir.to_string_lossy().as_ref(),
+        );
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
 
         let cli_res = run_hosts_cli(&["reconcile".to_string(), "127.0.0.1".to_string()]);
         assert!(cli_res.is_ok());
@@ -8504,12 +8945,33 @@ mod tests {
         ] {
             assert!(validate_hosts_ip(bad_ip).is_err());
             // Verify update_hosts_file_with_ip_at_path and reconcile_hosts_file_at_path reject invalid IPs
-            assert!(update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &domains, bad_ip, false).is_err());
-            assert!(reconcile_hosts_file_at_path(&hosts_file, &lock_file, &domains, bad_ip).is_err());
+            assert!(update_hosts_file_with_ip_at_path(
+                &hosts_file,
+                &lock_file,
+                &domains,
+                bad_ip,
+                false
+            )
+            .is_err());
+            assert!(
+                reconcile_hosts_file_at_path(&hosts_file, &lock_file, &domains, bad_ip).is_err()
+            );
 
             // Verify modify_hosts_file_at_path directly
-            assert!(modify_hosts_file_at_path(&hosts_file, &lock_file, &domains, HostsModifyAction::Update { ip: bad_ip }).is_err());
-            assert!(modify_hosts_file_at_path(&hosts_file, &lock_file, &domains, HostsModifyAction::Reconcile { ip: bad_ip }).is_err());
+            assert!(modify_hosts_file_at_path(
+                &hosts_file,
+                &lock_file,
+                &domains,
+                HostsModifyAction::Update { ip: bad_ip }
+            )
+            .is_err());
+            assert!(modify_hosts_file_at_path(
+                &hosts_file,
+                &lock_file,
+                &domains,
+                HostsModifyAction::Reconcile { ip: bad_ip }
+            )
+            .is_err());
 
             // Verify sync_dns_provider_files and execute_hosts_cli_command
             assert!(sync_dns_provider_files(bad_ip, &domains).is_err());
@@ -8522,7 +8984,10 @@ mod tests {
 
     #[test]
     fn test_hosts_removes_or_updates_last_alias_preserves_standalone_comment() {
-        let scratch_dir = env::temp_dir().join(format!("af-hosts-comment-preserve-{}", uuid::Uuid::new_v4()));
+        let scratch_dir = env::temp_dir().join(format!(
+            "af-hosts-comment-preserve-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&scratch_dir).unwrap();
         let hosts_file = scratch_dir.join("hosts");
         let lock_file = scratch_dir.join("hosts.lock");
@@ -8535,19 +9000,45 @@ mod tests {
         // 2. Removing last alias on an outside-block line preserves # admin note as standalone comment line
         let initial_remove = "127.0.0.1 sonarr.aether.local # admin note\n";
         fs::write(&hosts_file, initial_remove).unwrap();
-        update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &["sonarr.aether.local".to_string()], "127.0.0.1", true).unwrap();
+        update_hosts_file_with_ip_at_path(
+            &hosts_file,
+            &lock_file,
+            &["sonarr.aether.local".to_string()],
+            "127.0.0.1",
+            true,
+        )
+        .unwrap();
         let content_after_remove = fs::read_to_string(&hosts_file).unwrap();
-        assert!(content_after_remove.contains("# admin note"), "standalone comment must be preserved on removal: {}", content_after_remove);
+        assert!(
+            content_after_remove.contains("# admin note"),
+            "standalone comment must be preserved on removal: {}",
+            content_after_remove
+        );
         assert!(!content_after_remove.contains("sonarr.aether.local"));
-        assert!(content_after_remove.lines().any(|l| l.trim() == "# admin note"));
+        assert!(content_after_remove
+            .lines()
+            .any(|l| l.trim() == "# admin note"));
 
         // 3. Updating last alias on an outside-block line preserves # admin note as standalone comment line
         let initial_update = "127.0.0.1 sonarr.aether.local # admin note\n";
         fs::write(&hosts_file, initial_update).unwrap();
-        update_hosts_file_with_ip_at_path(&hosts_file, &lock_file, &["sonarr.aether.local".to_string()], "10.0.0.2", false).unwrap();
+        update_hosts_file_with_ip_at_path(
+            &hosts_file,
+            &lock_file,
+            &["sonarr.aether.local".to_string()],
+            "10.0.0.2",
+            false,
+        )
+        .unwrap();
         let content_after_update = fs::read_to_string(&hosts_file).unwrap();
-        assert!(content_after_update.contains("# admin note"), "standalone comment must be preserved on update: {}", content_after_update);
-        assert!(content_after_update.lines().any(|l| l.trim() == "# admin note"));
+        assert!(
+            content_after_update.contains("# admin note"),
+            "standalone comment must be preserved on update: {}",
+            content_after_update
+        );
+        assert!(content_after_update
+            .lines()
+            .any(|l| l.trim() == "# admin note"));
         assert!(content_after_update.contains("10.0.0.2\tsonarr.aether.local"));
 
         let _ = fs::remove_dir_all(&scratch_dir);
@@ -8566,7 +9057,10 @@ mod tests {
         let reconciled = reconcile_pihole_custom_list_content(
             initial_content,
             "192.168.1.200",
-            &["sonarr.aether.local".to_string(), "radarr.aether.local".to_string()],
+            &[
+                "sonarr.aether.local".to_string(),
+                "radarr.aether.local".to_string(),
+            ],
             true,
         );
 
@@ -8580,7 +9074,8 @@ mod tests {
         assert!(!reconciled.contains("192.168.1.10 app.aether.local"));
 
         // Multi-alias line with # aetherflow-managed tag preserves unmanaged aliases
-        let managed_multi_line = "192.168.1.10 old.aether.local unrelated.lan # aetherflow-managed\n";
+        let managed_multi_line =
+            "192.168.1.10 old.aether.local unrelated.lan # aetherflow-managed\n";
         let reconciled_multi = reconcile_pihole_custom_list_content(
             managed_multi_line,
             "192.168.1.200",
@@ -8609,10 +9104,8 @@ mod tests {
         assert!(reconciled.contains("192.168.1.200 radarr.aether.local # aetherflow-managed"));
 
         // Now test removal
-        let after_removal = remove_pihole_custom_list_content(
-            &reconciled,
-            &["sonarr.aether.local".to_string()],
-        );
+        let after_removal =
+            remove_pihole_custom_list_content(&reconciled, &["sonarr.aether.local".to_string()]);
         assert!(!after_removal.contains("sonarr.aether.local"));
         assert!(after_removal.contains("192.168.1.1 router.home"));
         assert!(after_removal.contains("192.168.1.10 keep.lan # custom note"));
@@ -8620,14 +9113,19 @@ mod tests {
 
         // Test removing one alias from multi-alias line
         let multi_alias = "192.168.1.99 host1.lan host2.lan host3.lan # my comment\n";
-        let removed_alias = remove_pihole_custom_list_content(multi_alias, &["host2.lan".to_string()]);
-        assert_eq!(removed_alias.trim(), "192.168.1.99 host1.lan host3.lan # my comment");
+        let removed_alias =
+            remove_pihole_custom_list_content(multi_alias, &["host2.lan".to_string()]);
+        assert_eq!(
+            removed_alias.trim(),
+            "192.168.1.99 host1.lan host3.lan # my comment"
+        );
     }
 
     #[tokio::test]
     async fn test_pihole_custom_list_invalid_utf8_fails_closed_and_leaves_file_intact() {
         let _env_guard = ENV_TEST_MUTEX.lock().await;
-        let scratch_dir = env::temp_dir().join(format!("af-pihole-utf8-test-{}", uuid::Uuid::new_v4()));
+        let scratch_dir =
+            env::temp_dir().join(format!("af-pihole-utf8-test-{}", uuid::Uuid::new_v4()));
         let pihole_dir = scratch_dir.join("pihole");
         fs::create_dir_all(&pihole_dir).unwrap();
 
@@ -8635,7 +9133,10 @@ mod tests {
         let invalid_bytes = vec![0xff, 0xfe, b'a', b'b', b'c'];
         fs::write(&custom_list, &invalid_bytes).unwrap();
 
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
 
         // Test sync fails closed
         let sync_res = sync_dns_provider_files_with_mode(
@@ -8660,9 +9161,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runner_hosts_handler_separates_loopback_hosts_from_provider_lan_ip_and_public_domains() {
+    async fn test_runner_hosts_handler_separates_loopback_hosts_from_provider_lan_ip_and_public_domains(
+    ) {
         let _env_guard = ENV_TEST_MUTEX.lock().await;
-        let scratch_dir = env::temp_dir().join(format!("af-runner-sep-test-{}", uuid::Uuid::new_v4()));
+        let scratch_dir =
+            env::temp_dir().join(format!("af-runner-sep-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&scratch_dir).unwrap();
 
         let hosts_file = scratch_dir.join("hosts");
@@ -8673,8 +9176,14 @@ mod tests {
         fs::create_dir_all(&pihole_dir).unwrap();
 
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_DNSMASQ_DIR",
+            dnsmasq_dir.to_string_lossy().as_ref(),
+        );
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
 
         let req = HostsUpdateRequest {
             action: "reconcile".to_string(),
@@ -8730,8 +9239,14 @@ mod tests {
         fs::create_dir_all(&pihole_dir).unwrap();
 
         env::set_var("AF_HOSTS_FILE", hosts_file.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_DNSMASQ_DIR", dnsmasq_dir.to_string_lossy().as_ref());
-        env::set_var("AETHERFLOW_PIHOLE_DIR", pihole_dir.to_string_lossy().as_ref());
+        env::set_var(
+            "AETHERFLOW_DNSMASQ_DIR",
+            dnsmasq_dir.to_string_lossy().as_ref(),
+        );
+        env::set_var(
+            "AETHERFLOW_PIHOLE_DIR",
+            pihole_dir.to_string_lossy().as_ref(),
+        );
 
         // 1. Add entry
         let add_res = run_hosts_cli(&[
@@ -8749,10 +9264,7 @@ mod tests {
         assert!(pihole_after_add.contains("sonarr.aether.local"));
 
         // 2. Remove entry via CLI
-        let rm_res = run_hosts_cli(&[
-            "remove".to_string(),
-            "sonarr.aether.local".to_string(),
-        ]);
+        let rm_res = run_hosts_cli(&["remove".to_string(), "sonarr.aether.local".to_string()]);
         assert!(rm_res.is_ok(), "{:?}", rm_res);
 
         let hosts_after_rm = fs::read_to_string(&hosts_file).unwrap();
@@ -8765,7 +9277,11 @@ mod tests {
         // 3. Provider error propagation: write to read-only dir
         let ro_dir = scratch_dir.join("ro_dir");
         fs::create_dir_all(&ro_dir).unwrap();
-        fs::write(ro_dir.join("custom.list"), "10.0.0.50 testfail.aether.local\n").unwrap();
+        fs::write(
+            ro_dir.join("custom.list"),
+            "10.0.0.50 testfail.aether.local\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -8778,10 +9294,8 @@ mod tests {
             ]);
             assert!(err_res.is_err(), "provider sync error must be propagated");
 
-            let err_rm = run_hosts_cli(&[
-                "remove".to_string(),
-                "testfail.aether.local".to_string(),
-            ]);
+            let err_rm =
+                run_hosts_cli(&["remove".to_string(), "testfail.aether.local".to_string()]);
             assert!(err_rm.is_err(), "remove provider error must be propagated");
             let _ = fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755));
         }
@@ -8790,5 +9304,147 @@ mod tests {
         env::remove_var("AETHERFLOW_DNSMASQ_DIR");
         env::remove_var("AETHERFLOW_PIHOLE_DIR");
         let _ = fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn canonical_config_candidates_prioritize_repo_config_and_isolate_legacy_fallback() {
+        let candidates = canonical_config_candidates("packages.json");
+        let strings: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(strings[0], "config/packages.json");
+        assert_eq!(strings[1], "../config/packages.json");
+        assert_eq!(strings[2], "../../config/packages.json");
+        assert!(
+            !strings
+                .iter()
+                .any(|s| s == "backend/config/packages.json"
+                    || s == "../backend/config/packages.json"),
+            "dead relative backend/config paths must be removed: {strings:?}"
+        );
+        let opt_canonical_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/config/packages.json")
+            .unwrap();
+        let opt_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/config/packages.json")
+            .unwrap();
+        let legacy_curr_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/backend/config/packages.json")
+            .unwrap();
+        let legacy_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/backend/config/packages.json")
+            .unwrap();
+        assert!(opt_canonical_idx < opt_root_idx);
+        assert!(opt_root_idx < legacy_curr_idx);
+        assert!(legacy_curr_idx < legacy_root_idx);
+    }
+
+    #[tokio::test]
+    async fn load_runner_config_or_embedded_prefers_canonical_over_legacy_relative() {
+        struct CwdRestore(PathBuf);
+        impl Drop for CwdRestore {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.0);
+            }
+        }
+
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let _cwd_guard = CwdRestore(env::current_dir().unwrap());
+        let prev_env = env::var_os("AETHERFLOW_TEST_CFG_PATH");
+        env::remove_var("AETHERFLOW_TEST_CFG_PATH");
+
+        let scratch = env::temp_dir().join(format!("af-runner-cfg-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(scratch.join("backend/config")).unwrap();
+        fs::write(
+            scratch.join("backend/config/test_only_cfg.json"),
+            r#"{"source":"legacy-relative"}"#,
+        )
+        .unwrap();
+        env::set_current_dir(&scratch).unwrap();
+
+        // Relative backend/config/ must be ignored in favor of embedded fallback when canonical config/ is absent.
+        let without_canonical = try_load_runner_config_or_embedded(
+            "AETHERFLOW_TEST_CFG_PATH",
+            "test_only_cfg.json",
+            r#"{"source":"embedded"}"#,
+        )
+        .unwrap();
+        assert_eq!(without_canonical, r#"{"source":"embedded"}"#);
+
+        // Once canonical config/ exists, it wins immediately.
+        fs::create_dir_all(scratch.join("config")).unwrap();
+        fs::write(
+            scratch.join("config/test_only_cfg.json"),
+            r#"{"source":"canonical"}"#,
+        )
+        .unwrap();
+        let with_canonical = try_load_runner_config_or_embedded(
+            "AETHERFLOW_TEST_CFG_PATH",
+            "test_only_cfg.json",
+            r#"{"source":"embedded"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_canonical, r#"{"source":"canonical"}"#);
+
+        // Symlinked config candidate must fail closed instead of silently falling back to embedded.
+        #[cfg(unix)]
+        {
+            let link_path = scratch.join("symlink_cfg.json");
+            std::os::unix::fs::symlink(scratch.join("config/test_only_cfg.json"), &link_path)
+                .unwrap();
+            env::set_var("AETHERFLOW_TEST_CFG_PATH", &link_path);
+            let err = try_load_runner_config_or_embedded(
+                "AETHERFLOW_TEST_CFG_PATH",
+                "test_only_cfg.json",
+                r#"{"source":"embedded"}"#,
+            )
+            .expect_err("symlinked config override must fail closed");
+            let err_msg = format!("{err:#}");
+            assert!(
+                err_msg.contains("Failed to open config")
+                    || err_msg.contains("ELOOP")
+                    || err_msg.contains("Too many levels"),
+                "unexpected symlink error: {err_msg}"
+            );
+            env::remove_var("AETHERFLOW_TEST_CFG_PATH");
+        }
+
+        if let Some(val) = prev_env {
+            env::set_var("AETHERFLOW_TEST_CFG_PATH", val);
+        }
+        drop(_cwd_guard);
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn test_librespeed_sandbox_dropin_preserves_protect_home_yes_and_minimal_rw_paths() {
+        let rendered = render_systemd_sandbox_dropin(
+            "native",
+            "librespeed.service",
+            &["/opt/librespeed".to_string()],
+        );
+        assert!(
+            rendered.contains("\nProtectHome=yes\n"),
+            "librespeed drop-in must preserve ProtectHome=yes, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ProtectHome=read-only"),
+            "librespeed drop-in must not downgrade ProtectHome to read-only"
+        );
+        assert!(
+            rendered.contains("\nReadWritePaths=/opt/librespeed\n")
+                || rendered.contains("\nReadWritePaths=-/opt/librespeed\n"),
+            "expected confined /opt/librespeed ReadWritePaths, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("/home/"),
+            "librespeed drop-in must not expose /home paths, got:\n{rendered}"
+        );
     }
 }

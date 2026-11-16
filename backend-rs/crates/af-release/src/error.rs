@@ -77,7 +77,9 @@ pub enum ReleaseError {
     #[error("systemd lifecycle operation '{action}' failed: {reason}")]
     Systemd { action: String, reason: String },
 
-    #[error("deep readiness probe failed after {attempts} attempts against '{endpoint}': {last_error}")]
+    #[error(
+        "deep readiness probe failed after {attempts} attempts against '{endpoint}': {last_error}"
+    )]
     HealthProbeFailed {
         endpoint: String,
         attempts: u32,

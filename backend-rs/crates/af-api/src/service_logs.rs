@@ -93,7 +93,8 @@ pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
                     let _host = parts.next();
                     let rest = parts.next().unwrap_or(line);
                     let (service, message) = rest.split_once(": ").unwrap_or(("journald", rest));
-                    raw.push(json!({"timestamp":timestamp,"source":"journald","service":service.trim(),"level":infer_log_level(message),"message":message.trim()}));
+                    let safe_message = af_services::redact_secrets(message.trim());
+                    raw.push(json!({"timestamp":timestamp,"source":"journald","service":service.trim(),"level":infer_log_level(&safe_message),"message":safe_message}));
                 }
             }
             Ok(output) => {
@@ -186,7 +187,10 @@ fn tail(path: &std::path::Path) -> io::Result<String> {
 
 fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
     let files: Vec<(&str, &str)> = match source {
-        "application" | "deploy" => vec![("application", "/var/log/aetherflow-deploy.log")],
+        "application" | "deploy" => vec![
+            ("application", "/var/log/aetherflow/deploy.log"),
+            ("application", "/var/log/aetherflow-deploy.log"),
+        ],
         "syslog" => vec![
             ("syslog", "/var/log/syslog"),
             ("syslog", "/var/log/messages"),
@@ -196,6 +200,7 @@ fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
             ("apache", "/var/log/apache2/access.log"),
         ],
         "" => vec![
+            ("application", "/var/log/aetherflow/deploy.log"),
             ("application", "/var/log/aetherflow-deploy.log"),
             ("syslog", "/var/log/syslog"),
             ("apache", "/var/log/apache2/error.log"),
@@ -218,7 +223,8 @@ fn file_entries(source: &str, line_limit: usize) -> io::Result<Vec<Value>> {
             .rev()
         {
             if !line.trim().is_empty() {
-                entries.push(json!({"timestamp":chrono::Utc::now().to_rfc3339(),"source":source,"service":source,"level":infer_log_level(line),"message":line.trim()}));
+                let safe_message = af_services::redact_secrets(line.trim());
+                entries.push(json!({"timestamp":chrono::Utc::now().to_rfc3339(),"source":source,"service":source,"level":infer_log_level(&safe_message),"message":safe_message}));
             }
         }
     }
@@ -230,7 +236,8 @@ fn audit_entries(source: &str, limit: usize) -> anyhow::Result<Vec<Value>> {
     let mut stmt = conn.prepare(AUDIT_LOG_FALLBACK_SQL)?;
     let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
         let timestamp: String=row.get(0)?; let action: String=row.get(1)?;let target:String=row.get(2)?;let detail:String=row.get(3)?;
-        let message = if detail.is_empty(){action}else{format!("{action}: {detail}")};
+        let raw_message = if detail.is_empty(){action}else{format!("{action}: {detail}")};
+        let message = af_services::redact_secrets(&raw_message);
         Ok(json!({"timestamp":timestamp,"source":if source.is_empty(){"application"}else{source},"service":target,"level":infer_log_level(&message),"message":message}))
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

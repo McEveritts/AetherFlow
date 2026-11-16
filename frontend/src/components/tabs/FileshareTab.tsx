@@ -249,7 +249,7 @@ export default function FileshareTab() {
                             {isUploading ? `Uploading ${uploadProgress}%` : 'Ready / Idle'}
                         </div>
                         <span className="text-xs text-slate-500 mt-0.5 block break-words">
-                            50MB Chunk Streaming
+                            5 MiB Chunk Streaming · 50 MiB Max
                         </span>
                     </div>
                     <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0 ml-3">

@@ -29,7 +29,9 @@ pub enum HostBackupError {
     #[error("manifest validation failed: {0}")]
     InvalidManifest(String),
 
-    #[error("incompatible backup manifest (found schema v{found}, supported v{min}..=v{max}): {reason}")]
+    #[error(
+        "incompatible backup manifest (found schema v{found}, supported v{min}..=v{max}): {reason}"
+    )]
     IncompatibleManifest {
         found: u32,
         min: u32,
@@ -37,7 +39,9 @@ pub enum HostBackupError {
         reason: String,
     },
 
-    #[error("incompatible application version '{backup_version}' for host '{host_version}': {reason}")]
+    #[error(
+        "incompatible application version '{backup_version}' for host '{host_version}': {reason}"
+    )]
     IncompatibleVersion {
         backup_version: String,
         host_version: String,

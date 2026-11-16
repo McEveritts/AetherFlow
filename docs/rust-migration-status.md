@@ -6,7 +6,7 @@ This document tracks the exact boundary between **shipped & integrated Rust serv
 
 ## 1. Shipped & Integrated in `backend-rs`
 
-The V4 Rust control plane compiles eleven workspace crates into `aetherflow-api`, `af` (`af-cli`), and the streaming contract verification harness:
+The V4 Rust control plane compiles twelve workspace crates into `aetherflow-api`, `af` (`af-cli`), `speedtest-backend` (`af-librespeed`), and the streaming contract verification harness:
 
 | Component / Crate | Path | Status | Verified Responsibilities |
 | :--- | :--- | :--- | :--- |
@@ -21,7 +21,8 @@ The V4 Rust control plane compiles eleven workspace crates into `aetherflow-api`
 | **`af-cli`** | `backend-rs/crates/af-cli` | **Shipped & Integrated** | Unified Rust `af` administrative CLI binary compiled & packaged alongside `aetherflow-api`. Supports `package`, `service`, `quota`/`setdisk`, `sandbox`, `release`, `backup` (including `restore --staging-root`), `maintenance` (`tune`, `sentinel`, `clean-logs`, `showspace`), and `provision` (14 Rust-native foundation steps with `# STATE_VERSION=2` persistence). |
 | **`af-models`** | `backend-rs/crates/af-models` | **Shipped & Integrated** | Shared serde domain models, hardware snapshot structs, and runner IPC wire contracts. |
 | **`af-streaming-tests`** | `backend-rs/crates/af-streaming-tests` | **Shipped & Integrated** | Contract and integration verification suite for canonical streaming playback history, reconciliation, and portability. |
-| **Release Build Pipeline** | `.github/workflows/release.yml`, `scripts/build_gold.sh`, `setup/modules/modern_stack.sh` | **Shipped & Integrated** | Stages Next.js static export (`frontend/out/.` -> `backend/web/dist/`), runs `cargo test --workspace`, compiles both `aetherflow-api` and `af` (`af-cli`) from `backend-rs`, packages `aetherflow-linux-<arch>.tar.gz` + `SHA256SUMS`, and provisions the V4 Rust stack in `modern_stack.sh`. |
+| **Release Build Pipeline** | `.github/workflows/release.yml`, `scripts/build_gold.sh`, `setup/modules/modern_stack.sh` | **Shipped & Zero-Go** | Stages Next.js static export (`frontend/out/.` -> neutral `web/dist/`), enforces Zero-Go repo hygiene (`git ls-files '*.go' '*go.mod' '*go.sum'`), runs `cargo test --workspace`, compiles `aetherflow-api`, `af` (`af-cli`), and `speedtest-backend` (`af-librespeed`) from `backend-rs`, packages `aetherflow-linux-<arch>.tar.gz` + `SHA256SUMS`, and provisions the V4 Rust stack in `modern_stack.sh`. |
+| **Native Rust LibreSpeed** | `backend-rs/crates/af-librespeed`, `packages/package/install/installpackage-librespeed` | **Shipped & Zero-Go** | Replaces the patched Go LibreSpeed backend with the native Rust `speedtest-backend` crate binary built and packaged alongside `aetherflow-api` and `af`. |
 | **Rust Plugin Runtime & SDK** | `af-services::plugins`, `af-api`, `plugins/sdk-template-rust/` | **Shipped & Integrated** | Manifest discovery & validation (`plugin.manifest.json`), deterministic/dynamic port allocation (`21000..=21999`), plugin-scoped JWT minting (`POST /api/v1/admin/plugins/:id/token`), route-scope RBAC middleware, and streaming reverse proxy (`/api/v1/auth/plugins/:id/proxy/*path` and `/plugins/:id/*path`). |
 
 ---
@@ -33,7 +34,7 @@ The V4 Rust control plane compiles eleven workspace crates into `aetherflow-api`
 | **Declarative Rust Package Executor (`af-runner`)** | Hybrid: Bash fallback (`LegacyBashFallback`) by default unless `AETHERFLOW_ENABLE_RUST_PACKAGES=1` is set | `AETHERFLOW_ENABLE_RUST_PACKAGES=1` (or force Bash via `AETHERFLOW_FORCE_BASH_PACKAGES=1`) | **15 built-in declarative Rust recipes** (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `scrutiny`, `prometheus`, `netdata`, `mergerfs`, `rclone`, `clamav`, `mosquitto`, `syncthing`) with `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, pre-start systemd sandboxing, and `RollbackJournal`. Remaining 58 complex installers run under the same advisory lock and process-group supervisor. |
 | **Release Self-Update (`af-runner` -> `af-release`)** | `deploy/release-manager.sh` in detached cgroup (or `af-release` when `AETHERFLOW_USE_RUST_RELEASE=1` or script absent) | `AETHERFLOW_USE_RUST_RELEASE=1` (or `af release deploy --local`) | `af-api` `run_update` dispatches `SelfUpdateRequest` over `/run/aetherflow/runner.sock` with local fallback. Both `af-release` and `deploy/release-manager.sh` normalize binary permissions (`aetherflow-api`, `bin/af`), support `stable`/`nightly`, and resolve `/releases/latest` redirects. |
 | **Host Backups & Staged Restore (`af-host`)** | Native Rust in `af-services` smart backup worker and `af-cli` | `af backup restore --staging-root <dir>` | `execute_online_sqlite_backup` uses `af_host::create_sqlite_snapshot_backup` (`OnlineBackupApi` + `.manifest.json` + `.sha256`). Destructive live overwrite onto `/` remains blocked (`DestructiveRestoreUnsupported`); operators extract verified archives into an isolated `--staging-root` (`0700`/`0600`) with automatic SQLite `PRAGMA quick_check`. |
-| **Bare-Metal Provisioning (`af-cli::provision`)** | 14 Rust-Native Foundation steps + 25 Retained Shell Bootstrap steps | `af provision run [<steps>...]` | `checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, and `perms` execute natively in Rust with `# STATE_VERSION=2` and symlink-free atomic writes. |
+| **Bare-Metal Provisioning (`af-cli::provision`)** | 14 Rust-Native Foundation steps + 24 Retained Shell Bootstrap steps | `af provision run [<steps>...]` | `checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, and `perms` execute natively in Rust with `# STATE_VERSION=2` and symlink-free atomic writes. |
 
 ---
 
@@ -43,17 +44,18 @@ The V4 Rust control plane compiles eleven workspace crates into `aetherflow-api`
 - Backend manifest loading, port allocation (`21000..=21999`), plugin-scoped JWT minting (`POST /api/v1/admin/plugins/:id/token`), per-route `api_scopes` enforcement, and streaming HTTP reverse proxying (`/plugins/:id/*path`) are fully implemented in `af-services::plugins` and `af-api`.
 - Frontend UI slot components (`plugins/*/frontend/src/index.tsx`) remain compile-time/companion artifacts because the Next.js 16 dashboard is compiled as an immutable static export (`output: 'export'`) embedded into `aetherflow-api`.
 
-### 3.2 Shared Asset Paths (`backend/config/` & `backend/web/dist/`)
-- While the runtime control plane is 100% Rust (`backend-rs/`), two asset directories under `backend/` are used at build/package time:
-  1. `backend/config/packages.json` and `backend/config/package_automation.json` are embedded at compile time and copied into release tarballs (`config/`).
-  2. `backend-rs/crates/af-api/src/embed.rs` embeds the compiled Next.js static export from `#[folder = "../../../backend/web/dist"]`.
+### 3.2 Canonical Neutral Asset Paths (`config/` & `web/dist/`)
+- After the Zero-Go cutover, `backend/` is completely removed from the repository and all build/embed assets live in canonical neutral paths:
+  1. `config/packages.json`, `config/package_automation.json`, and `config/openapi-v1.yaml` are embedded at compile time and copied directly into release tarballs (`config/`).
+  2. `backend-rs/crates/af-api/src/embed.rs` embeds the compiled Next.js static export from `#[folder = "../../../web/dist"]`.
+  3. Zero-Go invariants across tracked files, CI/release/security workflows, installer modules, and Rust plugin scaffolding (`plugins/sdk-template-rust` default) are guarded by `tests/test_zero_go_cutover.py`.
 
 ---
 
-## 4. Integration Validation (November 1, 2026)
+## 4. Integration Validation (November 1, 2026 Baseline + Zero-Go Cutover)
 
 | Check | Result |
 | :--- | :--- |
-| `cargo test --workspace` | **131 passed**, zero failed: `af-api` (23), `af-cli` (13), `af-db` (2), `af-hardware` (3), `af-host` (18), `af-models` (2), `af-release` (18), `af-runner` (29), `af-services` (23). |
-| Python release & build test suite | **42 ran (41 passed, 1 skipped)** across `tests/test_release_manager.py`, `tests/test_rust_build_tools.py`, `tests/test_installer_regressions.py`, and `tests/test_sandbox_regressions.py`. |
-| Rust SDK standalone tests | **3 passed** (`plugins/sdk-template-rust`). |
+| `cargo test --workspace` (Nov 1 baseline) | **131 passed**, zero failed: `af-api` (23), `af-cli` (13), `af-db` (2), `af-hardware` (3), `af-host` (18), `af-models` (2), `af-release` (18), `af-runner` (29), `af-services` (23). Workspace now expands to **12 crates** with `af-librespeed` (`speedtest-backend`). |
+| Python release & build test suite | **42 ran (41 passed, 1 skipped)** in Nov 1 baseline across `tests/test_release_manager.py`, `tests/test_rust_build_tools.py`, `tests/test_installer_regressions.py`, and `tests/test_sandbox_regressions.py`; extended with Zero-Go repository hygiene tests in `tests/test_zero_go_cutover.py`. |
+| Rust SDK standalone tests | **3 passed** (`plugins/sdk-template-rust`); legacy Go `plugins/sdk-template/` removed. |

@@ -18,6 +18,72 @@
 #   under the GPL along with build & install instructions.
 #
 
-source /opt/AetherFlow/packages/common.sh
-printf "" > "$LOGFILE"
+set -euo pipefail
+
+# Never allow caller-supplied LOGFILE outside /var/log/aetherflow to truncate arbitrary files.
+if [[ -n "${LOGFILE:-}" && "${LOGFILE}" != "/dev/null" && "${LOGFILE}" != /var/log/aetherflow/* ]]; then
+    printf 'Refusing logfile outside /var/log/aetherflow: %s\n' "${LOGFILE}" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for COMMON_SH in "${SCRIPT_DIR}/../common.sh" /opt/AetherFlow/current/packages/common.sh /opt/AetherFlow/packages/common.sh /usr/local/bin/AetherFlow/common.sh; do
+    if [[ -f "${COMMON_SH}" ]]; then
+        # shellcheck source=/dev/null
+        source "${COMMON_SH}"
+        break
+    fi
+done
+
+if [[ -n "${LOGFILE:-}" && "${LOGFILE}" != "/dev/null" ]]; then
+    python3 - "${LOGFILE}" <<'PYEOF'
+import fcntl, os, pathlib, stat, sys
+
+ALLOWED_ROOT = pathlib.PurePosixPath("/var/log/aetherflow")
+target = sys.argv[1]
+p = pathlib.PurePosixPath(target)
+if not p.is_absolute() or ".." in p.parts:
+    sys.stderr.write(f"Refusing relative or traversal logfile path: {target}\n")
+    raise SystemExit(1)
+if p == ALLOWED_ROOT or ALLOWED_ROOT not in p.parents:
+    sys.stderr.write(f"Refusing logfile outside {ALLOWED_ROOT}: {target}\n")
+    raise SystemExit(1)
+
+cur = "/"
+for part in p.parts[1:-1]:
+    cur = os.path.join(cur, part)
+    try:
+        pst = os.lstat(cur)
+    except OSError:
+        sys.stderr.write(f"Refusing missing logfile ancestor: {cur}\n")
+        raise SystemExit(1)
+    if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+        sys.stderr.write(f"Refusing unsafe logfile ancestor: {cur}\n")
+        raise SystemExit(1)
+
+real_parent = os.path.realpath(os.path.dirname(target))
+if real_parent != "/var/log/aetherflow" and not real_parent.startswith("/var/log/aetherflow/"):
+    sys.stderr.write(f"Refusing logfile outside canonical /var/log/aetherflow: {target}\n")
+    raise SystemExit(1)
+
+flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        os.ftruncate(fd, 0)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+fi
 

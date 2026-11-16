@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def common_functions(*names):
+    names = tuple(dict.fromkeys(('af_prepare_logfile_path', 'af_logged', 'af_logged_stderr', *names)))
     if 'backup_configured_database' in names or 'restore_configured_database' in names:
         names = tuple(dict.fromkeys((*names, 'configured_database_connection', 'configured_postgresql_cleanup',
                                      'validate_config_paths', 'safe_config_python')))
@@ -13,9 +14,12 @@ def common_functions(*names):
     if 'begin_state_transaction' in names:
         names = tuple(dict.fromkeys((*names, 'installed_apt_package_version', 'apt_reinstall_marker_path',
                                      'record_apt_package_for_rollback', 'prepare_apt_package_transaction',
-                                     'apt-get', 'rollback_apt_packages', 'clear_apt_reinstall_markers', 'write_config_file')))
+                                     'apt-get', 'rollback_apt_packages', 'clear_apt_reinstall_markers', 'write_config_file',
+                                     'derive_app_password', 'check_disk_space')))
     if 'stop_systemd_unit' in names:
         names = tuple(dict.fromkeys((*names, 'quiesce_services_for_rollback', 'retained_bind_address')))
+    if 'download_file' in names:
+        names = tuple(dict.fromkeys((*names, 'af_prepare_logfile_path', 'af_validate_tar_archive')))
     source = (ROOT / "packages/common.sh").read_text()
     functions = []
     for name in names:

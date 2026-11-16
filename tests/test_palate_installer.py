@@ -13,7 +13,7 @@ import unittest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from installer_test_helpers import installer_common_functions as common_functions
+from installer_test_helpers import installer_common_functions as common_functions, replace_paths_once
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,7 +79,14 @@ elif command == 'systemctl':
     if 'af-palate.service' in args:
         running = root / 'running'
         if args[0] == 'is-active':
-            sys.exit(0 if running.exists() else 3)
+            is_up = running.exists()
+            if '--quiet' not in args:
+                print('active' if is_up else 'inactive')
+            sys.exit(0 if is_up else 3)
+        elif args[0] == 'show':
+            is_up = running.exists()
+            print(f"LoadState=loaded\nActiveState={'active' if is_up else 'inactive'}\nMainPID={1234 if is_up else 0}\nUnitFileState={'enabled' if is_up else 'disabled'}")
+            sys.exit(0)
         elif args[0] == 'stop':
             running.unlink(missing_ok=True)
         elif args[0] in ('restart', 'start'):
@@ -143,9 +150,10 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         self.unit = self.root / 'etc/systemd/system/af-palate.service'
 
     def run_script(self, action='install', **environment):
-        source = (ROOT / f'packages/package/{action}/{action}package-palate').read_text()
-        for prefix in ('/opt/', '/var/', '/etc/', '/run/', '/install'):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            (ROOT / f'packages/package/{action}/{action}package-palate').read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ('/opt/', '/var/', '/etc/', '/run/', '/install')],
+        )
         script = self.root / f'{action}.sh'
         script.write_text(source)
         return subprocess.run(['bash', str(script)], env={**self.env, **environment}, capture_output=True, text=True, timeout=20)

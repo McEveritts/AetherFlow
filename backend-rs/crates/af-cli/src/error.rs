@@ -122,9 +122,7 @@ impl CliError {
                 | HostBackupError::PathValidation { .. }
                 | HostBackupError::TraversalRejected { .. }
                 | HostBackupError::SymlinkRejected { .. }
-                | HostBackupError::UnsafeOverwriteRejected { .. } => {
-                    CliExitCode::UsageOrValidation
-                }
+                | HostBackupError::UnsafeOverwriteRejected { .. } => CliExitCode::UsageOrValidation,
                 HostBackupError::ChecksumMismatch { .. }
                 | HostBackupError::MissingChecksumSidecar { .. }
                 | HostBackupError::SqliteIntegrity { .. }

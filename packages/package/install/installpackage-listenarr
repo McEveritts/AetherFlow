@@ -28,7 +28,67 @@ SERVICE_FILE="/etc/systemd/system/listenarr.service"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4546}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -36,9 +96,9 @@ report_progress 10 "Preparing ${APP_NAME} installation..."
 load_master_credentials
 
 report_progress 25 "Installing system dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+    curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
@@ -66,11 +126,12 @@ fi
 RELEASES_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
 
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" '
-        .[] | select((.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) |
-        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
-    ' | head -n1 || true)"
-    if [[ -z "$MATCH_LINE" ]]; then
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg ver "$AF_TARGET_VERSION" --arg vver "v${AF_TARGET_VERSION#v}" --arg rver "${AF_TARGET_VERSION#v}" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) | .tag_name][0] // empty) elif (type == "object" and ((.draft // false) | not) and (.tag_name == $ver or .tag_name == $vver or .tag_name == $rver) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' || true)"
+    ASSET_URL=""
+    if [[ -n "$LATEST_TAG" ]]; then
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
+    fi
+    if [[ -z "$LATEST_TAG" || -z "$ASSET_URL" ]]; then
         TARGET_TAG_LOOKUP="$AF_TARGET_VERSION"
         TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         if [[ -z "$TAG_RELEASE_JSON" && ! "$TARGET_TAG_LOOKUP" =~ ^v ]]; then
@@ -78,20 +139,16 @@ if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
             TAG_RELEASE_JSON="$(curl -fsSL ${AUTH_HEADER:+"${AUTH_HEADER[@]}"} "https://api.github.com/repos/Listenarrs/Listenarr/releases/tags/${TARGET_TAG_LOOKUP}" 2>/dev/null || true)"
         fi
         if [[ -n "$TAG_RELEASE_JSON" ]]; then
-            MATCH_LINE="$(echo "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
-                "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url // empty)"
-            ' || true)"
+            LATEST_TAG="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r 'if type == "object" and ((.draft // false) | not) then (.tag_name // empty) else empty end' || true)"
+            ASSET_URL="$(printf '%s\n' "${TAG_RELEASE_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "object" and ((.draft // false) | not) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
         fi
     fi
-    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
-    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
 else
-    MATCH_LINE="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '
-        .[] | select(any(.assets[]?; .name | endswith($arch))) |
-        "\(.tag_name)\t\([.assets[] | select(.name | endswith($arch))][0].browser_download_url)"
-    ' | sort -V -k1,1 | tail -n1 || true)"
-    LATEST_TAG="$(echo "$MATCH_LINE" | cut -f1)"
-    ASSET_URL="$(echo "$MATCH_LINE" | cut -f2)"
+    LATEST_TAG="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) | .tag_name][]) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and any(.assets[]?; .name | endswith($arch))) then (.tag_name // empty) else empty end' | sort -V | tail -n1 || true)"
+    ASSET_URL=""
+    if [[ -n "$LATEST_TAG" ]]; then
+        ASSET_URL="$(printf '%s\n' "${RELEASES_JSON}" | jq -r --arg tag "$LATEST_TAG" --arg arch "${L_ARCH}.zip" 'if type == "array" then ([.[] | select(((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) | .assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) elif (type == "object" and ((.draft // false) | not) and ((.prerelease // false) | not) and .tag_name == $tag) then ([.assets[]? | select(.name | endswith($arch)) | .browser_download_url][0] // empty) else empty end' || true)"
+    fi
 fi
 
 if [[ -z "${LATEST_TAG}" ]]; then
@@ -127,12 +184,12 @@ cleanup() {
         if [[ -f "$BACKUP_DIR/listenarr.service" ]]; then
             safe_restore_path_from_backup "$BACKUP_DIR/listenarr.service" "$SERVICE_FILE" || restore_failed=true
         else
-            systemctl disable listenarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl disable listenarr.service || restore_failed=true
             rm -f -- "$SERVICE_FILE" || restore_failed=true
         fi
-        systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+        af_logged systemctl daemon-reload || restore_failed=true
         if [[ "$restore_failed" == false && "$WAS_RUNNABLE" == true ]]; then
-            systemctl start listenarr.service >> "$LOGFILE" 2>&1 || restore_failed=true
+            af_logged systemctl start listenarr.service || restore_failed=true
         fi
     fi
     rm -f -- "$TMP_ZIP"
@@ -147,10 +204,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-download_file "${ASSET_URL}" "${TMP_ZIP}" >> "$LOGFILE" 2>&1
+af_logged download_file "${ASSET_URL}" "${TMP_ZIP}"
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
-unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}" >> "$LOGFILE" 2>&1
+af_logged unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}"
 rm -f "${TMP_ZIP}"
 
 STAGE_SRC="$TMP_EXTRACT"
@@ -186,6 +243,10 @@ mkdir -p "${DATA_DIR}/config"
 chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
+LISTENARR_BIND_HOST="${AF_BIND_ADDRESS:-127.0.0.1}"
+if [[ -f "$SERVICE_FILE" ]] && ! grep -Eq 'ASPNETCORE_URLS=http://\*:' "$SERVICE_FILE" 2>/dev/null; then
+    LISTENARR_BIND_HOST="$(retained_bind_address "$SERVICE_FILE" 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
+fi
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Listenarr Audiobook Collection Manager
@@ -197,7 +258,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${INSTALL_DIR}
-Environment="ASPNETCORE_URLS=http://*:${APP_PORT}"
+Environment="ASPNETCORE_URLS=http://${LISTENARR_BIND_HOST}:${APP_PORT}"
 Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false"
 Environment="HOME=${DATA_DIR}"
 Environment="XDG_CONFIG_HOME=${DATA_DIR}/config"
@@ -209,9 +270,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now listenarr.service >> "$LOGFILE" 2>&1
-systemctl restart listenarr.service >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now listenarr.service
+af_logged systemctl restart listenarr.service
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
 wait_for_service_ready "listenarr.service" "$APP_PORT" "$READY_URL"
 

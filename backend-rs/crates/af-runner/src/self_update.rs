@@ -176,10 +176,12 @@ fn encode_environment_file(environment: &[(&str, String)]) -> String {
     environment
         .iter()
         .map(|(name, value)| {
-            format!(
-                "{name}=\"{}\"\n",
-                value.replace('\\', "\\\\").replace('"', "\\\"")
-            )
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            format!("{name}=\"{escaped}\"\n")
         })
         .collect()
 }
@@ -195,6 +197,11 @@ fn write_environment_handoff() -> Result<PathBuf, LaunchError> {
             let value = value.into_string().map_err(|_| {
                 LaunchError::Failed(format!("updater environment variable {name} is not UTF-8"))
             })?;
+            if value.contains('\0') {
+                return Err(LaunchError::Failed(format!(
+                    "updater environment variable {name} contains NUL byte"
+                )));
+            }
             environment.push((*name, value));
         }
     }
@@ -208,6 +215,7 @@ fn write_environment_handoff() -> Result<PathBuf, LaunchError> {
     Ok(path)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn systemd_arguments(
     request: &af_release::admin::ValidatedSelfUpdateRequest,
     executable: &Path,
@@ -580,7 +588,7 @@ mod tests {
     fn environment_file_quotes_values_without_shell_expansion() {
         assert_eq!(
             encode_environment_file(&[("GH_TOKEN", "a\\b\"c\n$d".to_string())]),
-            "GH_TOKEN=\"a\\\\b\\\"c\n$d\"\n"
+            "GH_TOKEN=\"a\\\\b\\\"c\\n$d\"\n"
         );
     }
 

@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! Resumable / chunked TUS 1.0.0 upload backend for McBrowser (`uploads.rs`).
 //!
 //! Owns:
@@ -183,8 +184,10 @@ pub(crate) fn authorize_conflict_policy_permissions_with_conn(
 /// Supported upload conflict resolution policies for McBrowser TUS uploads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ConflictPolicy {
     /// Fail with `409 Conflict` if the target file already exists (`RENAME_NOREPLACE`).
+    #[default]
     Error,
     /// Atomically replace an existing regular file (`BrowserFs::begin_replace` + `PendingUpload::commit_replace`),
     /// bound to the original `(st_dev, st_ino, st_size)` observed at session creation.
@@ -195,12 +198,6 @@ pub enum ConflictPolicy {
     /// private staging file, starting at `Upload-Offset = existing_len`, reserving only `upload_length - existing_len`,
     /// and atomically replacing the bound original inode upon completion without ever truncating live files.
     Resume,
-}
-
-impl Default for ConflictPolicy {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 impl ConflictPolicy {
@@ -297,6 +294,7 @@ pub(crate) struct UploadSessionRecord {
     pub base_target_ino: u64,
     pub base_target_size: u64,
     pub audit_event_id: String,
+    #[allow(dead_code)]
     pub created_at: i64,
     pub updated_at: i64,
     pub expires_at: i64,
@@ -933,30 +931,37 @@ fn ensure_session_pending_audit_conn(
         }
     }
     conn.execute_batch("SAVEPOINT mcbrowser_upload_audit_binding")
-        .map_err(|_| McBrowserError::Internal("Failed to begin upload audit binding".to_string()))?;
-    let binding = (|| -> Result<String, McBrowserError> {
-        let actor = load_session_actor_conn(conn, session.user_id)?;
-        let pending = super::events::record_pending_intent_with_conn(
-            conn,
-            &actor,
-            super::events::McBrowserEventTrigger::UploadCompleted,
-            &session.target_path,
-            None,
-            session_published_byte_delta(session),
-        )?;
-        let event_id = pending.event.event_id;
-        let changed = conn.execute(
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to begin upload audit binding".to_string())
+        })?;
+    let binding =
+        (|| -> Result<String, McBrowserError> {
+            let actor = load_session_actor_conn(conn, session.user_id)?;
+            let pending = super::events::record_pending_intent_with_conn(
+                conn,
+                &actor,
+                super::events::McBrowserEventTrigger::UploadCompleted,
+                &session.target_path,
+                None,
+                session_published_byte_delta(session),
+            )?;
+            let event_id = pending.event.event_id;
+            let changed = conn.execute(
             "UPDATE mcbrowser_uploads SET audit_event_id = ?1 WHERE id = ?2 AND user_id = ?3",
             params![event_id, session.id, session.user_id],
         )
         .map_err(|_| McBrowserError::Internal("Failed to bind upload audit event ID".to_string()))?;
-        if changed != 1 {
-            return Err(McBrowserError::NotFound("Upload session not found".to_string()));
-        }
-        conn.execute_batch("RELEASE mcbrowser_upload_audit_binding")
-            .map_err(|_| McBrowserError::Internal("Failed to commit upload audit binding".to_string()))?;
-        Ok(event_id)
-    })();
+            if changed != 1 {
+                return Err(McBrowserError::NotFound(
+                    "Upload session not found".to_string(),
+                ));
+            }
+            conn.execute_batch("RELEASE mcbrowser_upload_audit_binding")
+                .map_err(|_| {
+                    McBrowserError::Internal("Failed to commit upload audit binding".to_string())
+                })?;
+            Ok(event_id)
+        })();
     let event_id = match binding {
         Ok(event_id) => event_id,
         Err(error) => {
@@ -1300,19 +1305,25 @@ pub fn cleanup_expired_uploads_at(
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_mcbrowser_uploads_expiry_cursor ON mcbrowser_uploads(expires_at, id)",
     ).map_err(|_| McBrowserError::Internal("Failed to index upload cleanup cursor".to_string()))?;
-    let (cursor_expiry, cursor_id): (i64, String) = conn.query_row(
-        "SELECT expires_at, upload_id FROM mcbrowser_upload_cleanup_cursor WHERE singleton = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).map_err(|_| McBrowserError::Internal("Failed to load upload cleanup cursor".to_string()))?;
+    let (cursor_expiry, cursor_id): (i64, String) = conn
+        .query_row(
+            "SELECT expires_at, upload_id FROM mcbrowser_upload_cleanup_cursor WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to load upload cleanup cursor".to_string())
+        })?;
     let sql = format!(
         "SELECT {SESSION_SELECT_COLUMNS} FROM mcbrowser_uploads WHERE expires_at <= ?1 \
          AND (expires_at, id) > (?2, ?3) ORDER BY expires_at, id LIMIT 128"
     );
     let scan = |expiry: i64, upload_id: &str| -> Result<Vec<UploadSessionRecord>, McBrowserError> {
-        let mut statement = conn.prepare(&sql)
+        let mut statement = conn
+            .prepare(&sql)
             .map_err(|_| McBrowserError::Internal("Failed to prepare expiry query".to_string()))?;
-        let rows = statement.query_map(params![now_secs, expiry, upload_id], row_to_session)
+        let rows = statement
+            .query_map(params![now_secs, expiry, upload_id], row_to_session)
             .map_err(|_| McBrowserError::Internal("Failed to scan expired uploads".to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| McBrowserError::Internal("Failed to read expired upload row".to_string()))
@@ -1918,8 +1929,7 @@ fn prepared_publication_matches(file: &File, device: u64, inode: u64, nonce: Opt
     let Ok(metadata) = fstat_fd(file.as_raw_fd()) else {
         return false;
     };
-    if metadata.st_dev as u64 != device || metadata.st_ino as u64 != inode || metadata.st_nlink != 1
-    {
+    if metadata.st_dev != device || metadata.st_ino != inode || metadata.st_nlink != 1 {
         return false;
     }
     let mut actual = [0_u8; 32];
@@ -3899,7 +3909,7 @@ fn skipped_upload_patch_response(skipped: &UploadSessionRecord) -> Response {
     }
     headers.insert("Upload-Status", HeaderValue::from_static("completed"));
     headers.insert("Upload-Skipped", HeaderValue::from_static("true"));
-    if let Ok(value) = HeaderValue::from_str(&encode_session_metadata_header(&skipped)) {
+    if let Ok(value) = HeaderValue::from_str(&encode_session_metadata_header(skipped)) {
         headers.insert("Upload-Metadata", value);
     }
     if let Ok(value) = HeaderValue::from_str(&skipped.target_path) {
@@ -4094,7 +4104,7 @@ pub(crate) fn finalize_patch_upload_at(
     if let Ok(st_hv) = HeaderValue::from_str(final_status) {
         h.insert("Upload-Status", st_hv);
     }
-    let encoded_meta = encode_session_metadata_header(&session);
+    let encoded_meta = encode_session_metadata_header(session);
     if let Ok(meta_hv) = HeaderValue::from_str(&encoded_meta) {
         h.insert("Upload-Metadata", meta_hv);
     }

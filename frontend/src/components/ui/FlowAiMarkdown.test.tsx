@@ -101,4 +101,14 @@ describe('FlowAiMarkdown', () => {
         expect(container.textContent).not.toContain('# AetherFlow');
         expect(container.textContent).not.toContain('**AetherFlow');
     });
+
+    it('rejects protocol-relative links while preserving internal root-relative and https links', () => {
+        const md = `Visit [Dashboard](/overview) or [Docs](https://example.com/docs), never [Trap](//evil.example/login) or [Backslash](/\\evil.example).`;
+        const { container } = render(<FlowAiMarkdown content={md} />);
+        const links = Array.from(container.querySelectorAll('a'));
+        expect(links.map((a) => a.getAttribute('href'))).toEqual(['/overview', 'https://example.com/docs']);
+        expect(links[0]).not.toHaveAttribute('target');
+        expect(links[1]).toHaveAttribute('target', '_blank');
+        expect(links[1]).toHaveAttribute('rel', 'noopener noreferrer');
+    });
 });

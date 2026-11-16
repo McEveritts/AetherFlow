@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import hashlib
 import io
 import os
@@ -17,7 +18,7 @@ REAL_TOOLS = (
     "sqlite3", "flock", "mkdir", "date", "cp", "mv", "ln", "rm", "cat", "tee",
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
     "head", "cut", "tr", "sha256sum", "tar", "gzip", "python3", "touch", "sleep",
-    "basename", "dirname", "sort", "tail", "runuser", "sh", "stat",
+    "basename", "dirname", "sort", "tail", "runuser", "sh", "stat", "openssl",
 )
 
 CURL_MOCK = r'''#!/usr/bin/python3
@@ -59,14 +60,19 @@ if url.endswith("/SHA256SUMS"):
     shutil.copyfile(root / "SHA256SUMS", target)
     sys.exit(0)
 if url.endswith("/health/ready"):
-    corrupt = os.environ.get("TEST_CORRUPT_DB", "")
-    if corrupt:
-        target = Path(corrupt)
-        target.write_bytes(b"not a database")
-        Path(corrupt + "-wal").write_text("wal")
-        Path(corrupt + "-shm").write_text("shm")
-    body = os.environ.get("TEST_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
-    code = os.environ.get("TEST_HEALTH_CODE", "200")
+    is_rollback = (root / "current").exists() and (root / "current").resolve().name == "100"
+    if is_rollback and "TEST_ROLLBACK_HEALTH_CODE" in os.environ:
+        body = os.environ.get("TEST_ROLLBACK_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
+        code = os.environ["TEST_ROLLBACK_HEALTH_CODE"]
+    else:
+        corrupt = os.environ.get("TEST_CORRUPT_DB", "")
+        if corrupt:
+            target = Path(corrupt)
+            target.write_bytes(b"not a database")
+            Path(corrupt + "-wal").write_text("wal")
+            Path(corrupt + "-shm").write_text("shm")
+        body = os.environ.get("TEST_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
+        code = os.environ.get("TEST_HEALTH_CODE", "200")
     sys.stdout.write(body)
     if not body.endswith("\n"):
         sys.stdout.write("\n")
@@ -186,9 +192,8 @@ os.execvp(inner[0], inner)
         )
         return result.stdout.strip()
 
-    def write_artifact(self):
+    def write_artifact(self, version=b"v4.0.0\n"):
         binary = b"#!/bin/bash\necho aetherflow-api\n"
-        version = b"v4.0.0\n"
         unit = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nFrom=artifact\n"
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
         buffer = io.BytesIO()
@@ -237,6 +242,7 @@ os.execvp(inner[0], inner)
             "HEALTH_INTERVAL": "0",
             "SNAPSHOT_TIMEOUT": "5",
             "MAX_RELEASES": "3",
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1",
         })
         env.update(extra)
         return env
@@ -293,7 +299,7 @@ os.execvp(inner[0], inner)
         owner = str(uuid.uuid4())
         owners = database.with_suffix(".lifecycle-owners")
         owners.mkdir()
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE package_lifecycle_jobs(package_id TEXT,job_id TEXT,action TEXT,status TEXT,started_at TEXT,finished_at TEXT,owner_id TEXT)")
             connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('fixture','job','update','updating','now','',?)", (owner,))
@@ -305,7 +311,7 @@ os.execvp(inner[0], inner)
         self.assertFalse((self.releases / ".release.lock").exists())
         recovered = self.run_manager("cleanup")
         self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-        with sqlite3.connect(database) as connection:
+        with contextlib.closing(sqlite3.connect(database)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM package_lifecycle_jobs").fetchone()[0], "interrupted")
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX advisory locks")
@@ -459,9 +465,11 @@ os.execvp(inner[0], inner)
         self.assertFalse(missing.exists())
         versions = list((self.dry / "releases").glob("*/.version"))
         self.assertEqual(len(versions), 1)
-        self.assertEqual(versions[0].read_text().strip(), "v3.1.7-dryrun")
+        self.assertEqual(versions[0].read_text().strip(), "v4.0.0-dryrun")
         self.assertNotIn("curl ", self.commands.read_text())
         self.assertTrue((self.dry / "current").is_symlink())
+        self.assertTrue((self.dry / "current" / "speedtest-backend").is_file())
+        self.assertTrue((self.dry / "current" / "bin" / "speedtest-backend").is_file())
 
     def test_env_file_aetherflow_db_path_when_db_path_missing(self):
         other_db = self.root / "live" / "from-aether.sqlite"
@@ -554,6 +562,7 @@ os.execvp(inner[0], inner)
             "deploy", "--channel", "stable",
             TEST_HEALTH_CODE="503",
             TEST_HEALTH_BODY='{"uptime":"0.0s","database":"unreachable","redis":"disabled","status":"not_ready"}',
+            TEST_ROLLBACK_HEALTH_CODE="200",
         )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("ROLLBACK COMPLETE", result.stdout)
@@ -574,6 +583,7 @@ os.execvp(inner[0], inner)
             "deploy", "--channel", "stable",
             TEST_HEALTH_CODE="503",
             TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable","redis":"disabled","uptime":"1.0s"}',
+            TEST_ROLLBACK_HEALTH_CODE="200",
             TEST_CORRUPT_DB=str(live_db),
         )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
@@ -614,6 +624,7 @@ os.execvp(inner[0], inner)
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
         self.env_file.write_text(f"DB_PATH={live_db}\n")
+        self.write_artifact(version=b"v4.0.0-nightly.123.1\n")
         releases_json = (
             '[{"tag_name":"v4.0.0-experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
             '{"tag_name":"v4.0.0-nightly.124.1","draft":true,"prerelease":true,"target_commitish":"ignored"},'
@@ -647,13 +658,12 @@ os.execvp(inner[0], inner)
         import sqlite3
         import sys
         database = self.data / "lifecycle.sqlite"
-        connection = sqlite3.connect(database)
-        connection.execute("CREATE TABLE package_lifecycle_jobs (status TEXT)")
-        connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('completed')")
-        connection.commit()
-        root_page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='package_lifecycle_jobs'").fetchone()[0]
-        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
-        connection.close()
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("CREATE TABLE package_lifecycle_jobs (status TEXT)")
+            connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('completed')")
+            connection.commit()
+            root_page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='package_lifecycle_jobs'").fetchone()[0]
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
         content = bytearray(database.read_bytes())
         content[(root_page - 1) * page_size] = 255
         database.write_bytes(content)
@@ -760,8 +770,22 @@ os.execvp(inner[0], inner)
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
         self.env_file.write_text(f"DB_PATH={live_db}\n")
+        legacy_only_json = (
+            '[{"tag_name":"experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v3.2.6","draft":false,"prerelease":false,"target_commitish":"master"}]'
+        )
+        rejected = self.run_manager(
+            "deploy", "--channel", "experimental", "--dry-run",
+            TEST_RELEASES_JSON=legacy_only_json,
+        )
+        self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+        self.assertNotIn("releases/download/nightly/", self.commands.read_text())
+
+        self.commands.write_text("")
+        self.write_artifact(version=b"v4.0.0-nightly.123.1\n")
         releases_json = (
             '[{"tag_name":"experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v4.0.0-nightly.123.1","draft":false,"prerelease":true,"target_commitish":"nightly"},'
             '{"tag_name":"v3.2.6","draft":false,"prerelease":false,"target_commitish":"master"}]'
         )
         result = self.run_manager(
@@ -769,8 +793,8 @@ os.execvp(inner[0], inner)
             TEST_RELEASES_JSON=releases_json,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Resolved release tag nightly for channel nightly.", result.stdout)
-        self.assertIn("releases/download/nightly/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
+        self.assertIn("Resolved release tag v4.0.0-nightly.123.1 for channel nightly.", result.stdout)
+        self.assertIn("releases/download/v4.0.0-nightly.123.1/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
 
     def test_archive_deploy_symlink_attack_is_rejected_before_extraction(self):
         outside_dir = self.root / "outside-victim"
@@ -936,6 +960,146 @@ os.execvp(inner[0], inner)
         )
         self.assertEqual(escape_res.returncode, 4, escape_res.stdout + escape_res.stderr)
         self.assertIn("escapes isolated release root", escape_res.stdout + escape_res.stderr)
+
+    def test_log_json_escaping_and_staging_cleanup_ignore_dotfiles(self):
+        import json
+
+        (self.dry / "releases").mkdir(parents=True, exist_ok=True)
+        staging_dir = self.dry / "releases" / ".staging.9999999.fixture"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        (staging_dir / "keep").write_text("active staging\n")
+        for epoch in ("10", "20", "30", "40"):
+            old_rel = self.dry / "releases" / epoch
+            old_rel.mkdir(parents=True, exist_ok=True)
+            (old_rel / "aetherflow-api").write_text("old")
+
+        conf_path = self.root / 'quote"slash\\name.conf'
+        conf_path.write_text('RELEASE_CHANNEL="nightly"\n')
+        res = self.run_manager("cleanup", "--dry-run", "--config", str(conf_path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(staging_dir.exists())
+        self.assertFalse((self.dry / "releases" / "10").exists())
+        self.assertTrue((self.dry / "releases" / "40").exists())
+        log_file = self.dry / "deploy.log"
+        for line in log_file.read_text().splitlines():
+            if line.strip():
+                json.loads(line)
+
+    def test_symlinked_systemd_unit_is_refused(self):
+        self.prepare_live_units()
+        (self.units / "aetherflow-api.service").unlink()
+        victim = self.root / "unit-symlink-victim"
+        victim.write_text("UNTOUCHED\n")
+        (self.units / "aetherflow-api.service").symlink_to(victim)
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("Refusing symlinked systemd unit path", result.stdout + result.stderr)
+        self.assertEqual(victim.read_text(), "UNTOUCHED\n")
+
+    def test_explicit_rollback_runs_health_probe_and_fails_when_unhealthy(self):
+        database_path, _ = self.prepare_rejected_snapshot_rollback()
+        result = self.run_manager(
+            "rollback",
+            TEST_HEALTH_CODE="503",
+            TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable"}',
+        )
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("Health probe failed after rollback", result.stdout + result.stderr)
+        self.assertEqual(self.marker(database_path), "verified golden fixture")
+
+    def test_lifecycle_admission_uses_read_only_sqlite_unless_reaping_stale_lease(self):
+        import sqlite3
+        import sys
+
+        database = self.data / "readonly-check.sqlite"
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("CREATE TABLE package_lifecycle_jobs(package_id TEXT,job_id TEXT,action TEXT,status TEXT,started_at TEXT,finished_at TEXT,owner_id TEXT)")
+            connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('fixture','job','update','completed','now','later','owner')")
+        script = SCRIPT.read_text().split('check_package_lifecycle_reservations() {', 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        prelude = textwrap.dedent("""\
+            import sqlite3
+            real_connect = sqlite3.connect
+            modes = []
+            def spying_connect(database, *args, **kwargs):
+                modes.append(str(database))
+                assert "?mode=rw" not in str(database), f"unexpected rw connect: {database}"
+                return real_connect(database, *args, **kwargs)
+            sqlite3.connect = spying_connect
+        """)
+        result = subprocess.run([sys.executable, "-c", prelude + script, str(database), "deploy"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v4_provenance_verification_fails_closed_when_unattested(self):
+        self.write_db(self.data / "aetherflow.sqlite", "live-marker")
+        missing_bundle = self.root / "empty-attestations.json"
+        missing_bundle.write_text('{"attestations": []}\n')
+        for tag, channel, prerelease in (
+            ("v4.0.0", "stable", "false"),
+            ("v5.0.0", "stable", "false"),
+            ("v5.0.0-nightly.1.1", "nightly", "true"),
+        ):
+            with self.subTest(tag=tag):
+                self.write_artifact(version=(tag + "\n").encode())
+                releases_json = f'[{{"tag_name":"{tag}","draft":false,"prerelease":{prerelease},"target_commitish":"main"}}]'
+                result = self.run_manager(
+                    "deploy",
+                    "--channel",
+                    channel,
+                    AETHERFLOW_SKIP_PROVENANCE_VERIFY="0",
+                    AETHERFLOW_PROVENANCE_BUNDLE_FILE=str(missing_bundle),
+                    TEST_RELEASES_JSON=releases_json,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Sigstore build provenance verification FAILED", result.stdout + result.stderr)
+                self.assertFalse(self.current.exists())
+        # Pre-v4 downgrade tags must fail closed before download
+        v3_res = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            AETHERFLOW_SKIP_PROVENANCE_VERIFY="0",
+            TEST_RELEASES_JSON='[{"tag_name":"v3.99.0","draft":false,"prerelease":false,"target_commitish":"main"}]',
+        )
+        self.assertNotEqual(v3_res.returncode, 0)
+        self.assertFalse(self.current.exists())
+        # Staging directory must be cleaned up on verification failure
+        leftover_staging = list(self.releases.glob(".staging.*"))
+        self.assertEqual(leftover_staging, [])
+
+    def test_cleanup_prunes_stale_staging_directories_even_below_max_releases(self):
+        stale_stage = self.releases / ".staging.1700000000.abcdef"
+        stale_stage.mkdir(parents=True)
+        (stale_stage / "partial").write_text("leftover\n")
+        stale_native = self.releases / ".staging-1700000000-abcdef"
+        stale_native.mkdir(parents=True)
+        (stale_native / "partial").write_text("leftover\n")
+        old_ts = 1700000000
+        os.utime(stale_stage, (old_ts, old_ts))
+        os.utime(stale_native, (old_ts, old_ts))
+
+        fresh_stage = self.releases / ".staging.fresh.123456"
+        fresh_stage.mkdir(parents=True)
+        fresh_native = self.releases / ".staging-fresh-123456"
+        fresh_native.mkdir(parents=True)
+
+        result = self.run_manager("cleanup")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(stale_stage.exists())
+        self.assertFalse(stale_native.exists())
+        self.assertTrue(fresh_stage.exists())
+        self.assertTrue(fresh_native.exists())
+
+    def test_stage0_migrates_legacy_v3_slot_current_backend_db_and_env(self):
+        v3_slot = self.releases / "v3.2.5"
+        (v3_slot / "backend" / "data").mkdir(parents=True)
+        self.write_db(v3_slot / "backend" / "data" / "aetherflow.sqlite", "v3-slot-marker")
+        (v3_slot / "backend" / ".env").write_text("JWT_SECRET=slot-secret-value\n")
+        self.current.symlink_to(v3_slot)
+
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.marker(self.data / "aetherflow.sqlite"), "v3-slot-marker")
+        self.assertEqual(self.env_file.read_text(), "JWT_SECRET=slot-secret-value\n")
 
 
 if __name__ == "__main__":

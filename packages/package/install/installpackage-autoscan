@@ -20,7 +20,69 @@ PACKAGE_NAME="autoscan"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3030}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p /install
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
+if ! declare -F af_logged >/dev/null 2>&1; then
+    af_logged() {
+        local target="${LOGFILE:-/dev/null}"
+        if [[ "$target" == "/dev/null" ]]; then "$@" >/dev/null 2>&1; return $?; fi
+        local _flock_bin="flock"
+        if ! command -v flock >/dev/null 2>&1 && [[ -x /usr/bin/flock ]]; then _flock_bin="/usr/bin/flock"; fi
+        local _out_r="" _meta=""
+        exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+import fcntl, os, select, stat, sys
+target = sys.argv[1]
+parent_dir = os.path.dirname(target) or "."
+if not os.path.lexists(parent_dir):
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+pst = os.lstat(parent_dir)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    fd = os.open(target, flags, 0o640)
+except OSError:
+    sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
+    raise SystemExit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stderr.write(f"Refusing non-regular or hardlinked logfile target: {target}\n")
+            raise SystemExit(1)
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl & ~getattr(os, "O_NONBLOCK", 0))
+        sys.stdout.write(f"{os.getpid()}:{fd}\n")
+        sys.stdout.flush()
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        poller.poll(5000)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+PYEOF
+        ) || return 1
+        if ! IFS= read -r _meta <&"$_out_r" || [[ ! "$_meta" =~ ^([0-9]+):([0-9]+)$ ]]; then exec {_out_r}<&-; return 1; fi
+        local _hpid="${BASH_REMATCH[1]}" _hfd="${BASH_REMATCH[2]}" lock_fd="" rc=0
+        exec {lock_fd}>>"/proc/${_hpid}/fd/${_hfd}" || { exec {_out_r}<&-; return 1; }
+        "$_flock_bin" -s "$lock_fd" || { exec {lock_fd}>&-; exec {_out_r}<&-; return 1; }
+        exec {_out_r}<&-
+        "$@" >&"$lock_fd" 2>&1 || rc=$?
+        "$_flock_bin" -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&-
+        return "$rc"
+    }
+fi
 
 require_root
 validate_config_paths /etc/autoscan/config.yml
@@ -28,8 +90,8 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 print_warn "Cloudbox Autoscan is archived, unmaintained and feature frozen; future integration incompatibilities will not receive upstream fixes. Existing configuration and data are preserved; no fork is substituted."
 report_progress 10 "Installing prerequisites for Autoscan..."
 
-DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar ca-certificates
 
 if ! id -u autoscan >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/autoscan --shell /usr/sbin/nologin autoscan
@@ -52,10 +114,10 @@ AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/au
 report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
 TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)
 TMP_DIR="$(mktemp -d /tmp/autoscan-extract-XXXXXX)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
-download_file "$AS_URL" "$TMP_BIN" >> "$LOGFILE" 2>&1
+trap '[[ -z "${TMP_DIR:-}" ]] || rm -rf "$TMP_DIR"; rm -f "$TMP_BIN"' EXIT
+af_logged download_file "$AS_URL" "$TMP_BIN"
 if [[ "$AS_URL" == *.tar.gz ]]; then
-    tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan >> "$LOGFILE" 2>&1
+    af_logged tar -xzf "$TMP_BIN" -C "$TMP_DIR" autoscan
     rm -f "$TMP_BIN"
 else
     cp "$TMP_BIN" "$TMP_DIR/autoscan"
@@ -63,7 +125,7 @@ else
 fi
 chmod 755 "$TMP_DIR/autoscan"
 stage_app_archive "$TMP_DIR" /usr/local/bin/autoscan autoscan /etc/autoscan "$PACKAGE_NAME" "." /opt/autoscan "" binary
-rm -rf "$TMP_DIR"
+TMP_DIR=""
 queue_app_version /opt/autoscan/.af-version "${AS_VERSION#v}"
 
 report_progress 75 "Performing Zero-Touch Arr API key auto-discovery for Autoscan..."
@@ -144,9 +206,9 @@ WantedBy=multi-user.target
 EOF
 
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now autoscan >> "$LOGFILE" 2>&1
-systemctl restart autoscan >> "$LOGFILE" 2>&1
+af_logged systemctl daemon-reload
+af_logged systemctl enable --now autoscan
+af_logged systemctl restart autoscan
 systemctl is-active --quiet autoscan
 finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/"
 

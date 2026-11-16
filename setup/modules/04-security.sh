@@ -15,7 +15,11 @@ function _ssdpblock() {
 }
 
 _fw_allowed_ports() {
-	echo "22/tcp 80/tcp 443/tcp 3000/tcp 5757/tcp 8080/tcp 10090:10100/tcp"
+	local ports="22/tcp 80/tcp 443/tcp 10090:10100/tcp"
+	if [[ "${AF_ALLOW_DIRECT_8080:-0}" == "1" || "${AF_ALLOW_DIRECT_8080:-false}" == "true" ]]; then
+		ports="${ports} 3000/tcp 5757/tcp 8080/tcp"
+	fi
+	echo "${ports}"
 }
 
 _setup_firewall() {
@@ -148,19 +152,8 @@ function _lshell() {
 	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	if ! command -v lshell >/dev/null 2>&1; then
 		if ! _af_apt_install lshell >>"${OUTTO}" 2>&1; then
-			cd /root || { printf -- "%s" "Unable to enter /root" && return 1; }
-			rm -rf /root/lshell
-			if git clone https://github.com/ghantoos/lshell.git lshell >>/dev/null 2>&1; then
-				cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
-				python3 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1 \
-					|| pip3 install --break-system-packages . >>/dev/null 2>&1 \
-					|| pip3 install . >>/dev/null 2>&1 \
-					|| true
-				if [[ ! -x /usr/bin/lshell && -x /usr/local/bin/lshell ]]; then
-					ln -sf /usr/local/bin/lshell /usr/bin/lshell
-				fi
-			fi
-			cd /root || true
+			printf -- "%s\n" "ERROR: Failed to install verified lshell package via apt; refusing unpinned source git clone." >>"${OUTTO}"
+			return 1
 		fi
 	fi
 	if [[ "${CODENAME}" == "focal" || "${CODENAME}" == "bionic" ]]; then
@@ -175,16 +168,18 @@ function _lshell() {
 	chmod 770 /var/log/lshell
 }
 
-# function to enable sudo for www-data function
+# Purge legacy sudoers drop-ins without overwriting /etc/sudoers (privileged actions use af-runner)
 function _apachesudo() {
-	mkdir -p /etc/apache2
-	if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
-		install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
-	else
-		echo "ERROR: Invalid sudoers.template; refusing to overwrite /etc/sudoers" >&2
-		return 1
+	if [[ -d /etc/sudoers.d && ! -L /etc/sudoers.d ]]; then
+		find /etc/sudoers.d -maxdepth 1 \( -type f -o -type l \) -name 'aether*' -delete 2>/dev/null || true
 	fi
-	echo -n "${username}" >/etc/apache2/master.txt
+	if [[ ! -L /etc/apache2 ]]; then
+		mkdir -p /etc/apache2
+		if [[ ! -L /etc/apache2/master.txt ]]; then
+			install -o root -g root -m 0640 /dev/null /etc/apache2/master.txt
+			printf '%s' "${username:-}" >/etc/apache2/master.txt
+		fi
+	fi
 	cd || exit 1
 }
 

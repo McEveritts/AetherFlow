@@ -73,12 +73,12 @@ sudo af release status
 
 ### 4. `AES_MASTER_KEY` Validation Error on Startup
 **Symptom**: `aetherflow-api.service` fails to start with an invalid `AES_MASTER_KEY` length error.
-**Cause**: `AES_MASTER_KEY` in `/etc/aetherflow/aetherflow.env` must be either a raw 32-byte string or a Base64-encoded 32-byte key (not a 64-character hex string).
+**Cause**: `AES_MASTER_KEY` in `/etc/aetherflow/aetherflow.env` must represent 32 bytes (256 bits) of key material encoded as a 64-character hexadecimal string, a Base64-encoded 32-byte key, or a raw 32-byte ASCII string.
 **Resolution**:
 ```bash
-openssl rand -base64 32
+openssl rand -hex 32
 ```
-Set `AES_MASTER_KEY=<base64-value>` in `/etc/aetherflow/aetherflow.env` and restart `aetherflow-api`.
+Set `AES_MASTER_KEY=<64-hex-value>` (or a 32-byte `openssl rand -base64 32` value) in `/etc/aetherflow/aetherflow.env` and restart `aetherflow-api`.
 
 > [!CAUTION]
 > Rotating `AES_MASTER_KEY` invalidates previously encrypted secrets (`enc:v1:`) in SQLite. Re-enter AI provider keys in **Settings → FlowAI Engine** after rotating.

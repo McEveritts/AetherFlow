@@ -25,7 +25,7 @@
 //! 4. **Structured Progress & Wire Compatibility**:
 //!    - Emits structured [`PackageProgressEvent`] values and formats lines as
 //!      `[PROGRESS:<pct>] <message>` plus timestamped `[INFO]`/`[WARN]`/`[ERROR]` lines compatible
-//!      with both the legacy Go scanner (`backend/services/privileged_runner.go`) and the Rust
+//!      with both the legacy Go scanner and the Rust
 //!      `consume_package_output` consumer.
 //! 5. **Explicit Failure, Cancellation & Rollback Recovery**:
 //!    - Every file mutation (`WriteTemplateFile`, `WriteSystemdUnit`, `InstallBinary`, `ExtractTarGz`)
@@ -38,6 +38,7 @@
 #[path = "teardown_regressions.rs"]
 mod teardown_regressions;
 
+use crate::legacy_stream_output::BoundedLines;
 use crate::{resolve_package_script_path, SAFE_PKG_ID, SAFE_SERVICE_NAME, SAFE_USERNAME};
 use af_models::PackageRunnerRequest;
 use chrono::Utc;
@@ -58,7 +59,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::Archive;
-use crate::legacy_stream_output::BoundedLines;
 use tokio::process::Command;
 
 // -----------------------------------------------------------------------------
@@ -357,7 +357,10 @@ impl Default for ArtifactVerificationPolicy {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DeclarativeStep {
     /// Runs `apt-get update -y -qq` with `DEBIAN_FRONTEND=noninteractive` and `DPkg::Lock::Timeout=120`.
-    AptUpdate { progress_pct: u8, description: String },
+    AptUpdate {
+        progress_pct: u8,
+        description: String,
+    },
     /// Runs `apt-get install -y -qq <packages>` with validated package identifiers.
     AptInstall {
         packages: Vec<String>,
@@ -406,7 +409,10 @@ pub enum DeclarativeStep {
     },
     /// Probes `/etc/ssh/sshd_config` for a custom `Port <N>` directive and stores `SSH_PORT` in context
     /// (defaulting to `"ssh"` if absent or unreadable).
-    ProbeSshPort { progress_pct: u8, description: String },
+    ProbeSshPort {
+        progress_pct: u8,
+        description: String,
+    },
     /// Generates a self-signed X.509 TLS certificate (`openssl req -x509 -nodes -newkey rsa:4096`)
     /// at a validated managed path with rollback staging and explicit file permissions/ownership.
     GenerateSelfSignedTlsCert {
@@ -437,9 +443,15 @@ pub enum DeclarativeStep {
         progress_pct: u8,
         description: String,
     },
-    EnsureThreadfinConfig { progress_pct: u8, description: String },
+    EnsureThreadfinConfig {
+        progress_pct: u8,
+        description: String,
+    },
     /// Downloads and installs official Rclone binary matching GitHub release discovery.
-    InstallRcloneBinary { progress_pct: u8, description: String },
+    InstallRcloneBinary {
+        progress_pct: u8,
+        description: String,
+    },
     /// Resolves the latest release tag for a GitHub repository (`owner/repo`) with a deterministic fallback version.
     ResolveGitHubReleaseTag {
         repo: String,
@@ -672,7 +684,9 @@ impl CancellationToken {
 
     pub fn check_cancelled(&self) -> Result<(), PackageExecutorError> {
         if self.is_cancelled() {
-            Err(PackageExecutorError::Cancelled("operation cancelled".to_string()))
+            Err(PackageExecutorError::Cancelled(
+                "operation cancelled".to_string(),
+            ))
         } else {
             Ok(())
         }
@@ -781,7 +795,11 @@ pub trait CommandRunner: Send + Sync {
         env_vars: &'a [(String, String)],
         cancel: &'a CancellationToken,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                + Send
+                + 'a,
+        >,
     >;
 
     fn run_command_with_stdin<'a>(
@@ -792,7 +810,11 @@ pub trait CommandRunner: Send + Sync {
         stdin_data: &'a [u8],
         cancel: &'a CancellationToken,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                + Send
+                + 'a,
+        >,
     > {
         let _ = stdin_data;
         self.run_command(program, args, env_vars, cancel)
@@ -909,7 +931,11 @@ impl CommandRunner for TokioCommandRunner {
         env_vars: &'a [(String, String)],
         cancel: &'a CancellationToken,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                + Send
+                + 'a,
+        >,
     > {
         self.run_command_with_stdin(program, args, env_vars, &[], cancel)
     }
@@ -922,7 +948,11 @@ impl CommandRunner for TokioCommandRunner {
         stdin_data: &'a [u8],
         cancel: &'a CancellationToken,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                + Send
+                + 'a,
+        >,
     > {
         let stdin_bytes = stdin_data.to_vec();
         Box::pin(async move {
@@ -1144,7 +1174,9 @@ impl Default for PackageExecutionEnv {
             delete_data,
             keep_existing_secrets,
             artifact_cache_dir,
-            expected_target_version: env::var("AF_TARGET_VERSION").ok().filter(|s| !s.trim().is_empty()),
+            expected_target_version: env::var("AF_TARGET_VERSION")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             scratch_root: Some(PathBuf::from("/var/tmp/aetherflow-scratch")),
             dry_run,
         }
@@ -1166,7 +1198,9 @@ impl PackageExecutionEnv {
             delete_data: false,
             keep_existing_secrets: false,
             artifact_cache_dir: Some(root.join("artifacts")),
-            expected_target_version: env::var("AF_TARGET_VERSION").ok().filter(|s| !s.trim().is_empty()),
+            expected_target_version: env::var("AF_TARGET_VERSION")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             scratch_root: Some(root.join("var/tmp/aetherflow-scratch")),
             dry_run: false,
         }
@@ -1201,7 +1235,10 @@ impl PackageExecutionEnv {
     }
 
     /// Resolves the package completion lockfile (`/install/.<pkg>.lock`).
-    pub fn resolve_lock_file(&self, recipe: &DeclarativePackageRecipe) -> Result<PathBuf, PackageExecutorError> {
+    pub fn resolve_lock_file(
+        &self,
+        recipe: &DeclarativePackageRecipe,
+    ) -> Result<PathBuf, PackageExecutorError> {
         if !recipe.lock_file.trim().is_empty() {
             self.resolve_path(&recipe.lock_file)
         } else {
@@ -1215,7 +1252,11 @@ impl PackageExecutionEnv {
     }
 
     /// Resolves the per-operation log file (`/var/log/aetherflow/<action>-<pkg>.log`).
-    pub fn resolve_log_file(&self, action: PackageAction, pkg_id: &str) -> Result<PathBuf, PackageExecutorError> {
+    pub fn resolve_log_file(
+        &self,
+        action: PackageAction,
+        pkg_id: &str,
+    ) -> Result<PathBuf, PackageExecutorError> {
         let prefix = match action {
             PackageAction::Install | PackageAction::Reinstall | PackageAction::Update => "install",
             PackageAction::Remove => "remove",
@@ -1270,7 +1311,11 @@ pub fn validate_managed_path(logical_path: &str) -> Result<(), PackageExecutorEr
         )));
     }
     let normalized = trimmed.trim_end_matches('/');
-    let check_exact = if normalized.is_empty() { "/" } else { normalized };
+    let check_exact = if normalized.is_empty() {
+        "/"
+    } else {
+        normalized
+    };
     if FORBIDDEN_EXACT_PATHS.contains(&check_exact) {
         return Err(PackageExecutorError::SecurityViolation(format!(
             "refusing to mutate protected system path: {:?}",
@@ -1429,7 +1474,11 @@ pub fn validate_filesystem_symlink_path(
 pub fn validate_chown_target_path(logical_path: &str) -> Result<(), PackageExecutorError> {
     validate_managed_path(logical_path)?;
     let normalized = logical_path.trim().trim_end_matches('/');
-    let check_exact = if normalized.is_empty() { "/" } else { normalized };
+    let check_exact = if normalized.is_empty() {
+        "/"
+    } else {
+        normalized
+    };
     if SHARED_SYSTEM_CHOWN_PATHS.contains(&check_exact) {
         return Err(PackageExecutorError::SecurityViolation(format!(
             "refusing to chown shared system directory: {:?}",
@@ -1669,16 +1718,24 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
             validate_managed_path(dest_path)
         }
         DeclarativeStep::MergeIniSettings {
-            path, section, settings, ..
+            path,
+            section,
+            settings,
+            ..
         } => {
             validate_managed_path(path)?;
-            if section.is_empty() || section.contains(['\n', '\r', '[', ']'])
-                || settings.is_empty() || settings.iter().any(|(key, value)| {
-                    key.is_empty() || key.contains(['\n', '\r', '=', '[', ']'])
+            if section.is_empty()
+                || section.contains(['\n', '\r', '[', ']'])
+                || settings.is_empty()
+                || settings.iter().any(|(key, value)| {
+                    key.is_empty()
+                        || key.contains(['\n', '\r', '=', '[', ']'])
                         || value.contains(['\n', '\r'])
                 })
             {
-                return Err(PackageExecutorError::Validation("invalid INI settings".into()));
+                return Err(PackageExecutorError::Validation(
+                    "invalid INI settings".into(),
+                ));
             }
             Ok(())
         }
@@ -1801,10 +1858,10 @@ pub fn verify_elf_header_architecture(
         u16::from_le_bytes([header[18], header[19]])
     };
     let actual_arch = match e_machine {
-        62 => Some("amd64"),  // EM_X86_64
-        183 => Some("arm64"), // EM_AARCH64
-        40 => Some("armhf"),  // EM_ARM
-        3 => Some("i386"),    // EM_386
+        62 => Some("amd64"),    // EM_X86_64
+        183 => Some("arm64"),   // EM_AARCH64
+        40 => Some("armhf"),    // EM_ARM
+        3 => Some("i386"),      // EM_386
         243 => Some("riscv64"), // EM_RISCV
         _ => None,
     };
@@ -1890,7 +1947,11 @@ pub fn verify_artifact_file_for_arch(
     }
     if policy.require_elf_magic {
         if let Some(arch) = target_arch {
-            verify_elf_header_architecture(&header[..head_read], arch, &path.display().to_string())?;
+            verify_elf_header_architecture(
+                &header[..head_read],
+                arch,
+                &path.display().to_string(),
+            )?;
         }
     }
 
@@ -1957,9 +2018,7 @@ enum RollbackEntry {
         link_target: PathBuf,
     },
     /// A file that did not exist before the execution and should be removed on failure/cancellation.
-    CreatedFile {
-        target: PathBuf,
-    },
+    CreatedFile { target: PathBuf },
     /// A systemd unit that was newly written and should be stopped/disabled/removed on rollback.
     CreatedSystemdUnit {
         unit_name: String,
@@ -2059,16 +2118,10 @@ fn restore_directory_snapshot_atomic(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("state");
-    let staging_dir = target_dir.with_file_name(format!(
-        ".{}.af-restore-{}",
-        dir_name,
-        uuid::Uuid::new_v4()
-    ));
-    let old_dir = target_dir.with_file_name(format!(
-        ".{}.af-old-{}",
-        dir_name,
-        uuid::Uuid::new_v4()
-    ));
+    let staging_dir =
+        target_dir.with_file_name(format!(".{}.af-restore-{}", dir_name, uuid::Uuid::new_v4()));
+    let old_dir =
+        target_dir.with_file_name(format!(".{}.af-old-{}", dir_name, uuid::Uuid::new_v4()));
     validate_filesystem_path(&staging_dir, root_bound)?;
     validate_filesystem_path(&old_dir, root_bound)?;
 
@@ -2086,9 +2139,10 @@ fn restore_directory_snapshot_atomic(
                     let dst_path = staging_dir.join(&fname);
                     if let Ok(meta) = fs::symlink_metadata(&src_path) {
                         if meta.is_file() {
-                            if let (Ok(mut s), Ok(mut d)) =
-                                (File::open(&src_path), open_new_private_file(&dst_path, 0o600))
-                            {
+                            if let (Ok(mut s), Ok(mut d)) = (
+                                File::open(&src_path),
+                                open_new_private_file(&dst_path, 0o600),
+                            ) {
                                 let _ = std::io::copy(&mut s, &mut d);
                                 let _ = d.set_permissions(meta.permissions());
                                 let _ = d.sync_all();
@@ -2145,12 +2199,19 @@ pub(crate) struct RollbackJournal {
 
 impl RollbackJournal {
     fn new(fs_root: Option<PathBuf>) -> Self {
-        Self { fs_root, ..Self::default() }
+        Self {
+            fs_root,
+            ..Self::default()
+        }
     }
 
     fn stage_directory_snapshot(&mut self, target_dir: &Path) -> Result<(), PackageExecutorError> {
         validate_filesystem_path(target_dir, self.fs_root.as_deref())?;
-        if self.dir_snapshots.iter().any(|s| s.target_dir == target_dir) {
+        if self
+            .dir_snapshots
+            .iter()
+            .any(|s| s.target_dir == target_dir)
+        {
             return Ok(());
         }
         match fs::symlink_metadata(target_dir) {
@@ -2164,11 +2225,7 @@ impl RollbackJournal {
                 if meta.is_dir() {
                     let backup_dir = backup_dir_path_for(target_dir);
                     validate_filesystem_path(&backup_dir, self.fs_root.as_deref())?;
-                    copy_dir_snapshot_recursive(
-                        target_dir,
-                        &backup_dir,
-                        self.fs_root.as_deref(),
-                    )?;
+                    copy_dir_snapshot_recursive(target_dir, &backup_dir, self.fs_root.as_deref())?;
                     self.dir_snapshots.push(DirectorySnapshot {
                         target_dir: target_dir.to_path_buf(),
                         backup_dir,
@@ -2191,9 +2248,7 @@ impl RollbackJournal {
     fn record_apt_upgrade(&mut self, package: &str, prior_version: &str) {
         let pkg = package.trim();
         let ver = prior_version.trim();
-        if !pkg.is_empty()
-            && !ver.is_empty()
-            && !self.apt_downgrades.iter().any(|(p, _)| p == pkg)
+        if !pkg.is_empty() && !ver.is_empty() && !self.apt_downgrades.iter().any(|(p, _)| p == pkg)
         {
             self.apt_downgrades.push((pkg.to_string(), ver.to_string()));
         }
@@ -2241,7 +2296,9 @@ impl RollbackJournal {
                                 Some((meta.uid(), meta.gid()))
                             }
                             #[cfg(not(unix))]
-                            { None }
+                            {
+                                None
+                            }
                         },
                     });
                 } else {
@@ -2264,7 +2321,10 @@ impl RollbackJournal {
     /// Prepares a path (symlink or regular file) for mutation: if `target` exists as a symlink,
     /// preserves its link target in [`RollbackEntry::RestorableSymlink`]; if it exists as a regular
     /// file, backs it up to `<target>.bak-af`; otherwise records it as a newly created file.
-    fn stage_symlink_or_file_mutation(&mut self, target: &Path) -> Result<(), PackageExecutorError> {
+    fn stage_symlink_or_file_mutation(
+        &mut self,
+        target: &Path,
+    ) -> Result<(), PackageExecutorError> {
         validate_filesystem_symlink_path(target, self.fs_root.as_deref())?;
 
         let already_staged = self.entries.iter().any(|e| match e {
@@ -2303,7 +2363,9 @@ impl RollbackJournal {
                                 Some((meta.uid(), meta.gid()))
                             }
                             #[cfg(not(unix))]
-                            { None }
+                            {
+                                None
+                            }
                         },
                     });
                 } else {
@@ -2402,10 +2464,7 @@ impl RollbackJournal {
                 )
                 .await;
             let still_active = match &active_res {
-                Ok(out) => matches!(
-                    out.stdout.trim(),
-                    "active" | "activating" | "reloading"
-                ),
+                Ok(out) => matches!(out.stdout.trim(), "active" | "activating" | "reloading"),
                 Err(_) => true,
             };
             if !stop_ok || still_active {
@@ -2470,7 +2529,8 @@ impl RollbackJournal {
                             &noop_cancel,
                         )
                         .await;
-                    if let Err(err) = validate_filesystem_path(&unit_path, self.fs_root.as_deref()) {
+                    if let Err(err) = validate_filesystem_path(&unit_path, self.fs_root.as_deref())
+                    {
                         notes.push(format!(
                             "skipped unsafe rollback path {}: {}",
                             unit_path.display(),
@@ -2481,8 +2541,13 @@ impl RollbackJournal {
                         notes.push(format!("rolled back systemd unit {}", unit_name));
                     }
                 }
-                RollbackEntry::RestorableSymlink { target, link_target } => {
-                    if let Err(err) = validate_filesystem_symlink_path(&target, self.fs_root.as_deref()) {
+                RollbackEntry::RestorableSymlink {
+                    target,
+                    link_target,
+                } => {
+                    if let Err(err) =
+                        validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
+                    {
                         let msg = format!(
                             "skipped unsafe backup restore for symlink {}: {}",
                             target.display(),
@@ -2496,25 +2561,43 @@ impl RollbackJournal {
                     #[cfg(unix)]
                     {
                         let parent = target.parent().unwrap_or_else(|| Path::new("/"));
-                        let tmp_symlink = parent.join(format!(".af-restore-link-{}", uuid::Uuid::new_v4()));
+                        let tmp_symlink =
+                            parent.join(format!(".af-restore-link-{}", uuid::Uuid::new_v4()));
                         let _ = fs::remove_file(&tmp_symlink);
                         if let Err(e) = std::os::unix::fs::symlink(&link_target, &tmp_symlink) {
-                            let msg = format!("failed to restore symlink {} -> {}: {}", target.display(), link_target.display(), e);
+                            let msg = format!(
+                                "failed to restore symlink {} -> {}: {}",
+                                target.display(),
+                                link_target.display(),
+                                e
+                            );
                             notes.push(msg.clone());
                             incomplete_errors.push(msg);
                             state_restore_failed = true;
                         } else if let Err(e) = fs::rename(&tmp_symlink, &target) {
                             let _ = fs::remove_file(&tmp_symlink);
-                            let msg = format!("failed to rename restored symlink over {}: {}", target.display(), e);
+                            let msg = format!(
+                                "failed to rename restored symlink over {}: {}",
+                                target.display(),
+                                e
+                            );
                             notes.push(msg.clone());
                             incomplete_errors.push(msg);
                             state_restore_failed = true;
                         } else {
-                            notes.push(format!("restored symlink backup for {} -> {}", target.display(), link_target.display()));
+                            notes.push(format!(
+                                "restored symlink backup for {} -> {}",
+                                target.display(),
+                                link_target.display()
+                            ));
                         }
                     }
                 }
-                RollbackEntry::RestorableFile { target, backup, ownership } => {
+                RollbackEntry::RestorableFile {
+                    target,
+                    backup,
+                    ownership,
+                } => {
                     if let Err(err) = validate_filesystem_path(&target, self.fs_root.as_deref())
                         .and_then(|_| validate_filesystem_path(&backup, self.fs_root.as_deref()))
                     {
@@ -2530,18 +2613,21 @@ impl RollbackJournal {
                     }
                     if backup.is_file() {
                         if let Some((owner_uid, owner_gid)) = ownership {
-                            let result = runner.run_command(
-                                "chown",
-                                &[
-                                    "-h".to_string(),
-                                    format!("{}:{}", owner_uid, owner_gid),
-                                    backup.to_string_lossy().to_string(),
-                                ],
-                                &[],
-                                &noop_cancel,
-                            ).await;
+                            let result = runner
+                                .run_command(
+                                    "chown",
+                                    &[
+                                        "-h".to_string(),
+                                        format!("{}:{}", owner_uid, owner_gid),
+                                        backup.to_string_lossy().to_string(),
+                                    ],
+                                    &[],
+                                    &noop_cancel,
+                                )
+                                .await;
                             if !matches!(result, Ok(output) if output.success()) {
-                                let msg = format!("failed to restore ownership for {}", target.display());
+                                let msg =
+                                    format!("failed to restore ownership for {}", target.display());
                                 notes.push(msg.clone());
                                 incomplete_errors.push(msg);
                                 state_restore_failed = true;
@@ -2573,7 +2659,9 @@ impl RollbackJournal {
                     }
                 }
                 RollbackEntry::CreatedFile { target } => {
-                    if let Err(err) = validate_filesystem_symlink_path(&target, self.fs_root.as_deref()) {
+                    if let Err(err) =
+                        validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
+                    {
                         notes.push(format!(
                             "skipped unsafe rollback removal for {}: {}",
                             target.display(),
@@ -2674,9 +2762,15 @@ impl RollbackJournal {
         if !service_quiescence_failed && !state_restore_failed && !package_downgrade_failed {
             for entry in deferred_receipt_entries {
                 match entry {
-                    RollbackEntry::RestorableFile { target, backup, ownership } => {
+                    RollbackEntry::RestorableFile {
+                        target,
+                        backup,
+                        ownership,
+                    } => {
                         if let Err(err) = validate_filesystem_path(&target, self.fs_root.as_deref())
-                            .and_then(|_| validate_filesystem_path(&backup, self.fs_root.as_deref()))
+                            .and_then(|_| {
+                                validate_filesystem_path(&backup, self.fs_root.as_deref())
+                            })
                         {
                             let msg = format!(
                                 "skipped unsafe receipt restore for {}: {}",
@@ -2737,18 +2831,27 @@ impl RollbackJournal {
                             }
                         }
                     }
-                    RollbackEntry::RestorableSymlink { target, link_target } => {
-                        if validate_filesystem_symlink_path(&target, self.fs_root.as_deref()).is_ok() {
+                    RollbackEntry::RestorableSymlink {
+                        target,
+                        link_target,
+                    } => {
+                        if validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
+                            .is_ok()
+                        {
                             #[cfg(unix)]
                             {
                                 let _ = fs::remove_file(&target);
                                 let _ = std::os::unix::fs::symlink(&link_target, &target);
-                                notes.push(format!("restored symlink receipt for {}", target.display()));
+                                notes.push(format!(
+                                    "restored symlink receipt for {}",
+                                    target.display()
+                                ));
                             }
                         }
                     }
                     RollbackEntry::CreatedFile { target } => {
-                        if validate_filesystem_symlink_path(&target, self.fs_root.as_deref()).is_ok()
+                        if validate_filesystem_symlink_path(&target, self.fs_root.as_deref())
+                            .is_ok()
                             && (target.is_file() || fs::symlink_metadata(&target).is_ok())
                         {
                             let _ = fs::remove_file(&target);
@@ -2834,7 +2937,10 @@ fn write_file_atomic_with_mode_bounded(
     }
     validate_filesystem_path(target, root_bound)?;
 
-    let filename = target.file_name().and_then(|value| value.to_str()).unwrap_or("artifact");
+    let filename = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact");
     let temporary = target.with_file_name(format!(".{}.af-tmp-{}", filename, uuid::Uuid::new_v4()));
     let result = (|| -> Result<(), PackageExecutorError> {
         let mut file = open_new_private_file(&temporary, mode)?;
@@ -3190,7 +3296,9 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                 autoremove: false,
                 ignore_errors: false,
                 progress_pct: 20,
-                description: "Removing fail2ban APT package (purging only with DELETE_DATA=true)...".to_string(),
+                description:
+                    "Removing fail2ban APT package (purging only with DELETE_DATA=true)..."
+                        .to_string(),
             },
             DeclarativeStep::PurgeSystemdUnit {
                 unit_name: "fail2ban.service".to_string(),
@@ -3198,13 +3306,12 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                 description: "Stopping and disabling fail2ban.service...".to_string(),
             },
             DeclarativeStep::RemovePaths {
-                paths: vec![
-                    "/etc/fail2ban".to_string(),
-                    "/var/lib/fail2ban".to_string(),
-                ],
+                paths: vec!["/etc/fail2ban".to_string(), "/var/lib/fail2ban".to_string()],
                 only_if_delete_data: true,
                 progress_pct: 80,
-                description: "Purging Fail2ban configuration and state only with DELETE_DATA=true...".to_string(),
+                description:
+                    "Purging Fail2ban configuration and state only with DELETE_DATA=true..."
+                        .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
@@ -3213,7 +3320,8 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                 ],
                 only_if_delete_data: false,
                 progress_pct: 85,
-                description: "Removing Fail2ban runtime directory and version marker...".to_string(),
+                description: "Removing Fail2ban runtime directory and version marker..."
+                    .to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -3806,7 +3914,8 @@ fn build_znc_recipe() -> DeclarativePackageRecipe {
                 ],
                 only_if_delete_data: true,
                 progress_pct: 78,
-                description: "Removing /var/lib/znc data directory (when DELETE_DATA=true)...".to_string(),
+                description: "Removing /var/lib/znc data directory (when DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::PurgeSystemUser {
                 username: "znc".to_string(),
@@ -4111,13 +4220,11 @@ fn build_novnc_recipe() -> DeclarativePackageRecipe {
                 description: "Removing noVNC runtime version marker...".to_string(),
             },
             DeclarativeStep::RemovePaths {
-                paths: vec![
-                    "/etc/novnc".to_string(),
-                    "/var/lib/novnc".to_string(),
-                ],
+                paths: vec!["/etc/novnc".to_string(), "/var/lib/novnc".to_string()],
                 only_if_delete_data: true,
                 progress_pct: 82,
-                description: "Removing /var/lib/novnc state directory (when DELETE_DATA=true)...".to_string(),
+                description: "Removing /var/lib/novnc state directory (when DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::PurgeSystemUser {
                 username: "novnc".to_string(),
@@ -4207,10 +4314,7 @@ fn build_x2go_recipe() -> DeclarativePackageRecipe {
                 description: "Stopping and disabling x2goserver.service...".to_string(),
             },
             DeclarativeStep::AptPurge {
-                packages: vec![
-                    "x2goserver".to_string(),
-                    "x2goserver-xsession".to_string(),
-                ],
+                packages: vec!["x2goserver".to_string(), "x2goserver-xsession".to_string()],
                 autoremove: true,
                 ignore_errors: true,
                 progress_pct: 60,
@@ -4229,7 +4333,8 @@ fn build_x2go_recipe() -> DeclarativePackageRecipe {
                 paths: vec!["/etc/x2go".to_string(), "/var/lib/x2go".to_string()],
                 only_if_delete_data: true,
                 progress_pct: 85,
-                description: "Removing X2Go state directories (when DELETE_DATA=true)...".to_string(),
+                description: "Removing X2Go state directories (when DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -4388,7 +4493,8 @@ fn build_prometheus_recipe() -> DeclarativePackageRecipe {
                 ],
                 only_if_delete_data: false,
                 progress_pct: 65,
-                description: "Removing Prometheus runtime version marker and binary symlinks...".to_string(),
+                description: "Removing Prometheus runtime version marker and binary symlinks..."
+                    .to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
@@ -4428,10 +4534,7 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
             description: "Installing netdata APT package...".to_string(),
         },
         DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/etc/netdata".to_string(),
-                "/var/lib/netdata".to_string(),
-            ],
+            paths: vec!["/etc/netdata".to_string(), "/var/lib/netdata".to_string()],
             mode: 0o755,
             owner: None,
             group: None,
@@ -4456,7 +4559,8 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
             ],
             mode: 0o644,
             progress_pct: 75,
-            description: "Writing /etc/netdata/netdata.conf bound to 127.0.0.1:{{APP_PORT}}...".to_string(),
+            description: "Writing /etc/netdata/netdata.conf bound to 127.0.0.1:{{APP_PORT}}..."
+                .to_string(),
         },
         DeclarativeStep::Systemctl {
             unit: None,
@@ -4482,7 +4586,9 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
         DeclarativeStep::WaitForHttpReady {
             path: "/api/v1/info".to_string(),
             progress_pct: 98,
-            description: "Verifying Netdata HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/api/v1/info...".to_string(),
+            description:
+                "Verifying Netdata HTTP listener readiness on 127.0.0.1:{{APP_PORT}}/api/v1/info..."
+                    .to_string(),
         },
     ];
     DeclarativePackageRecipe {
@@ -4526,7 +4632,8 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
                 ],
                 only_if_delete_data: true,
                 progress_pct: 88,
-                description: "Removing Netdata state and logs (when DELETE_DATA=true)...".to_string(),
+                description: "Removing Netdata state and logs (when DELETE_DATA=true)..."
+                    .to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -4721,7 +4828,10 @@ pub fn detect_rclone_separate_api_port_for_root(
     let is_explicit_rcd = vars
         .get("RCLONE_WEB_MODE")
         .map(|v| v.eq_ignore_ascii_case("rcd"))
-        .or_else(|| vars.get("RCLONE_MODE").map(|v| v.eq_ignore_ascii_case("rcd")))
+        .or_else(|| {
+            vars.get("RCLONE_MODE")
+                .map(|v| v.eq_ignore_ascii_case("rcd"))
+        })
         .unwrap_or(false);
     if is_explicit_rcd {
         return None;
@@ -4729,26 +4839,28 @@ pub fn detect_rclone_separate_api_port_for_root(
 
     // 2. Next, determine the target unit name being verified (from variables.get("SYSTEMD_UNIT")
     // or variables.get("SERVICE_NAME"), defaulting to "rclone.service" when rclone.service exists on disk).
-    let rclone_svc_path = if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
-        PathBuf::from("/etc/systemd/system/rclone.service")
-    } else {
-        effective_root.join("etc/systemd/system/rclone.service")
-    };
-    let rclone_web_svc_path = if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
-        PathBuf::from("/etc/systemd/system/rclone-web.service")
-    } else {
-        effective_root.join("etc/systemd/system/rclone-web.service")
-    };
+    let rclone_svc_path =
+        if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
+            PathBuf::from("/etc/systemd/system/rclone.service")
+        } else {
+            effective_root.join("etc/systemd/system/rclone.service")
+        };
+    let rclone_web_svc_path =
+        if effective_root == Path::new("/") || effective_root.as_os_str().is_empty() {
+            PathBuf::from("/etc/systemd/system/rclone-web.service")
+        } else {
+            effective_root.join("etc/systemd/system/rclone-web.service")
+        };
 
     let requested_unit = vars
         .get("SYSTEMD_UNIT")
         .or_else(|| vars.get("SERVICE_NAME"))
         .map(|s| s.trim());
 
-    let is_rclone_web_requested = requested_unit
-        .map_or(false, |u| u == "rclone-web" || u == "rclone-web.service");
-    let is_rclone_requested = requested_unit
-        .map_or(false, |u| u == "rclone" || u == "rclone.service");
+    let is_rclone_web_requested =
+        requested_unit.is_some_and(|u| u == "rclone-web" || u == "rclone-web.service");
+    let is_rclone_requested =
+        requested_unit.is_some_and(|u| u == "rclone" || u == "rclone.service");
 
     let units_to_check: Vec<(&str, PathBuf)> = if is_rclone_web_requested {
         vec![("rclone-web.service", rclone_web_svc_path)]
@@ -4811,11 +4923,17 @@ pub fn detect_rclone_separate_api_port_for_root(
     let is_explicit_gui = vars
         .get("RCLONE_WEB_MODE")
         .map(|v| v.eq_ignore_ascii_case("gui"))
-        .or_else(|| vars.get("RCLONE_MODE").map(|v| v.eq_ignore_ascii_case("gui")))
+        .or_else(|| {
+            vars.get("RCLONE_MODE")
+                .map(|v| v.eq_ignore_ascii_case("gui"))
+        })
         .unwrap_or(false);
 
     if is_explicit_gui {
-        if let Some(p) = vars.get("RCLONE_API_PORT").and_then(|v| v.parse::<u16>().ok()) {
+        if let Some(p) = vars
+            .get("RCLONE_API_PORT")
+            .and_then(|v| v.parse::<u16>().ok())
+        {
             if p != app_port {
                 return Some(p);
             }
@@ -5127,7 +5245,9 @@ fn build_syncthing_recipe() -> DeclarativePackageRecipe {
                 paths: vec!["/var/lib/syncthing".to_string()],
                 only_if_delete_data: true,
                 progress_pct: 78,
-                description: "Removing /var/lib/syncthing state directory (when DELETE_DATA=true)...".to_string(),
+                description:
+                    "Removing /var/lib/syncthing state directory (when DELETE_DATA=true)..."
+                        .to_string(),
             },
             DeclarativeStep::PurgeSystemUser {
                 username: "syncthing".to_string(),
@@ -5155,7 +5275,11 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
         }
     };
 
-    for step in recipe.install_steps.iter().chain(recipe.update_steps.iter()) {
+    for step in recipe
+        .install_steps
+        .iter()
+        .chain(recipe.update_steps.iter())
+    {
         match step {
             DeclarativeStep::EnsureDirectories { paths, .. } => {
                 for path in paths {
@@ -5169,7 +5293,7 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
                 }
             }
             DeclarativeStep::WriteTemplateFile { path, .. }
-            | DeclarativeStep::MergeIniSettings { path, .. } => {
+            | DeclarativeStep::MergeIniSettings { path, .. }
                 if (path.starts_with("/var/lib/")
                     || path.starts_with("/etc/")
                     || path.contains("/.config/")
@@ -5178,12 +5302,11 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
                     && !path.starts_with("/etc/apt/")
                     && !path.starts_with("/etc/nginx/")
                     && !path.starts_with("/etc/sudoers")
-                    && !path.starts_with("/etc/cron")
-                {
-                    if let Some(parent) = Path::new(path).parent().and_then(|p| p.to_str()) {
-                        if parent != "/etc" && parent != "/var/lib" && parent != "/var" {
-                            push_unique(parent);
-                        }
+                    && !path.starts_with("/etc/cron") =>
+            {
+                if let Some(parent) = Path::new(path).parent().and_then(|p| p.to_str()) {
+                    if parent != "/etc" && parent != "/var/lib" && parent != "/var" {
+                        push_unique(parent);
                     }
                 }
             }
@@ -5239,8 +5362,14 @@ fn recipe_mutable_state_dirs(recipe: &DeclarativePackageRecipe) -> Vec<String> {
     dirs
 }
 
-pub(crate) fn recipe_version_file_logical_path(recipe: &DeclarativePackageRecipe) -> Option<String> {
-    for step in recipe.install_steps.iter().chain(recipe.update_steps.iter()) {
+pub(crate) fn recipe_version_file_logical_path(
+    recipe: &DeclarativePackageRecipe,
+) -> Option<String> {
+    for step in recipe
+        .install_steps
+        .iter()
+        .chain(recipe.update_steps.iter())
+    {
         if let DeclarativeStep::CaptureDpkgVersion {
             version_file_path: Some(version_file),
             ..
@@ -5257,8 +5386,15 @@ pub(crate) fn recipe_version_file_logical_path(recipe: &DeclarativePackageRecipe
     Some(format!("/opt/{}/.af-version", recipe.package_id))
 }
 
-fn recipe_primary_apt_package(recipe: &DeclarativePackageRecipe, packages: &[String]) -> Option<String> {
-    for step in recipe.install_steps.iter().chain(recipe.update_steps.iter()) {
+fn recipe_primary_apt_package(
+    recipe: &DeclarativePackageRecipe,
+    packages: &[String],
+) -> Option<String> {
+    for step in recipe
+        .install_steps
+        .iter()
+        .chain(recipe.update_steps.iter())
+    {
         if let DeclarativeStep::CaptureDpkgVersion { package, .. } = step {
             if packages.iter().any(|p| p == package) {
                 return Some(package.clone());
@@ -5298,16 +5434,26 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         journal: &mut RollbackJournal,
         cancel: &CancellationToken,
     ) -> Result<String, PackageExecutorError> {
-        let systemd_root = self.env_cfg.fs_root.as_ref()
+        let systemd_root = self
+            .env_cfg
+            .fs_root
+            .as_ref()
             .map(|root| root.join("etc/systemd/system"))
             .unwrap_or_else(|| PathBuf::from("/etc/systemd/system"));
         let status = apply_sandbox_in_root_with_journal(
-            package_id, &systemd_root, Some(journal), self.env_cfg.fs_root.as_deref(),
+            package_id,
+            &systemd_root,
+            Some(journal),
+            self.env_cfg.fs_root.as_deref(),
         )?;
-        let output = self.runner.run_command("systemctl", &["daemon-reload".to_string()], &[], cancel).await?;
+        let output = self
+            .runner
+            .run_command("systemctl", &["daemon-reload".to_string()], &[], cancel)
+            .await?;
         if !output.success() {
             return Err(PackageExecutorError::StepFailed {
-                step: "apply_systemd_sandbox".to_string(), reason: output.combined_output(),
+                step: "apply_systemd_sandbox".to_string(),
+                reason: output.combined_output(),
             });
         }
         Ok(status)
@@ -5328,17 +5474,26 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
         }
         if let (None, Some(owner_name)) = (self.env_cfg.fs_root.as_ref(), owner) {
-                let group_name = group.unwrap_or(owner_name);
-                let output = self.runner.run_command("chown", &[
-                    "-h".to_string(),
-                    format!("{}:{}", owner_name, group_name),
-                    path.to_string_lossy().to_string(),
-                ], &[], cancel).await?;
-                if !output.success() {
-                    return Err(PackageExecutorError::StepFailed {
-                        step: "apply_file_metadata".to_string(), reason: output.combined_output(),
-                    });
-                }
+            let group_name = group.unwrap_or(owner_name);
+            let output = self
+                .runner
+                .run_command(
+                    "chown",
+                    &[
+                        "-h".to_string(),
+                        format!("{}:{}", owner_name, group_name),
+                        path.to_string_lossy().to_string(),
+                    ],
+                    &[],
+                    cancel,
+                )
+                .await?;
+            if !output.success() {
+                return Err(PackageExecutorError::StepFailed {
+                    step: "apply_file_metadata".to_string(),
+                    reason: output.combined_output(),
+                });
+            }
         }
         Ok(())
     }
@@ -5398,9 +5553,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         let steps = recipe.steps_for_action(action);
         let total_steps = steps.len();
         let lock_file_path = self.env_cfg.resolve_lock_file(recipe)?;
-        let log_file_path = self
-            .env_cfg
-            .resolve_log_file(action, &recipe.package_id)?;
+        let log_file_path = self.env_cfg.resolve_log_file(action, &recipe.package_id)?;
         if let Some(parent) = log_file_path.parent() {
             validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
             let _ = fs::create_dir_all(parent);
@@ -5483,7 +5636,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         };
 
         let (master_user, mut master_pass) =
-            resolve_master_credentials(self.env_cfg.fs_root.as_deref());
+            try_resolve_master_credentials(self.env_cfg.fs_root.as_deref())
+                .map_err(|e| PackageExecutorError::SecurityViolation(e.to_string()))?;
         if let Some(explicit_pass) = self.resolve_explicit_password() {
             master_pass = explicit_pass;
         }
@@ -5550,7 +5704,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 pass.unwrap_or_else(|| {
-                    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+                    format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().simple(),
+                        uuid::Uuid::new_v4().simple()
+                    )
                 })
             };
             vars.insert("RCLONE_PASS".to_string(), rclone_pass);
@@ -5562,24 +5720,38 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             let is_gui = vars
                 .get("RCLONE_WEB_MODE")
                 .map(|v| v.eq_ignore_ascii_case("gui"))
-                .or_else(|| vars.get("RCLONE_MODE").map(|v| v.eq_ignore_ascii_case("gui")))
+                .or_else(|| {
+                    vars.get("RCLONE_MODE")
+                        .map(|v| v.eq_ignore_ascii_case("gui"))
+                })
                 .unwrap_or_else(|| {
                     detect_rclone_exec_start_for_root(effective_root).contains("rclone gui")
                 });
             if is_gui {
                 vars.insert("RCLONE_WEB_MODE".to_string(), "gui".to_string());
                 vars.insert("RCLONE_MODE".to_string(), "gui".to_string());
-                vars.insert("RCLONE_API_PORT".to_string(), app_port_num.saturating_add(1).to_string());
+                vars.insert(
+                    "RCLONE_API_PORT".to_string(),
+                    app_port_num.saturating_add(1).to_string(),
+                );
             } else {
                 vars.insert("RCLONE_WEB_MODE".to_string(), "rcd".to_string());
                 vars.insert("RCLONE_MODE".to_string(), "rcd".to_string());
             }
         }
-        if let Some(target) = self.env_cfg.expected_target_version.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(target) = self
+            .env_cfg
+            .expected_target_version
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             vars.insert("AF_TARGET_VERSION".to_string(), target.trim().to_string());
             vars.insert("TARGET_VERSION".to_string(), target.trim().to_string());
         }
-        vars.insert("AF_JOB_SCRATCH_ROOT".to_string(), "/var/tmp/aetherflow-scratch".to_string());
+        vars.insert(
+            "AF_JOB_SCRATCH_ROOT".to_string(),
+            "/var/tmp/aetherflow-scratch".to_string(),
+        );
 
         self.emit_event(
             &recipe.package_id,
@@ -5617,14 +5789,18 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                     DeclarativeStep::Systemctl {
                         unit: Some(unit),
-                        operation: SystemctlOp::Stop | SystemctlOp::Disable | SystemctlOp::ResetFailed,
+                        operation:
+                            SystemctlOp::Stop | SystemctlOp::Disable | SystemctlOp::ResetFailed,
                         ..
                     } => units.push(normalize_unit_filename(unit)),
                     _ => {}
                 }
             }
             units.sort_by_key(|unit| {
-                (!unit.ends_with(".timer") && !unit.ends_with(".socket"), unit.clone())
+                (
+                    !unit.ends_with(".timer") && !unit.ends_with(".socket"),
+                    unit.clone(),
+                )
             });
             units.dedup();
             for unit in &units {
@@ -5659,14 +5835,14 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 && matches!(
                     step,
                     DeclarativeStep::AptInstall { .. }
-                    | DeclarativeStep::Systemctl {
-                        operation: SystemctlOp::DaemonReload
-                            | SystemctlOp::EnableNow
-                            | SystemctlOp::Enable
-                            | SystemctlOp::Start
-                            | SystemctlOp::Restart,
-                        ..
-                    }
+                        | DeclarativeStep::Systemctl {
+                            operation: SystemctlOp::DaemonReload
+                                | SystemctlOp::EnableNow
+                                | SystemctlOp::Enable
+                                | SystemctlOp::Start
+                                | SystemctlOp::Restart,
+                            ..
+                        }
                 )
             {
                 let (step_pct, _) = step_progress_meta(step);
@@ -5843,22 +6019,27 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             if action == PackageAction::Remove {
                 append_log_line(&log_file_path, "[WARN] Removal incomplete; installed marker retained. Retry removal to reconcile package state.");
             }
-            let final_err = if let Some(incomplete_reason) = journal.incomplete_rollback_error.take() {
-                match err {
-                    PackageExecutorError::StepFailed { step, reason } => {
-                        PackageExecutorError::StepFailed {
-                            step,
-                            reason: format!("{reason}; incomplete rollback/recovery: {incomplete_reason}"),
+            let final_err =
+                if let Some(incomplete_reason) = journal.incomplete_rollback_error.take() {
+                    match err {
+                        PackageExecutorError::StepFailed { step, reason } => {
+                            PackageExecutorError::StepFailed {
+                                step,
+                                reason: format!(
+                                    "{reason}; incomplete rollback/recovery: {incomplete_reason}"
+                                ),
+                            }
                         }
+                        other => PackageExecutorError::StepFailed {
+                            step: "rollback_journal".to_string(),
+                            reason: format!(
+                                "{other}; incomplete rollback/recovery: {incomplete_reason}"
+                            ),
+                        },
                     }
-                    other => PackageExecutorError::StepFailed {
-                        step: "rollback_journal".to_string(),
-                        reason: format!("{other}; incomplete rollback/recovery: {incomplete_reason}"),
-                    },
-                }
-            } else {
-                err
-            };
+                } else {
+                    err
+                };
             self.emit_event(
                 &recipe.package_id,
                 action,
@@ -5866,7 +6047,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 completed_steps,
                 total_steps,
                 99,
-                format!("Package {} {} failed: {}", recipe.package_id, action.as_str(), final_err),
+                format!(
+                    "Package {} {} failed: {}",
+                    recipe.package_id,
+                    action.as_str(),
+                    final_err
+                ),
                 &log_file_path,
                 &mut logs,
                 &mut on_progress,
@@ -5957,33 +6143,45 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         unit: &str,
         cancel: &CancellationToken,
     ) -> Result<(), PackageExecutorError> {
-        let output = self.runner.run_command(
-            "systemctl",
-            &[operation.to_string(), "--".to_string(), unit.to_string()],
-            &[],
-            cancel,
-        ).await?;
+        let output = self
+            .runner
+            .run_command(
+                "systemctl",
+                &[operation.to_string(), "--".to_string(), unit.to_string()],
+                &[],
+                cancel,
+            )
+            .await?;
         if output.success() {
             return Ok(());
         }
-        let state = self.runner.run_command(
-            "systemctl",
-            &[
-                "show".to_string(),
-                "--property=LoadState".to_string(),
-                "--property=ActiveState".to_string(),
-                "--property=UnitFileState".to_string(),
-                "--".to_string(),
-                unit.to_string(),
-            ],
-            &[],
-            cancel,
-        ).await?;
-        let load_state = state.stdout.lines()
+        let state = self
+            .runner
+            .run_command(
+                "systemctl",
+                &[
+                    "show".to_string(),
+                    "--property=LoadState".to_string(),
+                    "--property=ActiveState".to_string(),
+                    "--property=UnitFileState".to_string(),
+                    "--".to_string(),
+                    unit.to_string(),
+                ],
+                &[],
+                cancel,
+            )
+            .await?;
+        let load_state = state
+            .stdout
+            .lines()
             .find_map(|line| line.strip_prefix("LoadState="));
-        let active_state = state.stdout.lines()
+        let active_state = state
+            .stdout
+            .lines()
             .find_map(|line| line.strip_prefix("ActiveState="));
-        let unit_file_state = state.stdout.lines()
+        let unit_file_state = state
+            .stdout
+            .lines()
             .find_map(|line| line.strip_prefix("UnitFileState="));
         let known_inactive = state.success()
             && active_state == Some("inactive")
@@ -6000,7 +6198,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             step: format!("systemctl_{operation}"),
             reason: format!(
                 "systemctl {operation} {unit} exited with {}: {}; teardown state unproven: {}",
-                output.exit_code, output.combined_output(), state.combined_output()
+                output.exit_code,
+                output.combined_output(),
+                state.combined_output()
             ),
         })
     }
@@ -6113,7 +6313,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 if recipe.package_id == "prometheus" {
                     for (src, dst) in [
                         ("/usr/bin/prometheus", "/usr/local/bin/prometheus"),
-                        ("/usr/bin/prometheus-node-exporter", "/usr/local/bin/node_exporter"),
+                        (
+                            "/usr/bin/prometheus-node-exporter",
+                            "/usr/local/bin/node_exporter",
+                        ),
                     ] {
                         let src_resolved = self.env_cfg.resolve_readonly_path(src);
                         let dst_resolved = self.env_cfg.resolve_path(dst)?;
@@ -6165,16 +6368,18 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             DeclarativeStep::AptRemove {
                 packages,
                 autoremove,
-                ignore_errors: _,
                 ..
             }
             | DeclarativeStep::AptPurge {
                 packages,
                 autoremove,
-                ignore_errors: _,
                 ..
             } => {
-                let removal_action = if self.env_cfg.delete_data { "purge" } else { "remove" };
+                let removal_action = if self.env_cfg.delete_data {
+                    "purge"
+                } else {
+                    "remove"
+                };
                 let mut args = vec![
                     "-o".to_string(),
                     "DPkg::Lock::Timeout=120".to_string(),
@@ -6219,7 +6424,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         });
                     }
                 }
-                Ok(format!("APT {} packages: {}", removal_action, packages.join(", ")))
+                Ok(format!(
+                    "APT {} packages: {}",
+                    removal_action,
+                    packages.join(", ")
+                ))
             }
 
             DeclarativeStep::EnsureSystemUser {
@@ -6279,12 +6488,21 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
             DeclarativeStep::PurgeSystemUser { username, .. } => {
                 if !self.env_cfg.delete_data {
-                    return Ok(format!("retained system user {} with application data", username));
+                    return Ok(format!(
+                        "retained system user {} with application data",
+                        username
+                    ));
                 }
                 for (database, program) in [("passwd", "userdel"), ("group", "groupdel")] {
-                    let account = self.runner.run_command(
-                        "getent", &[database.to_string(), username.clone()], &[], cancel,
-                    ).await?;
+                    let account = self
+                        .runner
+                        .run_command(
+                            "getent",
+                            &[database.to_string(), username.clone()],
+                            &[],
+                            cancel,
+                        )
+                        .await?;
                     if account.exit_code == 2 {
                         continue;
                     }
@@ -6294,9 +6512,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             reason: account.combined_output(),
                         });
                     }
-                    let output = self.runner.run_command(
-                        program, std::slice::from_ref(username), &[], cancel,
-                    ).await?;
+                    let output = self
+                        .runner
+                        .run_command(program, std::slice::from_ref(username), &[], cancel)
+                        .await?;
                     if !output.success() {
                         return Err(PackageExecutorError::StepFailed {
                             step: program.to_string(),
@@ -6531,7 +6750,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     )
                     .await?;
                 }
-                Ok(format!("generated self-signed TLS certificate {}", cert_path))
+                Ok(format!(
+                    "generated self-signed TLS certificate {}",
+                    cert_path
+                ))
             }
 
             DeclarativeStep::CaptureDpkgVersion {
@@ -6685,7 +6907,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         .await?;
                     if out.success() && !out.stdout.trim().is_empty() {
                         let ver = out.stdout.trim().trim_start_matches('v').to_string();
-                        let clean = ver.split(':').last().unwrap_or(&ver).split('-').next().unwrap_or(&ver);
+                        let clean = ver
+                            .split(':')
+                            .next_back()
+                            .unwrap_or(&ver)
+                            .split('-')
+                            .next()
+                            .unwrap_or(&ver);
                         target_version = Some(clean.to_string());
                     }
                 }
@@ -6743,7 +6971,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 }
 
                 let tmp_dir = self.env_cfg.temp_dir.clone();
-                if let Err(e) = check_filesystem_capacity_and_inodes(&tmp_dir, 512 * 1024 * 1024, 1024) {
+                if let Err(e) =
+                    check_filesystem_capacity_and_inodes(&tmp_dir, 512 * 1024 * 1024, 1024)
+                {
                     return Err(PackageExecutorError::ExecutionError(e));
                 }
 
@@ -6786,7 +7016,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         "-qq".to_string(),
                         "rclone".to_string(),
                     ];
-                    let _ = self.runner.run_command("apt-get", &apt_args, &[], cancel).await;
+                    let _ = self
+                        .runner
+                        .run_command("apt-get", &apt_args, &[], cancel)
+                        .await;
 
                     let mut binary_bytes = None;
                     if let Some(ref cache_dir) = self.env_cfg.artifact_cache_dir {
@@ -6817,8 +7050,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_nanos())
                         .unwrap_or(0);
-                    let staging_dir = PathBuf::from(format!("/var/tmp/aetherflow-rclone-{}", nanos));
-                    if let Err(e) = check_filesystem_capacity_and_inodes(&staging_dir, 512 * 1024 * 1024, 1024) {
+                    let staging_dir =
+                        PathBuf::from(format!("/var/tmp/aetherflow-rclone-{}", nanos));
+                    if let Err(e) =
+                        check_filesystem_capacity_and_inodes(&staging_dir, 512 * 1024 * 1024, 1024)
+                    {
                         return Err(PackageExecutorError::ExecutionError(e));
                     }
                     fs::create_dir_all(&staging_dir)?;
@@ -6831,9 +7067,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     let _staging_guard = StagingDirGuard(staging_dir.clone());
                     let zip_path = staging_dir.join("rclone.zip");
 
-                    let archive_filename = format!("rclone-v{}-linux-{}.zip", clean_ver, rclone_arch);
+                    let archive_filename =
+                        format!("rclone-v{}-linux-{}.zip", clean_ver, rclone_arch);
 
-                    let zip_bytes: Vec<u8> = if let Some(archive_path) = vars.get("RCLONE_ARCHIVE_PATH") {
+                    let zip_bytes: Vec<u8> = if let Some(archive_path) =
+                        vars.get("RCLONE_ARCHIVE_PATH")
+                    {
                         fs::read(archive_path).map_err(|e| {
                             let _ = fs::remove_dir_all(&staging_dir);
                             PackageExecutorError::ExecutionError(format!(
@@ -6848,37 +7087,40 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             .build()
                             .map_err(|e| {
                                 let _ = fs::remove_dir_all(&staging_dir);
-                                PackageExecutorError::ExecutionError(format!("failed to build HTTP client: {}", e))
+                                PackageExecutorError::ExecutionError(format!(
+                                    "failed to build HTTP client: {}",
+                                    e
+                                ))
                             })?;
 
-                        let download_url = vars.get("RCLONE_DOWNLOAD_URL").cloned().unwrap_or_else(|| {
-                            format!(
-                                "https://downloads.rclone.org/v{}/rclone-v{}-linux-{}.zip",
-                                clean_ver, clean_ver, rclone_arch
-                            )
-                        });
+                        let download_url =
+                            vars.get("RCLONE_DOWNLOAD_URL").cloned().unwrap_or_else(|| {
+                                format!(
+                                    "https://downloads.rclone.org/v{}/rclone-v{}-linux-{}.zip",
+                                    clean_ver, clean_ver, rclone_arch
+                                )
+                            });
 
                         let resp = client.get(&download_url).send().await;
                         match resp {
-                            Ok(r) if r.status().is_success() => {
-                                r.bytes().await.map_err(|e| {
+                            Ok(r) if r.status().is_success() => r
+                                .bytes()
+                                .await
+                                .map_err(|e| {
                                     let _ = fs::remove_dir_all(&staging_dir);
                                     PackageExecutorError::ExecutionError(format!(
                                         "failed to read rclone download bytes from {}: {}",
                                         download_url, e
                                     ))
-                                })?.to_vec()
-                            }
+                                })?
+                                .to_vec(),
                             _ => {
                                 let github_url = format!(
                                     "https://github.com/rclone/rclone/releases/download/v{}/rclone-v{}-linux-{}.zip",
                                     clean_ver, clean_ver, rclone_arch
                                 );
-                                let gh_resp = client
-                                    .get(&github_url)
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
+                                let gh_resp =
+                                    client.get(&github_url).send().await.map_err(|e| {
                                         let _ = fs::remove_dir_all(&staging_dir);
                                         PackageExecutorError::ExecutionError(format!(
                                             "failed to download rclone from fallback {}: {}",
@@ -6892,13 +7134,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                         gh_resp.status()
                                     )));
                                 }
-                                gh_resp.bytes().await.map_err(|e| {
-                                    let _ = fs::remove_dir_all(&staging_dir);
-                                    PackageExecutorError::ExecutionError(format!(
-                                        "failed to read rclone download bytes: {}",
-                                        e
-                                    ))
-                                })?.to_vec()
+                                gh_resp
+                                    .bytes()
+                                    .await
+                                    .map_err(|e| {
+                                        let _ = fs::remove_dir_all(&staging_dir);
+                                        PackageExecutorError::ExecutionError(format!(
+                                            "failed to read rclone download bytes: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .to_vec()
                             }
                         }
                     };
@@ -6939,7 +7185,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         let sums_text = if let Some(sums_url) = sums_url_opt {
                             let resp = client.get(&sums_url).send().await.map_err(|e| {
                                 let _ = fs::remove_dir_all(&staging_dir);
-                                PackageExecutorError::ExecutionError(format!("failed to fetch SHA256SUMS from {}: {}", sums_url, e))
+                                PackageExecutorError::ExecutionError(format!(
+                                    "failed to fetch SHA256SUMS from {}: {}",
+                                    sums_url, e
+                                ))
                             })?;
                             if !resp.status().is_success() {
                                 let _ = fs::remove_dir_all(&staging_dir);
@@ -6951,25 +7200,38 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             }
                             resp.text().await.map_err(|e| {
                                 let _ = fs::remove_dir_all(&staging_dir);
-                                PackageExecutorError::ExecutionError(format!("failed to read SHA256SUMS: {}", e))
+                                PackageExecutorError::ExecutionError(format!(
+                                    "failed to read SHA256SUMS: {}",
+                                    e
+                                ))
                             })?
                         } else {
-                            let primary_url = format!("https://downloads.rclone.org/v{}/SHA256SUMS", clean_ver);
+                            let primary_url =
+                                format!("https://downloads.rclone.org/v{}/SHA256SUMS", clean_ver);
                             let resp = client.get(&primary_url).send().await;
                             match resp {
-                                Ok(r) if r.status().is_success() => r.text().await.map_err(|e| {
-                                    let _ = fs::remove_dir_all(&staging_dir);
-                                    PackageExecutorError::ExecutionError(format!("failed to read SHA256SUMS text: {}", e))
-                                })?,
+                                Ok(r) if r.status().is_success() => {
+                                    r.text().await.map_err(|e| {
+                                        let _ = fs::remove_dir_all(&staging_dir);
+                                        PackageExecutorError::ExecutionError(format!(
+                                            "failed to read SHA256SUMS text: {}",
+                                            e
+                                        ))
+                                    })?
+                                }
                                 _ => {
                                     let fallback_url = format!(
                                         "https://github.com/rclone/rclone/releases/download/v{}/SHA256SUMS",
                                         clean_ver
                                     );
-                                    let gh_resp = client.get(&fallback_url).send().await.map_err(|e| {
-                                        let _ = fs::remove_dir_all(&staging_dir);
-                                        PackageExecutorError::ExecutionError(format!("failed to fetch fallback SHA256SUMS: {}", e))
-                                    })?;
+                                    let gh_resp =
+                                        client.get(&fallback_url).send().await.map_err(|e| {
+                                            let _ = fs::remove_dir_all(&staging_dir);
+                                            PackageExecutorError::ExecutionError(format!(
+                                                "failed to fetch fallback SHA256SUMS: {}",
+                                                e
+                                            ))
+                                        })?;
                                     if !gh_resp.status().is_success() {
                                         let _ = fs::remove_dir_all(&staging_dir);
                                         return Err(PackageExecutorError::ExecutionError(format!(
@@ -6979,7 +7241,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                     }
                                     gh_resp.text().await.map_err(|e| {
                                         let _ = fs::remove_dir_all(&staging_dir);
-                                        PackageExecutorError::ExecutionError(format!("failed to read SHA256SUMS text: {}", e))
+                                        PackageExecutorError::ExecutionError(format!(
+                                            "failed to read SHA256SUMS text: {}",
+                                            e
+                                        ))
                                     })?
                                 }
                             }
@@ -6994,9 +7259,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             let mut parts = trimmed.split_whitespace();
                             if let (Some(hash), Some(filename)) = (parts.next(), parts.next()) {
                                 let clean_fname = filename.trim_start_matches('*');
-                                if clean_fname == archive_filename || clean_fname.ends_with(&format!("/{}", archive_filename)) {
+                                if clean_fname == archive_filename
+                                    || clean_fname.ends_with(&format!("/{}", archive_filename))
+                                {
                                     let clean_hash = hash.to_ascii_lowercase();
-                                    if clean_hash.len() == 64 && clean_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    if clean_hash.len() == 64
+                                        && clean_hash.chars().all(|c| c.is_ascii_hexdigit())
+                                    {
                                         found_sha = Some(clean_hash);
                                         break;
                                     }
@@ -7072,7 +7341,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     })?;
 
                     let bin_bytes = fs::read(&bin_path)?;
-                    if bin_bytes.len() < 4 || &bin_bytes[0..4] != &[0x7f, b'E', b'L', b'F'] {
+                    if bin_bytes.len() < 4 || bin_bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
                         let _ = fs::remove_dir_all(&staging_dir);
                         return Err(PackageExecutorError::ArtifactVerification(
                             "extracted rclone binary failed ELF magic header check".to_string(),
@@ -7088,11 +7357,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     let mut ver_cmd = std::process::Command::new(&bin_path);
                     ver_cmd.arg("--version");
                     cancel.check(&recipe.package_id)?;
-                    let version_out = crate::package_lifecycle::run_bounded_probe_command_cancellable(
-                        &mut ver_cmd,
-                        std::time::Duration::from_secs(5),
-                        || cancel.is_cancelled(),
-                    );
+                    let version_out =
+                        crate::package_lifecycle::run_bounded_probe_command_cancellable(
+                            &mut ver_cmd,
+                            std::time::Duration::from_secs(5),
+                            || cancel.is_cancelled(),
+                        );
                     cancel.check(&recipe.package_id)?;
                     let out = match version_out {
                         Ok(o) if o.status.success() => o,
@@ -7142,8 +7412,15 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         fs::create_dir_all(parent)?;
                         validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
                     }
-                    let bin_filename = dest_bin.file_name().and_then(|v| v.to_str()).unwrap_or("rclone");
-                    let tmp_dest = dest_bin.with_file_name(format!(".{}.af-bin-tmp-{}", bin_filename, uuid::Uuid::new_v4()));
+                    let bin_filename = dest_bin
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("rclone");
+                    let tmp_dest = dest_bin.with_file_name(format!(
+                        ".{}.af-bin-tmp-{}",
+                        bin_filename,
+                        uuid::Uuid::new_v4()
+                    ));
                     let write_res = (|| -> Result<(), PackageExecutorError> {
                         let mut file = open_new_private_file(&tmp_dest, 0o755)?;
                         file.write_all(&bin_bytes)?;
@@ -7151,7 +7428,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let _ = fs::set_permissions(&tmp_dest, fs::Permissions::from_mode(0o755));
+                            let _ =
+                                fs::set_permissions(&tmp_dest, fs::Permissions::from_mode(0o755));
                         }
                         fs::rename(&tmp_dest, &dest_bin)?;
                         Ok(())
@@ -7170,35 +7448,63 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     } else {
                         PathBuf::from("/usr/local/bin/rclone")
                     };
-                    let parent = symlink_path.parent().unwrap_or_else(|| Path::new("/usr/bin"));
-                    let tmp_symlink = parent.join(format!(".rclone.af-tmp-{}", uuid::Uuid::new_v4()));
+                    let parent = symlink_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/usr/bin"));
+                    let tmp_symlink =
+                        parent.join(format!(".rclone.af-tmp-{}", uuid::Uuid::new_v4()));
                     let _ = fs::remove_file(&tmp_symlink);
                     std::os::unix::fs::symlink(&link_target, &tmp_symlink)?;
                     fs::rename(&tmp_symlink, &symlink_path)?;
                 }
 
-                Ok(format!("installed rclone binary {} -> {}", dest_bin.display(), clean_ver))
+                Ok(format!(
+                    "installed rclone binary {} -> {}",
+                    dest_bin.display(),
+                    clean_ver
+                ))
             }
 
             DeclarativeStep::EnsureThreadfinConfig { .. } => {
-                let resolved = self.env_cfg.resolve_path("/var/lib/threadfin/conf/settings.json")?;
+                let resolved = self
+                    .env_cfg
+                    .resolve_path("/var/lib/threadfin/conf/settings.json")?;
                 let mut settings = serde_json::Map::new();
                 if resolved.exists() {
                     let mut contents = Vec::new();
-                    File::open(&resolved)?.take(1024 * 1024 + 1).read_to_end(&mut contents)?;
+                    File::open(&resolved)?
+                        .take(1024 * 1024 + 1)
+                        .read_to_end(&mut contents)?;
                     if contents.len() > 1024 * 1024 {
-                        return Err(PackageExecutorError::Validation("Threadfin settings exceed 1 MiB".to_string()));
+                        return Err(PackageExecutorError::Validation(
+                            "Threadfin settings exceed 1 MiB".to_string(),
+                        ));
                     }
                     settings = serde_json::from_slice::<serde_json::Value>(&contents)
-                        .map_err(|error| PackageExecutorError::Validation(format!("invalid Threadfin settings: {}", error)))?
+                        .map_err(|error| {
+                            PackageExecutorError::Validation(format!(
+                                "invalid Threadfin settings: {}",
+                                error
+                            ))
+                        })?
                         .as_object()
                         .cloned()
-                        .ok_or_else(|| PackageExecutorError::Validation("Threadfin settings must be a JSON object".to_string()))?;
+                        .ok_or_else(|| {
+                            PackageExecutorError::Validation(
+                                "Threadfin settings must be a JSON object".to_string(),
+                            )
+                        })?;
                 }
                 if settings.is_empty() {
-                    settings.insert("version".to_string(), serde_json::Value::String("0.5.0".to_string()));
-                } else if !matches!(settings.get("version"), Some(serde_json::Value::String(version)) if !version.is_empty()) {
-                    return Err(PackageExecutorError::Validation("existing Threadfin settings require a version string".to_string()));
+                    settings.insert(
+                        "version".to_string(),
+                        serde_json::Value::String("0.5.0".to_string()),
+                    );
+                } else if !matches!(settings.get("version"), Some(serde_json::Value::String(version)) if !version.is_empty())
+                {
+                    return Err(PackageExecutorError::Validation(
+                        "existing Threadfin settings require a version string".to_string(),
+                    ));
                 }
                 match settings.get("bindIpAddress") {
                     Some(serde_json::Value::String(address)) if !address.is_empty() => {
@@ -7214,9 +7520,16 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         return Ok("preserved explicit Threadfin bindIpAddress".to_string());
                     }
                     Some(serde_json::Value::String(_) | serde_json::Value::Null) | None => {}
-                    Some(_) => return Err(PackageExecutorError::Validation("Threadfin bindIpAddress must be a string".to_string())),
+                    Some(_) => {
+                        return Err(PackageExecutorError::Validation(
+                            "Threadfin bindIpAddress must be a string".to_string(),
+                        ))
+                    }
                 }
-                settings.insert("bindIpAddress".to_string(), serde_json::Value::String("127.0.0.1".to_string()));
+                settings.insert(
+                    "bindIpAddress".to_string(),
+                    serde_json::Value::String("127.0.0.1".to_string()),
+                );
                 journal.stage_file_mutation(&resolved)?;
                 let contents = serde_json::to_vec_pretty(&settings)
                     .map_err(|error| PackageExecutorError::Validation(error.to_string()))?;
@@ -7275,7 +7588,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         raw_tag
                     },
                 );
-                Ok(format!("resolved release version {} for {}", clean_ver, repo))
+                Ok(format!(
+                    "resolved release version {} for {}",
+                    clean_ver, repo
+                ))
             }
 
             DeclarativeStep::DownloadBinary {
@@ -7295,7 +7611,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         {
                             if let Ok(existing_raw) = fs::read_to_string(&ver_marker_path) {
                                 let existing_ver = existing_raw.trim().trim_start_matches('v');
-                               if is_semver_strictly_greater(existing_ver, clean_ver) {
+                                if is_semver_strictly_greater(existing_ver, clean_ver) {
                                     return Err(PackageExecutorError::Validation(format!(
                                         "refusing to downgrade {} from installed version {} to {}",
                                         recipe.package_id, existing_ver, clean_ver
@@ -7321,7 +7637,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     )));
                 }
                 let tmp_artifact = self
-                    .fetch_artifact_to_temp(&recipe.package_id, &resolved_url, arch_asset, journal, cancel)
+                    .fetch_artifact_to_temp(
+                        &recipe.package_id,
+                        &resolved_url,
+                        arch_asset,
+                        journal,
+                        cancel,
+                    )
                     .await?;
                 cancel.check(&recipe.package_id)?;
                 let mut effective_verification = verification.clone();
@@ -7331,7 +7653,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         effective_verification.arch_sha256 = None;
                     }
                 }
-                let sha256 = verify_artifact_file_for_arch(&tmp_artifact, &effective_verification, Some(&arch))?;
+                let sha256 = verify_artifact_file_for_arch(
+                    &tmp_artifact,
+                    &effective_verification,
+                    Some(&arch),
+                )?;
 
                 let dest_resolved = self.env_cfg.resolve_path(dest_path)?;
                 journal.stage_file_mutation(&dest_resolved)?;
@@ -7376,7 +7702,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     )));
                 }
                 let tmp_archive = self
-                    .fetch_artifact_to_temp(&recipe.package_id, &resolved_url, arch_asset, journal, cancel)
+                    .fetch_artifact_to_temp(
+                        &recipe.package_id,
+                        &resolved_url,
+                        arch_asset,
+                        journal,
+                        cancel,
+                    )
                     .await?;
                 cancel.check(&recipe.package_id)?;
 
@@ -7406,7 +7738,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ))
             }
 
-            DeclarativeStep::MergeIniSettings { path, section, settings, mode, .. } => {
+            DeclarativeStep::MergeIniSettings {
+                path,
+                section,
+                settings,
+                mode,
+                ..
+            } => {
                 let resolved = self.env_cfg.resolve_path(path)?;
                 journal.stage_file_mutation(&resolved)?;
                 let original = match fs::read_to_string(&resolved) {
@@ -7414,12 +7752,16 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
                     Err(error) => return Err(error.into()),
                 };
-                let rendered_settings = settings.iter().map(|(key, value)| {
-                    (key.clone(), interpolate_template(value, vars))
-                }).collect::<Vec<_>>();
+                let rendered_settings = settings
+                    .iter()
+                    .map(|(key, value)| (key.clone(), interpolate_template(value, vars)))
+                    .collect::<Vec<_>>();
                 let rendered = merge_ini_settings(&original, section, &rendered_settings);
                 write_file_atomic_with_mode_bounded(
-                    &resolved, rendered.as_bytes(), *mode, self.env_cfg.fs_root.as_deref(),
+                    &resolved,
+                    rendered.as_bytes(),
+                    *mode,
+                    self.env_cfg.fs_root.as_deref(),
                 )?;
                 Ok(format!("merged managed INI settings in {}", path))
             }
@@ -7436,13 +7778,16 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let rendered = if path.ends_with(".env") || path.starts_with("/etc/default/") {
                     let mut escaped_vars = vars.clone();
                     if let Some(u) = escaped_vars.get("MASTER_USER").cloned() {
-                        escaped_vars.insert("MASTER_USER".to_string(), escape_systemd_env_quoted(&u));
+                        escaped_vars
+                            .insert("MASTER_USER".to_string(), escape_systemd_env_quoted(&u));
                     }
                     if let Some(p) = escaped_vars.get("MASTER_PASS").cloned() {
-                        escaped_vars.insert("MASTER_PASS".to_string(), escape_systemd_env_quoted(&p));
+                        escaped_vars
+                            .insert("MASTER_PASS".to_string(), escape_systemd_env_quoted(&p));
                     }
                     if let Some(p) = escaped_vars.get("RCLONE_PASS").cloned() {
-                        escaped_vars.insert("RCLONE_PASS".to_string(), escape_systemd_env_quoted(&p));
+                        escaped_vars
+                            .insert("RCLONE_PASS".to_string(), escape_systemd_env_quoted(&p));
                     }
                     interpolate_template(content_template, &escaped_vars)
                 } else if path == "/var/lib/znc/configs/znc.conf" {
@@ -7465,7 +7810,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                 && existing_bytes != rendered.as_bytes()
                                 && decode_tigervnc_passwd(&existing_bytes).is_some_and(|decoded| {
                                     decoded.len() >= 6
-                                        && decoded.as_bytes().iter().all(|b| b.is_ascii_graphic() || *b == b' ')
+                                        && decoded
+                                            .as_bytes()
+                                            .iter()
+                                            .all(|b| b.is_ascii_graphic() || *b == b' ')
                                 });
                             if is_valid_retained {
                                 return Ok(format!("preserved existing file {}", path));
@@ -7565,9 +7913,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     };
                     if let Some(app_port) = port_var {
                         if let Ok(existing) = fs::read_to_string(&resolved) {
-                            if let Some(updated) = update_preserved_template_port(
-                                path, &existing, &rendered, app_port,
-                            ) {
+                            if let Some(updated) =
+                                update_preserved_template_port(path, &existing, &rendered, app_port)
+                            {
                                 if updated != existing {
                                     journal.stage_file_mutation(&resolved)?;
                                     write_file_atomic_with_mode_bounded(
@@ -7584,10 +7932,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                         cancel,
                                     )
                                     .await?;
-                                    return Ok(format!(
-                                        "updated port in existing file {}",
-                                        path
-                                    ));
+                                    return Ok(format!("updated port in existing file {}", path));
                                 }
                             }
                         }
@@ -7679,7 +8024,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     let detected_exec = detect_rclone_exec_start_for_root(effective_root);
                     if content.contains("{{RCLONE_EXEC_START}}") {
                         content = content.replace("{{RCLONE_EXEC_START}}", detected_exec);
-                    } else if content.contains("--rc-web-gui") && detected_exec.contains("rclone gui") {
+                    } else if content.contains("--rc-web-gui")
+                        && detected_exec.contains("rclone gui")
+                    {
                         content = content.replace(
                             "/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-enable-metrics --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf",
                             detected_exec,
@@ -7717,7 +8064,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             .get("APP_PORT")
                             .and_then(|p| p.parse::<u16>().ok())
                             .unwrap_or(5572);
-                        let final_api_port = existing_api_port.unwrap_or_else(|| app_port_num.saturating_add(1));
+                        let final_api_port =
+                            existing_api_port.unwrap_or_else(|| app_port_num.saturating_add(1));
                         vars.insert("RCLONE_API_PORT".to_string(), final_api_port.to_string());
                     }
                 }
@@ -7760,12 +8108,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         SystemctlOp::Disable => "disable",
                         _ => "reset-failed",
                     };
-                    self.teardown_systemctl(
-                        operation_name,
-                        &norm_unit,
-                        cancel,
-                    )
-                    .await?;
+                    self.teardown_systemctl(operation_name, &norm_unit, cancel)
+                        .await?;
                     return Ok(format!("systemctl {operation_name} completed"));
                 }
                 let args: Vec<String> = match operation {
@@ -7878,9 +8222,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
                 }
-                let reload = self.runner.run_command(
-                    "systemctl", &["daemon-reload".to_string()], &[], cancel,
-                ).await?;
+                let reload = self
+                    .runner
+                    .run_command("systemctl", &["daemon-reload".to_string()], &[], cancel)
+                    .await?;
                 if !reload.success() {
                     return Err(PackageExecutorError::StepFailed {
                         step: "systemctl_daemon_reload".to_string(),
@@ -7946,7 +8291,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     return Ok("skipped command (DELETE_DATA=false)".to_string());
                 }
                 let mut cmd_envs: Vec<(String, String)> = Vec::new();
-                cmd_envs.push(("AF_JOB_SCRATCH_ROOT".to_string(), "/var/tmp/aetherflow-scratch".to_string()));
+                cmd_envs.push((
+                    "AF_JOB_SCRATCH_ROOT".to_string(),
+                    "/var/tmp/aetherflow-scratch".to_string(),
+                ));
                 if let Some(ref target) = self.env_cfg.expected_target_version {
                     cmd_envs.push(("AF_TARGET_VERSION".to_string(), target.clone()));
                 }
@@ -8064,12 +8412,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         }
                         if let Some((k, v)) = line.split_once('=') {
                             let mut val = v.trim();
-                            if (val.starts_with('"') && val.ends_with('"'))
-                                || (val.starts_with('\'') && val.ends_with('\''))
+                            if ((val.starts_with('"') && val.ends_with('"'))
+                                || (val.starts_with('\'') && val.ends_with('\'')))
+                                && val.len() >= 2
                             {
-                                if val.len() >= 2 {
-                                    val = &val[1..val.len() - 1];
-                                }
+                                val = &val[1..val.len() - 1];
                             }
                             if (k.trim() == "RCLONE_RC_USER" || k.trim() == "RCLONE_USER")
                                 && !val.is_empty()
@@ -8091,10 +8438,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 }
             }
             if user.is_none() {
-                user = vars.get("MASTER_USER").cloned().or_else(|| vars.get("AF_CONFIG_USER").cloned());
+                user = vars
+                    .get("MASTER_USER")
+                    .cloned()
+                    .or_else(|| vars.get("AF_CONFIG_USER").cloned());
             }
             if pass.is_none() {
-                pass = vars.get("RCLONE_PASS").cloned().or_else(|| vars.get("MASTER_PASS").cloned()).or_else(|| vars.get("AF_CONFIG_PASS").cloned());
+                pass = vars
+                    .get("RCLONE_PASS")
+                    .cloned()
+                    .or_else(|| vars.get("MASTER_PASS").cloned())
+                    .or_else(|| vars.get("AF_CONFIG_PASS").cloned());
             }
             if let (Some(u), Some(p)) = (user, pass) {
                 rclone_creds = Some((u, p));
@@ -8105,13 +8459,25 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n >= 1)
-            .unwrap_or(if self.env_cfg.fs_root.is_some() { 5 } else { 15 });
+            .unwrap_or(if self.env_cfg.fs_root.is_some() {
+                5
+            } else {
+                15
+            });
         let retry_delay_ms = env::var("AETHERFLOW_HTTP_READY_RETRY_DELAY_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(if self.env_cfg.fs_root.is_some() { 15 } else { 500 });
+            .unwrap_or(if self.env_cfg.fs_root.is_some() {
+                15
+            } else {
+                500
+            });
         let deadline = Instant::now()
-            + Duration::from_secs(if self.env_cfg.fs_root.is_some() { 5 } else { 30 });
+            + Duration::from_secs(if self.env_cfg.fs_root.is_some() {
+                5
+            } else {
+                30
+            });
         let mut last_reason = String::new();
 
         for attempt in 1..=max_attempts {
@@ -8148,15 +8514,26 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             continue;
                         }
                     } else if !gui_out.success() {
-                        last_reason = format!("rclone GUI probe to {} failed: {}", gui_url, gui_out.combined_output());
+                        last_reason = format!(
+                            "rclone GUI probe to {} failed: {}",
+                            gui_url,
+                            gui_out.combined_output()
+                        );
                         continue;
                     } else {
                         let Some((_, gui_code)) = parse_curl(&gui_out.stdout) else {
-                            last_reason = format!("rclone GUI listener on {} returned invalid HTTP status: {}", gui_url, gui_out.stdout.trim());
+                            last_reason = format!(
+                                "rclone GUI listener on {} returned invalid HTTP status: {}",
+                                gui_url,
+                                gui_out.stdout.trim()
+                            );
                             continue;
                         };
                         if !(200..=399).contains(&gui_code) {
-                            last_reason = format!("rclone GUI listener on {} returned HTTP {}", gui_url, gui_code);
+                            last_reason = format!(
+                                "rclone GUI listener on {} returned HTTP {}",
+                                gui_url, gui_code
+                            );
                             continue;
                         }
                     }
@@ -8172,7 +8549,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
 
                 // 1. /metrics (GET)
                 let metrics_url = format!("http://127.0.0.1:{}/metrics", rc_port);
-                let unauth_metrics = self.probe_curl_http("GET", &metrics_url, None, cancel).await?;
+                let unauth_metrics = self
+                    .probe_curl_http("GET", &metrics_url, None, cancel)
+                    .await?;
                 if is_mock_curl_output(&unauth_metrics.stdout) {
                     if self.env_cfg.dry_run {
                         if unauth_metrics.success() {
@@ -8187,13 +8566,19 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 if !unauth_metrics.success() {
-                    last_reason = format!("RC metrics probe to {} failed: {}", metrics_url, unauth_metrics.combined_output());
+                    last_reason = format!(
+                        "RC metrics probe to {} failed: {}",
+                        metrics_url,
+                        unauth_metrics.combined_output()
+                    );
                     continue;
                 }
-                let Some((_unauth_m_body, unauth_m_code)) = parse_curl(&unauth_metrics.stdout) else {
+                let Some((_unauth_m_body, unauth_m_code)) = parse_curl(&unauth_metrics.stdout)
+                else {
                     last_reason = format!(
                         "RC metrics probe to {} returned invalid HTTP status: {}",
-                        metrics_url, unauth_metrics.stdout.trim()
+                        metrics_url,
+                        unauth_metrics.stdout.trim()
                     );
                     continue;
                 };
@@ -8213,7 +8598,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     );
                     continue;
                 }
-                let auth_metrics = self.probe_curl_http("GET", &metrics_url, rclone_creds.as_ref(), cancel).await?;
+                let auth_metrics = self
+                    .probe_curl_http("GET", &metrics_url, rclone_creds.as_ref(), cancel)
+                    .await?;
                 if is_mock_curl_output(&auth_metrics.stdout) {
                     if self.env_cfg.dry_run {
                         if auth_metrics.success() {
@@ -8228,30 +8615,43 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 if !auth_metrics.success() {
-                    last_reason = format!("authenticated RC metrics probe to {} failed: {}", metrics_url, auth_metrics.combined_output());
+                    last_reason = format!(
+                        "authenticated RC metrics probe to {} failed: {}",
+                        metrics_url,
+                        auth_metrics.combined_output()
+                    );
                     continue;
                 }
                 let Some((_auth_m_body, auth_m_code)) = parse_curl(&auth_metrics.stdout) else {
                     last_reason = format!(
                         "authenticated RC metrics probe to {} returned invalid HTTP status: {}",
-                        metrics_url, auth_metrics.stdout.trim()
+                        metrics_url,
+                        auth_metrics.stdout.trim()
                     );
                     continue;
                 };
                 if auth_m_code == 401 || auth_m_code == 403 {
                     return Err(PackageExecutorError::StepFailed {
                         step: "wait_for_http_ready".to_string(),
-                        reason: format!("authenticated RC metrics check failed with HTTP {} on {}", auth_m_code, metrics_url),
+                        reason: format!(
+                            "authenticated RC metrics check failed with HTTP {} on {}",
+                            auth_m_code, metrics_url
+                        ),
                     });
                 }
                 if auth_m_code != 200 {
-                    last_reason = format!("authenticated RC metrics check returned HTTP {} on {} (expected 200)", auth_m_code, metrics_url);
+                    last_reason = format!(
+                        "authenticated RC metrics check returned HTTP {} on {} (expected 200)",
+                        auth_m_code, metrics_url
+                    );
                     continue;
                 }
 
                 // 2. /core/version (POST)
                 let version_url = format!("http://127.0.0.1:{}/core/version", rc_port);
-                let unauth_version = self.probe_curl_http("POST", &version_url, None, cancel).await?;
+                let unauth_version = self
+                    .probe_curl_http("POST", &version_url, None, cancel)
+                    .await?;
                 if is_mock_curl_output(&unauth_version.stdout) {
                     if self.env_cfg.dry_run {
                         if unauth_version.success() {
@@ -8266,13 +8666,19 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 if !unauth_version.success() {
-                    last_reason = format!("RC API probe to {} failed: {}", version_url, unauth_version.combined_output());
+                    last_reason = format!(
+                        "RC API probe to {} failed: {}",
+                        version_url,
+                        unauth_version.combined_output()
+                    );
                     continue;
                 }
-                let Some((_unauth_v_body, unauth_v_code)) = parse_curl(&unauth_version.stdout) else {
+                let Some((_unauth_v_body, unauth_v_code)) = parse_curl(&unauth_version.stdout)
+                else {
                     last_reason = format!(
                         "unauthenticated probe to {} returned invalid HTTP status: {}",
-                        version_url, unauth_version.stdout.trim()
+                        version_url,
+                        unauth_version.stdout.trim()
                     );
                     continue;
                 };
@@ -8286,12 +8692,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     });
                 }
                 if unauth_v_code != 401 && unauth_v_code != 403 {
-                    last_reason = format!("unauthenticated probe to {} returned unexpected HTTP {}", version_url, unauth_v_code);
+                    last_reason = format!(
+                        "unauthenticated probe to {} returned unexpected HTTP {}",
+                        version_url, unauth_v_code
+                    );
                     continue;
                 }
 
                 // 3. Authenticated POST /core/version MUST return 200
-                let auth_version = self.probe_curl_http("POST", &version_url, rclone_creds.as_ref(), cancel).await?;
+                let auth_version = self
+                    .probe_curl_http("POST", &version_url, rclone_creds.as_ref(), cancel)
+                    .await?;
                 if is_mock_curl_output(&auth_version.stdout) {
                     if self.env_cfg.dry_run {
                         if auth_version.success() {
@@ -8306,24 +8717,35 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
                 if !auth_version.success() {
-                    last_reason = format!("authenticated RC API probe to {} failed: {}", version_url, auth_version.combined_output());
+                    last_reason = format!(
+                        "authenticated RC API probe to {} failed: {}",
+                        version_url,
+                        auth_version.combined_output()
+                    );
                     continue;
                 }
                 let Some((_auth_v_body, auth_v_code)) = parse_curl(&auth_version.stdout) else {
                     last_reason = format!(
                         "authenticated RC API check returned invalid HTTP status on {}: {}",
-                        version_url, auth_version.stdout.trim()
+                        version_url,
+                        auth_version.stdout.trim()
                     );
                     continue;
                 };
                 if auth_v_code == 401 || auth_v_code == 403 {
                     return Err(PackageExecutorError::StepFailed {
                         step: "wait_for_http_ready".to_string(),
-                        reason: format!("authenticated RC API check failed with HTTP {} on {}", auth_v_code, version_url),
+                        reason: format!(
+                            "authenticated RC API check failed with HTTP {} on {}",
+                            auth_v_code, version_url
+                        ),
                     });
                 }
                 if auth_v_code != 200 {
-                    last_reason = format!("authenticated RC API check returned HTTP {} on {}", auth_v_code, version_url);
+                    last_reason = format!(
+                        "authenticated RC API check returned HTTP {} on {}",
+                        auth_v_code, version_url
+                    );
                     continue;
                 }
 
@@ -8396,10 +8818,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     .unwrap_or(false);
                 if require_live {
                     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-                    match std::net::TcpStream::connect_timeout(
-                        &addr,
-                        Duration::from_millis(250),
-                    ) {
+                    match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
                         Ok(_) => return Ok(format!("verified HTTP readiness at {}", url)),
                         Err(err) => {
                             last_reason = format!(
@@ -8477,8 +8896,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if matches!(norm_logical, "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote")
-                || norm_logical.starts_with("/mnt/")
+            if matches!(
+                norm_logical,
+                "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote"
+            ) || norm_logical.starts_with("/mnt/")
             {
                 if let (Ok(meta), Some(parent)) =
                     (fs::symlink_metadata(resolved), resolved.parent())
@@ -8492,21 +8913,23 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             }
         }
 
-        if self.env_cfg.fs_root.is_none() && cfg!(target_os = "linux") {
-            if matches!(norm_logical, "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote")
-                || norm_logical.starts_with("/mnt/")
+        if self.env_cfg.fs_root.is_none()
+            && cfg!(target_os = "linux")
+            && (matches!(
+                norm_logical,
+                "/mnt/unionfs" | "/mnt/mergerfs" | "/mnt/remote"
+            ) || norm_logical.starts_with("/mnt/"))
+        {
+            if let Ok(status) = std::process::Command::new("mountpoint")
+                .arg("-q")
+                .arg(resolved)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
             {
-                if let Ok(status) = std::process::Command::new("mountpoint")
-                    .arg("-q")
-                    .arg(resolved)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    if status.success() {
-                        return true;
-                    }
+                if status.success() {
+                    return true;
                 }
             }
         }
@@ -8927,7 +9350,10 @@ fn merge_ini_settings(original: &str, section: &str, settings: &[(String, String
         }
         if in_section {
             if let Some((key, _)) = trimmed.split_once('=') {
-                if let Some((managed_key, value)) = settings.iter().find(|(managed_key, _)| managed_key == key.trim()) {
+                if let Some((managed_key, value)) = settings
+                    .iter()
+                    .find(|(managed_key, _)| managed_key == key.trim())
+                {
                     let indentation = &line[..line.len() - line.trim_start().len()];
                     if let Some((lhs, _)) = line.split_once('=') {
                         if lhs.ends_with(' ') || lhs.ends_with('\t') {
@@ -8984,45 +9410,38 @@ fn interpolate_template(template: &str, vars: &HashMap<String, String>) -> Strin
 const TIGERVNC_FIXED_KEY: [u8; 8] = [23, 82, 107, 6, 35, 78, 88, 7];
 
 const DES_IP: [u8; 64] = [
-    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
-    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
-    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
-    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
+    64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61,
+    53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
 ];
 
 const DES_FP: [u8; 64] = [
-    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
-    38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
-    36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30,
+    37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
     34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
 ];
 
 const DES_PC1: [u8; 56] = [
-    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
-    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
-    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
-    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4,
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60,
+    52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29,
+    21, 13, 5, 28, 20, 12, 4,
 ];
 
 const DES_PC2: [u8; 48] = [
-    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10,
-    23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
-    41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48,
-    44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2, 41, 52,
+    31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
 ];
 
 const DES_SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
 
 const DES_E: [u8; 48] = [
-    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9,
-    8, 9, 10, 11, 12, 13, 12, 13, 14, 15, 16, 17,
-    16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25,
-    24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1,
+    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13, 12, 13, 14, 15, 16, 17, 16, 17, 18,
+    19, 20, 21, 20, 21, 22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1,
 ];
 
 const DES_P: [u8; 32] = [
-    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
-    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25,
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19,
+    13, 30, 6, 22, 11, 4, 25,
 ];
 
 const DES_SBOX: [[[u8; 16]; 4]; 8] = [
@@ -9107,11 +9526,11 @@ fn des_subkeys_vnc() -> [u64; 16] {
 fn des_feistel(r: u32, k: u64) -> u32 {
     let er = des_permute(r as u64, 32, &DES_E) ^ k;
     let mut s_out = 0u32;
-    for i in 0..8 {
+    for (i, sbox) in DES_SBOX.iter().enumerate() {
         let chunk = ((er >> (42 - 6 * i)) & 0x3f) as u8;
         let row = (((chunk >> 5) & 1) << 1) | (chunk & 1);
         let col = (chunk >> 1) & 0x0f;
-        let val = DES_SBOX[i][row as usize][col as usize];
+        let val = sbox[row as usize][col as usize];
         s_out = (s_out << 4) | (val as u32);
     }
     des_permute(s_out as u64, 32, &DES_P) as u32
@@ -9167,7 +9586,22 @@ fn append_log_line(log_file_path: &Path, line: &str) {
         .append(true)
         .open(log_file_path)
     {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let _ = libc::flock(f.as_raw_fd(), libc::LOCK_SH);
+            }
+        }
         let _ = writeln!(f, "[{}] {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), line);
+        let _ = f.flush();
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let _ = libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
@@ -9207,10 +9641,8 @@ fn extract_binaries_from_targz(
     let gz = GzDecoder::new(file);
     let mut archive = Archive::new(gz);
 
-    let mut found: HashMap<String, bool> = wanted_binaries
-        .iter()
-        .map(|b| (b.clone(), false))
-        .collect();
+    let mut found: HashMap<String, bool> =
+        wanted_binaries.iter().map(|b| (b.clone(), false)).collect();
 
     for entry_res in archive.entries().map_err(|e| {
         PackageExecutorError::ArtifactVerification(format!("invalid tar.gz archive: {}", e))
@@ -9249,7 +9681,10 @@ fn extract_binaries_from_targz(
         if !found.contains_key(fname) {
             continue;
         }
-        if !matches!(entry_type, tar::EntryType::Regular | tar::EntryType::GNUSparse) {
+        if !matches!(
+            entry_type,
+            tar::EntryType::Regular | tar::EntryType::GNUSparse
+        ) {
             return Err(PackageExecutorError::SecurityViolation(format!(
                 "archive target '{}' is not a regular file",
                 entry_path.display()
@@ -9364,7 +9799,10 @@ fn apply_sandbox_in_root(pkg_id: &str, systemd_root: &Path) -> anyhow::Result<St
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn collect_package_version_receipt_logical_paths(pkg: &af_models::Package, pkg_id: &str) -> Vec<String> {
+fn collect_package_version_receipt_logical_paths(
+    pkg: &af_models::Package,
+    pkg_id: &str,
+) -> Vec<String> {
     static AF_VERSION_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(/[A-Za-z0-9_./-]*/\.af-version)").unwrap());
     let mut paths = Vec::new();
@@ -9449,7 +9887,9 @@ pub fn ensure_package_sandbox_dropin_under_root(
                         }
                     }
                 }
-                for logical_version_path in collect_package_version_receipt_logical_paths(&pkg, pkg_id) {
+                for logical_version_path in
+                    collect_package_version_receipt_logical_paths(&pkg, pkg_id)
+                {
                     let resolved = match effective_root.as_deref() {
                         Some(root) => root.join(logical_version_path.trim_start_matches('/')),
                         None => PathBuf::from(&logical_version_path),
@@ -9514,16 +9954,11 @@ pub fn script_matches_package_identity(action: &str, package_id: &str, script_na
 
     // Allow synthetic non-catalog test fixtures (e.g. `package_id = "fixture"` with
     // `installpackage-overflow-fixture` or `installpackage-hillclimb-<uuid>`) in isolated tests.
-    if pkg == "fixture"
+    pkg == "fixture"
         && (script_stem.ends_with("-fixture")
             || script_stem.starts_with("fixture-")
             || script_stem.starts_with("hillclimb-")
             || script_stem.starts_with("polling-"))
-    {
-        return true;
-    }
-
-    false
 }
 
 /// Resolves whether a `PackageRunnerRequest` can be satisfied by either a built-in
@@ -9595,7 +10030,9 @@ fn parse_master_credentials_content(raw: &str) -> (Option<String>, Option<String
             .or_else(|| val.get("pass"))
             .or_else(|| val.get("MASTER_PASS"))
             .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| af_db::decrypt_secret_if_needed(s).ok())
             .filter(|s| !s.is_empty() && s != "adminadmin");
         return (user, pass);
     }
@@ -9648,7 +10085,11 @@ fn parse_master_credentials_content(raw: &str) -> (Option<String>, Option<String
 
 /// Resolves `(MASTER_USER, MASTER_PASS)` from process environment or credential files,
 /// generating and persisting a cryptographically unique fallback secret when absent.
-fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
+/// Fails closed if an existing encrypted `.master.creds` cannot be decrypted or if
+/// configured `AES_MASTER_KEY` encryption fails, preventing silent plaintext clobbering.
+pub(crate) fn try_resolve_master_credentials(
+    fs_root: Option<&Path>,
+) -> anyhow::Result<(String, String)> {
     let env_user = env::var("AETHERFLOW_MASTER_USER")
         .or_else(|_| env::var("MASTER_USER"))
         .ok()
@@ -9663,7 +10104,7 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
         .filter(|v| !v.is_empty() && v != "adminadmin");
 
     if let Some(pass) = env_pass {
-        return (env_user.unwrap_or_else(|| "admin".to_string()), pass);
+        return Ok((env_user.unwrap_or_else(|| "admin".to_string()), pass));
     }
 
     let rebase_path = |logical: &str| -> PathBuf {
@@ -9680,6 +10121,11 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
             }
             None => p.to_path_buf(),
         }
+    };
+
+    let persist_path = match env::var("AETHERFLOW_MASTER_CREDS_FILE") {
+        Ok(custom) if !custom.trim().is_empty() => rebase_path(custom.trim()),
+        _ => rebase_path("/var/lib/aetherflow/.master.creds"),
     };
 
     let mut candidate_paths = Vec::new();
@@ -9703,6 +10149,27 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
     let mut file_pass: Option<String> = None;
     for candidate in candidate_paths {
         if let Ok(contents) = fs::read_to_string(&candidate) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
+                for field in ["password", "passwd", "pass", "MASTER_PASS", "ha1"] {
+                    if let Some(raw_secret) = val.get(field).and_then(|v| v.as_str()) {
+                        let trimmed_secret = raw_secret.trim();
+                        if trimmed_secret.starts_with("enc:v1:") {
+                            af_db::decrypt_secret_if_needed(trimmed_secret).map_err(|err| {
+                                anyhow::anyhow!(
+                                    "refusing to overwrite undecryptable master credentials at {}: {}",
+                                    candidate.display(),
+                                    err
+                                )
+                            })?;
+                        }
+                    }
+                }
+            } else if contents.contains("enc:v1:") {
+                anyhow::bail!(
+                    "refusing to overwrite corrupted encrypted master credentials at {}",
+                    candidate.display()
+                );
+            }
             let (u, p) = parse_master_credentials_content(&contents);
             if file_user.is_none() {
                 file_user = u;
@@ -9720,27 +10187,36 @@ fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
     let master_pass = match file_pass {
         Some(pass) => pass,
         None => {
+            if let Ok(existing_persist) = fs::read_to_string(&persist_path) {
+                if existing_persist.contains("enc:v1:") {
+                    anyhow::bail!(
+                        "refusing to overwrite existing encrypted master credentials at {}",
+                        persist_path.display()
+                    );
+                }
+            }
             let generated = format!(
                 "{}{}",
                 uuid::Uuid::new_v4().simple(),
                 uuid::Uuid::new_v4().simple()
             );
-            let persist_path = rebase_path("/var/lib/aetherflow/.master.creds");
+            let stored_password = af_db::encrypt_secret_if_configured(&generated)?;
             let payload = serde_json::json!({
                 "username": master_user,
-                "password": generated,
+                "password": stored_password,
             })
             .to_string();
-            let _ = write_file_atomic_with_mode_bounded(
-                &persist_path,
-                payload.as_bytes(),
-                0o600,
-                fs_root,
-            );
+            write_file_atomic_with_mode_bounded(&persist_path, payload.as_bytes(), 0o600, fs_root)?;
             generated
         }
     };
-    (master_user, master_pass)
+    Ok((master_user, master_pass))
+}
+
+#[cfg(test)]
+fn resolve_master_credentials(fs_root: Option<&Path>) -> (String, String) {
+    try_resolve_master_credentials(fs_root)
+        .expect("resolve_master_credentials failed in test fixture")
 }
 
 /// Updates listening/scrape port in-place on preserved package configuration files
@@ -9754,9 +10230,8 @@ fn update_preserved_template_port(
     if logical_path.ends_with("/etc/default/prometheus")
         || rendered.contains("--web.listen-address=")
     {
-        static PROM_DEFAULT_PORT_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(--web\.listen-address=(?:[^\s\x22':]+)?):[0-9]+").unwrap()
-        });
+        static PROM_DEFAULT_PORT_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(--web\.listen-address=(?:[^\s\x22':]+)?):[0-9]+").unwrap());
         if PROM_DEFAULT_PORT_RE.is_match(existing) {
             let replacement = format!("${{1}}:{}", app_port);
             let updated = PROM_DEFAULT_PORT_RE
@@ -9765,9 +10240,8 @@ fn update_preserved_template_port(
             return (updated != existing).then_some(updated);
         }
 
-        static RENDERED_LISTEN_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"--web\.listen-address=([^\s\x22':]+):[0-9]+").unwrap()
-        });
+        static RENDERED_LISTEN_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"--web\.listen-address=([^\s\x22':]+):[0-9]+").unwrap());
         let listen_flag = if let Some(caps) = RENDERED_LISTEN_RE.captures(rendered) {
             let host = caps.get(1).map(|m| m.as_str()).unwrap_or("127.0.0.1");
             format!("--web.listen-address={}:{}", host, app_port)
@@ -9781,26 +10255,27 @@ fn update_preserved_template_port(
             let full_match = caps.get(0).unwrap();
             let prefix = caps.get(1).unwrap().as_str();
             let raw_rhs = caps.get(2).unwrap().as_str().trim_end();
-            let new_rhs = if raw_rhs.starts_with('"') && raw_rhs.ends_with('"') && raw_rhs.len() >= 2
-            {
-                let inner = raw_rhs[1..raw_rhs.len() - 1].trim();
-                if inner.is_empty() {
+            let new_rhs =
+                if raw_rhs.starts_with('"') && raw_rhs.ends_with('"') && raw_rhs.len() >= 2 {
+                    let inner = raw_rhs[1..raw_rhs.len() - 1].trim();
+                    if inner.is_empty() {
+                        format!("\"{}\"", listen_flag)
+                    } else {
+                        format!("\"{} {}\"", inner, listen_flag)
+                    }
+                } else if raw_rhs.starts_with('\'') && raw_rhs.ends_with('\'') && raw_rhs.len() >= 2
+                {
+                    let inner = raw_rhs[1..raw_rhs.len() - 1].trim();
+                    if inner.is_empty() {
+                        format!("'{}'", listen_flag)
+                    } else {
+                        format!("'{} {}'", inner, listen_flag)
+                    }
+                } else if raw_rhs.is_empty() {
                     format!("\"{}\"", listen_flag)
                 } else {
-                    format!("\"{} {}\"", inner, listen_flag)
-                }
-            } else if raw_rhs.starts_with('\'') && raw_rhs.ends_with('\'') && raw_rhs.len() >= 2 {
-                let inner = raw_rhs[1..raw_rhs.len() - 1].trim();
-                if inner.is_empty() {
-                    format!("'{}'", listen_flag)
-                } else {
-                    format!("'{} {}'", inner, listen_flag)
-                }
-            } else if raw_rhs.is_empty() {
-                format!("\"{}\"", listen_flag)
-            } else {
-                format!("\"{} {}\"", raw_rhs, listen_flag)
-            };
+                    format!("\"{} {}\"", raw_rhs, listen_flag)
+                };
             let mut out = String::with_capacity(existing.len() + listen_flag.len() + 8);
             out.push_str(&existing[..full_match.start()]);
             out.push_str(prefix);
@@ -9907,39 +10382,21 @@ fn resolve_package_lock_name(pkg_id: &str) -> &str {
 }
 
 /// Returns whether `config/package_automation.json` configures `require_download_sha256: true`
-/// for `pkg_id`.
+/// for `pkg_id`. Fails closed (`true`) if a config candidate is a symlink or unreadable.
 pub fn package_requires_download_sha256(pkg_id: &str) -> bool {
-    let raw = if let Ok(explicit) = env::var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG") {
-        let trimmed = explicit.trim();
-        if !trimmed.is_empty() {
-            fs::read_to_string(trimmed).ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-    .or_else(|| {
-        for candidate in [
-            "/opt/AetherFlow/current/config/package_automation.json",
-            "/opt/AetherFlow/current/backend/config/package_automation.json",
-            "config/package_automation.json",
-            "../config/package_automation.json",
-            "/opt/AetherFlow/config/package_automation.json",
-            "backend/config/package_automation.json",
-            "../backend/config/package_automation.json",
-            "/opt/AetherFlow/backend/config/package_automation.json",
-        ] {
-            if let Ok(s) = fs::read_to_string(candidate) {
-                return Some(s);
-            }
-        }
-        None
-    })
-    .unwrap_or_else(|| EMBEDDED_AUTOMATION_FOR_EXECUTOR.to_string());
+    let raw = match crate::try_load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "package_automation.json",
+        EMBEDDED_AUTOMATION_FOR_EXECUTOR,
+    ) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
 
-    let map: HashMap<String, af_models::PackageAutomation> =
-        serde_json::from_str(&raw).unwrap_or_default();
+    let Ok(map) = serde_json::from_str::<HashMap<String, af_models::PackageAutomation>>(&raw)
+    else {
+        return true;
+    };
     let clean = resolve_package_lock_name(pkg_id);
     map.get(clean)
         .or_else(|| map.get(pkg_id.trim()))
@@ -9979,11 +10436,7 @@ fn parse_port_from_runner_lockfile(raw: &str) -> Option<i32> {
 /// Resolves the effective listen port for `install` / `reinstall` / `update` when `req.app_port`
 /// was not explicitly supplied (`<= 0`), checking persisted SQLite ingress (`app_ingress_configs`
 /// and `retained_app_ingress_configs`), native runtime config, lockfile, and catalog `default_port`.
-pub fn resolve_effective_runner_app_port(
-    action: &str,
-    pkg_id: &str,
-    requested_port: i32,
-) -> i32 {
+pub fn resolve_effective_runner_app_port(action: &str, pkg_id: &str, requested_port: i32) -> i32 {
     let action_lower = action.trim().to_ascii_lowercase();
     if action_lower == "remove" || action_lower == "uninstall" {
         return 0;
@@ -10167,13 +10620,14 @@ fn runner_mutate_xml_tag(
             new_value
         );
         if re_known.is_match(&content) {
-            content = re_known.replace_all(&content, replacement.as_str()).into_owned();
+            content = re_known
+                .replace_all(&content, replacement.as_str())
+                .into_owned();
         } else if let Some(idx) = content.rfind(&closing_tag) {
             content.insert_str(idx, &format!("  {}\n", replacement));
         }
     } else {
-        let re_tag =
-            Regex::new(&format!(r"(?s)<{0}>.*?</{0}>|<{0}\s*/>", escaped_tag)).unwrap();
+        let re_tag = Regex::new(&format!(r"(?s)<{0}>.*?</{0}>|<{0}\s*/>", escaped_tag)).unwrap();
         let new_elem = format!("<{0}>{1}</{0}>", tag_name, new_value);
         if re_tag.is_match(&content) {
             content = re_tag.replace_all(&content, new_elem.as_str()).into_owned();
@@ -10223,7 +10677,11 @@ fn runner_mutate_ini_key(
         let in_matching_section = want_sec_lower.is_empty()
             || current_section == want_sec_lower
             || current_section.is_empty();
-        if !key_updated && in_matching_section && !trimmed.starts_with('#') && !trimmed.starts_with(';') {
+        if !key_updated
+            && in_matching_section
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with(';')
+        {
             if let Some((lhs, rhs)) = line.split_once('=') {
                 if lhs.trim().eq_ignore_ascii_case(key_trimmed) {
                     if rhs.trim() == new_value.trim() {
@@ -10333,11 +10791,7 @@ fn runner_mutate_json_key(
 /// Applies post-install blueprint config mutations inside the privileged runner process so that
 /// root-owned or service-user-owned config files under `/etc` and `/var/lib` are updated with
 /// preserved ownership and permissions before control returns to the unprivileged API process.
-pub fn apply_runner_blueprint_app_config(
-    fs_root: Option<&Path>,
-    pkg_id: &str,
-    listen_port: i32,
-) {
+pub fn apply_runner_blueprint_app_config(fs_root: Option<&Path>, pkg_id: &str, listen_port: i32) {
     let _ = try_apply_runner_blueprint_app_config(fs_root, pkg_id, listen_port);
 }
 
@@ -10524,7 +10978,10 @@ pub fn collect_blueprint_target_paths(pkg_id: &str, fs_root: Option<&Path>) -> V
     match canonical {
         "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
             paths.push(rebase(&format!("/var/lib/{}/config.xml", canonical)));
-            paths.push(rebase(&format!("/var/lib/{}/.config/{}/config.xml", canonical, canonical)));
+            paths.push(rebase(&format!(
+                "/var/lib/{}/.config/{}/config.xml",
+                canonical, canonical
+            )));
         }
         "jellyfin" => {
             paths.push(rebase("/etc/jellyfin/network.xml"));
@@ -10535,7 +10992,9 @@ pub fn collect_blueprint_target_paths(pkg_id: &str, fs_root: Option<&Path>) -> V
             paths.push(rebase("/var/lib/emby/system.xml"));
         }
         "qbittorrent" => {
-            paths.push(rebase("/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf"));
+            paths.push(rebase(
+                "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
+            ));
             paths.push(rebase("/var/lib/qbittorrent/qBittorrent.conf"));
         }
         "sabnzbd" => {
@@ -10554,10 +11013,15 @@ pub fn collect_blueprint_target_paths(pkg_id: &str, fs_root: Option<&Path>) -> V
         "transmission" => {
             paths.push(rebase("/etc/transmission-daemon/settings.json"));
             paths.push(rebase("/var/lib/transmission-daemon/info/settings.json"));
-            paths.push(rebase("/var/lib/transmission-daemon/.config/transmission-daemon/settings.json"));
+            paths.push(rebase(
+                "/var/lib/transmission-daemon/.config/transmission-daemon/settings.json",
+            ));
         }
         "overseerr" | "jellyseerr" => {
-            paths.push(rebase(&format!("/var/lib/{}/config/settings.json", canonical)));
+            paths.push(rebase(&format!(
+                "/var/lib/{}/config/settings.json",
+                canonical
+            )));
             paths.push(rebase(&format!("/opt/{}/config/settings.json", canonical)));
         }
         "jackett" => {
@@ -10621,8 +11085,9 @@ fn apply_runner_blueprint_app_config_changes(
 
     match canonical {
         "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
-            static BIND_RE: Lazy<Regex> =
-                Lazy::new(|| Regex::new(r"(?is)<BindAddress>\s*([^<]*?)\s*</BindAddress>").unwrap());
+            static BIND_RE: Lazy<Regex> = Lazy::new(|| {
+                Regex::new(r"(?is)<BindAddress>\s*([^<]*?)\s*</BindAddress>").unwrap()
+            });
             for candidate in [
                 format!("/var/lib/{}/config.xml", canonical),
                 format!("/var/lib/{}/.config/{}/config.xml", canonical, canonical),
@@ -10648,10 +11113,12 @@ fn apply_runner_blueprint_app_config_changes(
             static REMOTE_ACCESS_RE: Lazy<Regex> = Lazy::new(|| {
                 Regex::new(r"(?is)<EnableRemoteAccess>\s*([^<]*?)\s*</EnableRemoteAccess>").unwrap()
             });
-            static KNOWN_PROXIES_RE: Lazy<Regex> = Lazy::new(|| {
-                Regex::new(r"(?is)<KnownProxies>\s*(.*?)\s*</KnownProxies>").unwrap()
-            });
-            for candidate in ["/etc/jellyfin/network.xml", "/var/lib/jellyfin/config/network.xml"] {
+            static KNOWN_PROXIES_RE: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"(?is)<KnownProxies>\s*(.*?)\s*</KnownProxies>").unwrap());
+            for candidate in [
+                "/etc/jellyfin/network.xml",
+                "/var/lib/jellyfin/config/network.xml",
+            ] {
                 let p = rebase(candidate);
                 if runner_candidate_exists_or_symlink(&p)? {
                     changes.capture(&p)?;
@@ -10677,7 +11144,10 @@ fn apply_runner_blueprint_app_config_changes(
             }
         }
         "emby" => {
-            for candidate in ["/var/lib/emby/config/system.xml", "/var/lib/emby/system.xml"] {
+            for candidate in [
+                "/var/lib/emby/config/system.xml",
+                "/var/lib/emby/system.xml",
+            ] {
                 let p = rebase(candidate);
                 if runner_candidate_exists_or_symlink(&p)? {
                     changes.capture(&p)?;
@@ -10803,12 +11273,7 @@ fn apply_runner_blueprint_app_config_changes(
                 let p = rebase(candidate);
                 if runner_candidate_exists_or_symlink(&p)? {
                     changes.capture(&p)?;
-                    runner_mutate_json_key(
-                        &p,
-                        "Port",
-                        serde_json::json!(listen_port),
-                        fs_root,
-                    )?;
+                    runner_mutate_json_key(&p, "Port", serde_json::json!(listen_port), fs_root)?;
                 }
             }
         }
@@ -10839,8 +11304,60 @@ fn apply_runner_blueprint_app_config_changes(
                 candidate_vhosts.push(dir.join(format!("{}.conf", clean_app)));
             }
         }
-        let preserved_blocks =
+        let mut preserved_blocks =
             extract_runner_apache_custom_blocks(&candidate_vhosts, fs_root, &sites_en)?;
+        if clean_app == "librespeed"
+            && !preserved_blocks
+                .iter()
+                .any(|b| b.contains("/etc/aetherflow/librespeed-proxy-token.conf"))
+        {
+            preserved_blocks.push(
+                "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string(),
+            );
+        }
+        let proxy_token_directive = if clean_app == "librespeed" {
+            "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n"
+        } else {
+            ""
+        };
+        let librespeed_tls_cfg = if clean_app == "librespeed" {
+            let settings_path = match fs_root {
+                Some(root) => root.join("opt/librespeed/settings.toml"),
+                None => PathBuf::from("/opt/librespeed/settings.toml"),
+            };
+            Some(librespeed_runner_settings_tls_config(
+                &settings_path,
+                fs_root,
+            ))
+        } else {
+            None
+        };
+        let librespeed_tls = librespeed_tls_cfg.as_ref().map(|c| c.enabled);
+        let librespeed_ca_cert = librespeed_tls_cfg
+            .as_ref()
+            .and_then(|c| c.ca_cert_file.as_deref());
+        let ssl_proxy_directive = if librespeed_tls == Some(true) {
+            let ca_cert = librespeed_ca_cert.ok_or_else(|| {
+                PackageExecutorError::VerificationFailed(
+                    "LibreSpeed enable_tls=true requires a valid, regular, non-symlinked absolute tls_cert_file in /opt/librespeed/settings.toml for Apache SSLProxyCACertificateFile pinning".to_string(),
+                )
+            })?;
+            format!(
+                "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
+            )
+        } else {
+            String::new()
+        };
+        let http_scheme = if librespeed_tls == Some(true) {
+            "https"
+        } else {
+            "http"
+        };
+        let ws_scheme = if librespeed_tls == Some(true) {
+            "wss"
+        } else {
+            "ws"
+        };
         let existing_ingress = load_ingress(canonical)?;
 
         let mut modified_any = false;
@@ -10848,15 +11365,17 @@ fn apply_runner_blueprint_app_config_changes(
         if sites_avail_exists {
             let int_dom = format!("{}.aether.local", clean_app);
             let default_vhost = format!(
-                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n</VirtualHost>\n"
+                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
             );
             let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
             let prev_int = read_runner_apache_vhost(&conf_file, fs_root, false)?;
-            let vhost = render_or_update_runner_apache_vhost(
+            let vhost = render_or_update_runner_apache_vhost_with_ca(
                 prev_int.as_deref(),
                 &default_vhost,
                 Some(&int_dom),
                 listen_port,
+                librespeed_tls,
+                librespeed_ca_cert,
                 &preserved_blocks,
             );
             if prev_int.as_deref() != Some(vhost.as_str()) {
@@ -10876,13 +11395,15 @@ fn apply_runner_blueprint_app_config_changes(
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
             if ing.external_access_enabled && valid_dom && sites_avail_exists {
                 let default_ext_vhost = format!(
-                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n</VirtualHost>\n"
+                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"expr=%{{REQUEST_SCHEME}}\"\n{proxy_token_directive}</VirtualHost>\n"
                 );
-                let ext_vhost = render_or_update_runner_apache_vhost(
+                let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
                     prev_ext.as_deref(),
                     &default_ext_vhost,
                     Some(&pub_dom),
                     listen_port,
+                    librespeed_tls,
+                    librespeed_ca_cert,
                     &preserved_blocks,
                 );
                 if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
@@ -10894,11 +11415,13 @@ fn apply_runner_blueprint_app_config_changes(
                 modified_any = true;
             }
         } else if let Some(prev_ext) = prev_ext {
-            let ext_vhost = render_or_update_runner_apache_vhost(
+            let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
                 Some(&prev_ext),
                 &prev_ext,
                 None,
                 listen_port,
+                librespeed_tls,
+                librespeed_ca_cert,
                 &preserved_blocks,
             );
             if prev_ext != ext_vhost {
@@ -10918,11 +11441,13 @@ fn apply_runner_blueprint_app_config_changes(
             if let Some(prev_raw) =
                 read_runner_apache_vhost(&path, fs_root, path.parent() == Some(sites_en.as_path()))?
             {
-                let updated = render_or_update_runner_apache_vhost(
+                let updated = render_or_update_runner_apache_vhost_with_ca(
                     Some(&prev_raw),
                     &prev_raw,
                     None,
                     listen_port,
+                    librespeed_tls,
+                    librespeed_ca_cert,
                     &preserved_blocks,
                 );
                 if prev_raw != updated {
@@ -10966,9 +11491,429 @@ fn apply_runner_blueprint_app_config_changes(
     Ok(())
 }
 
-fn rewrite_runner_apache_proxy_url_port(token: &str, listen_port: i32) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LibreSpeedUpstreamTlsConfig {
+    pub enabled: bool,
+    pub ca_cert_file: Option<String>,
+}
+
+pub fn librespeed_runner_settings_tls_enabled(settings_path: &Path) -> bool {
+    librespeed_runner_settings_tls_config(settings_path, None).enabled
+}
+
+pub fn librespeed_runner_settings_tls_config(
+    settings_path: &Path,
+    fs_root: Option<&Path>,
+) -> LibreSpeedUpstreamTlsConfig {
+    try_librespeed_runner_settings_tls_config(settings_path, fs_root).unwrap_or_default()
+}
+
+/// Reads `/opt/librespeed/settings.toml` safely (`O_NOFOLLOW` + non-symlink ancestors).
+/// Returns `None` when `PermissionDenied` prevents an unprivileged caller from inspecting
+/// `settings.toml`, allowing callers with an existing vhost to preserve current TLS directives.
+pub fn try_librespeed_runner_settings_tls_config(
+    settings_path: &Path,
+    fs_root: Option<&Path>,
+) -> Option<LibreSpeedUpstreamTlsConfig> {
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut cur = settings_path.parent();
+    while let Some(dir) = cur {
+        if dir.as_os_str().is_empty() || dir == Path::new("/") {
+            break;
+        }
+        match fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Some(LibreSpeedUpstreamTlsConfig::default());
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(_) => return Some(LibreSpeedUpstreamTlsConfig::default()),
+        }
+        cur = dir.parent();
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    let file = match opts.open(settings_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(_) => return Some(LibreSpeedUpstreamTlsConfig::default()),
+    };
+    let Ok(meta) = file.metadata() else {
+        return Some(LibreSpeedUpstreamTlsConfig::default());
+    };
+    if !meta.is_file() || meta.len() > 1_048_576 {
+        return Some(LibreSpeedUpstreamTlsConfig::default());
+    }
+    let mut raw = String::new();
+    if file.take(1_048_576).read_to_string(&mut raw).is_err() {
+        return Some(LibreSpeedUpstreamTlsConfig::default());
+    }
+    let (enabled, raw_cert) = parse_librespeed_root_tls_config(&raw);
+    let ca_cert_file = if enabled {
+        raw_cert.and_then(|cert_str| validate_librespeed_apache_ca_cert(&cert_str, fs_root))
+    } else {
+        None
+    };
+    Some(LibreSpeedUpstreamTlsConfig {
+        enabled,
+        ca_cert_file,
+    })
+}
+
+fn validate_librespeed_apache_ca_cert(cert_str: &str, fs_root: Option<&Path>) -> Option<String> {
+    let trimmed = cert_str.trim();
+    if trimmed.is_empty()
+        || !trimmed.starts_with('/')
+        || trimmed.len() > 512
+        || trimmed.bytes().any(|b| {
+            b.is_ascii_whitespace()
+                || b.is_ascii_control()
+                || matches!(b, b'"' | b'\'' | b'\\' | b'#')
+        })
+    {
+        return None;
+    }
+    let cert_path = Path::new(trimmed);
+    for comp in cert_path.components() {
+        if matches!(
+            comp,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        ) {
+            return None;
+        }
+    }
+    let disk_path = match fs_root {
+        Some(root) => root.join(trimmed.trim_start_matches('/')),
+        None => cert_path.to_path_buf(),
+    };
+    for anc in disk_path.ancestors().skip(1) {
+        if anc.as_os_str().is_empty() || anc == Path::new("/") {
+            break;
+        }
+        if fs::symlink_metadata(anc)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    let meta = fs::symlink_metadata(&disk_path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() == 0 || meta.len() > 1_048_576
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+fn parse_librespeed_root_tls_flag(raw: &str) -> bool {
+    parse_librespeed_root_tls_config(raw).0
+}
+
+fn scan_librespeed_toml_statements(input: &str) -> Option<Vec<String>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QuoteState {
+        None,
+        Single,
+        Double,
+        TripleSingle,
+        TripleDouble,
+    }
+
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = QuoteState::None;
+    let mut bracket_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+    let bytes = input.as_bytes();
+    let mut i: usize = 0;
+
+    while i < bytes.len() {
+        let ch = input[i..].chars().next()?;
+        let ch_len = ch.len_utf8();
+        match quote {
+            QuoteState::None => {
+                if ch == '#' {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::TripleDouble;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::TripleSingle;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                match ch {
+                    '"' => {
+                        quote = QuoteState::Double;
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        quote = QuoteState::Single;
+                        cur.push(ch);
+                    }
+                    '[' => {
+                        bracket_depth += 1;
+                        cur.push(ch);
+                    }
+                    ']' => {
+                        bracket_depth = bracket_depth.checked_sub(1)?;
+                        cur.push(ch);
+                    }
+                    '{' => {
+                        brace_depth += 1;
+                        cur.push(ch);
+                    }
+                    '}' => {
+                        brace_depth = brace_depth.checked_sub(1)?;
+                        cur.push(ch);
+                    }
+                    '\n' => {
+                        if bracket_depth == 0 && brace_depth == 0 {
+                            let trimmed = cur.trim();
+                            if !trimmed.is_empty() {
+                                out.push(trimmed.to_string());
+                            }
+                            cur.clear();
+                        } else {
+                            cur.push(' ');
+                        }
+                    }
+                    '\r' => {}
+                    _ => cur.push(ch),
+                }
+            }
+            QuoteState::Double => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next()?;
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\n' {
+                    return None;
+                }
+                if ch == '"' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::Single => {
+                if ch == '\n' {
+                    return None;
+                }
+                if ch == '\'' {
+                    quote = QuoteState::None;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleDouble => {
+                if ch == '\\' {
+                    cur.push(ch);
+                    i += ch_len;
+                    if i < bytes.len() {
+                        let next_ch = input[i..].chars().next()?;
+                        cur.push(next_ch);
+                        i += next_ch.len_utf8();
+                    }
+                    continue;
+                }
+                if input[i..].starts_with("\"\"\"") {
+                    quote = QuoteState::None;
+                    cur.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                cur.push(ch);
+            }
+            QuoteState::TripleSingle => {
+                if input[i..].starts_with("'''") {
+                    quote = QuoteState::None;
+                    cur.push_str("'''");
+                    i += 3;
+                    continue;
+                }
+                cur.push(ch);
+            }
+        }
+        i += ch_len;
+    }
+
+    if quote != QuoteState::None || bracket_depth > 0 || brace_depth > 0 {
+        return None;
+    }
+    let trimmed = cur.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    Some(out)
+}
+
+fn split_librespeed_toml_kv(stmt: &str) -> Option<(&str, &str)> {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut in_triple_double = false;
+    let mut in_triple_single = false;
+    let mut escaped = false;
+    let mut bracket_depth = 0usize;
+    let bytes = stmt.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = stmt[i..].chars().next()?;
+        let ch_len = ch.len_utf8();
+        if in_triple_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if stmt[i..].starts_with("\"\"\"") {
+                in_triple_double = false;
+                i += 3;
+                continue;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_triple_single {
+            if stmt[i..].starts_with("'''") {
+                in_triple_single = false;
+                i += 3;
+                continue;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            i += ch_len;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            i += ch_len;
+            continue;
+        }
+        if stmt[i..].starts_with("\"\"\"") {
+            in_triple_double = true;
+            i += 3;
+            continue;
+        }
+        if stmt[i..].starts_with("'''") {
+            in_triple_single = true;
+            i += 3;
+            continue;
+        }
+        match ch {
+            '"' => in_double = true,
+            '\'' => in_single = true,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '=' if bracket_depth == 0 => return Some((&stmt[..i], &stmt[i + 1..])),
+            _ => {}
+        }
+        i += ch_len;
+    }
+    None
+}
+
+fn unquote_librespeed_toml_scalar(raw_val: &str) -> String {
+    let trimmed = raw_val.trim();
+    if trimmed.starts_with("\"\"\"") && trimmed.ends_with("\"\"\"") && trimmed.len() >= 6 {
+        let inner = &trimmed[3..trimmed.len() - 3];
+        let inner = inner
+            .strip_prefix("\r\n")
+            .or_else(|| inner.strip_prefix('\n'))
+            .unwrap_or(inner);
+        return inner.to_string();
+    }
+    if trimmed.starts_with("'''") && trimmed.ends_with("'''") && trimmed.len() >= 6 {
+        let inner = &trimmed[3..trimmed.len() - 3];
+        let inner = inner
+            .strip_prefix("\r\n")
+            .or_else(|| inner.strip_prefix('\n'))
+            .unwrap_or(inner);
+        return inner.to_string();
+    }
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        if let Ok(parsed) = serde_json::from_str::<String>(trimmed) {
+            return parsed;
+        }
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    trimmed.to_string()
+}
+
+fn parse_librespeed_root_tls_config(raw: &str) -> (bool, Option<String>) {
+    let mut enabled = false;
+    let mut cert_file: Option<String> = None;
+    let Some(stmts) = scan_librespeed_toml_statements(raw) else {
+        return (false, None);
+    };
+    for stmt in stmts {
+        if stmt.starts_with('[') && split_librespeed_toml_kv(&stmt).is_none() {
+            break;
+        }
+        if let Some((k, v)) = split_librespeed_toml_kv(&stmt) {
+            let key = unquote_librespeed_toml_scalar(k);
+            let val = unquote_librespeed_toml_scalar(v);
+            if key == "enable_tls" {
+                enabled = val.trim().eq_ignore_ascii_case("true");
+            } else if key == "tls_cert_file" {
+                let trimmed = val.trim();
+                cert_file = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+        }
+    }
+    (enabled, cert_file)
+}
+
+fn rewrite_runner_apache_proxy_url_port(
+    token: &str,
+    listen_port: i32,
+    upstream_tls: Option<bool>,
+) -> Option<String> {
     for scheme in ["http://", "https://", "ws://", "wss://"] {
         if let Some(rest) = token.strip_prefix(scheme) {
+            let out_scheme = match (scheme, upstream_tls) {
+                ("http://" | "https://", Some(true)) => "https://",
+                ("http://" | "https://", Some(false)) => "http://",
+                ("ws://" | "wss://", Some(true)) => "wss://",
+                ("ws://" | "wss://", Some(false)) => "ws://",
+                _ => scheme,
+            };
             for host in ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"] {
                 if let Some(after_host) = rest.strip_prefix(host) {
                     let digit_len = after_host
@@ -10977,7 +11922,7 @@ fn rewrite_runner_apache_proxy_url_port(token: &str, listen_port: i32) -> Option
                         .count();
                     if digit_len > 0 {
                         let suffix = &after_host[digit_len..];
-                        return Some(format!("{scheme}{host}{listen_port}{suffix}"));
+                        return Some(format!("{out_scheme}{host}{listen_port}{suffix}"));
                     }
                 }
             }
@@ -11108,11 +12053,33 @@ fn extract_runner_apache_custom_blocks(
     Ok(blocks)
 }
 
+#[cfg(test)]
 fn render_or_update_runner_apache_vhost(
     existing_raw: Option<&str>,
     default_template: &str,
     desired_server_name: Option<&str>,
     listen_port: i32,
+    upstream_tls: Option<bool>,
+    preserved_blocks: &[String],
+) -> String {
+    render_or_update_runner_apache_vhost_with_ca(
+        existing_raw,
+        default_template,
+        desired_server_name,
+        listen_port,
+        upstream_tls,
+        None,
+        preserved_blocks,
+    )
+}
+
+fn render_or_update_runner_apache_vhost_with_ca(
+    existing_raw: Option<&str>,
+    default_template: &str,
+    desired_server_name: Option<&str>,
+    listen_port: i32,
+    upstream_tls: Option<bool>,
+    upstream_ca_cert: Option<&str>,
     preserved_blocks: &[String],
 ) -> String {
     let base = match existing_raw {
@@ -11122,6 +12089,22 @@ fn render_or_update_runner_apache_vhost(
                 let trimmed = line.trim_start();
                 let indent = &line[..line.len() - trimmed.len()];
                 let lower = trimmed.to_ascii_lowercase();
+                if upstream_tls.is_some()
+                    && (lower.starts_with("sslproxyengine ")
+                        || lower.starts_with("sslproxyengine\t")
+                        || lower.starts_with("sslproxyverify ")
+                        || lower.starts_with("sslproxyverify\t")
+                        || lower.starts_with("sslproxycacertificatefile ")
+                        || lower.starts_with("sslproxycacertificatefile\t")
+                        || lower.starts_with("sslproxycheckpeercn ")
+                        || lower.starts_with("sslproxycheckpeercn\t")
+                        || lower.starts_with("sslproxycheckpeername ")
+                        || lower.starts_with("sslproxycheckpeername\t")
+                        || lower.starts_with("sslproxycheckpeerexpire ")
+                        || lower.starts_with("sslproxycheckpeerexpire\t"))
+                {
+                    continue;
+                }
                 if let Some(dom) = desired_server_name {
                     if lower.starts_with("servername ") || lower.starts_with("servername\t") {
                         out_lines.push(format!("{indent}ServerName {dom}"));
@@ -11138,7 +12121,7 @@ fn render_or_update_runner_apache_vhost(
                     let tokens: Vec<String> = trimmed
                         .split_whitespace()
                         .map(|tok| {
-                            rewrite_runner_apache_proxy_url_port(tok, listen_port)
+                            rewrite_runner_apache_proxy_url_port(tok, listen_port, upstream_tls)
                                 .unwrap_or_else(|| tok.to_string())
                         })
                         .collect();
@@ -11146,6 +12129,30 @@ fn render_or_update_runner_apache_vhost(
                 } else {
                     out_lines.push(line.to_string());
                 }
+            }
+            if let (Some(true), Some(ca_cert)) = (upstream_tls, upstream_ca_cert) {
+                let insert_pos = out_lines
+                    .iter()
+                    .position(|l| {
+                        l.trim()
+                            .to_ascii_lowercase()
+                            .starts_with("proxypreservehost ")
+                    })
+                    .or_else(|| {
+                        out_lines
+                            .iter()
+                            .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
+                    })
+                    .unwrap_or(out_lines.len());
+                let ssl_lines = vec![
+                    "    SSLProxyEngine On".to_string(),
+                    "    SSLProxyVerify require".to_string(),
+                    format!("    SSLProxyCACertificateFile {ca_cert}"),
+                    "    SSLProxyCheckPeerCN off".to_string(),
+                    "    SSLProxyCheckPeerName off".to_string(),
+                    "    SSLProxyCheckPeerExpire off".to_string(),
+                ];
+                out_lines.splice(insert_pos..insert_pos, ssl_lines);
             }
             let mut joined = out_lines.join("\n");
             joined.push('\n');
@@ -11191,7 +12198,12 @@ fn render_or_update_runner_apache_vhost(
 }
 
 fn verify_runner_apache_configtest() -> Result<(), String> {
-    for bin in ["/usr/sbin/apache2ctl", "/usr/sbin/apachectl", "apache2ctl", "apachectl"] {
+    for bin in [
+        "/usr/sbin/apache2ctl",
+        "/usr/sbin/apachectl",
+        "apache2ctl",
+        "apachectl",
+    ] {
         match std::process::Command::new(bin).arg("-t").output() {
             Ok(out) => {
                 if out.status.success() {
@@ -11199,7 +12211,9 @@ fn verify_runner_apache_configtest() -> Result<(), String> {
                 }
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!("{} {}", stderr.trim(), stdout.trim()).trim().to_string());
+                return Err(format!("{} {}", stderr.trim(), stdout.trim())
+                    .trim()
+                    .to_string());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => return Err(format!("failed to execute {}: {}", bin, err)),
@@ -11350,11 +12364,17 @@ pub fn check_disk_space(
         || is_var_tmp(&check_str)
         || std::env::var("AF_REJECT_TMPFS_STAGING").as_deref() == Ok("1");
 
-    if reject_tmpfs && (fs_type == "tmpfs" || fs_type == "ramfs" || is_magic_tmpfs || is_magic_ramfs) {
+    if reject_tmpfs
+        && (fs_type == "tmpfs" || fs_type == "ramfs" || is_magic_tmpfs || is_magic_ramfs)
+    {
         return Err(PackageExecutorError::ExecutionError(format!(
             "Staging directory {} is on tmpfs filesystem or filesystem type is unknown ({})",
             check_path.display(),
-            if !fs_type.is_empty() { &fs_type } else { "tmpfs" }
+            if !fs_type.is_empty() {
+                &fs_type
+            } else {
+                "tmpfs"
+            }
         )));
     }
 
@@ -11435,17 +12455,31 @@ pub fn preflight_check_disk_and_inodes(fs_root: Option<&Path>) -> Result<(), Str
         match std::fs::symlink_metadata(&scratch_path) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
-                    return Err(format!("Scratch root {} must not be a symlink", scratch_path.display()));
+                    return Err(format!(
+                        "Scratch root {} must not be a symlink",
+                        scratch_path.display()
+                    ));
                 }
                 if !meta.is_dir() {
-                    return Err(format!("Scratch root {} is not a directory", scratch_path.display()));
+                    return Err(format!(
+                        "Scratch root {} is not a directory",
+                        scratch_path.display()
+                    ));
                 }
                 let mode = meta.mode() & 0o777;
                 if mode != 0o700 {
-                    return Err(format!("Scratch root {} has permissions 0o{:o}, expected 0o700", scratch_path.display(), mode));
+                    return Err(format!(
+                        "Scratch root {} has permissions 0o{:o}, expected 0o700",
+                        scratch_path.display(),
+                        mode
+                    ));
                 }
                 if is_root && meta.uid() != 0 {
-                    return Err(format!("Scratch root {} is owned by uid {}, expected 0 (root)", scratch_path.display(), meta.uid()));
+                    return Err(format!(
+                        "Scratch root {} is owned by uid {}, expected 0 (root)",
+                        scratch_path.display(),
+                        meta.uid()
+                    ));
                 }
                 check_capacity = true;
             }
@@ -11464,13 +12498,21 @@ pub fn preflight_check_disk_and_inodes(fs_root: Option<&Path>) -> Result<(), Str
                         if !is_root && create_err.kind() == std::io::ErrorKind::PermissionDenied {
                             // Unprivileged test runs fallback to checking /var/tmp
                         } else {
-                            return Err(format!("Failed to create scratch root {}: {}", scratch_path.display(), create_err));
+                            return Err(format!(
+                                "Failed to create scratch root {}: {}",
+                                scratch_path.display(),
+                                create_err
+                            ));
                         }
                     }
                 }
             }
             Err(e) => {
-                return Err(format!("Failed to read metadata for scratch root {}: {}", scratch_path.display(), e));
+                return Err(format!(
+                    "Failed to read metadata for scratch root {}: {}",
+                    scratch_path.display(),
+                    e
+                ));
             }
         }
 
@@ -11507,7 +12549,8 @@ pub(crate) fn format_exit_failure_diagnostics(
             .to_string();
         let mut updated_diag = diag.clone();
         if let Some(inc_line) = saw_incomplete_rollback_line {
-            if !summary.contains("incomplete-rollback") && !summary.contains("incomplete rollback") {
+            if !summary.contains("incomplete-rollback") && !summary.contains("incomplete rollback")
+            {
                 if !summary.is_empty() {
                     summary.push_str("; ");
                 }
@@ -11519,13 +12562,24 @@ pub(crate) fn format_exit_failure_diagnostics(
             || category.contains("incomplete-rollback");
         if is_incomplete {
             stage = "rollback";
-            if !category.contains("incomplete_rollback") && !category.contains("incomplete-rollback") {
+            if !category.contains("incomplete_rollback")
+                && !category.contains("incomplete-rollback")
+            {
                 category = "incomplete_rollback".to_string();
             }
             if let Some(obj) = updated_diag.as_object_mut() {
-                obj.insert("stage".to_string(), serde_json::Value::String("rollback".to_string()));
-                obj.insert("category".to_string(), serde_json::Value::String("incomplete_rollback".to_string()));
-                obj.insert("summary".to_string(), serde_json::Value::String(summary.clone()));
+                obj.insert(
+                    "stage".to_string(),
+                    serde_json::Value::String("rollback".to_string()),
+                );
+                obj.insert(
+                    "category".to_string(),
+                    serde_json::Value::String("incomplete_rollback".to_string()),
+                );
+                obj.insert(
+                    "summary".to_string(),
+                    serde_json::Value::String(summary.clone()),
+                );
             }
         }
         let diag_json = serde_json::to_string(&updated_diag).unwrap_or_default();
@@ -11533,13 +12587,11 @@ pub(crate) fn format_exit_failure_diagnostics(
             "__RUNNER_EXIT_ERROR__:exit status {} [STAGE:{}] [CATEGORY:{}] [SUMMARY:{}] | AF_DIAG_FAILURE={}\n",
             code, stage, category, summary, diag_json
         ))
-    } else if let Some(inc_line) = saw_incomplete_rollback_line {
-        Some(format!(
+    } else {
+        saw_incomplete_rollback_line.map(|inc_line| format!(
             "__RUNNER_EXIT_ERROR__:exit status {} [STAGE:rollback] [CATEGORY:incomplete_rollback] [SUMMARY:{}] | incomplete-rollback\n",
             code, inc_line
         ))
-    } else {
-        None
     }
 }
 
@@ -11738,10 +12790,15 @@ pub fn execute_package_request_stream(
             cmd.process_group(0);
         }
         apply_legacy_package_environment(&mut cmd, &req);
-        if env_cfg.fs_root.is_some() {
-            let (master_user, master_pass) = resolve_master_credentials(env_cfg.fs_root.as_deref());
-            cmd.env("MASTER_USER", master_user)
-                .env("MASTER_PASS", master_pass);
+        match try_resolve_master_credentials(env_cfg.fs_root.as_deref()) {
+            Ok((master_user, master_pass)) => {
+                cmd.env("MASTER_USER", master_user)
+                    .env("MASTER_PASS", master_pass);
+            }
+            Err(error) => {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:{error}\n"));
+                return;
+            }
         }
 
         #[cfg(unix)]
@@ -12051,9 +13108,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
-        assert!(journal.stage_file_mutation(&root.with_extension("outside")).is_err());
+        assert!(journal
+            .stage_file_mutation(&root.with_extension("outside"))
+            .is_err());
         journal.commit();
         fs::remove_dir_all(root).unwrap();
     }
@@ -12128,9 +13190,7 @@ mod tests {
                     env: env_vars.to_vec(),
                 });
 
-                if self.fail_on_call == Some(idx)
-                    || self.fail_program.as_deref() == Some(program)
-                {
+                if self.fail_on_call == Some(idx) || self.fail_program.as_deref() == Some(program) {
                     return Ok(CommandOutput {
                         exit_code: 100,
                         stdout: String::new(),
@@ -12172,7 +13232,9 @@ mod tests {
 
                 if program == "curl" {
                     let has_auth = args.iter().any(|a| a == "-K");
-                    let is_unauth_rc = args.iter().any(|a| a.contains("/metrics") || a.contains("/core/version"));
+                    let is_unauth_rc = args
+                        .iter()
+                        .any(|a| a.contains("/metrics") || a.contains("/core/version"));
                     let status = if is_unauth_rc && !has_auth {
                         "401"
                     } else {
@@ -12283,10 +13345,7 @@ mod tests {
         assert!(validate_step(&bad_threadfin_dirs).is_err());
 
         let bad_quassel_dirs = DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/var/lib/quassel".to_string(),
-                "/etc/default".to_string(),
-            ],
+            paths: vec!["/var/lib/quassel".to_string(), "/etc/default".to_string()],
             mode: 0o750,
             owner: Some("quasselcore".to_string()),
             group: Some("quasselcore".to_string()),
@@ -12426,7 +13485,8 @@ mod tests {
 
         // 3. Remove (with delete_data = true)
         env_cfg.delete_data = true;
-        let executor_rm = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let executor_rm =
+            DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
         let remove_outcome = executor_rm
             .execute_recipe(
                 &recipe,
@@ -12771,9 +13831,11 @@ mod tests {
             .await
             .expect("explicit purge should remove application data");
         assert!(!root.join("etc/fail2ban").exists());
-        assert!(mock.recorded_commands().iter().any(
-            |command| command.program == "apt-get" && command.args.iter().any(|arg| arg == "purge")
-        ));
+        assert!(mock
+            .recorded_commands()
+            .iter()
+            .any(|command| command.program == "apt-get"
+                && command.args.iter().any(|arg| arg == "purge")));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -13313,10 +14375,7 @@ mod tests {
             cancel_trigger.cancel();
         });
 
-        let args = vec![
-            "-c".to_string(),
-            "sh -c 'sleep 60' & sleep 60".to_string(),
-        ];
+        let args = vec!["-c".to_string(), "sh -c 'sleep 60' & sleep 60".to_string()];
         let res = tokio::time::timeout(
             Duration::from_secs(3),
             runner.run_command("sh", &args, &[], &cancel),
@@ -13602,7 +14661,9 @@ sleep 30
             })
             .expect("quassel-core must be installed");
         assert!(certificate_command < quassel_install_command);
-        assert!(install_commands[quassel_install_command].args.contains(&"DPkg::Options::=--force-confold".to_string()));
+        assert!(install_commands[quassel_install_command]
+            .args
+            .contains(&"DPkg::Options::=--force-confold".to_string()));
         let defaults_step = recipe.install_steps.iter().position(|step| matches!(
             step, DeclarativeStep::WriteTemplateFile { path, .. } if path == "/etc/default/quasselcore"
         )).unwrap();
@@ -13610,8 +14671,16 @@ sleep 30
             step, DeclarativeStep::AptInstall { packages, .. } if packages.iter().any(|package| package == "quassel-core")
         )).unwrap();
         assert!(defaults_step < package_step);
-        let sandbox_event = install_events.iter().position(|event| event.phase == ExecutionPhase::SandboxApply).unwrap();
-        let first_install_event = install_events.iter().position(|event| event.phase == ExecutionPhase::ExecuteStep && event.message.contains("Installing")).unwrap();
+        let sandbox_event = install_events
+            .iter()
+            .position(|event| event.phase == ExecutionPhase::SandboxApply)
+            .unwrap();
+        let first_install_event = install_events
+            .iter()
+            .position(|event| {
+                event.phase == ExecutionPhase::ExecuteStep && event.message.contains("Installing")
+            })
+            .unwrap();
         assert!(sandbox_event < first_install_event);
 
         // Verify dependencies, config, sandbox drop-in, cert, and version metadata
@@ -13630,8 +14699,7 @@ sleep 30
         let cert_path = root.join("var/lib/quassel/quasselCert.pem");
         assert!(cert_path.is_file());
 
-        let version_marker =
-            fs::read_to_string(root.join("var/lib/quassel/.af-version")).unwrap();
+        let version_marker = fs::read_to_string(root.join("var/lib/quassel/.af-version")).unwrap();
         assert_eq!(version_marker.trim(), "0.14.0");
 
         // Verify bounded monotonic progress
@@ -13668,7 +14736,8 @@ sleep 30
         // Clear recorded commands and run Update with a new port
         runner.recorded.lock().unwrap().clear();
         env_cfg.app_port = 4255;
-        let update_executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
+        let update_executor =
+            DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
         let update_outcome = update_executor
             .execute_recipe(
                 &recipe,
@@ -13707,8 +14776,7 @@ sleep 30
             recorded: Arc::new(StdMutex::new(Vec::new())),
             fail_systemctl_restart: true,
         };
-        let failing_exec =
-            DeclarativePackageExecutor::with_runner(env_cfg.clone(), failing_runner);
+        let failing_exec = DeclarativePackageExecutor::with_runner(env_cfg.clone(), failing_runner);
         let err = failing_exec
             .execute_recipe(
                 &recipe,
@@ -13751,7 +14819,9 @@ sleep 30
         assert!(!remove_commands.iter().any(|command| {
             command.program == "apt-get" && command.args.contains(&"purge".to_string())
         }));
-        assert!(!remove_commands.iter().any(|command| command.program == "userdel"));
+        assert!(!remove_commands
+            .iter()
+            .any(|command| command.program == "userdel"));
         assert!(!root.join("install/.quassel.lock").exists());
         assert!(!root.join("var/lib/quassel/.af-version").exists());
         assert!(
@@ -13837,10 +14907,7 @@ sleep 30
                 assert!(arch_digests.amd64.contains(THREADFIN_AMD64_COMPAT_SHA256));
                 assert!(arch_digests.amd64.contains(THREADFIN_AMD64_PLAIN_SHA256));
                 assert_eq!(arch_digests.arm64, THREADFIN_ARM64_SHA256);
-                assert_eq!(
-                    arch_digests.armhf.as_deref(),
-                    Some(THREADFIN_ARMHF_SHA256)
-                );
+                assert_eq!(arch_digests.armhf.as_deref(), Some(THREADFIN_ARMHF_SHA256));
                 assert!(verification.require_elf_magic);
             }
         }
@@ -13901,9 +14968,8 @@ sleep 30
             }),
             ..policy.clone()
         };
-        let arch_err =
-            verify_artifact_file_for_arch(&bin_path, &wrong_arch_policy, Some("amd64"))
-                .unwrap_err();
+        let arch_err = verify_artifact_file_for_arch(&bin_path, &wrong_arch_policy, Some("amd64"))
+            .unwrap_err();
         assert!(matches!(
             arch_err,
             PackageExecutorError::ArtifactVerification(_)
@@ -13921,7 +14987,9 @@ sleep 30
 
         // 5. Non-HTTPS URL in DownloadBinary must fail validation closed
         let insecure_http_step = DeclarativeStep::DownloadBinary {
-            url_template: "http://github.com/Threadfin/Threadfin/releases/download/1.2.37/{{ARCH_ASSET}}".to_string(),
+            url_template:
+                "http://github.com/Threadfin/Threadfin/releases/download/1.2.37/{{ARCH_ASSET}}"
+                    .to_string(),
             arch_map: ArchAssetMap {
                 amd64: "Threadfin_linux_amd64_compat".to_string(),
                 arm64: "Threadfin_linux_arm64".to_string(),
@@ -13956,14 +15024,44 @@ sleep 30
             let state_dir = root.join(format!("var/lib/{}", package_id));
             fs::create_dir_all(&state_dir).unwrap();
             fs::write(state_dir.join("sentinel"), "preserved user data").unwrap();
-            let mock = MockCommandRunner { fail_program: Some("apt-get".to_string()), ..Default::default() };
+            let mock = MockCommandRunner {
+                fail_program: Some("apt-get".to_string()),
+                ..Default::default()
+            };
             let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
-            assert!(executor.execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {}).await.is_err());
+            assert!(executor
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Remove,
+                    CancellationToken::new(),
+                    |_| {}
+                )
+                .await
+                .is_err());
             assert!(marker.exists());
-            assert_eq!(fs::read_to_string(state_dir.join("sentinel")).unwrap(), "preserved user data");
-            assert!(mock.recorded_commands().iter().any(|command| command.program == "systemctl" && command.args.first().map(String::as_str) == Some("stop")));
-            let retry = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
-            assert!(!retry.execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {}).await.unwrap().lock_present);
+            assert_eq!(
+                fs::read_to_string(state_dir.join("sentinel")).unwrap(),
+                "preserved user data"
+            );
+            assert!(mock
+                .recorded_commands()
+                .iter()
+                .any(|command| command.program == "systemctl"
+                    && command.args.first().map(String::as_str) == Some("stop")));
+            let retry =
+                DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+            assert!(
+                !retry
+                    .execute_recipe(
+                        &recipe,
+                        PackageAction::Remove,
+                        CancellationToken::new(),
+                        |_| {}
+                    )
+                    .await
+                    .unwrap()
+                    .lock_present
+            );
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -13976,25 +15074,69 @@ sleep 30
         let original = br#"{"version":"0.5.0","bindIpAddress":"","custom":{"playlist":"keep"}}"#;
         fs::write(&settings_path, original).unwrap();
         let runner = MockCommandRunner::default();
-        let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner.clone());
+        let executor = DeclarativePackageExecutor::with_runner(
+            PackageExecutionEnv::isolated(&root),
+            runner.clone(),
+        );
         let recipe = get_declarative_recipe("threadfin").unwrap();
-        let step = DeclarativeStep::EnsureThreadfinConfig { progress_pct: 85, description: "bind default".to_string() };
+        let step = DeclarativeStep::EnsureThreadfinConfig {
+            progress_pct: 85,
+            description: "bind default".to_string(),
+        };
         let mut journal = RollbackJournal::new(Some(root.clone()));
-        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
-        let settings: serde_json::Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut HashMap::new(),
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
         assert_eq!(settings["bindIpAddress"], "127.0.0.1");
         assert_eq!(settings["custom"]["playlist"], "keep");
         journal.rollback(&runner).await;
         assert_eq!(fs::read(&settings_path).unwrap(), original);
         let explicit = br#"{"version":"0.5.0","bindIpAddress":"192.0.2.10","custom":"preserve"}"#;
         fs::write(&settings_path, explicit).unwrap();
-        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
+        executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut HashMap::new(),
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(fs::read(&settings_path).unwrap(), explicit);
         fs::write(&settings_path, br#"{"bindIpAddress":42}"#).unwrap();
-        assert!(executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.is_err());
+        assert!(executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut HashMap::new(),
+                &mut journal,
+                &CancellationToken::new()
+            )
+            .await
+            .is_err());
         fs::remove_file(&settings_path).unwrap();
-        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
-        let fresh: serde_json::Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut HashMap::new(),
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let fresh: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
         assert_eq!(fresh["version"], "0.5.0");
         assert_eq!(fresh["bindIpAddress"], "127.0.0.1");
         journal.commit();
@@ -14011,17 +15153,56 @@ sleep 30
         fs::write(&certificate_path, "existing private certificate").unwrap();
         fs::set_permissions(&certificate_path, fs::Permissions::from_mode(0o644)).unwrap();
         let runner = MockCommandRunner::default();
-        let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner.clone());
+        let executor = DeclarativePackageExecutor::with_runner(
+            PackageExecutionEnv::isolated(&root),
+            runner.clone(),
+        );
         let recipe = get_declarative_recipe("quassel").unwrap();
-        let step = recipe.install_steps.iter().find(|step| matches!(step, DeclarativeStep::GenerateSelfSignedTlsCert { .. })).unwrap();
+        let step = recipe
+            .install_steps
+            .iter()
+            .find(|step| matches!(step, DeclarativeStep::GenerateSelfSignedTlsCert { .. }))
+            .unwrap();
         let mut journal = RollbackJournal::new(Some(root.clone()));
-        executor.run_single_step(&recipe, step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
-        assert_eq!(fs::metadata(&certificate_path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::read_to_string(&certificate_path).unwrap(), "existing private certificate");
-        assert!(!runner.recorded_commands().iter().any(|command| command.program == "openssl"));
+        executor
+            .run_single_step(
+                &recipe,
+                step,
+                &mut HashMap::new(),
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&certificate_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(&certificate_path).unwrap(),
+            "existing private certificate"
+        );
+        assert!(!runner
+            .recorded_commands()
+            .iter()
+            .any(|command| command.program == "openssl"));
         journal.rollback(&runner).await;
-        assert_eq!(fs::metadata(&certificate_path).unwrap().permissions().mode() & 0o777, 0o644);
-        assert_eq!(fs::read_to_string(&certificate_path).unwrap(), "existing private certificate");
+        assert_eq!(
+            fs::metadata(&certificate_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::read_to_string(&certificate_path).unwrap(),
+            "existing private certificate"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -14178,7 +15359,11 @@ sleep 30
         let fail_root = create_isolated_test_dir("threadfin-rollback");
         let fail_cache_dir = fail_root.join("artifact-cache");
         fs::create_dir_all(&fail_cache_dir).unwrap();
-        fs::write(fail_cache_dir.join("Threadfin_linux_amd64_compat"), &elf_payload).unwrap();
+        fs::write(
+            fail_cache_dir.join("Threadfin_linux_amd64_compat"),
+            &elf_payload,
+        )
+        .unwrap();
         let mut fail_env = PackageExecutionEnv::isolated(&fail_root);
         fail_env.artifact_cache_dir = Some(fail_cache_dir);
         let fail_mock = MockCommandRunner {
@@ -14290,7 +15475,8 @@ sleep 30
             remove_steps: Vec::new(),
         };
 
-        let executor = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let executor =
+            DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
         let res = executor
             .execute_recipe(
                 &recipe,
@@ -14346,7 +15532,9 @@ sleep 30
                     if cancel.is_cancelled() {
                         return Err(PackageExecutorError::Cancelled(program.to_string()));
                     }
-                    if program == "systemctl" && args.first().map(String::as_str) == Some("is-active") {
+                    if program == "systemctl"
+                        && args.first().map(String::as_str) == Some("is-active")
+                    {
                         return Ok(CommandOutput {
                             exit_code: 3,
                             stdout: "inactive\n".to_string(),
@@ -14429,7 +15617,8 @@ sleep 30
         fs::write(&sshd_cfg, "Port 2200\n").unwrap();
 
         let recipe = get_declarative_recipe("fail2ban").unwrap();
-        let executor = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let executor =
+            DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
 
         for action in [PackageAction::Update, PackageAction::Install] {
             let outcome = executor
@@ -14559,7 +15748,7 @@ sleep 30
                 let passwd_path = root.join("var/lib/novnc/.vnc/passwd");
                 fs::create_dir_all(passwd_path.parent().unwrap()).unwrap();
                 let encoded = encode_tigervnc_passwd("OpVncS3c");
-                fs::write(&passwd_path, &encoded).unwrap();
+                fs::write(&passwd_path, encoded).unwrap();
                 vec![
                     (passwd_path, hex::encode(encoded)),
                     write_sentinel(
@@ -14643,7 +15832,12 @@ sleep 30
             let initial_exec =
                 DeclarativePackageExecutor::with_runner(env_cfg.clone(), initial_runner);
             let initial_outcome = initial_exec
-                .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Install,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .unwrap_or_else(|e| panic!("initial install of {pkg_id} failed: {e}"));
             assert!(initial_outcome.lock_present, "{pkg_id}");
@@ -14685,7 +15879,12 @@ sleep 30
             let reinstall_exec =
                 DeclarativePackageExecutor::with_runner(env_cfg.clone(), reinstall_runner.clone());
             let reinstall_outcome = reinstall_exec
-                .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Install,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .unwrap_or_else(|e| panic!("in-place reinstall of {pkg_id} failed: {e}"));
             assert!(reinstall_outcome.lock_present, "{pkg_id}");
@@ -14829,7 +16028,12 @@ sleep 30
             let initial_exec =
                 DeclarativePackageExecutor::with_runner(env_cfg.clone(), initial_runner);
             let initial_outcome = initial_exec
-                .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Install,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .unwrap_or_else(|e| panic!("initial install of {pkg_id} failed: {e}"));
             assert!(initial_outcome.lock_present, "{pkg_id}");
@@ -14887,7 +16091,12 @@ sleep 30
             let failing_exec =
                 DeclarativePackageExecutor::with_runner(env_cfg.clone(), failing_runner);
             let err = failing_exec
-                .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Install,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .expect_err(&format!(
                     "in-place reinstall of {pkg_id} must fail when systemctl is-active returns 3"
@@ -15047,10 +16256,12 @@ sleep 30
                     });
 
                     // Simulate service restart migrating the application database to schema-v2
-                    if program == "systemctl"
-                        && args.first().map(String::as_str) == Some("restart")
+                    if program == "systemctl" && args.first().map(String::as_str) == Some("restart")
                     {
-                        let _ = fs::write(self.state_dir.join("index-v0.14.0.db"), b"schema-v2-migrated");
+                        let _ = fs::write(
+                            self.state_dir.join("index-v0.14.0.db"),
+                            b"schema-v2-migrated",
+                        );
                         return Ok(CommandOutput {
                             exit_code: 0,
                             stdout: String::new(),
@@ -15106,7 +16317,8 @@ sleep 30
                             return Ok(CommandOutput {
                                 exit_code: 100,
                                 stdout: String::new(),
-                                stderr: "E: Version '1.0.0' for 'syncthing' was not found".to_string(),
+                                stderr: "E: Version '1.0.0' for 'syncthing' was not found"
+                                    .to_string(),
                             });
                         }
                         return Ok(CommandOutput {
@@ -15153,7 +16365,11 @@ sleep 30
             fs::write(&lock_path, "package=syncthing\nversion=1.0.0\n").unwrap();
             let unit_path = root.join("etc/systemd/system/syncthing.service");
             fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
-            fs::write(&unit_path, "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n").unwrap();
+            fs::write(
+                &unit_path,
+                "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n",
+            )
+            .unwrap();
 
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             let runner = UpdateRollbackRunner {
@@ -15164,26 +16380,32 @@ sleep 30
             };
             let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner);
             let err = executor
-                .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Update,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .expect_err("update must fail when WaitForHttpReady fails");
             assert!(!err.to_string().contains("incomplete rollback/recovery"));
 
             // Verify service was stopped before state restoration, state was restored to schema-v1, package was downgraded, and .af-version is 1.0.0
             assert_eq!(
-                fs::read(&state_dir.join("index-v0.14.0.db")).unwrap(),
+                fs::read(state_dir.join("index-v0.14.0.db")).unwrap(),
                 b"schema-v1-original"
             );
             assert_eq!(
-                fs::read_to_string(state_dir.join(".af-version")).unwrap().trim(),
+                fs::read_to_string(state_dir.join(".af-version"))
+                    .unwrap()
+                    .trim(),
                 "1.0.0"
             );
             let cmds = recorded.lock().unwrap().clone();
             let stop_pos = cmds
                 .iter()
                 .position(|c| {
-                    c.program == "systemctl"
-                        && c.args == vec!["stop", "--", "syncthing.service"]
+                    c.program == "systemctl" && c.args == vec!["stop", "--", "syncthing.service"]
                 })
                 .expect("rollback must stop syncthing.service");
             let downgrade_pos = cmds
@@ -15214,7 +16436,11 @@ sleep 30
             fs::write(&lock_path, "package=syncthing\nversion=1.0.0\n").unwrap();
             let unit_path = root.join("etc/systemd/system/syncthing.service");
             fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
-            fs::write(&unit_path, "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n").unwrap();
+            fs::write(
+                &unit_path,
+                "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n",
+            )
+            .unwrap();
 
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             let runner = UpdateRollbackRunner {
@@ -15225,7 +16451,12 @@ sleep 30
             };
             let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner);
             let err = executor
-                .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Update,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
                 .expect_err("update must fail with incomplete rollback error when downgrade fails");
             assert!(
@@ -15258,7 +16489,11 @@ sleep 30
             fs::write(&lock_path, "package=syncthing\nversion=1.0.0\n").unwrap();
             let unit_path = root.join("etc/systemd/system/syncthing.service");
             fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
-            fs::write(&unit_path, "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n").unwrap();
+            fs::write(
+                &unit_path,
+                "[Unit]\nDescription=Syncthing\n[Service]\nExecStart=/usr/bin/syncthing\n",
+            )
+            .unwrap();
 
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             let runner = UpdateRollbackRunner {
@@ -15269,9 +16504,16 @@ sleep 30
             };
             let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner);
             let err = executor
-                .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Update,
+                    CancellationToken::new(),
+                    |_| {},
+                )
                 .await
-                .expect_err("update must fail with incomplete rollback error when service stop fails");
+                .expect_err(
+                    "update must fail with incomplete rollback error when service stop fails",
+                );
             assert!(
                 err.to_string().contains("incomplete rollback/recovery"),
                 "expected incomplete rollback error, got: {err}"
@@ -15279,11 +16521,13 @@ sleep 30
 
             // Live mutable state directory must not be overwritten while service is still active, and recovery backup is preserved
             assert_eq!(
-                fs::read(&state_dir.join("index-v0.14.0.db")).unwrap(),
+                fs::read(state_dir.join("index-v0.14.0.db")).unwrap(),
                 b"schema-v2-migrated"
             );
             assert_eq!(
-                fs::read_to_string(state_dir.join(".af-version")).unwrap().trim(),
+                fs::read_to_string(state_dir.join(".af-version"))
+                    .unwrap()
+                    .trim(),
                 "2.0.0"
             );
 
@@ -15382,13 +16626,8 @@ sleep 30
         fs::write(&ext_conf, existing_ext).unwrap();
         fs::write(&en_ext_conf, existing_ext).unwrap();
 
-        try_apply_runner_blueprint_app_config_with_ingress(
-            Some(&root),
-            "qui",
-            18376,
-            |_| Ok(None),
-        )
-        .unwrap();
+        try_apply_runner_blueprint_app_config_with_ingress(Some(&root), "qui", 18376, |_| Ok(None))
+            .unwrap();
 
         for path in [&int_conf, &ext_conf, &en_ext_conf] {
             let updated = fs::read_to_string(path).unwrap();
@@ -15452,7 +16691,8 @@ sleep 30
         let root = create_isolated_test_dir("blueprint-vhost-symlink");
         let target = root.join("etc/apache2/sites-available/aetherflow-app-qui.conf");
         let operator_config = root.join("operator.conf");
-        let original = "<VirtualHost *:80>\n    ProxyPass / http://127.0.0.1:8376/\n</VirtualHost>\n";
+        let original =
+            "<VirtualHost *:80>\n    ProxyPass / http://127.0.0.1:8376/\n</VirtualHost>\n";
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&operator_config, original).unwrap();
         std::os::unix::fs::symlink(&operator_config, &target).unwrap();
@@ -15546,12 +16786,14 @@ sleep 30
         fs::write(&internal, BLUEPRINT_VHOST_FIXTURE).unwrap();
         fs::write(&external, [0xff, 0xfe]).unwrap();
 
-        let error =
-            try_apply_runner_blueprint_app_config_with_ingress(Some(&root), "sonarr", 18989, |_| {
-                panic!("invalid vhost must fail before ingress lookup")
-            })
-            .unwrap_err()
-            .to_string();
+        let error = try_apply_runner_blueprint_app_config_with_ingress(
+            Some(&root),
+            "sonarr",
+            18989,
+            |_| panic!("invalid vhost must fail before ingress lookup"),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(
             error.contains("failed to read required Apache vhost"),
@@ -15811,9 +17053,12 @@ sleep 30
             std::os::unix::fs::symlink(target, enabled.join(name)).unwrap();
         }
 
-        try_apply_runner_blueprint_app_config_with_ingress(Some(&root), "qui", 18376, |canonical| {
-            load_runner_blueprint_ingress(&conn, canonical)
-        })
+        try_apply_runner_blueprint_app_config_with_ingress(
+            Some(&root),
+            "qui",
+            18376,
+            |canonical| load_runner_blueprint_ingress(&conn, canonical),
+        )
         .unwrap();
 
         let updated_external = fs::read_to_string(external).unwrap();
@@ -16034,7 +17279,11 @@ sleep 30
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let mut vars = HashMap::new();
@@ -16045,8 +17294,20 @@ sleep 30
                 description: "Verifying Rclone RC HTTP listener".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_ok(), "authenticated WaitForHttpReady for rclone rcd must succeed: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_ok(),
+                "authenticated WaitForHttpReady for rclone rcd must succeed: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
 
             // 1b: Failure with wrong credentials (server returns 401)
@@ -16054,11 +17315,26 @@ sleep 30
             let env_cfg_wrong = PackageExecutionEnv::isolated(&root_wrong);
             let env_file_wrong = root_wrong.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file_wrong.parent().unwrap()).unwrap();
-            fs::write(&env_file_wrong, "RCLONE_RC_USER=\"wrong\"\nRCLONE_RC_PASS=\"wrongpass\"\n").unwrap();
+            fs::write(
+                &env_file_wrong,
+                "RCLONE_RC_USER=\"wrong\"\nRCLONE_RC_PASS=\"wrongpass\"\n",
+            )
+            .unwrap();
 
             let executor_wrong = DeclarativePackageExecutor::new(env_cfg_wrong);
-            let res_wrong = executor_wrong.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res_wrong.is_err(), "wrong credentials WaitForHttpReady must fail on 401");
+            let res_wrong = executor_wrong
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res_wrong.is_err(),
+                "wrong credentials WaitForHttpReady must fail on 401"
+            );
             let _ = fs::remove_dir_all(&root_wrong);
         }
 
@@ -16079,7 +17355,11 @@ sleep 30
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let mut vars = HashMap::new();
@@ -16090,8 +17370,20 @@ sleep 30
                 description: "Verifying Rclone unauthenticated metrics rejection".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "unauthenticated /metrics exposure must be rejected with Err: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "unauthenticated /metrics exposure must be rejected with Err: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
 
@@ -16112,18 +17404,31 @@ sleep 30
                 }
                 if (path == "/core/version" || path == "/rc/noopauth") && method == "POST" {
                     if auth != Some(expected_auth) {
-                        return (401, "application/json", "{\"error\":\"unauthorized\"}\n".to_string());
+                        return (
+                            401,
+                            "application/json",
+                            "{\"error\":\"unauthorized\"}\n".to_string(),
+                        );
                     }
-                    return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                    return (
+                        200,
+                        "application/json",
+                        "{\"version\":\"1.75.2\"}\n".to_string(),
+                    );
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-auth-405-live");
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             // Write active rclone.service unit without --api-addr (pure single-port rcd)
             let svc_file = root.join("etc/systemd/system/rclone.service");
@@ -16154,11 +17459,24 @@ sleep 30
             let step = DeclarativeStep::WaitForHttpReady {
                 path: "/metrics".to_string(),
                 progress_pct: 98,
-                description: "Verifying Rclone 405 rejection on /metrics in single-port rcd mode".to_string(),
+                description: "Verifying Rclone 405 rejection on /metrics in single-port rcd mode"
+                    .to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "single-port rcd with 405 on /metrics must NOT be accepted: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "single-port rcd with 405 on /metrics must NOT be accepted: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
 
@@ -16173,7 +17491,8 @@ sleep 30
                     return (200, "text/html", "<html>Rclone GUI</html>\n".to_string());
                 }
                 (200, "text/html", "<html>Rclone GUI</html>\n".to_string())
-            }).await;
+            })
+            .await;
 
             let expected_auth = "Basic Z3VpX3VzZXI6Z3VpX3Bhc3M=";
             let server_api = start_local_http_server(move |method, path, auth| {
@@ -16181,23 +17500,40 @@ sleep 30
                     if auth != Some(expected_auth) {
                         return (401, "text/plain", "Unauthorized\n".to_string());
                     }
-                    return (200, "text/plain", "# HELP rclone_version_info\n".to_string());
+                    return (
+                        200,
+                        "text/plain",
+                        "# HELP rclone_version_info\n".to_string(),
+                    );
                 }
                 if path == "/core/version" && method == "POST" {
                     if auth != Some(expected_auth) {
-                        return (401, "application/json", "{\"error\":\"unauthorized\"}\n".to_string());
+                        return (
+                            401,
+                            "application/json",
+                            "{\"error\":\"unauthorized\"}\n".to_string(),
+                        );
                     }
-                    return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                    return (
+                        200,
+                        "application/json",
+                        "{\"version\":\"1.75.2\"}\n".to_string(),
+                    );
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             // 4a: Success with protected API server on --api-addr
             let root = create_isolated_test_dir("rclone-split-port-gui-live");
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"gui_user\"\nRCLONE_RC_PASS=\"gui_pass\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"gui_user\"\nRCLONE_RC_PASS=\"gui_pass\"\n",
+            )
+            .unwrap();
 
             // Write rclone.service with --api-addr
             let svc_file = root.join("etc/systemd/system/rclone.service");
@@ -16220,8 +17556,20 @@ sleep 30
                 description: "Verifying split-port Rclone GUI readiness".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_ok(), "split-port gui mode must succeed when RC API is protected: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_ok(),
+                "split-port gui mode must succeed when RC API is protected: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
 
             // 4b: RC API listener on --api-addr returns 200 WITHOUT credentials -> must be rejected (is_err())!
@@ -16231,16 +17579,25 @@ sleep 30
                 }
                 if path == "/core/version" && method == "POST" {
                     // Unauthenticated request returns 200 -> auth bypass!
-                    return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                    return (
+                        200,
+                        "application/json",
+                        "{\"version\":\"1.75.2\"}\n".to_string(),
+                    );
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root_bypass = create_isolated_test_dir("rclone-split-port-bypass-live");
             let env_cfg_bypass = PackageExecutionEnv::isolated(&root_bypass);
             let env_file_bypass = root_bypass.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file_bypass.parent().unwrap()).unwrap();
-            fs::write(&env_file_bypass, "RCLONE_RC_USER=\"gui_user\"\nRCLONE_RC_PASS=\"gui_pass\"\n").unwrap();
+            fs::write(
+                &env_file_bypass,
+                "RCLONE_RC_USER=\"gui_user\"\nRCLONE_RC_PASS=\"gui_pass\"\n",
+            )
+            .unwrap();
 
             let svc_file_bypass = root_bypass.join("etc/systemd/system/rclone.service");
             fs::create_dir_all(svc_file_bypass.parent().unwrap()).unwrap();
@@ -16255,10 +17612,25 @@ sleep 30
             let executor_bypass = DeclarativePackageExecutor::new(env_cfg_bypass);
             let mut vars_bypass = HashMap::new();
             vars_bypass.insert("APP_PORT".to_string(), server_gui.port.to_string());
-            vars_bypass.insert("RCLONE_API_PORT".to_string(), server_api_unauth.port.to_string());
+            vars_bypass.insert(
+                "RCLONE_API_PORT".to_string(),
+                server_api_unauth.port.to_string(),
+            );
 
-            let res_bypass = executor_bypass.run_single_step(&recipe, &step, &mut vars_bypass, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res_bypass.is_err(), "RC API listener returning 200 without credentials must be rejected with Err: {:?}", res_bypass);
+            let res_bypass = executor_bypass
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars_bypass,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res_bypass.is_err(),
+                "RC API listener returning 200 without credentials must be rejected with Err: {:?}",
+                res_bypass
+            );
             let _ = fs::remove_dir_all(&root_bypass);
         }
 
@@ -16267,22 +17639,35 @@ sleep 30
             let seen_auth_headers = Arc::new(StdMutex::new(Vec::<Option<String>>::new()));
             let headers_tracker = seen_auth_headers.clone();
             let server = start_local_http_server(move |_method, path, auth| {
-                headers_tracker.lock().unwrap().push(auth.map(|s| s.to_string()));
+                headers_tracker
+                    .lock()
+                    .unwrap()
+                    .push(auth.map(|s| s.to_string()));
                 if path == "/-/healthy" {
-                    (200, "text/plain", "Prometheus Server is Healthy.\n".to_string())
+                    (
+                        200,
+                        "text/plain",
+                        "Prometheus Server is Healthy.\n".to_string(),
+                    )
                 } else {
                     (200, "text/plain", "ok\n".to_string())
                 }
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-non-rclone-prometheus-live");
             let env_cfg = PackageExecutionEnv::isolated(&root);
             // Intentionally create /etc/rclone/rclone.env inside root
             let rclone_env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(rclone_env_file.parent().unwrap()).unwrap();
-            fs::write(&rclone_env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &rclone_env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
-            let prom_recipe = get_declarative_recipe("prometheus").expect("prometheus recipe must exist");
+            let prom_recipe =
+                get_declarative_recipe("prometheus").expect("prometheus recipe must exist");
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let mut vars = HashMap::new();
             vars.insert("APP_PORT".to_string(), server.port.to_string());
@@ -16292,11 +17677,26 @@ sleep 30
                 description: "Verifying Prometheus HTTP listener readiness".to_string(),
             };
 
-            let res = executor.run_single_step(&prom_recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_ok(), "readiness for prometheus must succeed: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &prom_recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_ok(),
+                "readiness for prometheus must succeed: {:?}",
+                res
+            );
 
             let recorded_headers = seen_auth_headers.lock().unwrap().clone();
-            assert!(!recorded_headers.is_empty(), "prometheus server must have received requests");
+            assert!(
+                !recorded_headers.is_empty(),
+                "prometheus server must have received requests"
+            );
             for auth in &recorded_headers {
                 assert!(
                     auth.is_none(),
@@ -16327,7 +17727,11 @@ sleep 30
 
         let zip_path = staging_dir.join("test_rclone.zip");
         let status = std::process::Command::new("zip")
-            .args(["-j", &zip_path.to_string_lossy(), &bin_path.to_string_lossy()])
+            .args([
+                "-j",
+                &zip_path.to_string_lossy(),
+                &bin_path.to_string_lossy(),
+            ])
             .status()
             .expect("zip command must succeed");
         assert!(status.success());
@@ -16358,15 +17762,32 @@ sleep 30
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
         // Deliberately incorrect SHA-256 digest
-        vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_SHA256".to_string(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
 
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await;
         assert!(res.is_err(), "SHA-256 mismatch must fail closed: {:?}", res);
 
         let dest_bin = root.join("usr/local/bin/rclone");
-        assert!(!dest_bin.exists(), "Binary must not be installed when SHA-256 verification fails");
+        assert!(
+            !dest_bin.exists(),
+            "Binary must not be installed when SHA-256 verification fails"
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&work_dir);
@@ -16391,14 +17812,32 @@ sleep 30
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
         vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), real_sha);
 
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-        assert!(res.is_err(), "Binary reporting wrong version (v1.60.0 vs target 1.75.2) must be rejected: {:?}", res);
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "Binary reporting wrong version (v1.60.0 vs target 1.75.2) must be rejected: {:?}",
+            res
+        );
 
         let dest_bin = root.join("usr/local/bin/rclone");
-        assert!(!dest_bin.exists(), "Binary must not be installed when version check fails");
+        assert!(
+            !dest_bin.exists(),
+            "Binary must not be installed when version check fails"
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&work_dir);
@@ -16423,16 +17862,34 @@ sleep 30
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
         vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), real_sha);
 
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-        assert!(res.is_ok(), "Valid SHA-256 and matching version must succeed: {:?}", res);
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            res.is_ok(),
+            "Valid SHA-256 and matching version must succeed: {:?}",
+            res
+        );
 
         let dest_bin = root.join("usr/local/bin/rclone");
         assert!(dest_bin.exists(), "Destination binary must be installed");
         let symlink = root.join("usr/bin/rclone");
-        assert!(symlink.exists() || fs::symlink_metadata(&symlink).is_ok(), "Symlink must exist");
+        assert!(
+            symlink.exists() || fs::symlink_metadata(&symlink).is_ok(),
+            "Symlink must exist"
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&work_dir);
@@ -16450,20 +17907,33 @@ sleep 30
                 if auth != Some(expected_auth) {
                     return (401, "text/plain", "Unauthorized\n".to_string());
                 }
-                return (200, "text/plain", "# HELP rclone_version_info\n".to_string());
+                return (
+                    200,
+                    "text/plain",
+                    "# HELP rclone_version_info\n".to_string(),
+                );
             }
             if path == "/core/version" && method == "POST" {
                 // Exposure: returns 200 even unauthenticated!
-                return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                return (
+                    200,
+                    "application/json",
+                    "{\"version\":\"1.75.2\"}\n".to_string(),
+                );
             }
             (404, "text/plain", "Not Found\n".to_string())
-        }).await;
+        })
+        .await;
 
         let root = create_isolated_test_dir("rclone-exposed-core-version");
         let env_cfg = PackageExecutionEnv::isolated(&root);
         let env_file = root.join("etc/rclone/rclone.env");
         fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-        fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+        fs::write(
+            &env_file,
+            "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+        )
+        .unwrap();
 
         let executor = DeclarativePackageExecutor::new(env_cfg);
         let recipe = get_declarative_recipe("rclone").unwrap();
@@ -16475,7 +17945,15 @@ sleep 30
             description: "Verifying exposed core version rejection".to_string(),
         };
 
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut RollbackJournal::new(None),
+                &CancellationToken::new(),
+            )
+            .await;
         assert!(res.is_err(), "exposed /core/version returning 200 unauthenticated must be rejected as an authentication bypass: {:?}", res);
         let _ = fs::remove_dir_all(&root);
     }
@@ -16492,22 +17970,39 @@ sleep 30
                     if auth != Some(expected_auth) {
                         return (404, "text/plain", "Not Found\n".to_string());
                     }
-                    return (200, "text/plain", "# HELP rclone_version_info\n".to_string());
+                    return (
+                        200,
+                        "text/plain",
+                        "# HELP rclone_version_info\n".to_string(),
+                    );
                 }
                 if path == "/core/version" && method == "POST" {
                     if auth != Some(expected_auth) {
-                        return (401, "application/json", "{\"error\":\"unauthorized\"}\n".to_string());
+                        return (
+                            401,
+                            "application/json",
+                            "{\"error\":\"unauthorized\"}\n".to_string(),
+                        );
                     }
-                    return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                    return (
+                        200,
+                        "application/json",
+                        "{\"version\":\"1.75.2\"}\n".to_string(),
+                    );
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-unauth-404-metrics");
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let recipe = get_declarative_recipe("rclone").unwrap();
@@ -16519,8 +18014,20 @@ sleep 30
                 description: "Verifying unauthenticated 404 metrics rejection".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "unauthenticated 404 on /metrics must NOT be accepted as ready: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "unauthenticated 404 on /metrics must NOT be accepted as ready: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
 
@@ -16532,22 +18039,39 @@ sleep 30
                     if auth != Some(expected_auth) {
                         return (500, "text/plain", "Internal Server Error\n".to_string());
                     }
-                    return (200, "text/plain", "# HELP rclone_version_info\n".to_string());
+                    return (
+                        200,
+                        "text/plain",
+                        "# HELP rclone_version_info\n".to_string(),
+                    );
                 }
                 if path == "/core/version" && method == "POST" {
                     if auth != Some(expected_auth) {
-                        return (401, "application/json", "{\"error\":\"unauthorized\"}\n".to_string());
+                        return (
+                            401,
+                            "application/json",
+                            "{\"error\":\"unauthorized\"}\n".to_string(),
+                        );
                     }
-                    return (200, "application/json", "{\"version\":\"1.75.2\"}\n".to_string());
+                    return (
+                        200,
+                        "application/json",
+                        "{\"version\":\"1.75.2\"}\n".to_string(),
+                    );
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-unauth-500-metrics");
             let env_cfg = PackageExecutionEnv::isolated(&root);
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let recipe = get_declarative_recipe("rclone").unwrap();
@@ -16559,8 +18083,20 @@ sleep 30
                 description: "Verifying unauthenticated 500 metrics rejection".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "unauthenticated 500 on /metrics must NOT be accepted as ready: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "unauthenticated 500 on /metrics must NOT be accepted as ready: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
     }
@@ -16576,14 +18112,19 @@ sleep 30
                     return (200, "text/plain", "ok: curl 200\n".to_string());
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-mock-metrics-reject");
             let mut env_cfg = PackageExecutionEnv::isolated(&root);
             env_cfg.dry_run = false;
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let recipe = get_declarative_recipe("rclone").unwrap();
@@ -16595,7 +18136,15 @@ sleep 30
                 description: "Verifying mock output rejection on metrics".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
             assert!(res.is_err(), "server returning 'ok: curl 200' on unauthenticated /metrics must be rejected when dry_run=false: {:?}", res);
             let _ = fs::remove_dir_all(&root);
         }
@@ -16608,20 +18157,29 @@ sleep 30
                     if auth != Some(expected_auth) {
                         return (401, "text/plain", "Unauthorized\n".to_string());
                     }
-                    return (200, "text/plain", "# HELP rclone_version_info\n".to_string());
+                    return (
+                        200,
+                        "text/plain",
+                        "# HELP rclone_version_info\n".to_string(),
+                    );
                 }
                 if path == "/core/version" && method == "POST" {
                     return (200, "text/plain", "[dry-run] curl\n".to_string());
                 }
                 (404, "text/plain", "Not Found\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("rclone-dryrun-version-reject");
             let mut env_cfg = PackageExecutionEnv::isolated(&root);
             env_cfg.dry_run = false;
             let env_file = root.join("etc/rclone/rclone.env");
             fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-            fs::write(&env_file, "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n").unwrap();
+            fs::write(
+                &env_file,
+                "RCLONE_RC_USER=\"admin\"\nRCLONE_RC_PASS=\"mysecret\"\n",
+            )
+            .unwrap();
 
             let executor = DeclarativePackageExecutor::new(env_cfg);
             let recipe = get_declarative_recipe("rclone").unwrap();
@@ -16633,7 +18191,15 @@ sleep 30
                 description: "Verifying [dry-run] output rejection on version".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
             assert!(res.is_err(), "server returning '[dry-run] curl' on unauthenticated /core/version must be rejected when dry_run=false: {:?}", res);
             let _ = fs::remove_dir_all(&root);
         }
@@ -16647,7 +18213,8 @@ sleep 30
         {
             let server = start_local_http_server(|_method, _path, _auth| {
                 (200, "text/plain", "ok: curl 200\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("non-rclone-mock-reject");
             let mut env_cfg = PackageExecutionEnv::isolated(&root);
@@ -16663,8 +18230,20 @@ sleep 30
                 description: "Verifying mock output rejection for non-rclone".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "non-rclone returning 'ok: curl 200' must be rejected when dry_run=false: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "non-rclone returning 'ok: curl 200' must be rejected when dry_run=false: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
 
@@ -16672,7 +18251,8 @@ sleep 30
         {
             let server = start_local_http_server(|_method, _path, _auth| {
                 (200, "text/plain", "[dry-run] curl\n".to_string())
-            }).await;
+            })
+            .await;
 
             let root = create_isolated_test_dir("non-rclone-dryrun-reject");
             let mut env_cfg = PackageExecutionEnv::isolated(&root);
@@ -16688,8 +18268,20 @@ sleep 30
                 description: "Verifying [dry-run] output rejection for non-rclone".to_string(),
             };
 
-            let res = executor.run_single_step(&recipe, &step, &mut vars, &mut RollbackJournal::new(None), &CancellationToken::new()).await;
-            assert!(res.is_err(), "non-rclone returning '[dry-run] curl' must be rejected when dry_run=false: {:?}", res);
+            let res = executor
+                .run_single_step(
+                    &recipe,
+                    &step,
+                    &mut vars,
+                    &mut RollbackJournal::new(None),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                res.is_err(),
+                "non-rclone returning '[dry-run] curl' must be rejected when dry_run=false: {:?}",
+                res
+            );
             let _ = fs::remove_dir_all(&root);
         }
     }
@@ -16753,19 +18345,45 @@ sleep 30
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
-        vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), "badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadb".to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
+        vars.insert(
+            "RCLONE_ARCHIVE_SHA256".to_string(),
+            "badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadb".to_string(),
+        );
 
         let mut journal = RollbackJournal::new(Some(root.clone()));
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut journal, &CancellationToken::new()).await;
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await;
         assert!(res.is_err(), "SHA-256 mismatch must fail");
 
         // The pre-existing binary and symlink MUST remain completely intact!
-        assert!(usr_local_bin.is_file(), "pre-existing /usr/local/bin/rclone must remain intact");
-        assert_eq!(fs::read(&usr_local_bin).unwrap(), b"original-rclone-binary-v1.60.0");
-        assert!(usr_bin.exists() || fs::symlink_metadata(&usr_bin).is_ok(), "pre-existing /usr/bin/rclone must exist");
+        assert!(
+            usr_local_bin.is_file(),
+            "pre-existing /usr/local/bin/rclone must remain intact"
+        );
+        assert_eq!(
+            fs::read(&usr_local_bin).unwrap(),
+            b"original-rclone-binary-v1.60.0"
+        );
+        assert!(
+            usr_bin.exists() || fs::symlink_metadata(&usr_bin).is_ok(),
+            "pre-existing /usr/bin/rclone must exist"
+        );
         #[cfg(unix)]
-        assert_eq!(fs::read_link(&usr_bin).unwrap(), PathBuf::from("/usr/local/bin/rclone"));
+        assert_eq!(
+            fs::read_link(&usr_bin).unwrap(),
+            PathBuf::from("/usr/local/bin/rclone")
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&work_dir);
@@ -16806,17 +18424,38 @@ sleep 30
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
         vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), real_sha);
 
         let mut journal = RollbackJournal::new(Some(root.clone()));
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut journal, &CancellationToken::new()).await;
-        assert!(res.is_ok(), "Install over symlink destination must succeed: {:?}", res);
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            res.is_ok(),
+            "Install over symlink destination must succeed: {:?}",
+            res
+        );
 
         // usr_local_bin must now be a regular file (not a symlink) containing the new binary
         let meta = fs::symlink_metadata(&usr_local_bin).unwrap();
-        assert!(!meta.file_type().is_symlink(), "/usr/local/bin/rclone must now be a regular file");
-        assert!(usr_local_bin.is_file(), "/usr/local/bin/rclone must be an installed file");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "/usr/local/bin/rclone must now be a regular file"
+        );
+        assert!(
+            usr_local_bin.is_file(),
+            "/usr/local/bin/rclone must be an installed file"
+        );
         let installed_bytes = fs::read(&usr_local_bin).unwrap();
         assert_ne!(installed_bytes, b"legacy-rclone-payload");
 
@@ -16828,7 +18467,10 @@ sleep 30
 
         // /usr/local/bin/rclone must be restored as the original symlink!
         let restored_meta = fs::symlink_metadata(&usr_local_bin).unwrap();
-        assert!(restored_meta.file_type().is_symlink(), "/usr/local/bin/rclone must be restored to a symlink");
+        assert!(
+            restored_meta.file_type().is_symlink(),
+            "/usr/local/bin/rclone must be restored to a symlink"
+        );
         #[cfg(unix)]
         assert_eq!(fs::read_link(&usr_local_bin).unwrap(), old_target);
 
@@ -16868,7 +18510,11 @@ int main(int argc, char** argv) {
 
         let zip_path = work_dir.join("test_rclone_subcmd.zip");
         let status = std::process::Command::new("zip")
-            .args(["-j", &zip_path.to_string_lossy(), &bin_path.to_string_lossy()])
+            .args([
+                "-j",
+                &zip_path.to_string_lossy(),
+                &bin_path.to_string_lossy(),
+            ])
             .status()
             .expect("zip command must succeed");
         assert!(status.success());
@@ -16889,14 +18535,32 @@ int main(int argc, char** argv) {
 
         let mut vars = HashMap::new();
         vars.insert("AF_TARGET_VERSION".to_string(), "1.75.2".to_string());
-        vars.insert("RCLONE_ARCHIVE_PATH".to_string(), zip_path.to_string_lossy().to_string());
+        vars.insert(
+            "RCLONE_ARCHIVE_PATH".to_string(),
+            zip_path.to_string_lossy().to_string(),
+        );
         vars.insert("RCLONE_ARCHIVE_SHA256".to_string(), sha256_hex);
 
         let mut journal = RollbackJournal::new(Some(root.clone()));
-        let res = executor.run_single_step(&recipe, &step, &mut vars, &mut journal, &CancellationToken::new()).await;
-        assert!(res.is_err(), "Install must fail when --version fails, even if 'version' succeeds");
+        let res = executor
+            .run_single_step(
+                &recipe,
+                &step,
+                &mut vars,
+                &mut journal,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "Install must fail when --version fails, even if 'version' succeeds"
+        );
         let err_str = format!("{:?}", res);
-        assert!(err_str.contains("--version"), "Error must cite failed self-test '--version': {}", err_str);
+        assert!(
+            err_str.contains("--version"),
+            "Error must cite failed self-test '--version': {}",
+            err_str
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&work_dir);
@@ -16913,7 +18577,8 @@ int main(int argc, char** argv) {
         fs::create_dir_all(&var_tmp_dir).unwrap();
 
         // 1. Direct check_filesystem_capacity_and_inodes on /dev/shm/.../var/tmp must reject tmpfs
-        let direct_res = check_filesystem_capacity_and_inodes(&var_tmp_dir, 512 * 1024 * 1024, 1024);
+        let direct_res =
+            check_filesystem_capacity_and_inodes(&var_tmp_dir, 512 * 1024 * 1024, 1024);
         assert!(
             direct_res.is_err(),
             "check_filesystem_capacity_and_inodes on tmpfs /var/tmp must fail"
@@ -16985,26 +18650,41 @@ int main(int argc, char** argv) {
         });
 
         let inc_line = "Failed to stop unit test.service (incomplete-rollback)";
-        let exit_msg = format_exit_failure_diagnostics(
-            1,
-            Some(&raw_diag),
-            Some(inc_line),
-        )
-        .expect("Must format diagnostic exit message");
+        let exit_msg = format_exit_failure_diagnostics(1, Some(&raw_diag), Some(inc_line))
+            .expect("Must format diagnostic exit message");
 
         // 1. Message must have [STAGE:rollback] [CATEGORY:incomplete_rollback]
-        assert!(exit_msg.contains("[STAGE:rollback]"), "Must override stage to rollback: {exit_msg}");
-        assert!(exit_msg.contains("[CATEGORY:incomplete_rollback]"), "Must set category to incomplete_rollback: {exit_msg}");
-        assert!(exit_msg.contains("install boom; Failed to stop unit test.service (incomplete-rollback)"), "Summary must combine: {exit_msg}");
+        assert!(
+            exit_msg.contains("[STAGE:rollback]"),
+            "Must override stage to rollback: {exit_msg}"
+        );
+        assert!(
+            exit_msg.contains("[CATEGORY:incomplete_rollback]"),
+            "Must set category to incomplete_rollback: {exit_msg}"
+        );
+        assert!(
+            exit_msg
+                .contains("install boom; Failed to stop unit test.service (incomplete-rollback)"),
+            "Summary must combine: {exit_msg}"
+        );
 
         // 2. Trailing AF_DIAG_FAILURE={...} must have stage: rollback, category: incomplete_rollback, and updated summary
         let marker = "AF_DIAG_FAILURE=";
-        let pos = exit_msg.find(marker).expect("Must contain AF_DIAG_FAILURE marker");
+        let pos = exit_msg
+            .find(marker)
+            .expect("Must contain AF_DIAG_FAILURE marker");
         let json_part = exit_msg[pos + marker.len()..].trim();
-        let parsed: serde_json::Value = serde_json::from_str(json_part).expect("Trailing JSON must be valid");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_part).expect("Trailing JSON must be valid");
 
-        assert_eq!(parsed.get("stage").and_then(|v| v.as_str()), Some("rollback"));
-        assert_eq!(parsed.get("category").and_then(|v| v.as_str()), Some("incomplete_rollback"));
+        assert_eq!(
+            parsed.get("stage").and_then(|v| v.as_str()),
+            Some("rollback")
+        );
+        assert_eq!(
+            parsed.get("category").and_then(|v| v.as_str()),
+            Some("incomplete_rollback")
+        );
         assert_eq!(
             parsed.get("summary").and_then(|v| v.as_str()),
             Some("install boom; Failed to stop unit test.service (incomplete-rollback)")
@@ -17012,4 +18692,114 @@ int main(int argc, char** argv) {
     }
 
     include!("native_catalog_regressions.rs");
+
+    #[test]
+    fn test_librespeed_apache_vhost_honors_and_toggles_upstream_tls() {
+        assert!(!parse_librespeed_root_tls_flag("enable_tls = false\n"));
+        assert!(parse_librespeed_root_tls_flag(
+            "listen_port = 8988\nenable_tls = true # comment\n"
+        ));
+        assert!(!parse_librespeed_root_tls_flag(
+            "enable_tls = false\n[extra]\nenable_tls = true\n"
+        ));
+        assert!(parse_librespeed_root_tls_flag(
+            "enable_tls = true\nbanner = \"\"\"\n# example:\nenable_tls = false\n\"\"\"\n"
+        ));
+        assert!(parse_librespeed_root_tls_flag(
+            "enable_tls = true\nnotes = '''\nenable_tls = false\n'''\n"
+        ));
+
+        let http_default = "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName librespeed.aether.local\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{HTTP:Upgrade} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:8988/$1 [P,L]\n    ProxyPass / http://127.0.0.1:8988/\n    ProxyPassReverse / http://127.0.0.1:8988/\n    RequestHeader set X-Forwarded-Proto \"http\"\n    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n</VirtualHost>\n";
+
+        // Pin operator certificate via SSLProxyCACertificateFile + SSLProxyVerify require when enable_tls=true
+        let pinned_tls = render_or_update_runner_apache_vhost_with_ca(
+            Some(http_default),
+            http_default,
+            Some("librespeed.aether.local"),
+            18988,
+            Some(true),
+            Some("/opt/librespeed/cert.pem"),
+            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
+        );
+        assert!(pinned_tls.contains("SSLProxyEngine On"));
+        assert!(pinned_tls.contains("SSLProxyVerify require"));
+        assert!(pinned_tls.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
+        assert!(!pinned_tls.contains("SSLProxyVerify none"));
+        assert!(pinned_tls.contains("wss://127.0.0.1:18988/$1"));
+        assert!(pinned_tls.contains("ProxyPass / https://127.0.0.1:18988/"));
+        assert!(pinned_tls.contains("ProxyPassReverse / https://127.0.0.1:18988/"));
+
+        // Fail closed if enable_tls=true in settings.toml lacks a valid regular tls_cert_file
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "af-runner-librespeed-tls-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(tmp_dir.join("etc/apache2/sites-available")).unwrap();
+        fs::create_dir_all(tmp_dir.join("etc/apache2/sites-enabled")).unwrap();
+        fs::create_dir_all(tmp_dir.join("opt/librespeed")).unwrap();
+        fs::write(
+            tmp_dir.join("opt/librespeed/settings.toml"),
+            "enable_tls = true\ntls_cert_file = \"/opt/librespeed/missing-cert.pem\"\ntls_key_file = \"/opt/librespeed/key.pem\"\n",
+        )
+        .unwrap();
+        let mut changes = RunnerBlueprintConfigChanges {
+            fs_root: Some(&tmp_dir),
+            backups: Vec::new(),
+        };
+        let err =
+            apply_runner_blueprint_app_config_changes(&mut changes, "librespeed", 18988, |_| {
+                Ok(None)
+            })
+            .expect_err("enable_tls=true without valid tls_cert_file must fail closed");
+        assert!(
+            err.to_string().contains("SSLProxyCACertificateFile"),
+            "unexpected error: {err}"
+        );
+
+        // Succeeds with pinned SSLProxyCACertificateFile once regular tls_cert_file exists
+        fs::write(
+            tmp_dir.join("opt/librespeed/cert.pem"),
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp_dir.join("opt/librespeed/settings.toml"),
+            "enable_tls = true\ntls_cert_file = \"/opt/librespeed/cert.pem\"\ntls_key_file = \"/opt/librespeed/key.pem\"\n",
+        )
+        .unwrap();
+        let mut ok_changes = RunnerBlueprintConfigChanges {
+            fs_root: Some(&tmp_dir),
+            backups: Vec::new(),
+        };
+        apply_runner_blueprint_app_config_changes(&mut ok_changes, "librespeed", 18988, |_| {
+            Ok(None)
+        })
+        .expect("enable_tls=true with valid regular tls_cert_file must succeed");
+        let rendered_on_disk = fs::read_to_string(
+            tmp_dir.join("etc/apache2/sites-available/aetherflow-app-librespeed.conf"),
+        )
+        .unwrap();
+        assert!(rendered_on_disk.contains("SSLProxyVerify require"));
+        assert!(rendered_on_disk.contains("SSLProxyCACertificateFile /opt/librespeed/cert.pem"));
+        assert!(!rendered_on_disk.contains("SSLProxyVerify none"));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        // Downgrade back to HTTP cleanly when enable_tls=false
+        let demoted_http = render_or_update_runner_apache_vhost(
+            Some(&pinned_tls),
+            http_default,
+            Some("librespeed.aether.local"),
+            18989,
+            Some(false),
+            &["    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string()],
+        );
+        assert!(!demoted_http.contains("SSLProxyEngine"));
+        assert!(!demoted_http.contains("SSLProxyCACertificateFile"));
+        assert!(demoted_http.contains("ws://127.0.0.1:18989/$1"));
+        assert!(demoted_http.contains("ProxyPass / http://127.0.0.1:18989/"));
+    }
 }

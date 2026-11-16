@@ -18,7 +18,7 @@ use super::{
     validate_mcbrowser_user, McBrowserError, MutationSuccessResponse, ParsedByteRange,
 };
 use crate::auth::{api_error, jwt_secret_bytes, secure_cookie_enabled, AuthUser};
-use crate::ws::{extract_client_ip, extract_cookie};
+use crate::ws::extract_cookie;
 use af_files::{BrowserFs, Entry};
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, RawQuery, State};
@@ -84,7 +84,7 @@ pub(super) type PolicyAuthorizer = Arc<
 >;
 
 fn default_policy_authorizer() -> PolicyAuthorizer {
-    Arc::new(|conn, user, perm, path| super::policy::authorize_with_conn(conn, user, perm, path))
+    Arc::new(super::policy::authorize_with_conn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +94,7 @@ fn default_policy_authorizer() -> PolicyAuthorizer {
 #[derive(Clone)]
 pub(crate) enum ShareRuntime {
     Production,
+    #[allow(dead_code)]
     Isolated {
         conn: Arc<Mutex<Connection>>,
         base_root: PathBuf,
@@ -768,6 +769,7 @@ fn fstat_fd(fd: libc::c_int) -> io::Result<libc::stat> {
 
 struct VerifiedScopedUserRoot {
     bfs: BrowserFs,
+    #[allow(dead_code)] // RAII descriptor pin for the open scoped user root
     root_fd: OwnedFd,
     scope: String,
     scope_dev: u64,
@@ -927,6 +929,7 @@ fn authorize_share_resolution(
     Ok(paths)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn authorize_shared_relative_resolution(
     conn: &Connection,
     policy: &PolicyAuthorizer,
@@ -1129,7 +1132,6 @@ fn open_verified_shared_single_file(
     Ok((file, entry))
 }
 
-/// Checks if a relative file beneath `share_dir_fd` is a single-link regular file (`st_nlink == 1`).
 // ─────────────────────────────────────────────────────────────────────────────
 // Database & Owner Re-Evaluation Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1803,6 +1805,7 @@ pub(crate) fn get_public_metadata_at(
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn unlock_public_share_at(
     conn: &Connection,
     base_root: &Path,
@@ -2253,6 +2256,7 @@ async fn unlock_public_share(
     State(runtime): State<ShareRuntime>,
     AxumPath(token): AxumPath<String>,
     RawQuery(raw_query): RawQuery,
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
     headers: HeaderMap,
     Json(req): Json<UnlockShareRequest>,
 ) -> Response {
@@ -2260,7 +2264,7 @@ async fn unlock_public_share(
         return public_share_error_response(e);
     }
 
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = crate::ws::extract_client_ip_for_peer(&headers, peer_ip);
     let res = tokio::task::spawn_blocking(move || {
         runtime.with_conn_and_root(|conn, base_root, policy| {
             Ok(unlock_public_share_at(

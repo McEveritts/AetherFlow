@@ -216,11 +216,11 @@ python tests/run_e2e.py --report-out TEST_READY.md
 | **F05** | `GET /api/v1/admin/ingress/configs` & `PUT .../apps/:appName` | GET returns `{"configs": [...]}`. PUT upserts into SQLite `app_ingress_configs` and triggers Apache2 Certbot SAN sync (`TriggerApacheCertSync`) and Subdomain Gateway routing. Port 1-65535, valid domain format. |
 | **F06** | `GET /api/v1/auth/system/topology` | 200 OK with live `nodes` and `links`. Nodes represent real daemons (API, Runner, SQLite WAL, Redis, Apache2). Zero hardcoded dummy nodes (`Proxy Port 8080`, `Nginx Router`). |
 | **F07** | `/run/aetherflow/runner.sock` (`/v1/sandbox`, `/v1/hosts`, `/v1/network`, `/v1/quota`) | HTTP/1.1 over UNIX domain socket, mode 0660 root:aetherflow. Max body 4096 bytes. Safe ID validation. Strict allowlist execution. |
-| **F08** | Caller Refactoring (`af_heal`, `arr_injector`, etc.) | Zero direct `sudo` or mutating `systemctl` calls in 7 target services. All route via `privileged_runner.go`. |
+| **F08** | Caller Refactoring (`af-services`, `af-runner`) | Zero direct `sudo` or mutating `systemctl` calls in core services. All route via `af-runner` socket (`dispatch_runner_systemctl_unix`, `/v1/*`). |
 | **F09** | SQLite Migration 17 (`app_ingress_configs`) | Schema: `app_ingress_configs(app_name TEXT PRIMARY KEY, public_domain TEXT, external_access_enabled INTEGER, listen_port INTEGER, tls_enabled INTEGER, updated_at DATETIME)`. Idempotent. |
-| **F10** | Cluster Manager Startup | `backend/main.go` calls `cluster.Init()` or alias before HTTP serving. `cluster.Manager` is non-nil. Handlers return 200 instead of 503. |
+| **F10** | Cluster Manager Startup | `backend-rs/crates/af-api/src/main.rs` calls `start_cluster_runtime()` before HTTP serving. Handlers respond cleanly. |
 | **F11** | Remove Next.js FS Route | `frontend/src/app/api/fs/route.ts` deleted. `NEXT_STATIC_EXPORT=1 npm run build` exports to `frontend/out/` without server-route conflict. |
-| **F12** | Backend Unit Tests | `go test ./...` passes 100% of packages, including new fs, auth, profile, ingress, and runner socket tests. |
+| **F12** | Backend Unit Tests | `cargo test --workspace --locked` passes 100% of crates, including fs, auth, profile, ingress, and runner socket tests. |
 | **F13** | Obsidian V2 CSS Foundation | `globals.css` defines `--obs-bg-base: #000000`, `body::before` 3-orb radial aurora + base gradient (`z-index: -2`), `body::after` fractal micro-grain + edge vignette (`z-index: -1`). |
 | **F14** | Obsidian V2 Glass Tokens | Directional specular highlight (`--obs-specular-top`), chromatic borders (`--obs-chromatic-border-*`), prism rims, 120Hz spring physics (`--obs-ease-spring-120`). |
 | **F15** | Tri-Mode Navigation | Desktop expandable rail (>=1024px), tablet icon rail (768-1023px), mobile bottom dock (<768px, `md:hidden`) with safe-area padding and >=44px touch targets. |
@@ -240,12 +240,12 @@ python tests/run_e2e.py --report-out TEST_READY.md
 | **F29** | Debian 13 Core OS Detection | `setup/modules/00-core.sh` supports Trixie without `VERSION_ID` and detects PHP 8.4 natively. |
 | **F30** | Modernize Package Dependencies | `setup/modules/02-packages.sh` removes `software-properties-common`, updates `pcregrep` -> `pcre2-utils`, `libncurses-dev`, drops dead packages. |
 | **F31** | Keyring Migration Across packages/ | Zero `apt-key` occurrences. All 7 package scripts use `/usr/share/keyrings/*.gpg` with `[signed-by=...]`. |
-| **F32** | Single-Binary Build Pipeline | `modern_stack.sh` & `05-finalize.sh` export static SPA, copy into `backend/web/dist/`, and compile single binary `aetherflow-api`. |
+| **F32** | Single-Binary Build Pipeline | `modern_stack.sh` & `05-finalize.sh` export static SPA, copy into `web/dist/`, and compile single binary `aetherflow-api` (+ `af`, `speedtest-backend`). |
 | **F33** | Systemd Privilege Units | `setup/templates/sysd/` contains `aetherflow-api.template` (`ProtectSystem=strict`, `NoNewPrivileges=yes`, user `aetherflow`) and `aetherflow-runner.template` (user `root`). |
 | **F34** | Sudoers & PM2 Purge | No `/etc/sudoers.d/aetherflow` with `NOPASSWD: ALL`. No root PM2 commands. |
 | **F35** | Shell Script Line Endings & Syntax | 100% of shell scripts in `setup/`, `deploy/`, `packages/` use LF line endings and pass `bash -n` syntax validation. |
 | **F36** | Automated E2E Test Suite | 4-tier automated test suite covering all 37 features across category-partition, boundary, pairwise, and real-world scenarios. |
-| **F37** | Full Verification & Hardening | 100% test pass across E2E test runner, unit tests (`go test`, `npm test`), static export, single binary compilation, and socket smoke tests. |
+| **F37** | Full Verification & Hardening | 100% test pass across E2E test runner, unit tests (`cargo test --workspace`, `npm run test:ci`), static export, single binary compilation, and socket smoke tests. |
 
 ---
 

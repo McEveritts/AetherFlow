@@ -9,6 +9,14 @@ publish = false
 # Empty workspace table isolates this scaffold from backend-rs/Cargo.toml
 [workspace]
 
+[lib]
+name = "aetherflow_plugin_sdk_template"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aetherflow-plugin-sdk-template"
+path = "src/main.rs"
+
 [dependencies]
 axum = { version = "0.7", features = ["json"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

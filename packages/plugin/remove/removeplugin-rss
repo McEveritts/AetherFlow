@@ -20,20 +20,25 @@
 #   under the GPL along with build & install instructions.
 #
 
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-  # shellcheck source=/dev/null
-  source /opt/AetherFlow/packages/common.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
   # shellcheck source=/dev/null
   source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/current/packages/common.sh
+elif [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
 fi
 OUTTO="${LOGFILE:-/var/log/aetherflow/install.log}"
+LOGFILE="${OUTTO}"
+af_prepare_logfile_path "${LOGFILE}"
 rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 function _removeplugin-rss() {
   username=$(whoami);
   rutorrent="${rutorrent:-/var/www/rutorrent/}"
-  echo "Uninstalling the rss plugin ... " >>"${OUTTO}" 2>&1;
+  log "Uninstalling the rss plugin ... "
   PLUGIN="rss"
   for i in $PLUGIN; do
     if [[ -n "${rutorrent}" && -n "$i" && ( -d "${rutorrent}plugins/$i" || -L "${rutorrent}plugins/$i" ) ]]; then
@@ -41,11 +46,11 @@ function _removeplugin-rss() {
     fi
   done
 
-  echo "RSS Plugin Uninstall Complete!" >>"${OUTTO}" 2>&1;
+  log "RSS Plugin Uninstall Complete!"
 
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
+  log ""
+  log ""
+  log "Close this dialog box to refresh your browser"
 
   exit 0
 }

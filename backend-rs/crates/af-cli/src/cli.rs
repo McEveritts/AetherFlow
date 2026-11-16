@@ -269,6 +269,8 @@ pub enum ReleaseCliCommand {
     /// Deploy a release via `/v1/self-update` or `af_release::ReleaseEngine` (`ReleaseCommand::Deploy`).
     Deploy {
         channel: ReleaseChannel,
+        #[serde(default)]
+        channel_explicit: bool,
         mode: ReleaseDispatchMode,
         offline: bool,
         from_source: bool,
@@ -282,6 +284,8 @@ pub enum ReleaseCliCommand {
     /// Roll back to the previous verified release via `/v1/self-update` or `af_release::ReleaseEngine`.
     Rollback {
         channel: ReleaseChannel,
+        #[serde(default)]
+        channel_explicit: bool,
         mode: ReleaseDispatchMode,
         config_path: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,7 +498,7 @@ pub enum ProvisionCliCommand {
     },
     /// Inspect persisted `# STATE_VERSION=2` step completion and configuration state.
     Status,
-    /// List all 39 canonical `ALL_STEPS` from `setup/modules/06-state.sh` and their Rust migration/foundation status.
+    /// List all 38 canonical `ALL_STEPS` from `setup/modules/06-state.sh` and their Rust migration/foundation status.
     ListSteps,
     /// Run or resume bounded Rust-native provisioning steps with persisted state (`--fresh` resets prior state).
     Run {
@@ -535,17 +539,9 @@ impl ProvisionCliCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HostsCliCommand {
-    Update {
-        ip: String,
-        domains: Vec<String>,
-    },
-    Remove {
-        domains: Vec<String>,
-    },
-    Reconcile {
-        ip: String,
-        domains: Vec<String>,
-    },
+    Update { ip: String, domains: Vec<String> },
+    Remove { domains: Vec<String> },
+    Reconcile { ip: String, domains: Vec<String> },
 }
 
 impl HostsCliCommand {
@@ -621,7 +617,9 @@ pub fn build_package_runner_request(
         )));
     }
 
-    let target = std::env::var("AF_TARGET_VERSION").ok().filter(|s| !s.trim().is_empty());
+    let target = std::env::var("AF_TARGET_VERSION")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     Ok(PackageRunnerRequest {
         action: action.to_string(),
@@ -677,7 +675,10 @@ pub fn validate_service_request(service: &str, action: &str) -> CliResult<System
 
 /// Validates and builds a [`QuotaRunnerRequest`] for `/v1/quota`, reusing
 /// `af_runner::SAFE_USERNAME`, `af_runner::SAFE_QUOTA_SIZE`, and `af_runner::parse_quota_size_to_1k_blocks`.
-pub fn build_quota_runner_request(username: &str, size: &str) -> CliResult<(QuotaRunnerRequest, u64)> {
+pub fn build_quota_runner_request(
+    username: &str,
+    size: &str,
+) -> CliResult<(QuotaRunnerRequest, u64)> {
     let clean_user = username.trim();
     if !SAFE_USERNAME.is_match(clean_user) {
         return Err(CliError::Validation(format!(
@@ -822,7 +823,9 @@ where
                     CliError::Usage("--socket requires a Unix socket path".to_string())
                 })?;
                 if val.trim().is_empty() {
-                    return Err(CliError::Usage("--socket path must not be empty".to_string()));
+                    return Err(CliError::Usage(
+                        "--socket path must not be empty".to_string(),
+                    ));
                 }
                 global.socket_path = PathBuf::from(val);
                 idx += 2;
@@ -830,7 +833,9 @@ where
             s if s.starts_with("--socket=") => {
                 let val = s.trim_start_matches("--socket=");
                 if val.trim().is_empty() {
-                    return Err(CliError::Usage("--socket path must not be empty".to_string()));
+                    return Err(CliError::Usage(
+                        "--socket path must not be empty".to_string(),
+                    ));
                 }
                 global.socket_path = PathBuf::from(val);
                 idx += 1;
@@ -905,10 +910,10 @@ where
             AfCommand::Help { topic }
         }
         "version" => AfCommand::Version,
-        "health" | "ping" => {
+        "health" | "ping" | "status" => {
             if !rest.is_empty() {
                 return Err(CliError::Usage(format!(
-                    "unexpected arguments for 'af health': {}",
+                    "unexpected arguments for 'af {head}': {}",
                     rest.join(" ")
                 )));
             }
@@ -975,7 +980,9 @@ pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
     match sub {
         "update" => {
             if tail.len() < 2 {
-                return Err(CliError::Usage("usage: af hosts update <ip> <domain...>".to_string()));
+                return Err(CliError::Usage(
+                    "usage: af hosts update <ip> <domain...>".to_string(),
+                ));
             }
             Ok(HostsCliCommand::Update {
                 ip: tail[0].clone(),
@@ -984,14 +991,19 @@ pub fn parse_hosts_subcommand(args: &[String]) -> CliResult<HostsCliCommand> {
         }
         "remove" => {
             if tail.is_empty() {
-                return Err(CliError::Usage("usage: af hosts remove <domain...>".to_string()));
+                return Err(CliError::Usage(
+                    "usage: af hosts remove <domain...>".to_string(),
+                ));
             }
             Ok(HostsCliCommand::Remove {
                 domains: tail.to_vec(),
             })
         }
         "reconcile" => {
-            let ip = tail.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+            let ip = tail
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".to_string());
             let domains = if tail.len() > 1 {
                 tail[1..].to_vec()
             } else {
@@ -1207,9 +1219,7 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
         match args[i].as_str() {
             "--channel" | "-c" => {
                 let raw_ch = args.get(i + 1).ok_or_else(|| {
-                    CliError::Usage(
-                        "--channel requires stable or nightly".to_string(),
-                    )
+                    CliError::Usage("--channel requires stable or nightly".to_string())
                 })?;
                 channel = ReleaseChannel::from_str(raw_ch)?;
                 i += 2;
@@ -1232,15 +1242,11 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
             }
             pkg => {
                 if pkg.starts_with('-') {
-                    return Err(CliError::Usage(format!(
-                        "unknown flag for update: {}",
-                        pkg
-                    )));
+                    return Err(CliError::Usage(format!("unknown flag for update: {}", pkg)));
                 }
                 if package.is_some() {
                     return Err(CliError::Usage(
-                        "usage: af [package] update [package_id] [--channel <channel>]"
-                            .to_string(),
+                        "usage: af [package] update [package_id] [--channel <channel>]".to_string(),
                     ));
                 }
                 let _ = build_package_runner_request("update", pkg, None)?;
@@ -1259,9 +1265,7 @@ fn parse_package_upgrade_args(args: &[String]) -> CliResult<PackageCommand> {
         match args[i].as_str() {
             "--channel" | "-c" => {
                 let raw_ch = args.get(i + 1).ok_or_else(|| {
-                    CliError::Usage(
-                        "--channel requires stable or nightly".to_string(),
-                    )
+                    CliError::Usage("--channel requires stable or nightly".to_string())
                 })?;
                 channel = ReleaseChannel::from_str(raw_ch)?;
                 i += 2;
@@ -1385,10 +1389,7 @@ fn parse_sandbox_subcommand(args: &[String]) -> CliResult<SandboxCommand> {
                             CliError::Usage("--user requires a username".to_string())
                         })?;
                         if !SAFE_USERNAME.is_match(u.trim()) {
-                            return Err(CliError::Validation(format!(
-                                "invalid username {:?}",
-                                u
-                            )));
+                            return Err(CliError::Validation(format!("invalid username {:?}", u)));
                         }
                         username = Some(u.trim().to_string());
                         i += 2;
@@ -1423,6 +1424,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
     let tail = &args[1..];
 
     let mut channel = ReleaseChannel::Stable;
+    let mut channel_explicit = false;
     let mut mode = ReleaseDispatchMode::RunnerSocket;
     let mut offline = false;
     let mut from_source = false;
@@ -1436,15 +1438,15 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
         match tail[i].as_str() {
             "--channel" | "-c" => {
                 let val = tail.get(i + 1).ok_or_else(|| {
-                    CliError::Usage(
-                        "--channel requires stable or nightly".to_string(),
-                    )
+                    CliError::Usage("--channel requires stable or nightly".to_string())
                 })?;
                 channel = ReleaseChannel::from_str(val)?;
+                channel_explicit = true;
                 i += 2;
             }
             s if s.starts_with("--channel=") => {
                 channel = ReleaseChannel::from_str(s.trim_start_matches("--channel="))?;
+                channel_explicit = true;
                 i += 1;
             }
             "--local" | "--direct-engine" => {
@@ -1548,6 +1550,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
             let _ = build_self_update_runner_request("deploy", channel)?;
             Ok(ReleaseCliCommand::Deploy {
                 channel,
+                channel_explicit,
                 mode,
                 offline,
                 from_source,
@@ -1561,6 +1564,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
             let _ = build_self_update_runner_request("rollback", channel)?;
             Ok(ReleaseCliCommand::Rollback {
                 channel,
+                channel_explicit,
                 mode,
                 config_path,
                 job_status_file,
@@ -2473,9 +2477,9 @@ fn parse_sentinel_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
                 i += 2;
             }
             "--threshold" => {
-                let val = tail.get(i + 1).ok_or_else(|| {
-                    CliError::Usage("--threshold requires a number".to_string())
-                })?;
+                let val = tail
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--threshold requires a number".to_string()))?;
                 threshold = val
                     .parse::<usize>()
                     .map_err(|_| CliError::Usage(format!("invalid threshold {:?}", val)))?;
@@ -2553,9 +2557,9 @@ fn parse_showspace_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
                 i += 2;
             }
             "--user" => {
-                let val = tail.get(i + 1).ok_or_else(|| {
-                    CliError::Usage("--user requires a username".to_string())
-                })?;
+                let val = tail
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--user requires a username".to_string()))?;
                 user = Some(val.clone());
                 i += 2;
             }
@@ -2598,7 +2602,9 @@ fn parse_maintenance_subcommand(args: &[String]) -> CliResult<MaintenanceCliComm
 pub fn parse_byte_size_arg(raw: &str) -> CliResult<u64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(CliError::Validation("size value must not be empty".to_string()));
+        return Err(CliError::Validation(
+            "size value must not be empty".to_string(),
+        ));
     }
     let upper = trimmed.to_ascii_uppercase();
     let (num_part, mult) = if let Some(v) = upper.strip_suffix("KB") {
@@ -2617,12 +2623,13 @@ pub fn parse_byte_size_arg(raw: &str) -> CliResult<u64> {
         (upper.as_str(), 1u64)
     };
 
-    let base = num_part.trim().parse::<u64>().map_err(|_| {
-        CliError::Validation(format!("invalid byte size specification {:?}", raw))
-    })?;
-    let bytes = base.checked_mul(mult).ok_or_else(|| {
-        CliError::Validation(format!("byte size overflow for {:?}", raw))
-    })?;
+    let base = num_part
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| CliError::Validation(format!("invalid byte size specification {:?}", raw)))?;
+    let bytes = base
+        .checked_mul(mult)
+        .ok_or_else(|| CliError::Validation(format!("byte size overflow for {:?}", raw)))?;
     if bytes == 0 {
         return Err(CliError::Validation(
             "chunk/byte size must be greater than zero".to_string(),
@@ -2794,32 +2801,52 @@ mod tests {
 
     #[test]
     fn test_parse_hosts_subcommand() {
-        let update_args = vec!["update".to_string(), "10.0.0.1".to_string(), "app.aether.local".to_string()];
+        let update_args = vec![
+            "update".to_string(),
+            "10.0.0.1".to_string(),
+            "app.aether.local".to_string(),
+        ];
         let cmd = parse_hosts_subcommand(&update_args).unwrap();
-        assert_eq!(cmd, HostsCliCommand::Update {
-            ip: "10.0.0.1".to_string(),
-            domains: vec!["app.aether.local".to_string()],
-        });
+        assert_eq!(
+            cmd,
+            HostsCliCommand::Update {
+                ip: "10.0.0.1".to_string(),
+                domains: vec!["app.aether.local".to_string()],
+            }
+        );
 
         let remove_args = vec!["remove".to_string(), "app.aether.local".to_string()];
         let cmd = parse_hosts_subcommand(&remove_args).unwrap();
-        assert_eq!(cmd, HostsCliCommand::Remove {
-            domains: vec!["app.aether.local".to_string()],
-        });
+        assert_eq!(
+            cmd,
+            HostsCliCommand::Remove {
+                domains: vec!["app.aether.local".to_string()],
+            }
+        );
 
-        let reconcile_args = vec!["reconcile".to_string(), "127.0.0.1".to_string(), "app1.aether.local".to_string()];
+        let reconcile_args = vec![
+            "reconcile".to_string(),
+            "127.0.0.1".to_string(),
+            "app1.aether.local".to_string(),
+        ];
         let cmd = parse_hosts_subcommand(&reconcile_args).unwrap();
-        assert_eq!(cmd, HostsCliCommand::Reconcile {
-            ip: "127.0.0.1".to_string(),
-            domains: vec!["app1.aether.local".to_string()],
-        });
+        assert_eq!(
+            cmd,
+            HostsCliCommand::Reconcile {
+                ip: "127.0.0.1".to_string(),
+                domains: vec!["app1.aether.local".to_string()],
+            }
+        );
 
         let reconcile_empty = vec!["reconcile".to_string()];
         let cmd = parse_hosts_subcommand(&reconcile_empty).unwrap();
-        assert_eq!(cmd, HostsCliCommand::Reconcile {
-            ip: "127.0.0.1".to_string(),
-            domains: Vec::new(),
-        });
+        assert_eq!(
+            cmd,
+            HostsCliCommand::Reconcile {
+                ip: "127.0.0.1".to_string(),
+                domains: Vec::new(),
+            }
+        );
 
         assert_eq!(parse_help_topic("hosts"), HelpTopic::Hosts);
         assert_eq!(parse_help_topic("dns"), HelpTopic::Hosts);

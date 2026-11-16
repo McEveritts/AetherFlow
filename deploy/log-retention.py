@@ -14,7 +14,9 @@ import sys
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_KEEP = 3
-LOG_NAME = re.compile(r"(?:install\.log|(?:install|remove)-(?P<package>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\.log)\Z")
+LOG_NAME = re.compile(
+    r"(?:install\.log|self_healing\.log|(?:install|remove)-(?P<package>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\.log)\Z"
+)
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -81,14 +83,14 @@ def _same_entry(directory, name, expected):
         raise UnsafeLogError(f"entry changed during retention: {name}")
 
 
-def _archive_entries(directory, name, group_id):
+def _archive_entries(directory, name, group_id, allowed_owners):
     archive_pattern = re.compile(re.escape(name) + r"\.af-retention\.([1-9][0-9]*|pending)\Z")
     archives = {}
     for entry in os.listdir(directory):
         match = archive_pattern.fullmatch(entry)
         if match is None:
             continue
-        descriptor = _open_file(directory, entry, os.O_RDONLY, {os.geteuid()})
+        descriptor = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
         try:
             _permissions(descriptor, group_id, 0o640)
             archives[entry] = os.fstat(descriptor)
@@ -117,55 +119,115 @@ def _copy_tail(directory, descriptor, pending, max_bytes, group_id):
             offset += len(chunk)
             remaining -= len(chunk)
         os.fsync(destination)
+        return size
     finally:
         os.close(destination)
+
+
+def _read_bounded_live_tail(descriptor, archived_end, current_size, max_bytes):
+    if current_size <= archived_end:
+        return b""
+    tail_len = min(current_size - archived_end, max_bytes)
+    start_offset = current_size - tail_len
+    os.lseek(descriptor, start_offset, os.SEEK_SET)
+    chunks = []
+    remaining = tail_len
+    while remaining > 0:
+        piece = os.read(descriptor, min(65536, remaining))
+        if not piece:
+            break
+        chunks.append(piece)
+        remaining -= len(piece)
+    return b"".join(chunks)
 
 
 def _retain_one(directory, name, max_bytes, keep, group_id, allowed_owners):
     descriptor = _open_file(directory, name, os.O_RDWR, allowed_owners)
     pending = name + ".af-retention.pending"
     try:
-        metadata = os.fstat(descriptor)
-        archives = _archive_entries(directory, name, group_id)
-        _same_entry(directory, name, metadata)
-        _permissions(descriptor, group_id, 0o640)
-        if pending in archives:
-            _same_entry(directory, pending, archives.pop(pending))
-            os.unlink(pending, dir_fd=directory)
-        for entry, archive in archives.items():
-            if int(entry.rsplit(".", 1)[1]) > keep:
-                _same_entry(directory, entry, archive)
-                os.unlink(entry, dir_fd=directory)
-            elif archive.st_size > max_bytes:
-                source = _open_file(directory, entry, os.O_RDONLY, {os.geteuid()})
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            metadata = os.fstat(descriptor)
+            archives = _archive_entries(directory, name, group_id, allowed_owners)
+            _same_entry(directory, name, metadata)
+            _permissions(descriptor, group_id, 0o640)
+            if pending in archives:
+                _same_entry(directory, pending, archives.pop(pending))
+                os.unlink(pending, dir_fd=directory)
+            for entry, archive in archives.items():
+                if int(entry.rsplit(".", 1)[1]) > keep:
+                    _same_entry(directory, entry, archive)
+                    os.unlink(entry, dir_fd=directory)
+                elif archive.st_size > max_bytes:
+                    source = _open_file(directory, entry, os.O_RDONLY, allowed_owners)
+                    try:
+                        _copy_tail(directory, source, pending, max_bytes, group_id)
+                    finally:
+                        os.close(source)
+                    _same_entry(directory, entry, archive)
+                    os.replace(pending, entry, src_dir_fd=directory, dst_dir_fd=directory)
+            if os.fstat(descriptor).st_size <= max_bytes:
+                return False
+            archived_end = _copy_tail(directory, descriptor, pending, max_bytes, group_id)
+            for index in range(keep - 1, 0, -1):
+                source = f"{name}.af-retention.{index}"
                 try:
-                    _copy_tail(directory, source, pending, max_bytes, group_id)
+                    archive_descriptor = _open_file(directory, source, os.O_RDONLY, allowed_owners)
+                except FileNotFoundError:
+                    continue
+                try:
+                    _same_entry(directory, source, os.fstat(archive_descriptor))
+                    os.replace(source, f"{name}.af-retention.{index + 1}",
+                               src_dir_fd=directory, dst_dir_fd=directory)
                 finally:
-                    os.close(source)
-                _same_entry(directory, entry, archive)
-                os.replace(pending, entry, src_dir_fd=directory, dst_dir_fd=directory)
-        if os.fstat(descriptor).st_size <= max_bytes:
-            return False
-        _copy_tail(directory, descriptor, pending, max_bytes, group_id)
-        for index in range(keep - 1, 0, -1):
-            source = f"{name}.af-retention.{index}"
-            try:
-                archive_descriptor = _open_file(directory, source, os.O_RDONLY, {os.geteuid()})
-            except FileNotFoundError:
-                continue
-            try:
-                _same_entry(directory, source, os.fstat(archive_descriptor))
-                os.replace(source, f"{name}.af-retention.{index + 1}",
-                           src_dir_fd=directory, dst_dir_fd=directory)
-            finally:
-                os.close(archive_descriptor)
-        os.replace(pending, name + ".af-retention.1", src_dir_fd=directory, dst_dir_fd=directory)
-        os.fsync(directory)
-        _same_entry(directory, name, metadata)
-        _validate_file(descriptor, {os.geteuid()})
-        os.ftruncate(descriptor, 0)
-        os.fsync(descriptor)
-        return True
+                    os.close(archive_descriptor)
+            os.replace(pending, name + ".af-retention.1", src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+            _same_entry(directory, name, metadata)
+            post_metadata = _validate_file(descriptor, {os.geteuid()})
+            read_cursor = post_metadata.st_size
+            retained = bytearray(
+                _read_bounded_live_tail(descriptor, archived_end, read_cursor, max_bytes)
+            )
+            for _ in range(8):
+                latest_size = os.fstat(descriptor).st_size
+                if latest_size <= read_cursor:
+                    break
+                extra = _read_bounded_live_tail(descriptor, read_cursor, latest_size, max_bytes)
+                read_cursor = latest_size
+                if extra:
+                    retained.extend(extra)
+                    if len(retained) > max_bytes:
+                        del retained[:-max_bytes]
+            def _rewrite_retained_from_start(buf: bytearray) -> None:
+                if not buf:
+                    return
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                unwritten = memoryview(buf)
+                while unwritten:
+                    written = os.write(descriptor, unwritten)
+                    if written <= 0:
+                        raise OSError("zero-length trailing restore write")
+                    unwritten = unwritten[written:]
+
+            _rewrite_retained_from_start(retained)
+            for _ in range(8):
+                post_write_size = os.fstat(descriptor).st_size
+                tail_start = max(read_cursor, len(retained))
+                if post_write_size <= tail_start:
+                    break
+                late_extra = _read_bounded_live_tail(descriptor, tail_start, post_write_size, max_bytes)
+                read_cursor = post_write_size
+                if late_extra:
+                    retained.extend(late_extra)
+                    if len(retained) > max_bytes:
+                        del retained[:-max_bytes]
+                    _rewrite_retained_from_start(retained)
+            os.ftruncate(descriptor, len(retained))
+            os.fsync(descriptor)
+            return True
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
 

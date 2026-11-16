@@ -4,9 +4,12 @@ use anyhow::{Context, Result};
 use futures::{future::BoxFuture, StreamExt};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{path::{Path, PathBuf}, time::Duration};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::sync::mpsc;
 
 pub const JOB_MARKER: &str = "__RUNNER_JOB__:";
@@ -49,30 +52,17 @@ fn catalog_source(variable: &str, filename: &str, embedded: &str) -> Result<Stri
         }
     }
     for path in env_paths {
-        if !path.trim().is_empty() {
-            return Ok(std::fs::read_to_string(path.trim())?);
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(crate::open_and_read_regular_config(std::path::Path::new(
+                trimmed,
+            ))?);
         }
     }
-    let mut candidates = vec![
-        Path::new("/opt/AetherFlow/current/config").join(filename),
-        Path::new("/opt/AetherFlow/current/backend/config").join(filename),
-        Path::new("config").join(filename),
-        Path::new("../config").join(filename),
-        Path::new("/opt/AetherFlow/config").join(filename),
-        Path::new("backend/config").join(filename),
-        Path::new("../backend/config").join(filename),
-        Path::new("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Some(directory) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_owned))
-    {
-        candidates.insert(2, directory.join("config").join(filename));
-    }
-    for path in candidates {
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => return Ok(std::fs::read_to_string(path)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    for path in crate::canonical_config_candidates(filename) {
+        match crate::open_and_read_regular_config(&path) {
+            Ok(s) => return Ok(s),
+            Err(error) if crate::is_missing_config_candidate(&error) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -216,20 +206,12 @@ mod tests {
                 (Some(_), Some(_)) => {
                     if self.inactive_after_start {
                         false
-                    } else if self.inactive_after_certification && current_count == 3 {
-                        false
                     } else {
-                        true
+                        !(self.inactive_after_certification && current_count == 3)
                     }
                 }
                 (Some(_), None) => false,
-                (None, Some(_)) => {
-                    if self.inactive_after_start {
-                        false
-                    } else {
-                        true
-                    }
-                }
+                (None, Some(_)) => !self.inactive_after_start,
                 (None, None) => {
                     if matches!(unit, "recyclarr" | "scrutiny-collector") {
                         self.active_oneshots.iter().any(|u| u == unit)
@@ -293,11 +275,17 @@ mod tests {
                         let _ = std::fs::write(vfile, target);
                         let bin = root.join("usr/bin/syncthing");
                         let _ = std::fs::create_dir_all(bin.parent().unwrap());
-                        let _ = std::fs::write(&bin, format!("#!/bin/sh\necho \"syncthing {target}\"\n"));
+                        let _ = std::fs::write(
+                            &bin,
+                            format!("#!/bin/sh\necho \"syncthing {target}\"\n"),
+                        );
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+                            let _ = std::fs::set_permissions(
+                                &bin,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
                         }
                     }
                 }
@@ -701,16 +689,7 @@ mod tests {
             [],
         )
         .unwrap();
-        af_db::synchronize_lifecycle_ingress(
-            &mut conn,
-            "sonarr",
-            "remove",
-            "",
-            0,
-            false,
-            "",
-        )
-        .ok();
+        af_db::synchronize_lifecycle_ingress(&mut conn, "sonarr", "remove", "", 0, false, "").ok();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL)",
             [],
@@ -796,7 +775,10 @@ mod tests {
         )
         .unwrap();
         let exec_res = op.execute(&backend, &sender).await;
-        assert!(exec_res.is_err(), "Execute must fail closed at preflight when blueprint target is a symlink");
+        assert!(
+            exec_res.is_err(),
+            "Execute must fail closed at preflight when blueprint target is a symlink"
+        );
         let (status, category): (String, String) = op
             .conn
             .query_row(
@@ -866,13 +848,8 @@ mod tests {
         let mut req = request("update");
         req.expected_target_version = None;
         assert!(
-            CoordinatedOperation::admit(
-                conn,
-                req,
-                package.clone(),
-                vec!["syncthing".into()]
-            )
-            .is_err(),
+            CoordinatedOperation::admit(conn, req, package.clone(), vec!["syncthing".into()])
+                .is_err(),
             "admission must reject update request with missing target version"
         );
 
@@ -880,13 +857,7 @@ mod tests {
         let mut req2 = request("update");
         req2.expected_target_version = Some("invalid target with spaces".into());
         assert!(
-            CoordinatedOperation::admit(
-                conn2,
-                req2,
-                package,
-                vec!["syncthing".into()]
-            )
-            .is_err(),
+            CoordinatedOperation::admit(conn2, req2, package, vec!["syncthing".into()]).is_err(),
             "admission must reject update request with invalid target version"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -898,13 +869,9 @@ mod tests {
         // Backend does not write target version to .af-version, so live probe will find nothing!
         let backend = FakeBackend::default();
         let (sender, _receiver) = mpsc::channel(32);
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            request("update"),
-            package,
-            vec!["syncthing".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, request("update"), package, vec!["syncthing".into()])
+                .unwrap();
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
         let (_, status, category) = persisted(&op.conn);
@@ -927,13 +894,9 @@ mod tests {
             ..Default::default()
         };
         let (sender, _receiver) = mpsc::channel(32);
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            request("update"),
-            package,
-            vec!["syncthing".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, request("update"), package, vec!["syncthing".into()])
+                .unwrap();
 
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
@@ -949,7 +912,9 @@ mod tests {
         assert_eq!(status, "failed");
         assert_eq!(category, "service_restore");
         assert!(
-            diag.as_deref().unwrap_or("").contains("not active after start"),
+            diag.as_deref()
+                .unwrap_or("")
+                .contains("not active after start"),
             "Diagnostic summary must detail unit inactive after start: {:?}",
             diag
         );
@@ -978,13 +943,9 @@ mod tests {
             ..Default::default()
         };
         let (sender, _receiver) = mpsc::channel(32);
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            request("update"),
-            package,
-            vec!["syncthing".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, request("update"), package, vec!["syncthing".into()])
+                .unwrap();
 
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
@@ -1000,7 +961,9 @@ mod tests {
         assert_eq!(status, "failed");
         assert_eq!(category, "service_restore");
         assert!(
-            diag.as_deref().unwrap_or("").contains("exited or became inactive during certification"),
+            diag.as_deref()
+                .unwrap_or("")
+                .contains("exited or became inactive during certification"),
             "Diagnostic summary must report post-certification unit exit: {:?}",
             diag
         );
@@ -1025,7 +988,11 @@ mod tests {
         };
         let config_file = root.join("var/lib/sonarr/config.xml");
         std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
-        std::fs::write(&config_file, b"<Config><Port>8989</Port><ApiKey>PRE_OP_KEY</ApiKey></Config>\n").unwrap();
+        std::fs::write(
+            &config_file,
+            b"<Config><Port>8989</Port><ApiKey>PRE_OP_KEY</ApiKey></Config>\n",
+        )
+        .unwrap();
 
         let receipt_file = root.join("var/lib/sonarr/.af-version");
         std::fs::write(&receipt_file, b"2.0.0\n").unwrap();
@@ -1046,8 +1013,12 @@ mod tests {
             stopped: Arc<std::sync::Mutex<bool>>,
         }
         impl LifecycleBackend for BlueprintMutationBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8989 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8989
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(true) })
             }
@@ -1055,7 +1026,12 @@ mod tests {
                 let s = *self.stopped.lock().unwrap();
                 Box::pin(async move { Ok(s) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 if action == "stop" {
                     *self.stopped.lock().unwrap() = true;
                 } else if action == "start" {
@@ -1063,10 +1039,18 @@ mod tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async move {
                     // Installer mutates blueprint config and writes receipt that mismatches target
-                    std::fs::write(&self.config_file, b"<Config><Port>8989</Port><ApiKey>MODIFIED_KEY</ApiKey></Config>\n").unwrap();
+                    std::fs::write(
+                        &self.config_file,
+                        b"<Config><Port>8989</Port><ApiKey>MODIFIED_KEY</ApiKey></Config>\n",
+                    )
+                    .unwrap();
                     std::fs::write(&self.receipt_file, b"2.5.0\n").unwrap();
                     let bin = self.root.join("usr/bin/sonarr");
                     let _ = std::fs::create_dir_all(bin.parent().unwrap());
@@ -1074,7 +1058,8 @@ mod tests {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+                        let _ =
+                            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
                     }
                     Ok(())
                 })
@@ -1089,13 +1074,8 @@ mod tests {
         };
 
         let (sender, _receiver) = mpsc::channel(32);
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            req,
-            sonarr_package,
-            vec!["sonarr".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, sonarr_package, vec!["sonarr".into()]).unwrap();
 
         let receipt = op.execute(&backend, &sender).await.unwrap();
         assert_eq!(receipt.status, "failed");
@@ -1272,16 +1252,28 @@ impl LifecycleBackend for HostBackend {
                 if let Ok(Ok(show_out)) = tokio::time::timeout(
                     Duration::from_secs(5),
                     tokio::process::Command::new("systemctl")
-                        .args(["show", "--property=LoadState,ActiveState", "--value", "--", unit])
+                        .args([
+                            "show",
+                            "--property=LoadState,ActiveState",
+                            "--value",
+                            "--",
+                            unit,
+                        ])
                         .output(),
                 )
                 .await
                 {
                     if show_out.status.success() {
                         let text = String::from_utf8_lossy(&show_out.stdout);
-                        let lines: Vec<&str> = text.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-                        if (lines.get(0) == Some(&"not-found") || text.contains("LoadState=not-found"))
-                            && (lines.get(1) == Some(&"inactive") || text.contains("ActiveState=inactive"))
+                        let lines: Vec<&str> = text
+                            .lines()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if (lines.first() == Some(&"not-found")
+                            || text.contains("LoadState=not-found"))
+                            && (lines.get(1) == Some(&"inactive")
+                                || text.contains("ActiveState=inactive"))
                         {
                             return Ok(true);
                         }
@@ -1310,28 +1302,37 @@ impl LifecycleBackend for HostBackend {
                     if let Ok(Ok(output)) = tokio::time::timeout(
                         Duration::from_secs(5),
                         tokio::process::Command::new("systemctl")
-                            .args(["show", "--property=LoadState,ActiveState,SubState", "--value", "--", unit])
+                            .args([
+                                "show",
+                                "--property=LoadState,ActiveState,SubState",
+                                "--value",
+                                "--",
+                                unit,
+                            ])
                             .output(),
                     )
                     .await
                     {
                         if output.status.success() {
                             let text = String::from_utf8_lossy(&output.stdout);
-                            let lines: Vec<&str> = text.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+                            let lines: Vec<&str> = text
+                                .lines()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .collect();
                             if lines.len() >= 2
                                 && (lines[0] == "not-found" || text.contains("LoadState=not-found"))
                                 && (lines[1] == "inactive" || text.contains("ActiveState=inactive"))
-                                && (lines.len() < 3 || lines[2] == "dead" || text.contains("SubState=dead"))
+                                && (lines.len() < 3
+                                    || lines[2] == "dead"
+                                    || text.contains("SubState=dead"))
                             {
                                 return Ok(());
                             }
                         }
                     }
                 }
-                anyhow::bail!(
-                    "Application service {action} failed: {}",
-                    response.error
-                );
+                anyhow::bail!("Application service {action} failed: {}", response.error);
             }
             Ok(())
         })
@@ -1427,7 +1428,9 @@ impl CoordinatedOperation {
                 .filter(|s| !s.is_empty() && af_release::lifecycle::validate_target_version(s))
                 .is_some();
             if !valid {
-                anyhow::bail!("Cannot start update: expected_target_version is missing, empty, or invalid");
+                anyhow::bail!(
+                    "Cannot start update: expected_target_version is missing, empty, or invalid"
+                );
             }
         }
         if let Some(ref target) = request.expected_target_version {
@@ -1603,8 +1606,10 @@ impl CoordinatedOperation {
     }
 
     fn rollback_quiesce_units(&self) -> Vec<String> {
-        if !matches!(self.request.action.as_str(), "install" | "update" | "reinstall")
-            || self.package.service_type == "pm2"
+        if !matches!(
+            self.request.action.as_str(),
+            "install" | "update" | "reinstall"
+        ) || self.package.service_type == "pm2"
             || matches!(
                 self.package.name.as_str(),
                 "nextcloud" | "rutorrent" | "organizr" | "maintainerr"
@@ -1653,7 +1658,7 @@ fn quote_closes_outer_span(after: Option<u8>, include_colon: bool) -> bool {
     match after {
         None => true,
         Some(n) if n.is_ascii_whitespace() => true,
-        Some(n) if matches!(n, b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&') => true,
+        Some(b'"' | b'\'' | b',' | b'}' | b']' | b';' | b'&') => true,
         Some(b':') if include_colon => true,
         _ => false,
     }
@@ -1730,7 +1735,7 @@ fn consume_plain_quoted(bytes: &[u8], quote_idx: usize) -> usize {
             j += 1;
             continue;
         }
-        if c == q && bs % 2 == 0 {
+        if c == q && bs.is_multiple_of(2) {
             return j + 1;
         }
         bs = 0;
@@ -1747,25 +1752,26 @@ fn shield_redacted_urls(input: &str) -> String {
     // redactor would collapse it to `[REDACTED]`. Rewrite it to `[REDACTED]`
     // plus a suffix that starts with `]`, which that scanner treats as a
     // terminator, and put the original marker back at the end.
-    static MARKER_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"\[REDACTED_(?:URL|url)\]").unwrap()
-    });
-    MARKER_RE.replace_all(input, |captures: &regex::Captures| {
-        let marker = captures.get(0).unwrap();
-        let suffix = &input[marker.end()..];
-        let standalone = match suffix.chars().next() {
-            None => true,
-            Some(quote @ ('\'' | '"')) => !suffix[quote.len_utf8()..].contains(quote),
-            Some(next) => next.is_whitespace() || matches!(next, ',' | '}' | ']' | ';' | '&'),
-        };
-        if !standalone {
-            "[REDACTED]".to_string()
-        } else if marker.as_str() == "[REDACTED_URL]" {
-            format!("[REDACTED]{REDACTED_URL_SHIELD}")
-        } else {
-            format!("[REDACTED]{REDACTED_URL_SHIELD_LOWER}")
-        }
-    }).into_owned()
+    static MARKER_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\[REDACTED_(?:URL|url)\]").unwrap());
+    MARKER_RE
+        .replace_all(input, |captures: &regex::Captures| {
+            let marker = captures.get(0).unwrap();
+            let suffix = &input[marker.end()..];
+            let standalone = match suffix.chars().next() {
+                None => true,
+                Some(quote @ ('\'' | '"')) => !suffix[quote.len_utf8()..].contains(quote),
+                Some(next) => next.is_whitespace() || matches!(next, ',' | '}' | ']' | ';' | '&'),
+            };
+            if !standalone {
+                "[REDACTED]".to_string()
+            } else if marker.as_str() == "[REDACTED_URL]" {
+                format!("[REDACTED]{REDACTED_URL_SHIELD}")
+            } else {
+                format!("[REDACTED]{REDACTED_URL_SHIELD_LOWER}")
+            }
+        })
+        .into_owned()
 }
 
 fn unshield_redacted_urls(input: &str) -> String {
@@ -1812,7 +1818,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
             let after = bytes.get(i + bs0 + 1).copied();
             // `"[REDACTED]",` and `[REDACTED]\" https://...` close an enclosing
             // string. `[REDACTED]"secret"` / `[REDACTED]\"secret\"` do not.
-            if quote_closes_outer_span(after, false) && (!after.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, i + bs0, bs0)) {
+            if quote_closes_outer_span(after, false)
+                && (!after.is_some_and(|next| next.is_ascii_whitespace())
+                    || !af_release::lifecycle::has_matching_secret_quote(bytes, i + bs0, bs0))
+            {
                 return i;
             }
         } else if bytes[i].is_ascii_whitespace()
@@ -1839,7 +1848,11 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                 let q = nxt.unwrap();
                 let q_idx = i + bs;
                 let after_q = bytes.get(q_idx + 1).copied();
-                if i > 0 && quote_closes_outer_span(after_q, false) && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, q_idx, bs)) {
+                if i > 0
+                    && quote_closes_outer_span(after_q, false)
+                    && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                        || !af_release::lifecycle::has_matching_secret_quote(bytes, q_idx, bs))
+                {
                     break;
                 }
                 let mut j = q_idx + 1;
@@ -1858,7 +1871,8 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
                             stop_outer = true;
                             break;
                         }
-                        if inner_bs == bs || (inner_bs % 2 == 1 && escaped_quote_closes_payload(bytes, j))
+                        if inner_bs == bs
+                            || (inner_bs % 2 == 1 && escaped_quote_closes_payload(bytes, j))
                         {
                             i = j + 1;
                             if escaped_quote_closes_payload(bytes, j) {
@@ -1900,7 +1914,10 @@ fn consume_secret_scalar_value(s: &str, allow_comma_list: bool) -> usize {
             let q = bytes[i];
             if i > 0 {
                 let after_q = bytes.get(i + 1).copied();
-                if quote_closes_outer_span(after_q, true) && (!after_q.is_some_and(|next| next.is_ascii_whitespace()) || !af_release::lifecycle::has_matching_secret_quote(bytes, i, 0)) {
+                if quote_closes_outer_span(after_q, true)
+                    && (!after_q.is_some_and(|next| next.is_ascii_whitespace())
+                        || !af_release::lifecycle::has_matching_secret_quote(bytes, i, 0))
+                {
                     break;
                 }
             }
@@ -1981,7 +1998,10 @@ fn redact_prefixed_secrets(text: &str, prefix_re: &regex::Regex, allow_comma_lis
         }
         out.push_str(&slice[..mat.end()]);
         let value_off = cursor + mat.end();
-        if af_release::lifecycle::is_complete_redacted_header(&slice[mat.start()..mat.end()], &text[value_off..]) {
+        if af_release::lifecycle::is_complete_redacted_header(
+            &slice[mat.start()..mat.end()],
+            &text[value_off..],
+        ) {
             cursor = value_off;
             continue;
         }
@@ -2007,14 +2027,20 @@ fn redact_scalar_cli_and_curl_secrets(text: &str) -> String {
     static CURL_PREFIX_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
         regex::Regex::new(r#"(?i)(?:^|[^A-Za-z0-9])(?:--user(?:\s+|=)|-u\s*)"#).unwrap()
     });
-    static CLI_FLAG_PREFIX_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(
+    static CLI_FLAG_PREFIX_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(
+        || {
+            regex::Regex::new(
             r#"(?i)(?:^|[^A-Za-z0-9])(--(?:password|passwd|api-key|apikey|cookies|cookie|secret|token|session|webhook|pwd|pass))(?:\s+|=)"#,
         )
         .unwrap()
-    });
+        },
+    );
     let with_curl = redact_prefixed_secrets(text, &CURL_PREFIX_RE, true);
-    let with_kv = redact_prefixed_secrets(&with_curl, &af_release::lifecycle::SENSITIVE_ASSIGNMENT_PREFIX_RE, true);
+    let with_kv = redact_prefixed_secrets(
+        &with_curl,
+        &af_release::lifecycle::SENSITIVE_ASSIGNMENT_PREFIX_RE,
+        true,
+    );
     redact_prefixed_secrets(&with_kv, &CLI_FLAG_PREFIX_RE, true)
 }
 
@@ -2031,16 +2057,18 @@ pub fn sanitize_lifecycle_field(raw: &str) -> String {
             r#"(?im)(?P<pre>\\*["'])?\b(?P<hdr>Set-Cookie|Cookie|Proxy-Authorization|X-Api-Key|X-Auth-Token|Authorization)\s*:\s*(?P<val>[^\r\n]+)"#
         ).unwrap()
     });
-    static SENSITIVE_JSON_NESTED_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(
+    static SENSITIVE_JSON_NESTED_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(
             r#"(?i)("[\w.-]*(?:password|passwd|pwd|pass|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credential(?:s)?|bearer|cookie|session|webhook|passphrase|rclone_pass|jwt_secret)[\w.-]*"\s*:\s*)(\{(?:[^{}\r\n]|\{[^{}\r\n]*\})*\}|\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\])"#
         ).unwrap()
-    });
-    static SENSITIVE_RAW_NESTED_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(
+        });
+    static SENSITIVE_RAW_NESTED_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(
             r#"(?i)(["']?[\w.-]*(?:password|passwd|pwd|pass|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth(?:orization|[_-]?token|[_-]?key|[_-]?secret)?|credential(?:s)?|bearer|cookie|session|webhook|passphrase|rclone_pass|jwt_secret)[\w.-]*["']?\s*[:=]\s*)(\{(?:[^{}\r\n]|\{[^{}\r\n]*\})*\}|\[(?:[^\[\]\r\n]|\[[^\[\]\r\n]*\])*\])"#
         ).unwrap()
-    });
+        });
     static BEARER_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
         regex::Regex::new(r#"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*"#).unwrap()
     });
@@ -2096,15 +2124,17 @@ pub fn sanitize_lifecycle_field(raw: &str) -> String {
                 format!("{prefix}\"[REDACTED]\"")
             }
         });
-        SENSITIVE_RAW_NESTED_RE.replace_all(&s, |caps: &regex::Captures| {
-            let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let val = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            if redacted_container_value(val) {
-                format!("{prefix}{val}")
-            } else {
-                format!("{prefix}[REDACTED]")
-            }
-        }).into_owned()
+        SENSITIVE_RAW_NESTED_RE
+            .replace_all(&s, |caps: &regex::Captures| {
+                let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                let val = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                if redacted_container_value(val) {
+                    format!("{prefix}{val}")
+                } else {
+                    format!("{prefix}[REDACTED]")
+                }
+            })
+            .into_owned()
     };
 
     let s_headers = sanitize_http_headers(raw);
@@ -2158,7 +2188,7 @@ impl CoordinatedOperation {
         })
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units(
         backend: &impl LifecycleBackend,
         lifecycle_job_id: &str,
@@ -2189,6 +2219,7 @@ impl CoordinatedOperation {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore_and_restart_units_with_runtime(
         backend: &impl LifecycleBackend,
         lifecycle_job_id: &str,
@@ -2216,19 +2247,26 @@ impl CoordinatedOperation {
                     continue;
                 }
                 match backend.control(unit, "stop", lifecycle_job_id).await {
-                    Ok(()) => match backend.quiescent(unit).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::error!(unit, "Unit is still active after stop before restoration");
-                            quiesce_failed = true;
-                            restart_failures.push(format!("{unit}: still active after stop before restoration"));
+                    Ok(()) => {
+                        match backend.quiescent(unit).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::error!(
+                                    unit,
+                                    "Unit is still active after stop before restoration"
+                                );
+                                quiesce_failed = true;
+                                restart_failures.push(format!(
+                                    "{unit}: still active after stop before restoration"
+                                ));
+                            }
+                            Err(error) => {
+                                tracing::error!(unit, error = %error, "Failed to verify quiescence before restoration");
+                                quiesce_failed = true;
+                                restart_failures.push(format!("{unit}: failed to verify quiescence before restoration: {error}"));
+                            }
                         }
-                        Err(error) => {
-                            tracing::error!(unit, error = %error, "Failed to verify quiescence before restoration");
-                            quiesce_failed = true;
-                            restart_failures.push(format!("{unit}: failed to verify quiescence before restoration: {error}"));
-                        }
-                    },
+                    }
                     Err(error) => {
                         let err_str = error.to_string();
                         let err_lower = err_str.to_ascii_lowercase();
@@ -2242,7 +2280,8 @@ impl CoordinatedOperation {
                         } else {
                             tracing::error!(unit, error = %error, "Failed to quiesce unit before state restoration");
                             quiesce_failed = true;
-                            restart_failures.push(format!("{unit}: stop before restoration failed: {error}"));
+                            restart_failures
+                                .push(format!("{unit}: stop before restoration failed: {error}"));
                         }
                     }
                 }
@@ -2266,7 +2305,11 @@ impl CoordinatedOperation {
         if let Err(restore_err) = rollback_operation_state_with_runtime(
             receipt_snapshots,
             blueprint_snapshots,
-            if incomplete_rollback { None } else { runtime_snapshot },
+            if incomplete_rollback {
+                None
+            } else {
+                runtime_snapshot
+            },
         ) {
             tracing::error!(
                 package = %package_id,
@@ -2288,7 +2331,10 @@ impl CoordinatedOperation {
                         package = %package_id,
                         "Refusing to restart pre-stopped service after incomplete rollback"
                     );
-                    restart_failures.push("Refusing to restart pre-stopped service after incomplete rollback".to_string());
+                    restart_failures.push(
+                        "Refusing to restart pre-stopped service after incomplete rollback"
+                            .to_string(),
+                    );
                 }
                 if snapshot_restore_failed {
                     tracing::error!(
@@ -2301,17 +2347,18 @@ impl CoordinatedOperation {
         } else {
             restart_failures.clear();
             for unit in restart_units.iter().rev() {
-                if let Err(error) = backend
-                    .control(unit, "start", lifecycle_job_id)
-                    .await
-                {
+                if let Err(error) = backend.control(unit, "start", lifecycle_job_id).await {
                     tracing::error!(unit, error = %error, "Application service restoration failed");
-                    restart_failures.push(format!("Application service start for unit '{unit}' failed: {error}"));
+                    restart_failures.push(format!(
+                        "Application service start for unit '{unit}' failed: {error}"
+                    ));
                 } else {
                     match backend.active(unit).await {
                         Ok(true) => {}
                         Ok(false) => {
-                            let msg = format!("Application service unit '{unit}' is not active after start");
+                            let msg = format!(
+                                "Application service unit '{unit}' is not active after start"
+                            );
                             tracing::error!(unit, "{}", msg);
                             restart_failures.push(msg);
                         }
@@ -2336,13 +2383,23 @@ impl CoordinatedOperation {
         if pre_op_env.fs_root.is_none() {
             pre_op_env.fs_root = self.effective_fs_root();
         }
-        let receipt_snapshots = match snapshot_candidate_receipts_with_env(&self.request.package_id, &pre_op_env) {
+        let receipt_snapshots = match snapshot_candidate_receipts_with_env(
+            &self.request.package_id,
+            &pre_op_env,
+        ) {
             Ok(snaps) => snaps,
             Err(snap_err) => {
-                let err_msg = format!("Failed to snapshot candidate receipts before execution: {}", snap_err);
+                let err_msg = format!(
+                    "Failed to snapshot candidate receipts before execution: {}",
+                    snap_err
+                );
                 tracing::error!(package = %self.request.package_id, error = %err_msg, "Preflight candidate receipt snapshot failed");
                 let sanitized_err = sanitize_lifecycle_field(&err_msg);
-                let sanitized_expected = self.request.expected_target_version.as_deref().map(sanitize_lifecycle_field);
+                let sanitized_expected = self
+                    .request
+                    .expected_target_version
+                    .as_deref()
+                    .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
                     finish_res = lifecycle::finish_job_with_diagnostics(
@@ -2370,13 +2427,23 @@ impl CoordinatedOperation {
                 anyhow::bail!("{err_msg}");
             }
         };
-        let blueprint_snapshots = match snapshot_blueprint_targets(&self.request.package_id, &pre_op_env) {
+        let blueprint_snapshots = match snapshot_blueprint_targets(
+            &self.request.package_id,
+            &pre_op_env,
+        ) {
             Ok(snaps) => snaps,
             Err(snap_err) => {
-                let err_msg = format!("Failed to snapshot blueprint targets before execution: {}", snap_err);
+                let err_msg = format!(
+                    "Failed to snapshot blueprint targets before execution: {}",
+                    snap_err
+                );
                 tracing::error!(package = %self.request.package_id, error = %err_msg, "Preflight blueprint target snapshot failed");
                 let sanitized_err = sanitize_lifecycle_field(&err_msg);
-                let sanitized_expected = self.request.expected_target_version.as_deref().map(sanitize_lifecycle_field);
+                let sanitized_expected = self
+                    .request
+                    .expected_target_version
+                    .as_deref()
+                    .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
                     finish_res = lifecycle::finish_job_with_diagnostics(
@@ -2499,7 +2566,10 @@ impl CoordinatedOperation {
                         package = %self.request.package_id,
                         "Refusing to restart pre-stopped service after incomplete rollback"
                     );
-                    restart_failures.push("Refusing to restart pre-stopped service after incomplete rollback".to_string());
+                    restart_failures.push(
+                        "Refusing to restart pre-stopped service after incomplete rollback"
+                            .to_string(),
+                    );
                 }
             } else {
                 for unit in stopped.iter().rev() {
@@ -2508,12 +2578,16 @@ impl CoordinatedOperation {
                         .await
                     {
                         tracing::error!(unit, error = %error, "Application service restoration failed");
-                        restart_failures.push(format!("Application service start for unit '{unit}' failed: {error}"));
+                        restart_failures.push(format!(
+                            "Application service start for unit '{unit}' failed: {error}"
+                        ));
                     } else {
                         match backend.active(unit).await {
                             Ok(true) => {}
                             Ok(false) => {
-                                let msg = format!("Application service unit '{unit}' is not active after start");
+                                let msg = format!(
+                                    "Application service unit '{unit}' is not active after start"
+                                );
                                 tracing::error!(unit, "{}", msg);
                                 restart_failures.push(msg);
                             }
@@ -2554,7 +2628,11 @@ impl CoordinatedOperation {
         // Target certification BEFORE post-install ingress synchronization & configuration commit
         let mut target_match_failed = false;
         let mut achieved_ver: Option<String> = None;
-        if execution.is_ok() && !restore_failed && self.request.expected_target_version.is_some() && self.request.action != "remove" {
+        if execution.is_ok()
+            && !restore_failed
+            && self.request.expected_target_version.is_some()
+            && self.request.action != "remove"
+        {
             let target = self.request.expected_target_version.as_deref().unwrap();
             let mut env_cfg = crate::PackageExecutionEnv::default();
             if env_cfg.fs_root.is_none() {
@@ -2645,7 +2723,9 @@ impl CoordinatedOperation {
                 } else {
                     "configuration"
                 };
-                if self.request.action != "remove" && (1024..=65535).contains(&self.request.app_port) {
+                if self.request.action != "remove"
+                    && (1024..=65535).contains(&self.request.app_port)
+                {
                     let fs_root = self.effective_fs_root();
                     crate::package_executor::try_apply_runner_blueprint_app_config(
                         fs_root.as_deref(),
@@ -2737,13 +2817,17 @@ impl CoordinatedOperation {
                 msg.push_str(&format!("; receipt restoration error: {}", r_err));
             }
             Some(msg)
-        } else if let Some(ref r_err) = receipt_restore_error {
-            Some(format!("Receipt restoration error: {}", r_err))
         } else {
-            None
+            receipt_restore_error
+                .as_ref()
+                .map(|r_err| format!("Receipt restoration error: {}", r_err))
         };
         let sanitized_diag_summary = diag_summary.as_deref().map(sanitize_lifecycle_field);
-        let sanitized_expected = self.request.expected_target_version.as_deref().map(sanitize_lifecycle_field);
+        let sanitized_expected = self
+            .request
+            .expected_target_version
+            .as_deref()
+            .map(sanitize_lifecycle_field);
         let sanitized_achieved = achieved_ver.as_deref().map(sanitize_lifecycle_field);
         lifecycle::finish_job_with_diagnostics(
             &self.conn,
@@ -2773,17 +2857,19 @@ impl CoordinatedOperation {
                 } else {
                     None
                 },
-                sanitized_summary: sanitized_diag_summary.as_deref().or(if target_match_failed {
-                    Some("Post-execution installed version did not match expected target")
-                } else if restore_failed {
-                    Some("Service restart verification failed")
-                } else if execution.is_err() {
-                    Some("Lifecycle execution failed")
-                } else if receipt_restore_error.is_some() {
-                    Some("Receipt restoration failed")
-                } else {
-                    None
-                }),
+                sanitized_summary: sanitized_diag_summary
+                    .as_deref()
+                    .or(if target_match_failed {
+                        Some("Post-execution installed version did not match expected target")
+                    } else if restore_failed {
+                        Some("Service restart verification failed")
+                    } else if execution.is_err() {
+                        Some("Lifecycle execution failed")
+                    } else if receipt_restore_error.is_some() {
+                        Some("Receipt restoration failed")
+                    } else {
+                        None
+                    }),
                 expected_target_version: sanitized_expected.as_deref(),
                 achieved_version: sanitized_achieved.as_deref(),
                 ..Default::default()
@@ -2812,9 +2898,10 @@ const MERGED_USR_ALIASES: &[&str] = &["bin", "sbin", "lib", "lib32", "lib64", "l
 /// directory ancestors. Any other symlink target stays prohibited.
 fn is_trusted_merged_usr_symlink(dir_path: &Path, fs_root: Option<&Path>) -> bool {
     let base_root = fs_root.unwrap_or_else(|| Path::new("/"));
-    let alias = MERGED_USR_ALIASES.iter().copied().find(|alias| {
-        dir_path.components().eq(base_root.join(alias).components())
-    });
+    let alias = MERGED_USR_ALIASES
+        .iter()
+        .copied()
+        .find(|alias| dir_path.components().eq(base_root.join(alias).components()));
     let Some(alias) = alias else {
         return false;
     };
@@ -2840,7 +2927,10 @@ fn is_trusted_merged_usr_symlink(dir_path: &Path, fs_root: Option<&Path>) -> boo
     }
 }
 
-fn verify_no_symlink_ancestors_with_root(path: &Path, fs_root: Option<&Path>) -> Result<(), String> {
+fn verify_no_symlink_ancestors_with_root(
+    path: &Path,
+    fs_root: Option<&Path>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let mut current = PathBuf::new();
         for component in parent.components() {
@@ -2891,9 +2981,9 @@ pub fn candidate_version_marker_paths_with_env(
     let mut paths = Vec::new();
     if let Some(recipe) = crate::package_executor::get_declarative_recipe(package_id) {
         if let Some(vf) = crate::package_executor::recipe_version_file_logical_path(&recipe) {
-            let p = env_cfg
-                .resolve_path(&vf)
-                .map_err(|e| format!("Failed to resolve version file logical path {}: {}", vf, e))?;
+            let p = env_cfg.resolve_path(&vf).map_err(|e| {
+                format!("Failed to resolve version file logical path {}: {}", vf, e)
+            })?;
             verify_no_symlink_ancestors_with_root(&p, env_cfg.fs_root.as_deref())?;
             if !paths.contains(&p) {
                 paths.push(p);
@@ -2903,9 +2993,12 @@ pub fn candidate_version_marker_paths_with_env(
     for prefix in ["/var/lib", "/etc", "/opt"] {
         if prefix == "/opt" && package_id.eq_ignore_ascii_case("filebot") {
             let candidate = "/opt/filebot-node/.af-version";
-            let p = env_cfg
-                .resolve_path(candidate)
-                .map_err(|e| format!("Failed to resolve candidate receipt path {}: {}", candidate, e))?;
+            let p = env_cfg.resolve_path(candidate).map_err(|e| {
+                format!(
+                    "Failed to resolve candidate receipt path {}: {}",
+                    candidate, e
+                )
+            })?;
             verify_no_symlink_ancestors_with_root(&p, env_cfg.fs_root.as_deref())?;
             if !paths.contains(&p) {
                 paths.push(p);
@@ -2913,9 +3006,12 @@ pub fn candidate_version_marker_paths_with_env(
         }
         for candidate_name in [package_id, &package_id.to_lowercase()] {
             let candidate = format!("{}/{}/.af-version", prefix, candidate_name);
-            let p = env_cfg
-                .resolve_path(&candidate)
-                .map_err(|e| format!("Failed to resolve candidate receipt path {}: {}", candidate, e))?;
+            let p = env_cfg.resolve_path(&candidate).map_err(|e| {
+                format!(
+                    "Failed to resolve candidate receipt path {}: {}",
+                    candidate, e
+                )
+            })?;
             verify_no_symlink_ancestors_with_root(&p, env_cfg.fs_root.as_deref())?;
             if !paths.contains(&p) {
                 paths.push(p);
@@ -2923,7 +3019,10 @@ pub fn candidate_version_marker_paths_with_env(
         }
     }
     if package_id.eq_ignore_ascii_case("piped") {
-        for extra in ["/opt/piped/.af-components.json", "/var/lib/piped/.af-components.json"] {
+        for extra in [
+            "/opt/piped/.af-components.json",
+            "/var/lib/piped/.af-components.json",
+        ] {
             let p = env_cfg
                 .resolve_path(extra)
                 .map_err(|e| format!("Failed to resolve extra receipt path {}: {}", extra, e))?;
@@ -2999,7 +3098,10 @@ pub fn snapshot_blueprint_targets(
     env_cfg: &crate::PackageExecutionEnv,
 ) -> Result<Vec<FileSnapshot>, String> {
     let mut snaps = Vec::new();
-    let paths = crate::package_executor::collect_blueprint_target_paths(package_id, env_cfg.fs_root.as_deref());
+    let paths = crate::package_executor::collect_blueprint_target_paths(
+        package_id,
+        env_cfg.fs_root.as_deref(),
+    );
     for path in paths {
         verify_no_symlink_ancestors_with_root(&path, env_cfg.fs_root.as_deref())?;
         let state = read_file_entry_bounded_nofollow(&path, 1024 * 1024)?;
@@ -3124,10 +3226,7 @@ fn is_protected_root(path: &Path) -> bool {
         return true;
     }
     let comp_count = path.components().count();
-    if comp_count <= 1 {
-        return true;
-    }
-    false
+    comp_count <= 1
 }
 
 fn copy_range_sparse(
@@ -3235,7 +3334,8 @@ fn copy_file_preserving_sparse_and_meta(
             let mut seek_data_supported = true;
 
             while offset < len {
-                let data_start = unsafe { libc::lseek(src_fd, offset as libc::off_t, libc::SEEK_DATA) };
+                let data_start =
+                    unsafe { libc::lseek(src_fd, offset as libc::off_t, libc::SEEK_DATA) };
                 if data_start < 0 {
                     let err = std::io::Error::last_os_error();
                     if err.raw_os_error() == Some(libc::ENXIO) {
@@ -3249,7 +3349,8 @@ fn copy_file_preserving_sparse_and_meta(
                 if data_start >= len {
                     break;
                 }
-                let next_hole = unsafe { libc::lseek(src_fd, data_start as libc::off_t, libc::SEEK_HOLE) };
+                let next_hole =
+                    unsafe { libc::lseek(src_fd, data_start as libc::off_t, libc::SEEK_HOLE) };
                 let extent_end = if next_hole < 0 {
                     len
                 } else {
@@ -3259,7 +3360,9 @@ fn copy_file_preserving_sparse_and_meta(
                     break;
                 }
 
-                if let Err(e) = copy_range_sparse(&mut src_file, &mut dst_file, data_start, extent_end) {
+                if let Err(e) =
+                    copy_range_sparse(&mut src_file, &mut dst_file, data_start, extent_end)
+                {
                     let _ = std::fs::remove_file(dst);
                     return Err(format!("Failed to copy range in {}: {}", src.display(), e));
                 }
@@ -3347,10 +3450,11 @@ fn remove_untracked_receipt_files(dir: &Path, embedded: &[FileSnapshot]) {
             if let Ok(meta) = std::fs::symlink_metadata(&p) {
                 if meta.is_dir() {
                     walk(&p, embedded);
-                } else if meta.is_file() && is_receipt_file_name(&name_str) {
-                    if !embedded.iter().any(|snap| snap.path == p) {
-                        let _ = std::fs::remove_file(&p);
-                    }
+                } else if meta.is_file()
+                    && is_receipt_file_name(&name_str)
+                    && !embedded.iter().any(|snap| snap.path == p)
+                {
+                    let _ = std::fs::remove_file(&p);
                 }
             }
         }
@@ -3361,7 +3465,7 @@ fn remove_untracked_receipt_files(dir: &Path, embedded: &[FileSnapshot]) {
 fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
-    root: &Path,
+    _root: &Path,
     mut embedded_receipts: Option<&mut Vec<FileSnapshot>>,
     _ignore_permission_denied: bool,
     fs_root: Option<&Path>,
@@ -3404,30 +3508,48 @@ fn copy_dir_recursive(
         if ft.is_symlink() {
             let target = match std::fs::read_link(&child_src) {
                 Ok(t) => t,
-                Err(e) => return Err(format!("Failed to read symlink {}: {}", child_src.display(), e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to read symlink {}: {}",
+                        child_src.display(),
+                        e
+                    ))
+                }
             };
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(&target, &child_dst)
-                    .map_err(|e| format!("Failed to create symlink {}: {}", child_dst.display(), e))?;
+                std::os::unix::fs::symlink(&target, &child_dst).map_err(|e| {
+                    format!("Failed to create symlink {}: {}", child_dst.display(), e)
+                })?;
             }
         } else if ft.is_dir() {
-            let receipts_sub = match embedded_receipts {
-                Some(ref mut r) => Some(&mut **r),
-                None => None,
-            };
-            copy_dir_recursive(&child_src, &child_dst, root, receipts_sub, _ignore_permission_denied, fs_root)?;
+            let receipts_sub = embedded_receipts.as_deref_mut();
+            copy_dir_recursive(
+                &child_src,
+                &child_dst,
+                _root,
+                receipts_sub,
+                _ignore_permission_denied,
+                fs_root,
+            )?;
         } else if ft.is_file() {
             if let Some(ref mut receipts) = embedded_receipts {
                 if is_receipt_file_name(&name_str) {
                     verify_no_symlink_ancestors_with_root(&child_src, fs_root)?;
                     let state = read_file_entry_bounded_nofollow(&child_src, 1024 * 1024)?;
-                    receipts.push(FileSnapshot { path: child_src, state });
+                    receipts.push(FileSnapshot {
+                        path: child_src,
+                        state,
+                    });
                     continue;
                 }
             }
             if let Err(e) = copy_file_preserving_sparse_and_meta(&child_src, &child_dst, &meta) {
-                return Err(format!("Failed to copy file {}: {}", child_src.display(), e));
+                return Err(format!(
+                    "Failed to copy file {}: {}",
+                    child_src.display(),
+                    e
+                ));
             }
         }
     }
@@ -3515,10 +3637,7 @@ fn candidate_runtime_targets(
             ]);
         }
         "filebot" => {
-            dir_candidates.extend([
-                "/opt/filebot".into(),
-                "/opt/filebot-node".into(),
-            ]);
+            dir_candidates.extend(["/opt/filebot".into(), "/opt/filebot-node".into()]);
         }
         "jackett" => dir_candidates.push("/opt/Jackett".into()),
         "jellyfin" => dir_candidates.push("/usr/lib/jellyfin".into()),
@@ -3544,17 +3663,11 @@ fn candidate_runtime_targets(
             ]);
         }
         "ombi" => {
-            dir_candidates.extend([
-                "/opt/Ombi".into(),
-                "/etc/Ombi".into(),
-            ]);
+            dir_candidates.extend(["/opt/Ombi".into(), "/etc/Ombi".into()]);
         }
         "organizr" => dir_candidates.push("/var/www/organizr".into()),
         "paperless-ngx" => {
-            dir_candidates.extend([
-                "/opt/paperless".into(),
-                "/var/lib/paperless".into(),
-            ]);
+            dir_candidates.extend(["/opt/paperless".into(), "/var/lib/paperless".into()]);
         }
         "pihole" => {
             dir_candidates.extend([
@@ -3586,16 +3699,10 @@ fn candidate_runtime_targets(
         "rutorrent" => dir_candidates.push("/var/www/rutorrent".into()),
         "sabnzbd" => dir_candidates.push("/opt/SABnzbd".into()),
         "sonarr" => {
-            dir_candidates.extend([
-                "/opt/Sonarr".into(),
-                "/opt/NzbDrone".into(),
-            ]);
+            dir_candidates.extend(["/opt/Sonarr".into(), "/opt/NzbDrone".into()]);
         }
         "tautulli" => {
-            dir_candidates.extend([
-                "/opt/Tautulli".into(),
-                "/opt/plexpy".into(),
-            ]);
+            dir_candidates.extend(["/opt/Tautulli".into(), "/opt/plexpy".into()]);
         }
         "transmission" => {
             dir_candidates.extend([
@@ -3616,25 +3723,47 @@ fn candidate_runtime_targets(
     let mut all_units: Vec<String> = units.to_vec();
     match pkg_lower.as_str() {
         "deluge" => all_units.extend(["deluged.service".into(), "deluge-web.service".into()]),
-        "dispatcharr" => all_units.extend(["dispatcharr-celery.service".into(), "dispatcharr-celerybeat.service".into()]),
+        "dispatcharr" => all_units.extend([
+            "dispatcharr-celery.service".into(),
+            "dispatcharr-celerybeat.service".into(),
+        ]),
         "emby" => all_units.push("emby-server.service".into()),
         "grafana" => all_units.push("grafana-server.service".into()),
         "homeassistant" => all_units.push("home-assistant@homeassistant.service".into()),
-        "invidious" => all_units.extend(["af-invidious.service".into(), "af-invidious-companion.service".into()]),
+        "invidious" => all_units.extend([
+            "af-invidious.service".into(),
+            "af-invidious-companion.service".into(),
+        ]),
         "kasmvnc" => all_units.push("af-kasmvnc.service".into()),
         "maintainerr" => all_units.push("af-maintainerr.service".into()),
         "mcvnc" => all_units.push("af-mcvnc.service".into()),
         "novnc" => all_units.push("novnc-xvnc.service".into()),
         "palate" => all_units.push("af-palate.service".into()),
-        "paperless-ngx" => all_units.extend(["paperless-webserver.service".into(), "paperless-worker.service".into(), "paperless-scheduler.service".into()]),
+        "paperless-ngx" => all_units.extend([
+            "paperless-webserver.service".into(),
+            "paperless-worker.service".into(),
+            "paperless-scheduler.service".into(),
+        ]),
         "pihole" => all_units.push("pihole-FTL.service".into()),
-        "piped" => all_units.extend(["af-piped.service".into(), "af-piped-api.service".into(), "af-piped-proxy.service".into(), "piped-backend.service".into(), "piped-proxy.service".into()]),
+        "piped" => all_units.extend([
+            "af-piped.service".into(),
+            "af-piped-api.service".into(),
+            "af-piped-proxy.service".into(),
+            "piped-backend.service".into(),
+            "piped-proxy.service".into(),
+        ]),
         "plex" => all_units.push("plexmediaserver.service".into()),
-        "prometheus" => all_units.extend(["node_exporter.service".into(), "prometheus-node-exporter.service".into()]),
+        "prometheus" => all_units.extend([
+            "node_exporter.service".into(),
+            "prometheus-node-exporter.service".into(),
+        ]),
         "quassel" => all_units.push("quasselcore.service".into()),
         "rclone" => all_units.push("rclone-vfs.service".into()),
         "recyclarr" => all_units.extend(["recyclarr.service".into(), "recyclarr.timer".into()]),
-        "scrutiny" => all_units.extend(["scrutiny-collector.service".into(), "scrutiny-collector.timer".into()]),
+        "scrutiny" => all_units.extend([
+            "scrutiny-collector.service".into(),
+            "scrutiny-collector.timer".into(),
+        ]),
         "tailscale" => all_units.push("tailscaled.service".into()),
         "transmission" => all_units.push("transmission-daemon.service".into()),
         "uptimekuma" => all_units.push("uptime-kuma.service".into()),
@@ -3710,10 +3839,9 @@ fn candidate_runtime_targets(
             "/usr/bin/vncserver".into(),
         ]),
         "maintainerr" => file_candidates.push("/usr/local/bin/af-systemd-sandbox".into()),
-        "netdata" => file_candidates.extend([
-            "/usr/sbin/netdata".into(),
-            "/usr/local/sbin/netdata".into(),
-        ]),
+        "netdata" => {
+            file_candidates.extend(["/usr/sbin/netdata".into(), "/usr/local/sbin/netdata".into()])
+        }
         "novnc" => file_candidates.extend([
             "/usr/local/bin/af-novnc-start".into(),
             "/usr/local/bin/af-novnc-xvnc-start".into(),
@@ -3749,29 +3877,29 @@ fn candidate_runtime_targets(
             "/usr/bin/transmission-daemon".into(),
             "/usr/bin/transmission-remote".into(),
         ]),
-        "wireguard" => file_candidates.extend([
-            "/usr/bin/wg".into(),
-            "/usr/bin/wg-quick".into(),
-        ]),
+        "wireguard" => file_candidates.extend(["/usr/bin/wg".into(), "/usr/bin/wg-quick".into()]),
         "x2go" => file_candidates.extend([
             "/usr/bin/x2goruncommand".into(),
             "/usr/bin/x2gostartagent".into(),
             "/usr/sbin/x2gocleansessions".into(),
         ]),
-        "xrdp" => file_candidates.extend([
-            "/usr/sbin/xrdp".into(),
-            "/usr/sbin/xrdp-sesman".into(),
-        ]),
+        "xrdp" => file_candidates.extend(["/usr/sbin/xrdp".into(), "/usr/sbin/xrdp-sesman".into()]),
         _ => {}
     }
 
     if let Some(recipe) = crate::package_executor::get_declarative_recipe(pkg) {
-        for step in recipe.install_steps.iter().chain(recipe.update_steps.iter()) {
+        for step in recipe
+            .install_steps
+            .iter()
+            .chain(recipe.update_steps.iter())
+        {
             match step {
                 crate::package_executor::DeclarativeStep::WriteTemplateFile { path, .. } => {
                     file_candidates.push(path.clone());
                 }
-                crate::package_executor::DeclarativeStep::WriteSystemdUnit { unit_name, .. } => {
+                crate::package_executor::DeclarativeStep::WriteSystemdUnit {
+                    unit_name, ..
+                } => {
                     let u = unit_name.trim();
                     let unit_file = if u.contains('.') {
                         u.to_string()
@@ -3785,13 +3913,21 @@ fn candidate_runtime_targets(
                 crate::package_executor::DeclarativeStep::DownloadBinary { dest_path, .. } => {
                     file_candidates.push(dest_path.clone());
                 }
-                crate::package_executor::DeclarativeStep::DownloadAndExtractTarGz { dest_dir, extract_binaries, .. } => {
+                crate::package_executor::DeclarativeStep::DownloadAndExtractTarGz {
+                    dest_dir,
+                    extract_binaries,
+                    ..
+                } => {
                     let clean = dest_dir.trim_end_matches('/');
                     for b in extract_binaries {
                         file_candidates.push(format!("{clean}/{b}"));
                     }
                 }
-                crate::package_executor::DeclarativeStep::GenerateSelfSignedTlsCert { cert_path, key_out_path, .. } => {
+                crate::package_executor::DeclarativeStep::GenerateSelfSignedTlsCert {
+                    cert_path,
+                    key_out_path,
+                    ..
+                } => {
                     file_candidates.push(cert_path.clone());
                     if let Some(ref k) = key_out_path {
                         file_candidates.push(k.clone());
@@ -3805,7 +3941,8 @@ fn candidate_runtime_targets(
         }
     }
 
-    let bp_paths = crate::package_executor::collect_blueprint_target_paths(pkg, env_cfg.fs_root.as_deref());
+    let bp_paths =
+        crate::package_executor::collect_blueprint_target_paths(pkg, env_cfg.fs_root.as_deref());
 
     let mut dir_targets: Vec<PathBuf> = Vec::new();
     for d in dir_candidates {
@@ -3890,7 +4027,13 @@ impl PackageRuntimeSnapshot {
     ) -> Result<Self, String> {
         let safe_pkg: String = package_id
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let folder_name = format!(".af-rt-snap-{}-{}", safe_pkg, uuid::Uuid::new_v4());
         let mut parent_candidates: Vec<PathBuf> = Vec::new();
@@ -3915,7 +4058,11 @@ impl PackageRuntimeSnapshot {
                     break;
                 }
                 Err(e) => {
-                    last_create_err = format!("Failed to create backup root {}: {}", candidate.display(), e);
+                    last_create_err = format!(
+                        "Failed to create backup root {}: {}",
+                        candidate.display(),
+                        e
+                    );
                 }
             }
         }
@@ -3955,19 +4102,36 @@ impl PackageRuntimeSnapshot {
                     entries.push(RuntimeSnapshotEntry::Absent { target_path, kind });
                 }
                 Err(e) => {
-                    return Err(format!("Failed to read metadata for {}: {}", target_path.display(), e));
+                    return Err(format!(
+                        "Failed to read metadata for {}: {}",
+                        target_path.display(),
+                        e
+                    ));
                 }
                 Ok(meta) if meta.file_type().is_symlink() => {
-                    let link_target = std::fs::read_link(&target_path)
-                        .map_err(|e| format!("Failed to read link {}: {}", target_path.display(), e))?;
-                    entries.push(RuntimeSnapshotEntry::Symlink { target_path, link_target });
+                    let link_target = std::fs::read_link(&target_path).map_err(|e| {
+                        format!("Failed to read link {}: {}", target_path.display(), e)
+                    })?;
+                    entries.push(RuntimeSnapshotEntry::Symlink {
+                        target_path,
+                        link_target,
+                    });
                 }
                 Ok(meta) if meta.is_file() => {
-                    let file_name = target_path.file_name().unwrap_or_default().to_string_lossy();
+                    let file_name = target_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
                     if is_receipt_file_name(&file_name) {
-                        verify_no_symlink_ancestors_with_root(&target_path, env_cfg.fs_root.as_deref())?;
+                        verify_no_symlink_ancestors_with_root(
+                            &target_path,
+                            env_cfg.fs_root.as_deref(),
+                        )?;
                         let state = read_file_entry_bounded_nofollow(&target_path, 1024 * 1024)?;
-                        embedded_receipts.push(FileSnapshot { path: target_path.clone(), state });
+                        embedded_receipts.push(FileSnapshot {
+                            path: target_path.clone(),
+                            state,
+                        });
                         continue;
                     }
                     let backup_path = backup_root.join(format!("entry_{idx}"));
@@ -3979,7 +4143,13 @@ impl PackageRuntimeSnapshot {
                     };
                     #[cfg(not(unix))]
                     let (mode, uid, gid) = (0o644, 0, 0);
-                    entries.push(RuntimeSnapshotEntry::File { target_path, backup_path, mode, uid, gid });
+                    entries.push(RuntimeSnapshotEntry::File {
+                        target_path,
+                        backup_path,
+                        mode,
+                        uid,
+                        gid,
+                    });
                 }
                 Ok(meta) if meta.is_dir() => {
                     let backup_path = backup_root.join(format!("entry_{idx}"));
@@ -4032,7 +4202,9 @@ impl PackageRuntimeSnapshot {
                 RuntimeSnapshotEntry::Symlink { target_path, .. } => target_path,
                 RuntimeSnapshotEntry::Directory { target_path, .. } => target_path,
             };
-            if let Err(e) = verify_no_symlink_ancestors_with_root(entry_target, self.fs_root.as_deref()) {
+            if let Err(e) =
+                verify_no_symlink_ancestors_with_root(entry_target, self.fs_root.as_deref())
+            {
                 cleanup_staged_items(&staged_items);
                 self.preserve_on_drop = true;
                 return Err(e);
@@ -4059,7 +4231,11 @@ impl PackageRuntimeSnapshot {
                     Err(e) => {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
-                        return Err(format!("Failed to stat ancestor {}: {}", ancestor.display(), e));
+                        return Err(format!(
+                            "Failed to stat ancestor {}: {}",
+                            ancestor.display(),
+                            e
+                        ));
                     }
                 }
             }
@@ -4092,7 +4268,13 @@ impl PackageRuntimeSnapshot {
                         }
                     }
                 }
-                RuntimeSnapshotEntry::File { target_path, backup_path, mode, uid, gid } => {
+                RuntimeSnapshotEntry::File {
+                    target_path,
+                    backup_path,
+                    mode,
+                    uid,
+                    gid,
+                } => {
                     let parent = target_path.parent().ok_or_else(|| {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
@@ -4107,20 +4289,34 @@ impl PackageRuntimeSnapshot {
                     let meta = std::fs::metadata(backup_path).map_err(|e| {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
-                        format!("Failed to stat backup file {}: {}", backup_path.display(), e)
+                        format!(
+                            "Failed to stat backup file {}: {}",
+                            backup_path.display(),
+                            e
+                        )
                     })?;
-                    if let Err(e) = copy_file_preserving_sparse_and_meta(backup_path, &stage, &meta) {
+                    if let Err(e) = copy_file_preserving_sparse_and_meta(backup_path, &stage, &meta)
+                    {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
-                        return Err(format!("Failed to stage restored file {}: {}", stage.display(), e));
+                        return Err(format!(
+                            "Failed to stage restored file {}: {}",
+                            stage.display(),
+                            e
+                        ));
                     }
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(*mode));
+                        let _ = std::fs::set_permissions(
+                            &stage,
+                            std::fs::Permissions::from_mode(*mode),
+                        );
                         unsafe {
                             if libc::geteuid() == 0 {
-                                if let Ok(c_path) = std::ffi::CString::new(stage.as_os_str().as_bytes()) {
+                                if let Ok(c_path) =
+                                    std::ffi::CString::new(stage.as_os_str().as_bytes())
+                                {
                                     libc::chown(c_path.as_ptr(), *uid, *gid);
                                 }
                             }
@@ -4131,7 +4327,10 @@ impl PackageRuntimeSnapshot {
                         stage_path: stage,
                     });
                 }
-                RuntimeSnapshotEntry::Symlink { target_path, link_target } => {
+                RuntimeSnapshotEntry::Symlink {
+                    target_path,
+                    link_target,
+                } => {
                     let parent = target_path.parent().ok_or_else(|| {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
@@ -4148,7 +4347,11 @@ impl PackageRuntimeSnapshot {
                         if let Err(e) = std::os::unix::fs::symlink(link_target, &stage) {
                             cleanup_staged_items(&staged_items);
                             self.preserve_on_drop = true;
-                            return Err(format!("Failed to create symlink {}: {}", stage.display(), e));
+                            return Err(format!(
+                                "Failed to create symlink {}: {}",
+                                stage.display(),
+                                e
+                            ));
                         }
                     }
                     staged_items.push(StagedRuntimeItem::Symlink {
@@ -4156,7 +4359,13 @@ impl PackageRuntimeSnapshot {
                         stage_path: stage,
                     });
                 }
-                RuntimeSnapshotEntry::Directory { target_path, backup_path, mode, uid, gid } => {
+                RuntimeSnapshotEntry::Directory {
+                    target_path,
+                    backup_path,
+                    mode,
+                    uid,
+                    gid,
+                } => {
                     let parent = target_path.parent().ok_or_else(|| {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
@@ -4167,20 +4376,40 @@ impl PackageRuntimeSnapshot {
                         self.preserve_on_drop = true;
                         format!("Failed to create parent dir {}: {}", parent.display(), e)
                     })?;
-                    let name = target_path.file_name().unwrap_or_default().to_string_lossy();
-                    let stage = parent.join(format!(".{}.af-rt-stage-{}", name, uuid::Uuid::new_v4()));
-                    if let Err(e) = copy_dir_recursive(backup_path, &stage, backup_path, None, false, self.fs_root.as_deref()) {
+                    let name = target_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let stage =
+                        parent.join(format!(".{}.af-rt-stage-{}", name, uuid::Uuid::new_v4()));
+                    if let Err(e) = copy_dir_recursive(
+                        backup_path,
+                        &stage,
+                        backup_path,
+                        None,
+                        false,
+                        self.fs_root.as_deref(),
+                    ) {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
-                        return Err(format!("Failed to stage restored directory {}: {}", stage.display(), e));
+                        return Err(format!(
+                            "Failed to stage restored directory {}: {}",
+                            stage.display(),
+                            e
+                        ));
                     }
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(*mode));
+                        let _ = std::fs::set_permissions(
+                            &stage,
+                            std::fs::Permissions::from_mode(*mode),
+                        );
                         unsafe {
                             if libc::geteuid() == 0 {
-                                if let Ok(c_path) = std::ffi::CString::new(stage.as_os_str().as_bytes()) {
+                                if let Ok(c_path) =
+                                    std::ffi::CString::new(stage.as_os_str().as_bytes())
+                                {
                                     libc::chown(c_path.as_ptr(), *uid, *gid);
                                 }
                             }
@@ -4189,7 +4418,11 @@ impl PackageRuntimeSnapshot {
                     if let Err(e) = copy_live_receipts_to_stage(target_path, &stage) {
                         cleanup_staged_items(&staged_items);
                         self.preserve_on_drop = true;
-                        return Err(format!("Failed to preserve live receipts into stage {}: {}", stage.display(), e));
+                        return Err(format!(
+                            "Failed to preserve live receipts into stage {}: {}",
+                            stage.display(),
+                            e
+                        ));
                     }
                     staged_items.push(StagedRuntimeItem::Directory {
                         target_path: target_path.clone(),
@@ -4205,25 +4438,50 @@ impl PackageRuntimeSnapshot {
 
         for item in staged_items {
             let (target_path, stage_path, is_dir) = match item {
-                StagedRuntimeItem::File { target_path, stage_path } => (target_path, stage_path, false),
-                StagedRuntimeItem::Symlink { target_path, stage_path } => (target_path, stage_path, false),
-                StagedRuntimeItem::Directory { target_path, stage_path } => (target_path, stage_path, true),
+                StagedRuntimeItem::File {
+                    target_path,
+                    stage_path,
+                } => (target_path, stage_path, false),
+                StagedRuntimeItem::Symlink {
+                    target_path,
+                    stage_path,
+                } => (target_path, stage_path, false),
+                StagedRuntimeItem::Directory {
+                    target_path,
+                    stage_path,
+                } => (target_path, stage_path, true),
             };
             let parent = match target_path.parent() {
                 Some(p) => p,
                 None => {
-                    let _ = if is_dir { std::fs::remove_dir_all(&stage_path) } else { std::fs::remove_file(&stage_path) };
+                    let _ = if is_dir {
+                        std::fs::remove_dir_all(&stage_path)
+                    } else {
+                        std::fs::remove_file(&stage_path)
+                    };
                     swap_err = Some(format!("Target {} has no parent", target_path.display()));
                     break;
                 }
             };
-            let name = target_path.file_name().unwrap_or_default().to_string_lossy();
+            let name = target_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
             let old_path = parent.join(format!(".{}.af-rt-old-{}", name, uuid::Uuid::new_v4()));
             let had_target = std::fs::symlink_metadata(&target_path).is_ok();
             if had_target {
                 if let Err(e) = std::fs::rename(&target_path, &old_path) {
-                    let _ = if is_dir { std::fs::remove_dir_all(&stage_path) } else { std::fs::remove_file(&stage_path) };
-                    swap_err = Some(format!("Failed to move old {} to {}: {}", target_path.display(), old_path.display(), e));
+                    let _ = if is_dir {
+                        std::fs::remove_dir_all(&stage_path)
+                    } else {
+                        std::fs::remove_file(&stage_path)
+                    };
+                    swap_err = Some(format!(
+                        "Failed to move old {} to {}: {}",
+                        target_path.display(),
+                        old_path.display(),
+                        e
+                    ));
                     break;
                 }
             }
@@ -4231,8 +4489,17 @@ impl PackageRuntimeSnapshot {
                 if had_target {
                     let _ = std::fs::rename(&old_path, &target_path);
                 }
-                let _ = if is_dir { std::fs::remove_dir_all(&stage_path) } else { std::fs::remove_file(&stage_path) };
-                swap_err = Some(format!("Failed to move stage {} to {}: {}", stage_path.display(), target_path.display(), e));
+                let _ = if is_dir {
+                    std::fs::remove_dir_all(&stage_path)
+                } else {
+                    std::fs::remove_file(&stage_path)
+                };
+                swap_err = Some(format!(
+                    "Failed to move stage {} to {}: {}",
+                    stage_path.display(),
+                    target_path.display(),
+                    e
+                ));
                 break;
             }
             committed_swaps.push(CommittedSwap {
@@ -4263,8 +4530,15 @@ impl PackageRuntimeSnapshot {
                 match std::fs::symlink_metadata(target_path) {
                     Ok(meta) => {
                         if let Some(parent) = target_path.parent() {
-                            let name = target_path.file_name().unwrap_or_default().to_string_lossy();
-                            let parked = parent.join(format!(".{}.af-rt-abs-{}", name, uuid::Uuid::new_v4()));
+                            let name = target_path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            let parked = parent.join(format!(
+                                ".{}.af-rt-abs-{}",
+                                name,
+                                uuid::Uuid::new_v4()
+                            ));
                             if std::fs::rename(target_path, &parked).is_ok() {
                                 absent_parked.push((target_path.clone(), parked));
                                 continue;
@@ -4374,12 +4648,16 @@ impl PackageRuntimeSnapshot {
 }
 
 #[cfg(test)]
-pub static TEST_ROLLBACK_HOOK: once_cell::sync::Lazy<std::sync::Mutex<Option<Box<dyn Fn(&[FileSnapshot]) + Send + Sync>>>> =
-    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+#[allow(clippy::type_complexity)]
+pub static TEST_ROLLBACK_HOOK: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<Box<dyn Fn(&[FileSnapshot]) + Send + Sync>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
-pub static TEST_CERTIFY_FAIL_HOOK: once_cell::sync::Lazy<std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>> =
-    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+#[allow(clippy::type_complexity)]
+pub static TEST_CERTIFY_FAIL_HOOK: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 
 pub fn rollback_operation_state(
     receipt_snapshots: &[FileSnapshot],
@@ -4407,9 +4685,7 @@ pub fn rollback_operation_state_with_runtime(
     Ok(())
 }
 
-pub fn snapshot_candidate_receipts(
-    package_id: &str,
-) -> Result<Vec<FileSnapshot>, String> {
+pub fn snapshot_candidate_receipts(package_id: &str) -> Result<Vec<FileSnapshot>, String> {
     snapshot_candidate_receipts_with_env(package_id, &crate::PackageExecutionEnv::default())
 }
 
@@ -4437,8 +4713,8 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
     dir_path: &Path,
     create_missing: bool,
 ) -> Result<Option<std::os::fd::OwnedFd>, StepwiseDirError> {
-    use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
     use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Component;
 
     if !dir_path.is_absolute() {
@@ -4449,7 +4725,10 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
     }
 
     let root_raw = unsafe {
-        libc::open(c"/".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
     };
     if root_raw < 0 {
         let err = std::io::Error::last_os_error();
@@ -4467,10 +4746,12 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
                 let part_bytes = part.to_string_lossy().into_owned();
                 let part_cstr = match CString::new(part_bytes) {
                     Ok(c) => c,
-                    Err(e) => return Err(StepwiseDirError {
-                        message: format!("CString error: {}", e),
-                        raw_os_error: Some(libc::EINVAL),
-                    }),
+                    Err(e) => {
+                        return Err(StepwiseDirError {
+                            message: format!("CString error: {}", e),
+                            raw_os_error: Some(libc::EINVAL),
+                        })
+                    }
                 };
                 let mut next_raw = unsafe {
                     libc::openat(
@@ -4504,7 +4785,10 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
                                 libc::openat(
                                     curr_fd.as_raw_fd(),
                                     part_cstr.as_ptr(),
-                                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                    libc::O_RDONLY
+                                        | libc::O_DIRECTORY
+                                        | libc::O_NOFOLLOW
+                                        | libc::O_CLOEXEC,
                                 )
                             };
                             if next_raw < 0 {
@@ -4540,7 +4824,10 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
             Component::CurDir => {}
             Component::ParentDir => {
                 return Err(StepwiseDirError {
-                    message: format!("Parent directory traversal '..' forbidden: {}", dir_path.display()),
+                    message: format!(
+                        "Parent directory traversal '..' forbidden: {}",
+                        dir_path.display()
+                    ),
                     raw_os_error: Some(libc::EPERM),
                 });
             }
@@ -4556,7 +4843,9 @@ pub fn open_dir_nofollow_stepwise_inner_ext(
     Ok(Some(curr_fd))
 }
 
-pub fn open_dir_nofollow_stepwise_inner(dir_path: &Path) -> Result<std::os::fd::OwnedFd, StepwiseDirError> {
+pub fn open_dir_nofollow_stepwise_inner(
+    dir_path: &Path,
+) -> Result<std::os::fd::OwnedFd, StepwiseDirError> {
     match open_dir_nofollow_stepwise_inner_ext(dir_path, false)? {
         Some(fd) => Ok(fd),
         None => Err(StepwiseDirError {
@@ -4581,9 +4870,9 @@ pub fn read_file_entry_bounded_nofollow(
     path: &Path,
     max_bytes: usize,
 ) -> Result<Option<SnapshotFileState>, String> {
-    use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
     use std::ffi::CString;
     use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     let parent = match path.parent() {
         Some(p) => p,
@@ -4600,18 +4889,28 @@ pub fn read_file_entry_bounded_nofollow(
         Err(e) => return Err(e.to_string()),
     };
 
-    let file_cstr = CString::new(file_name.as_bytes()).map_err(|e| format!("CString error: {}", e))?;
+    let file_cstr =
+        CString::new(file_name.as_bytes()).map_err(|e| format!("CString error: {}", e))?;
 
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let stat_rc = unsafe {
-        libc::fstatat(dir_fd.as_raw_fd(), file_cstr.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
+        libc::fstatat(
+            dir_fd.as_raw_fd(),
+            file_cstr.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
     };
     if stat_rc != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ENOENT) {
             return Ok(None);
         }
-        return Err(format!("fstatat failed on receipt {}: {}", path.display(), err));
+        return Err(format!(
+            "fstatat failed on receipt {}: {}",
+            path.display(),
+            err
+        ));
     }
 
     if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
@@ -4640,14 +4939,22 @@ pub fn read_file_entry_bounded_nofollow(
         if err.raw_os_error() == Some(libc::ENOENT) {
             return Ok(None);
         }
-        return Err(format!("openat failed on receipt {}: {}", path.display(), err));
+        return Err(format!(
+            "openat failed on receipt {}: {}",
+            path.display(),
+            err
+        ));
     }
     let file_fd = unsafe { OwnedFd::from_raw_fd(file_raw) };
 
     let mut fst: libc::stat = unsafe { std::mem::zeroed() };
     let fstat_rc = unsafe { libc::fstat(file_fd.as_raw_fd(), &mut fst) };
     if fstat_rc != 0 {
-        return Err(format!("fstat failed on receipt {}: {}", path.display(), std::io::Error::last_os_error()));
+        return Err(format!(
+            "fstat failed on receipt {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     if (fst.st_mode & libc::S_IFMT) != libc::S_IFREG {
         return Err(format!(
@@ -4656,10 +4963,17 @@ pub fn read_file_entry_bounded_nofollow(
         ));
     }
     if fst.st_dev != st.st_dev || fst.st_ino != st.st_ino {
-        return Err(format!("Inode or device changed for receipt {}", path.display()));
+        return Err(format!(
+            "Inode or device changed for receipt {}",
+            path.display()
+        ));
     }
     if fst.st_size > max_bytes as libc::off_t {
-        return Err(format!("Receipt path {} exceeds {} byte limit", path.display(), max_bytes));
+        return Err(format!(
+            "Receipt path {} exceeds {} byte limit",
+            path.display(),
+            max_bytes
+        ));
     }
 
     let mut std_file = std::fs::File::from(file_fd);
@@ -4670,7 +4984,11 @@ pub fn read_file_entry_bounded_nofollow(
         .read_to_end(&mut buf)
         .map_err(|e| format!("Failed to read receipt {}: {}", path.display(), e))?;
     if buf.len() > max_bytes {
-        return Err(format!("Receipt path {} exceeds {} byte limit during read", path.display(), max_bytes));
+        return Err(format!(
+            "Receipt path {} exceeds {} byte limit during read",
+            path.display(),
+            max_bytes
+        ));
     }
 
     let mode = (fst.st_mode & 0o7777) as u32;
@@ -4703,9 +5021,7 @@ pub fn snapshot_candidate_receipts_with_env(
     Ok(snapshots)
 }
 
-pub fn restore_candidate_receipts(
-    snapshots: &[FileSnapshot],
-) -> Result<(), String> {
+pub fn restore_candidate_receipts(snapshots: &[FileSnapshot]) -> Result<(), String> {
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
 
@@ -4723,7 +5039,10 @@ pub fn restore_candidate_receipts(
         let parent = match path.parent() {
             Some(p) => p,
             None => {
-                errors.push(format!("Invalid receipt path with no parent: {}", path.display()));
+                errors.push(format!(
+                    "Invalid receipt path with no parent: {}",
+                    path.display()
+                ));
                 continue;
             }
         };
@@ -4735,7 +5054,11 @@ pub fn restore_candidate_receipts(
                 continue;
             }
             Err(e) => {
-                errors.push(format!("Failed to open directory stepwise {}: {}", parent.display(), e));
+                errors.push(format!(
+                    "Failed to open directory stepwise {}: {}",
+                    parent.display(),
+                    e
+                ));
                 continue;
             }
         };
@@ -4758,20 +5081,27 @@ pub fn restore_candidate_receipts(
 
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         let stat_rc = unsafe {
-            libc::fstatat(dir_fd, file_cstr.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
+            libc::fstatat(
+                dir_fd,
+                file_cstr.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
         };
-        if stat_rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-            if prior_state.is_some() {
-                errors.push(format!(
-                    "Refusing to overwrite directory at receipt path {}",
-                    path.display()
-                ));
-                continue;
-            }
+        if stat_rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR && prior_state.is_some() {
+            errors.push(format!(
+                "Refusing to overwrite directory at receipt path {}",
+                path.display()
+            ));
+            continue;
         }
 
         if let Some(entry) = prior_state {
-            let tmp_name = format!(".af-receipt-tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+            let tmp_name = format!(
+                ".af-receipt-tmp-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            );
             let tmp_cstr = match CString::new(tmp_name.as_bytes()) {
                 Ok(c) => c,
                 Err(e) => {
@@ -4785,7 +5115,11 @@ pub fn restore_candidate_receipts(
                 libc::openat(
                     dir_fd,
                     tmp_cstr.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
                     0o600,
                 )
             };
@@ -4837,7 +5171,8 @@ pub fn restore_candidate_receipts(
             let current_uid = unsafe { libc::geteuid() };
             let current_gid = unsafe { libc::getegid() };
             if current_uid == 0 || entry.uid != current_uid || entry.gid != current_gid {
-                let chown_rc = unsafe { libc::fchown(fd, entry.uid as libc::uid_t, entry.gid as libc::gid_t) };
+                let chown_rc =
+                    unsafe { libc::fchown(fd, entry.uid as libc::uid_t, entry.gid as libc::gid_t) };
                 if chown_rc != 0 {
                     let err = std::io::Error::last_os_error();
                     unsafe {
@@ -4846,7 +5181,10 @@ pub fn restore_candidate_receipts(
                     };
                     errors.push(format!(
                         "Failed to restore ownership (uid={}, gid={}) on {}: {}",
-                        entry.uid, entry.gid, path.display(), err
+                        entry.uid,
+                        entry.gid,
+                        path.display(),
+                        err
                     ));
                     continue;
                 }
@@ -4863,7 +5201,9 @@ pub fn restore_candidate_receipts(
                 };
                 errors.push(format!(
                     "Failed to restore permissions ({:#o}) on {}: {}",
-                    target_mode, path.display(), err
+                    target_mode,
+                    path.display(),
+                    err
                 ));
                 continue;
             }
@@ -4880,9 +5220,8 @@ pub fn restore_candidate_receipts(
                 continue;
             }
 
-            let rename_rc = unsafe {
-                libc::renameat(dir_fd, tmp_cstr.as_ptr(), dir_fd, file_cstr.as_ptr())
-            };
+            let rename_rc =
+                unsafe { libc::renameat(dir_fd, tmp_cstr.as_ptr(), dir_fd, file_cstr.as_ptr()) };
             if rename_rc != 0 {
                 let err = std::io::Error::last_os_error();
                 unsafe { libc::unlinkat(dir_fd, tmp_cstr.as_ptr(), 0) };
@@ -4899,15 +5238,24 @@ pub fn restore_candidate_receipts(
                 let err = std::io::Error::last_os_error();
                 let raw_err = err.raw_os_error();
                 if raw_err == Some(libc::EISDIR) || raw_err == Some(libc::EPERM) {
-                    let rmdir_rc = unsafe { libc::unlinkat(dir_fd, file_cstr.as_ptr(), libc::AT_REMOVEDIR) };
+                    let rmdir_rc =
+                        unsafe { libc::unlinkat(dir_fd, file_cstr.as_ptr(), libc::AT_REMOVEDIR) };
                     if rmdir_rc != 0 {
                         let rmdir_err = std::io::Error::last_os_error();
                         if rmdir_err.raw_os_error() != Some(libc::ENOENT) {
-                            errors.push(format!("Failed to remove directory at receipt path {}: {}", path.display(), rmdir_err));
+                            errors.push(format!(
+                                "Failed to remove directory at receipt path {}: {}",
+                                path.display(),
+                                rmdir_err
+                            ));
                         }
                     }
                 } else if raw_err != Some(libc::ENOENT) {
-                    errors.push(format!("Failed to unlink receipt {}: {}", path.display(), err));
+                    errors.push(format!(
+                        "Failed to unlink receipt {}: {}",
+                        path.display(),
+                        err
+                    ));
                 }
             }
         }
@@ -4923,8 +5271,7 @@ fn spawn_bounded_pipe_reader<R>(
     pipe: Option<R>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: std::sync::mpsc::SyncSender<Vec<u8>>,
-)
-where
+) where
     R: std::io::Read + std::os::unix::io::AsRawFd + Send + 'static,
 {
     std::thread::spawn(move || {
@@ -4951,7 +5298,11 @@ where
                     if stop.load(Ordering::Relaxed) {
                         loop {
                             let n = unsafe {
-                                libc::read(fd, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
+                                libc::read(
+                                    fd,
+                                    scratch.as_mut_ptr() as *mut libc::c_void,
+                                    scratch.len(),
+                                )
                             };
                             if n > 0 {
                                 let to_take = (MAX_PROBE_OUTPUT_BYTES - buf.len()).min(n as usize);
@@ -4977,7 +5328,11 @@ where
                         let mut eof = false;
                         loop {
                             let n = unsafe {
-                                libc::read(fd, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
+                                libc::read(
+                                    fd,
+                                    scratch.as_mut_ptr() as *mut libc::c_void,
+                                    scratch.len(),
+                                )
                             };
                             if n > 0 {
                                 let to_take = (MAX_PROBE_OUTPUT_BYTES - buf.len()).min(n as usize);
@@ -5011,7 +5366,10 @@ where
             {
                 use std::io::Read;
                 let mut pipe = pipe;
-                let _ = pipe.by_ref().take(MAX_PROBE_OUTPUT_BYTES as u64).read_to_end(&mut buf);
+                let _ = pipe
+                    .by_ref()
+                    .take(MAX_PROBE_OUTPUT_BYTES as u64)
+                    .read_to_end(&mut buf);
             }
         }
         let _ = tx.send(buf);
@@ -5019,7 +5377,8 @@ where
 }
 
 #[cfg(test)]
-pub static INJECT_WAITID_EPERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static INJECT_WAITID_EPERM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "linux")]
 pub(crate) fn is_process_zombie_linux(pid: i32) -> bool {
@@ -5054,7 +5413,9 @@ where
         cmd.process_group(0);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn probe command: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn probe command: {}", e))?;
     #[cfg(unix)]
     let pgid = child.id() as i32;
 
@@ -5236,7 +5597,9 @@ where
             libc::kill(pgid, libc::SIGKILL);
         }
         let _ = child.kill();
-        child.wait().map_err(|e| format!("failed waiting for child after kill: {}", e))?
+        child
+            .wait()
+            .map_err(|e| format!("failed waiting for child after kill: {}", e))?
     } else {
         #[cfg(unix)]
         if exit_status.is_none() {
@@ -5246,14 +5609,20 @@ where
         }
         match exit_status {
             Some(s) => s,
-            None => child.wait().map_err(|e| format!("failed waiting for child: {}", e))?,
+            None => child
+                .wait()
+                .map_err(|e| format!("failed waiting for child: {}", e))?,
         }
     };
 
     stop_reading.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let stdout = stdout_rx.recv_timeout(Duration::from_millis(100)).unwrap_or_default();
-    let stderr = stderr_rx.recv_timeout(Duration::from_millis(100)).unwrap_or_default();
+    let stdout = stdout_rx
+        .recv_timeout(Duration::from_millis(100))
+        .unwrap_or_default();
+    let stderr = stderr_rx
+        .recv_timeout(Duration::from_millis(100))
+        .unwrap_or_default();
 
     if timed_out {
         return Err(format!("probe command timed out after {:?}", timeout));
@@ -5283,8 +5652,10 @@ pub enum LiveRuntimeProbeOutcome {
 pub use LiveRuntimeProbeOutcome::Verified as Confirmed;
 
 pub fn has_prerelease_or_build(token: &str) -> bool {
-    if let Some(pos) = token.find(|c: char| c == '-' || c == '+') {
-        token[pos + 1..].chars().any(|c| c.is_ascii_alphanumeric() || c == '-')
+    if let Some(pos) = token.find(['-', '+']) {
+        token[pos + 1..]
+            .chars()
+            .any(|c| c.is_ascii_alphanumeric() || c == '-')
     } else {
         false
     }
@@ -5316,14 +5687,18 @@ pub fn trim_version_token(raw_token: &str) -> &str {
 }
 
 pub fn extract_version_token(raw: &str) -> String {
-    static DOTTED_VERSION_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?\d+\.\d+(?:\.\d+)*(?:(?:[-+~:][0-9A-Za-z.+~:-]*[0-9A-Za-z-])|[0-9A-Za-z.+~:-]*[0-9A-Za-z])?)")
+    static DOTTED_VERSION_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(
+        || {
+            regex::Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?\d+\.\d+(?:\.\d+)*(?:(?:[-+~:][0-9A-Za-z.+~:-]*[0-9A-Za-z-])|[0-9A-Za-z.+~:-]*[0-9A-Za-z])?)")
             .unwrap()
-    });
-    static DEFAULT_VERSION_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?[0-9]+(?:(?:[-+~:][0-9A-Za-z.+~:-]*[0-9A-Za-z-])|[0-9A-Za-z.+~:-]*[0-9A-Za-z])?)")
+        },
+    );
+    static DEFAULT_VERSION_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(
+        || {
+            regex::Regex::new(r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:\d+:)?[0-9]+(?:(?:[-+~:][0-9A-Za-z.+~:-]*[0-9A-Za-z-])|[0-9A-Za-z.+~:-]*[0-9A-Za-z])?)")
             .unwrap()
-    });
+        },
+    );
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -5381,34 +5756,24 @@ pub fn probe_live_runtime_version(
         let any_exists = fe_dir.is_some() || be_dir.is_some() || pr_dir.is_some();
         if any_exists {
             if let (Some(fe), Some(be), Some(pr)) = (fe_dir, be_dir, pr_dir) {
-                let rev_parse = |git_dir: &std::path::Path| -> Option<String> {
-                    let mut cmd = std::process::Command::new("git");
-                    cmd.args(["--git-dir", &git_dir.to_string_lossy(), "rev-parse", "HEAD"]);
-                    let out = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)).ok()?;
-                    if out.status.success() {
-                        let hash = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
-                        if !hash.is_empty() {
-                            return Some(hash);
-                        }
-                    }
-                    None
-                };
-                if let (Some(fe_hash), Some(be_hash), Some(pr_hash)) = (
-                    rev_parse(&fe),
-                    rev_parse(&be),
-                    rev_parse(&pr),
+                if let (Ok(fe_hash), Ok(be_hash), Ok(pr_hash)) = (
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&fe),
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&be),
+                    crate::probe_metadata::resolve_git_head_commit_nofollow(&pr),
                 ) {
                     return LiveRuntimeProbeOutcome::Verified(format!(
                         "frontend:{fe_hash},backend:{be_hash},proxy:{pr_hash}"
                     ));
                 } else {
                     return LiveRuntimeProbeOutcome::Failed(
-                        "Piped git rev-parse HEAD failed for one or more sub-repos".into(),
+                        "Piped pure-Rust .git/HEAD resolution failed for one or more sub-repos"
+                            .into(),
                     );
                 }
             } else {
                 return LiveRuntimeProbeOutcome::Failed(
-                    "Piped partial git checkouts detected: expected frontend, backend, and proxy".into(),
+                    "Piped partial git checkouts detected: expected frontend, backend, and proxy"
+                        .into(),
                 );
             }
         } else {
@@ -5429,12 +5794,30 @@ pub fn probe_live_runtime_version(
         }
     };
 
-
     let is_cat_receipt = pkg.version_command.len() == 2
         && pkg.version_command[0] == "cat"
         && pkg.version_command[1].ends_with("/.af-version");
 
     if !pkg.version_command.is_empty() && !is_cat_receipt {
+        let rebase_static = |raw: &str| {
+            env_cfg
+                .resolve_path(raw)
+                .unwrap_or_else(|_| std::path::PathBuf::from(raw))
+        };
+        if let Some(static_res) = crate::probe_metadata::extract_static_package_version(
+            package_id,
+            &pkg.version_command,
+            &rebase_static,
+        ) {
+            return match static_res {
+                Ok(ver) if !ver.is_empty() => LiveRuntimeProbeOutcome::Verified(ver),
+                Ok(_) => LiveRuntimeProbeOutcome::Failed(
+                    "Static version probe returned empty version".into(),
+                ),
+                Err(e) => LiveRuntimeProbeOutcome::Failed(e),
+            };
+        }
+
         let prog = &pkg.version_command[0];
         let args = &pkg.version_command[1..];
         let prog_to_run = if let Ok(resolved_prog) = env_cfg.resolve_path(prog) {
@@ -5457,10 +5840,27 @@ pub fn probe_live_runtime_version(
             prog.clone()
         };
 
+        let sanitized_args = crate::probe_metadata::sanitize_probe_shell_args(
+            std::path::Path::new(&prog_to_run),
+            args,
+        );
         let mut cmd = std::process::Command::new(&prog_to_run);
-        cmd.args(args);
-        if let Some(ref root) = env_cfg.fs_root {
-            cmd.env("AETHERFLOW_FS_ROOT", root);
+        cmd.args(&sanitized_args);
+        let sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
+            drop_to_path_owner: true,
+            fs_root: env_cfg.fs_root.clone(),
+            package_user: Some(package_id.to_string()),
+        };
+        if let Err(err) = crate::probe_metadata::configure_sandboxed_std_command(
+            &mut cmd,
+            std::path::Path::new(&prog_to_run),
+            &sanitized_args,
+            &sandbox_spec,
+        ) {
+            return LiveRuntimeProbeOutcome::Failed(format!(
+                "Refused unsafe version probe command '{}': {}",
+                prog_to_run, err
+            ));
         }
 
         match run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
@@ -5486,8 +5886,11 @@ pub fn probe_live_runtime_version(
                     } else {
                         extract_version_token(combined.lines().next().unwrap_or("").trim())
                     };
-                    if let Some(stripped) = extracted.strip_prefix('v').or_else(|| extracted.strip_prefix('V')) {
-                        if stripped.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    if let Some(stripped) = extracted
+                        .strip_prefix('v')
+                        .or_else(|| extracted.strip_prefix('V'))
+                    {
+                        if stripped.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                             extracted = stripped.to_string();
                         }
                     }
@@ -5535,25 +5938,18 @@ pub fn probe_live_runtime_version(
             }
         }
         if let Some(opt_dir) = candidates.into_iter().next() {
-            let mut cmd = std::process::Command::new("git");
-            cmd.arg("-C").arg(&opt_dir).args(["rev-parse", "HEAD"]);
-            match run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
-                Ok(output) if output.status.success() => {
-                    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !hash.is_empty() {
-                        return LiveRuntimeProbeOutcome::Verified(hash);
-                    } else {
-                        return LiveRuntimeProbeOutcome::Failed("Git rev-parse returned empty hash".into());
-                    }
-                }
-                Ok(output) => {
-                    return LiveRuntimeProbeOutcome::Failed(format!(
-                        "Git rev-parse exited with status: {}",
-                        output.status
-                    ));
+            match crate::probe_metadata::resolve_git_head_commit_nofollow(&opt_dir.join(".git")) {
+                Ok(hash) if !hash.is_empty() => return LiveRuntimeProbeOutcome::Verified(hash),
+                Ok(_) => {
+                    return LiveRuntimeProbeOutcome::Failed(
+                        "Git HEAD resolved to empty hash".into(),
+                    )
                 }
                 Err(e) => {
-                    return LiveRuntimeProbeOutcome::Failed(format!("Failed to run git rev-parse: {}", e));
+                    return LiveRuntimeProbeOutcome::Failed(format!(
+                        "Failed to resolve .git/HEAD cleanly: {}",
+                        e
+                    ))
                 }
             }
         } else if is_git_package {
@@ -5575,12 +5971,55 @@ pub fn probe_live_runtime_version(
     pkg_names.push(pkg.name.clone());
     pkg_names.push(pkg.service_name.clone());
 
+    let fallback_sandbox_spec = crate::probe_metadata::ProbeSandboxSpec {
+        drop_to_path_owner: true,
+        fs_root: env_cfg.fs_root.clone(),
+        package_user: Some(package_id.to_string()),
+    };
+    let dpkg_prog = if let Some(root) = &env_cfg.fs_root {
+        [
+            "usr/bin/dpkg-query",
+            "usr/local/bin/dpkg-query",
+            "bin/dpkg-query",
+        ]
+        .into_iter()
+        .map(|rel| root.join(rel))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dpkg-query".to_string())
+    } else if Path::new("/usr/bin/dpkg-query").exists() {
+        "/usr/bin/dpkg-query".to_string()
+    } else {
+        "dpkg-query".to_string()
+    };
+
     for name in &pkg_names {
         if name.is_empty() {
             continue;
         }
-        let mut cmd = std::process::Command::new("dpkg-query");
-        cmd.args(["-W", "-f=${Version}\n", name]);
+        let mut dpkg_args: Vec<String> = Vec::new();
+        if let Some(root) = &env_cfg.fs_root {
+            let dpkg_dir = root.join("var/lib/dpkg");
+            if dpkg_dir.exists() {
+                dpkg_args.push(format!("--admindir={}", dpkg_dir.display()));
+            }
+        }
+        dpkg_args.push("-W".to_string());
+        dpkg_args.push("-f=${Version}\n".to_string());
+        dpkg_args.push(name.clone());
+
+        let mut cmd = std::process::Command::new(&dpkg_prog);
+        if crate::probe_metadata::configure_sandboxed_std_command(
+            &mut cmd,
+            Path::new(&dpkg_prog),
+            &dpkg_args,
+            &fallback_sandbox_spec,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        cmd.args(&dpkg_args);
         if let Ok(output) = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
             if output.status.success() {
                 let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -5599,6 +6038,12 @@ pub fn probe_live_runtime_version(
     candidate_progs.push(package_id.to_string());
     candidate_progs.push(pkg.name.clone());
 
+    static VERSION_TOKEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:[0-9]+:)?[0-9]+\.[0-9]+(?:\.[0-9]+)*(?:~[0-9A-Za-z.+~_-]+)?(?:-[0-9A-Za-z.+~_-]+)?(?:\+[0-9A-Za-z.+~_-]+)?|\b[0-9a-f]{7,40}\b)"
+        )
+        .expect("valid version regex")
+    });
     for prog_cand in &candidate_progs {
         let bin_path = if let Some(root) = &env_cfg.fs_root {
             let mut found = None;
@@ -5623,8 +6068,19 @@ pub fn probe_live_runtime_version(
         };
 
         if let Some(bin) = bin_path {
+            let bin_args = vec!["--version".to_string()];
             let mut cmd = std::process::Command::new(&bin);
-            cmd.arg("--version");
+            if crate::probe_metadata::configure_sandboxed_std_command(
+                &mut cmd,
+                &bin,
+                &bin_args,
+                &fallback_sandbox_spec,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            cmd.args(&bin_args);
             if let Ok(output) = run_bounded_probe_command(&mut cmd, Duration::from_secs(5)) {
                 if output.status.success() {
                     let combined = format!(
@@ -5632,10 +6088,7 @@ pub fn probe_live_runtime_version(
                         String::from_utf8_lossy(&output.stdout),
                         String::from_utf8_lossy(&output.stderr)
                     );
-                    let re = regex::Regex::new(
-                        r"(?i)(?:^|[\s(\[\x22'])(?:v)?((?:[0-9]+:)?[0-9]+\.[0-9]+(?:\.[0-9]+)*(?:~[0-9A-Za-z.+~_-]+)?(?:-[0-9A-Za-z.+~_-]+)?(?:\+[0-9A-Za-z.+~_-]+)?|\b[0-9a-f]{7,40}\b)"
-                    ).unwrap();
-                    if let Some(cap) = re.captures(&combined) {
+                    if let Some(cap) = VERSION_TOKEN_RE.captures(&combined) {
                         if let Some(m) = cap.get(1).or_else(|| cap.get(0)) {
                             let extracted = trim_version_token(m.as_str()).to_string();
                             if !extracted.is_empty() {
@@ -5873,8 +6326,20 @@ fn validate_systemd_unit_runtime_evidence(
 
         let is_interpreter = matches!(
             bin_name.as_str(),
-            "sh" | "bash" | "dash" | "zsh" | "env" | "python" | "python2" | "python3"
-                | "node" | "nodejs" | "java" | "ruby" | "perl" | "php" | "dotnet"
+            "sh" | "bash"
+                | "dash"
+                | "zsh"
+                | "env"
+                | "python"
+                | "python2"
+                | "python3"
+                | "node"
+                | "nodejs"
+                | "java"
+                | "ruby"
+                | "perl"
+                | "php"
+                | "dotnet"
         );
 
         if is_interpreter {
@@ -5898,7 +6363,9 @@ fn validate_systemd_unit_runtime_evidence(
                         let cand = if target.starts_with('/') {
                             env_cfg.resolve_path(target).ok()
                         } else if let Some(ref wd) = working_dir {
-                            wd.join(target).to_str().and_then(|s| env_cfg.resolve_path(s).ok())
+                            wd.join(target)
+                                .to_str()
+                                .and_then(|s| env_cfg.resolve_path(s).ok())
                         } else {
                             None
                         };
@@ -5920,7 +6387,9 @@ fn validate_systemd_unit_runtime_evidence(
                     let cand = if arg.starts_with('/') {
                         env_cfg.resolve_path(arg).ok()
                     } else if let Some(ref wd) = working_dir {
-                        wd.join(arg).to_str().and_then(|s| env_cfg.resolve_path(s).ok())
+                        wd.join(arg)
+                            .to_str()
+                            .and_then(|s| env_cfg.resolve_path(s).ok())
                     } else {
                         None
                     };
@@ -6026,20 +6495,29 @@ pub fn has_independent_runtime_evidence(
     ];
     if let Ok(units) = package_service_units(package_id) {
         for u in units {
-            let u_name = if u.ends_with(".service") { u } else { format!("{}.service", u) };
+            let u_name = if u.ends_with(".service") {
+                u
+            } else {
+                format!("{}.service", u)
+            };
             if !unit_candidates.contains(&u_name) {
                 unit_candidates.push(u_name);
             }
         }
     }
     for unit in &unit_candidates {
-        for prefix in ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"] {
+        for prefix in [
+            "/etc/systemd/system",
+            "/lib/systemd/system",
+            "/usr/lib/systemd/system",
+        ] {
             let unit_path = format!("{}/{}", prefix, unit);
             if let Ok(p) = env_cfg.resolve_path(&unit_path) {
                 if let Ok(meta) = std::fs::metadata(&p) {
                     if meta.is_file() {
                         if let Ok(content) = std::fs::read_to_string(&p) {
-                            if validate_systemd_unit_runtime_evidence(&content, package_id, env_cfg) {
+                            if validate_systemd_unit_runtime_evidence(&content, package_id, env_cfg)
+                            {
                                 return true;
                             }
                         }
@@ -6192,6 +6670,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod version_verification_tests {
     use super::*;
     use std::sync::Arc;
@@ -6210,7 +6689,8 @@ mod version_verification_tests {
         let live_probe = |_pkg: &str, _env: &crate::PackageExecutionEnv| {
             LiveRuntimeProbeOutcome::Verified("2.4.0".to_string())
         };
-        let receipt_probe = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
+        let receipt_probe =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
 
         let resolved = resolve_verified_installed_version_with_prober(
             "sonarr",
@@ -6233,7 +6713,8 @@ mod version_verification_tests {
         let live_git = |_pkg: &str, _env: &crate::PackageExecutionEnv| {
             LiveRuntimeProbeOutcome::Verified("1111111111111111".to_string())
         };
-        let receipt_git = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2222222222222222".to_string());
+        let receipt_git =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2222222222222222".to_string());
         let resolved_git = resolve_verified_installed_version_with_prober(
             "lidarr",
             &env_cfg,
@@ -6250,18 +6731,19 @@ mod version_verification_tests {
             LiveRuntimeProbeOutcome::Verified("2.5.0".to_string())
         };
         let receipt_ok = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
-        let resolved_ok = resolve_verified_installed_version_with_prober(
-            "sonarr",
-            &env_cfg,
-            live_ok,
-            receipt_ok,
-        );
+        let resolved_ok =
+            resolve_verified_installed_version_with_prober("sonarr", &env_cfg, live_ok, receipt_ok);
         assert_eq!(resolved_ok, Some("2.5.0".to_string()));
-        assert!(af_release::lifecycle::versions_match_target(resolved_ok.as_deref().unwrap(), target));
+        assert!(af_release::lifecycle::versions_match_target(
+            resolved_ok.as_deref().unwrap(),
+            target
+        ));
 
         // Scenario 4: When no live runtime probe is available, .af-version alone is rejected without independent runtime evidence, and accepted with evidence
-        let live_none = |_pkg: &str, _env: &crate::PackageExecutionEnv| LiveRuntimeProbeOutcome::NotConfigured;
-        let receipt_only = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
+        let live_none =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| LiveRuntimeProbeOutcome::NotConfigured;
+        let receipt_only =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
         let resolved_none = resolve_verified_installed_version_with_prober(
             "custompkg",
             &env_cfg,
@@ -6270,7 +6752,8 @@ mod version_verification_tests {
         );
         assert_eq!(resolved_none, None, "Without independent runtime evidence on disk, receipt-only certification must be rejected");
 
-        let temp_dir_sc4 = std::env::temp_dir().join(format!("af-test-sc4-evidence-{}", uuid::Uuid::new_v4()));
+        let temp_dir_sc4 =
+            std::env::temp_dir().join(format!("af-test-sc4-evidence-{}", uuid::Uuid::new_v4()));
         let mut env_cfg_sc4 = crate::PackageExecutionEnv::default();
         env_cfg_sc4.fs_root = Some(temp_dir_sc4.clone());
         let payload_file = temp_dir_sc4.join("opt/custompkg/app.bin");
@@ -6288,14 +6771,19 @@ mod version_verification_tests {
             live_none,
             receipt_only,
         );
-        assert_eq!(resolved_with_evidence, Some("2.5.0".to_string()), "With independent runtime evidence on disk, receipt is accepted");
+        assert_eq!(
+            resolved_with_evidence,
+            Some("2.5.0".to_string()),
+            "With independent runtime evidence on disk, receipt is accepted"
+        );
         let _ = std::fs::remove_dir_all(&temp_dir_sc4);
 
         // Scenario 5: Configured live probe fails -> certification MUST fail even if .af-version matches target
         let live_failed = |_pkg: &str, _env: &crate::PackageExecutionEnv| {
             LiveRuntimeProbeOutcome::Failed("Probe timeout or binary missing".to_string())
         };
-        let receipt_matches = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
+        let receipt_matches =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("2.5.0".to_string());
         let resolved_failed = resolve_verified_installed_version_with_prober(
             "invidious",
             &env_cfg,
@@ -6310,20 +6798,42 @@ mod version_verification_tests {
 
     #[test]
     fn test_piped_live_probe_three_components() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-piped-runner-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-piped-runner-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
         let init_repo = |dir: &Path| -> String {
             std::fs::create_dir_all(dir).unwrap();
-            let _ = std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(dir).output();
-            let _ = std::process::Command::new("git").args(["config", "user.email", "t@e.com"]).current_dir(dir).output();
-            let _ = std::process::Command::new("git").args(["config", "user.name", "T"]).current_dir(dir).output();
+            let _ = std::process::Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(dir)
+                .output();
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.email", "t@e.com"])
+                .current_dir(dir)
+                .output();
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.name", "T"])
+                .current_dir(dir)
+                .output();
             std::fs::write(dir.join("f"), "c").unwrap();
-            let _ = std::process::Command::new("git").args(["add", "f"]).current_dir(dir).output();
-            let _ = std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(dir).output();
-            let out = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output().unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase()
+            let _ = std::process::Command::new("git")
+                .args(["add", "f"])
+                .current_dir(dir)
+                .output();
+            let _ = std::process::Command::new("git")
+                .args(["commit", "-m", "init"])
+                .current_dir(dir)
+                .output();
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_ascii_lowercase()
         };
 
         let fe = init_repo(&temp_dir.join("opt/piped/frontend"));
@@ -6331,15 +6841,29 @@ mod version_verification_tests {
         let pr = init_repo(&temp_dir.join("opt/piped/proxy"));
 
         let live = probe_live_runtime_version("piped", &env_cfg);
-        assert_eq!(live, LiveRuntimeProbeOutcome::Verified(format!("frontend:{fe},backend:{be},proxy:{pr}")));
+        assert_eq!(
+            live,
+            LiveRuntimeProbeOutcome::Verified(format!("frontend:{fe},backend:{be},proxy:{pr}"))
+        );
 
         let receipt_path = temp_dir.join("opt/piped/.af-version");
-        std::fs::write(&receipt_path, format!("frontend:{fe},backend:{be},proxy:{pr}")).unwrap();
+        std::fs::write(
+            &receipt_path,
+            format!("frontend:{fe},backend:{be},proxy:{pr}"),
+        )
+        .unwrap();
         let verified = resolve_verified_installed_version("piped", &env_cfg);
-        assert_eq!(verified, Some(format!("frontend:{fe},backend:{be},proxy:{pr}")));
+        assert_eq!(
+            verified,
+            Some(format!("frontend:{fe},backend:{be},proxy:{pr}"))
+        );
 
         // Mismatched receipt
-        std::fs::write(&receipt_path, format!("frontend:{fe},backend:0000000000000000000000000000000000000000,proxy:{pr}")).unwrap();
+        std::fs::write(
+            &receipt_path,
+            format!("frontend:{fe},backend:0000000000000000000000000000000000000000,proxy:{pr}"),
+        )
+        .unwrap();
         let verified_mismatch = resolve_verified_installed_version("piped", &env_cfg);
         assert_eq!(verified_mismatch, None);
 
@@ -6349,7 +6873,10 @@ mod version_verification_tests {
     #[test]
     fn test_direct_runner_extract_version_token_from_rclone_output() {
         let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-rclone-version-token-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-rclone-version-token-{}",
+            uuid::Uuid::new_v4()
+        ));
         let bin_dir = temp_dir.join("usr/local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
@@ -6358,7 +6885,8 @@ mod version_verification_tests {
         std::fs::write(
             &script_path,
             "#!/bin/sh\necho 'rclone v1.75.2'\necho '- os/version: linux'\n",
-        ).unwrap();
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -6401,7 +6929,8 @@ mod version_verification_tests {
         );
 
         // Also test receipt matching target "1.75.2"
-        let receipt_probe = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("1.75.2".to_string());
+        let receipt_probe =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("1.75.2".to_string());
         let certified = resolve_verified_installed_version_with_prober(
             "rclone",
             &env_cfg,
@@ -6409,7 +6938,10 @@ mod version_verification_tests {
             receipt_probe,
         );
         assert_eq!(certified, Some("1.75.2".to_string()));
-        assert!(af_release::lifecycle::versions_match_target(certified.as_deref().unwrap(), "1.75.2"));
+        assert!(af_release::lifecycle::versions_match_target(
+            certified.as_deref().unwrap(),
+            "1.75.2"
+        ));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -6417,7 +6949,8 @@ mod version_verification_tests {
     #[test]
     fn test_catalog_loading_failure_fails_closed_without_certifying_af_version() {
         let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-catalog-fail-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-catalog-fail-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let malformed_cfg = temp_dir.join("bad_packages.json");
         std::fs::write(&malformed_cfg, "{ this is not valid json }").unwrap();
@@ -6442,14 +6975,18 @@ mod version_verification_tests {
         }
 
         // Even if .af-version receipt is present with target version "3.0.0", certification MUST fail (return None)
-        let receipt_probe = |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("3.0.0".to_string());
+        let receipt_probe =
+            |_pkg: &str, _env: &crate::PackageExecutionEnv| Some("3.0.0".to_string());
         let certified = resolve_verified_installed_version_with_prober(
             "sonarr",
             &env_cfg,
             |_pkg, _env| outcome.clone(),
             receipt_probe,
         );
-        assert_eq!(certified, None, "Catalog failure must fail closed and refuse to certify .af-version");
+        assert_eq!(
+            certified, None,
+            "Catalog failure must fail closed and refuse to certify .af-version"
+        );
 
         std::env::remove_var("AF_PACKAGES_CONFIG");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -6458,10 +6995,12 @@ mod version_verification_tests {
     #[test]
     fn test_probe_live_runtime_version_descendant_pipe_drain_does_not_hang() {
         let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("af-test-pipe-drain-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-pipe-drain-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let mut packages: Vec<serde_json::Value> = serde_json::from_str(crate::EMBEDDED_PACKAGES_JSON).unwrap();
+        let mut packages: Vec<serde_json::Value> =
+            serde_json::from_str(crate::EMBEDDED_PACKAGES_JSON).unwrap();
         packages.push(serde_json::json!({
             "name": "probe-pipe-test",
             "label": "Probe Pipe Test",
@@ -6527,16 +7066,27 @@ mod version_verification_tests {
         assert_eq!(debian_epoch, "2:1.18.2-1ubuntu1");
         assert_eq!(tilde_rc, "1.0.0~rc1-1");
 
-        assert_ne!(old_token, new_token, "1.0.0+build--old and 1.0.0+build--new must not collapse");
-        assert_ne!(debug_token, "1.0.0", "1.0.0+Debug must retain build metadata");
-        assert_ne!(old_token, "1.0.0+build", "1.0.0+build--old must not be truncated at --");
+        assert_ne!(
+            old_token, new_token,
+            "1.0.0+build--old and 1.0.0+build--new must not collapse"
+        );
+        assert_ne!(
+            debug_token, "1.0.0",
+            "1.0.0+Debug must retain build metadata"
+        );
+        assert_ne!(
+            old_token, "1.0.0+build",
+            "1.0.0+build--old must not be truncated at --"
+        );
 
         // 2. Generic binary-probe fallback in probe_live_runtime_version
-        let temp_dir = std::env::temp_dir().join(format!("af-test-build-meta-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-build-meta-{}", uuid::Uuid::new_v4()));
         let bin_dir = temp_dir.join("usr/local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
-        let mut packages: Vec<serde_json::Value> = serde_json::from_str(crate::EMBEDDED_PACKAGES_JSON).unwrap();
+        let mut packages: Vec<serde_json::Value> =
+            serde_json::from_str(crate::EMBEDDED_PACKAGES_JSON).unwrap();
         packages.push(serde_json::json!({
             "name": "buildmetaapp",
             "label": "Build Meta App",
@@ -6562,11 +7112,13 @@ mod version_verification_tests {
             std::fs::write(
                 &prog_path,
                 format!("#!/bin/sh\necho 'buildmetaapp {}'\n", ver),
-            ).unwrap();
+            )
+            .unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&prog_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::set_permissions(&prog_path, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
             }
 
             let outcome = probe_live_runtime_version("buildmetaapp", &env_cfg);
@@ -6584,7 +7136,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_candidate_receipt_snapshot_and_restore_on_failed_certification() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-receipt-snap-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-receipt-snap-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -6598,12 +7151,18 @@ mod version_verification_tests {
         assert!(!snapshots.is_empty(), "Must find candidate paths");
 
         // Verify pre-existing receipt has Some(b"1.0.0\n")
-        let pre_snap = snapshots.iter().find(|s| s.path == pre_existing).expect("pre-existing must be tracked");
+        let pre_snap = snapshots
+            .iter()
+            .find(|s| s.path == pre_existing)
+            .expect("pre-existing must be tracked");
         assert_eq!(pre_snap.bytes(), Some(b"1.0.0\n".as_slice()));
 
         // Verify non-existent candidate path (e.g. /var/lib/mockpkg/.af-version) has None
         let var_lib_path = temp_dir.join("var/lib/mockpkg/.af-version");
-        let non_exist_snap = snapshots.iter().find(|s| s.path == var_lib_path).expect("var/lib candidate must be tracked");
+        let non_exist_snap = snapshots
+            .iter()
+            .find(|s| s.path == var_lib_path)
+            .expect("var/lib candidate must be tracked");
         assert_eq!(non_exist_snap.state, None);
 
         // Mutate pre-existing receipt (installer writes new version)
@@ -6615,13 +7174,20 @@ mod version_verification_tests {
 
         // Target certification fails -> restore candidate receipts!
         let restore_res = restore_candidate_receipts(&snapshots);
-        assert!(restore_res.is_ok(), "Restoration must succeed: {:?}", restore_res);
+        assert!(
+            restore_res.is_ok(),
+            "Restoration must succeed: {:?}",
+            restore_res
+        );
 
         // Pre-existing receipt must be rolled back to 1.0.0
         assert_eq!(std::fs::read(&pre_existing).unwrap(), b"1.0.0\n");
 
         // Newly created receipt at var/lib must be completely removed
-        assert!(!var_lib_path.exists(), "Newly created receipt must be removed after failed certification");
+        assert!(
+            !var_lib_path.exists(),
+            "Newly created receipt must be removed after failed certification"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -6637,7 +7203,11 @@ mod version_verification_tests {
 
         assert!(res.is_err(), "Hanging command must time out");
         let err_msg = res.unwrap_err();
-        assert!(err_msg.contains("timed out"), "Error must mention timeout: {}", err_msg);
+        assert!(
+            err_msg.contains("timed out"),
+            "Error must mention timeout: {}",
+            err_msg
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "Command timeout took {:?}, expected < 2s",
@@ -6650,12 +7220,16 @@ mod version_verification_tests {
         assert!(echo_res.is_ok());
         let output = echo_res.unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello-probe");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "hello-probe"
+        );
     }
 
     #[test]
     fn test_restore_candidate_receipts_symlink_swap_does_not_modify_victim() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-symlink-restore-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-symlink-restore-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -6677,15 +7251,28 @@ mod version_verification_tests {
 
         // Now restore candidate receipts!
         let restore_res = restore_candidate_receipts(&snapshots);
-        assert!(restore_res.is_ok(), "Restoration must succeed: {:?}", restore_res);
+        assert!(
+            restore_res.is_ok(),
+            "Restoration must succeed: {:?}",
+            restore_res
+        );
 
         // Victim file MUST NOT have been modified!
-        assert_eq!(std::fs::read(&victim_file).unwrap(), b"VICTIM_INTACT_CONTENT");
+        assert_eq!(
+            std::fs::read(&victim_file).unwrap(),
+            b"VICTIM_INTACT_CONTENT"
+        );
 
         // .af-version MUST now be a regular file with b"1.0.0\n", NOT a symlink!
         let meta = std::fs::symlink_metadata(&receipt_path).unwrap();
-        assert!(!meta.file_type().is_symlink(), ".af-version must not be a symlink after restoration");
-        assert!(meta.file_type().is_file(), ".af-version must be a regular file");
+        assert!(
+            !meta.file_type().is_symlink(),
+            ".af-version must not be a symlink after restoration"
+        );
+        assert!(
+            meta.file_type().is_file(),
+            ".af-version must be a regular file"
+        );
         assert_eq!(std::fs::read(&receipt_path).unwrap(), b"1.0.0\n");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -6693,7 +7280,8 @@ mod version_verification_tests {
 
     #[tokio::test]
     async fn test_snapshot_symlink_or_fifo_fails_closed_and_marks_job_failed() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-symlink-snap-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-symlink-snap-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -6706,9 +7294,17 @@ mod version_verification_tests {
 
         // 1. snapshot_candidate_receipts_with_env must fail closed with Err
         let snap_res = snapshot_candidate_receipts_with_env("symlinkpkg", &env_cfg);
-        assert!(snap_res.is_err(), "Snapshotting a symlink must fail closed: {:?}", snap_res);
+        assert!(
+            snap_res.is_err(),
+            "Snapshotting a symlink must fail closed: {:?}",
+            snap_res
+        );
         let err_msg = snap_res.unwrap_err();
-        assert!(err_msg.to_ascii_lowercase().contains("symlink"), "Error must mention symlink: {}", err_msg);
+        assert!(
+            err_msg.to_ascii_lowercase().contains("symlink"),
+            "Error must mention symlink: {}",
+            err_msg
+        );
 
         // Also verify FIFO fails closed with non-regular file error
         #[cfg(unix)]
@@ -6731,13 +7327,16 @@ mod version_verification_tests {
         let db_path = temp_dir.join("var/lib/aetherflow/aetherflow.sqlite");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
             CREATE TABLE settings(id INTEGER PRIMARY KEY,base_domain TEXT);
             INSERT INTO settings VALUES(1,'default.example.test');
             CREATE TABLE app_updates(package_name TEXT PRIMARY KEY);
             CREATE TABLE app_ingress_configs(app_name TEXT PRIMARY KEY,public_domain TEXT,
                 external_access_enabled BOOLEAN,listen_port INTEGER,tls_enabled BOOLEAN,
-                created_at TEXT,updated_at TEXT);").unwrap();
+                created_at TEXT,updated_at TEXT);",
+        )
+        .unwrap();
 
         let req = PackageRunnerRequest {
             package_id: "symlinkpkg".to_string(),
@@ -6758,23 +7357,40 @@ mod version_verification_tests {
 
         struct DummyBackend;
         impl LifecycleBackend for DummyBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(false) })
             }
-            fn control<'a>(&'a self, _: &'a str, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
 
-        let mut coord = CoordinatedOperation::admit(conn, req, package, vec!["symlinkpkg".into()]).unwrap();
+        let mut coord =
+            CoordinatedOperation::admit(conn, req, package, vec!["symlinkpkg".into()]).unwrap();
         let (tx, _rx) = mpsc::channel(10);
         let exec_res = coord.execute(&DummyBackend, &tx).await;
-        assert!(exec_res.is_err(), "Execute must fail due to symlink receipt snapshot");
+        assert!(
+            exec_res.is_err(),
+            "Execute must fail due to symlink receipt snapshot"
+        );
 
         let (status, failure_category, failed_stage): (String, Option<String>, Option<String>) = coord.conn.query_row(
             "SELECT status, failure_category, failed_stage FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
@@ -6783,15 +7399,24 @@ mod version_verification_tests {
         ).unwrap();
 
         assert_eq!(status, "failed", "Job status must be terminal 'failed'");
-        assert_eq!(failure_category.as_deref(), Some("preflight"), "failure_category must be preflight");
-        assert_eq!(failed_stage.as_deref(), Some("preflight_receipt_snapshot"), "failed_stage must be preflight_receipt_snapshot");
+        assert_eq!(
+            failure_category.as_deref(),
+            Some("preflight"),
+            "failure_category must be preflight"
+        );
+        assert_eq!(
+            failed_stage.as_deref(),
+            Some("preflight_receipt_snapshot"),
+            "failed_stage must be preflight_receipt_snapshot"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_has_independent_runtime_evidence_rejects_only_lockfile() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-lock-evidence-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-lock-evidence-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -6814,10 +7439,22 @@ mod version_verification_tests {
 
     #[test]
     fn test_extract_version_token_preserves_trailing_hyphens_in_prerelease_and_build() {
-        assert_eq!(extract_version_token("tool 1.0.0+build- (linux)"), "1.0.0+build-");
-        assert_eq!(extract_version_token("tool 1.0.0+build-- (linux)"), "1.0.0+build--");
-        assert_eq!(extract_version_token("tool 1.0.0-alpha- (linux)"), "1.0.0-alpha-");
-        assert_eq!(extract_version_token("tool 1.0.0-alpha-- (linux)"), "1.0.0-alpha--");
+        assert_eq!(
+            extract_version_token("tool 1.0.0+build- (linux)"),
+            "1.0.0+build-"
+        );
+        assert_eq!(
+            extract_version_token("tool 1.0.0+build-- (linux)"),
+            "1.0.0+build--"
+        );
+        assert_eq!(
+            extract_version_token("tool 1.0.0-alpha- (linux)"),
+            "1.0.0-alpha-"
+        );
+        assert_eq!(
+            extract_version_token("tool 1.0.0-alpha-- (linux)"),
+            "1.0.0-alpha--"
+        );
         assert_eq!(extract_version_token("tool 1.0.0-- (linux)"), "1.0.0--");
         assert_eq!(extract_version_token("tool 1.0.0+-- (linux)"), "1.0.0+--");
         assert_eq!(extract_version_token("tool 1.0.0+- (linux)"), "1.0.0+-");
@@ -6837,10 +7474,19 @@ mod version_verification_tests {
     fn test_sanitize_lifecycle_field_redacts_credentials_and_tokens() {
         let input = "Failed to fetch: password=supersecret, token: mytoken123, Bearer eyJhbGciOi..., Basic dXNlcjpwYXNz; url=https://example.com";
         let sanitized = sanitize_lifecycle_field(input);
-        assert!(!sanitized.contains("supersecret"), "Password must be redacted");
+        assert!(
+            !sanitized.contains("supersecret"),
+            "Password must be redacted"
+        );
         assert!(!sanitized.contains("mytoken123"), "Token must be redacted");
-        assert!(!sanitized.contains("eyJhbGciOi"), "Bearer token must be redacted");
-        assert!(!sanitized.contains("dXNlcjpwYXNz"), "Basic auth must be redacted");
+        assert!(
+            !sanitized.contains("eyJhbGciOi"),
+            "Bearer token must be redacted"
+        );
+        assert!(
+            !sanitized.contains("dXNlcjpwYXNz"),
+            "Basic auth must be redacted"
+        );
         assert!(sanitized.contains("password=[REDACTED]"));
         assert!(sanitized.contains("token: [REDACTED]"));
         assert!(sanitized.contains("Bearer [REDACTED]"));
@@ -6849,29 +7495,53 @@ mod version_verification_tests {
         // Quoted and multi-word credential values
         let multiword_input = r#"Encountered error with password="first SECRET_TAIL" and "secret": "alpha beta gamma" and 'token': 'delta epsilon'"#;
         let sanitized_multi = sanitize_lifecycle_field(multiword_input);
-        assert!(!sanitized_multi.contains("SECRET_TAIL"), "Must not leak SECRET_TAIL");
-        assert!(!sanitized_multi.contains("alpha beta gamma"), "Must not leak alpha beta gamma");
-        assert!(!sanitized_multi.contains("beta gamma"), "Must not leak beta gamma");
-        assert!(!sanitized_multi.contains("delta epsilon"), "Must not leak delta epsilon");
+        assert!(
+            !sanitized_multi.contains("SECRET_TAIL"),
+            "Must not leak SECRET_TAIL"
+        );
+        assert!(
+            !sanitized_multi.contains("alpha beta gamma"),
+            "Must not leak alpha beta gamma"
+        );
+        assert!(
+            !sanitized_multi.contains("beta gamma"),
+            "Must not leak beta gamma"
+        );
+        assert!(
+            !sanitized_multi.contains("delta epsilon"),
+            "Must not leak delta epsilon"
+        );
         assert!(sanitized_multi.contains("password=[REDACTED]"));
         assert!(sanitized_multi.contains(r#""secret": [REDACTED]"#));
 
         // Verify db_password and escaped quotes are completely redacted
         let db_pw_input = r#"db_password="secret_val""#;
         let sanitized_db_pw = sanitize_lifecycle_field(db_pw_input);
-        assert!(!sanitized_db_pw.contains("secret_val"), "db_password value must be redacted");
+        assert!(
+            !sanitized_db_pw.contains("secret_val"),
+            "db_password value must be redacted"
+        );
         assert_eq!(sanitized_db_pw, "db_password=[REDACTED]");
 
         let json_db_pw = r#"{"db_password": "secret_val"}"#;
         let sanitized_json_db = sanitize_lifecycle_field(json_db_pw);
-        assert!(!sanitized_json_db.contains("secret_val"), "JSON db_password must be redacted");
+        assert!(
+            !sanitized_json_db.contains("secret_val"),
+            "JSON db_password must be redacted"
+        );
         assert_eq!(sanitized_json_db, r#"{"db_password": [REDACTED]}"#);
 
         let escaped_quotes_input = r#"secret="part1 \"quoted\" tail_secret""#;
         let sanitized_escaped = sanitize_lifecycle_field(escaped_quotes_input);
         assert!(!sanitized_escaped.contains("part1"), "Must not leak part1");
-        assert!(!sanitized_escaped.contains("quoted"), "Must not leak quoted");
-        assert!(!sanitized_escaped.contains("tail_secret"), "Must not leak tail_secret");
+        assert!(
+            !sanitized_escaped.contains("quoted"),
+            "Must not leak quoted"
+        );
+        assert!(
+            !sanitized_escaped.contains("tail_secret"),
+            "Must not leak tail_secret"
+        );
         assert_eq!(sanitized_escaped, "secret=[REDACTED]");
     }
 
@@ -6887,12 +7557,16 @@ mod version_verification_tests {
         });
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "probe command cancelled");
-        assert!(start.elapsed() < Duration::from_secs(2), "Cancellation must terminate immediately");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "Cancellation must terminate immediately"
+        );
     }
 
     #[test]
     fn test_has_independent_runtime_evidence_systemd_unit_exec_start() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-unit-evidence-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-unit-evidence-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -6911,7 +7585,8 @@ mod version_verification_tests {
         std::fs::write(
             &unit_file,
             b"[Service]\nExecStart=/opt/unitpkg/bin/nonexistent\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             !has_independent_runtime_evidence("unitpkg", &env_cfg),
             "Service pointing to nonexistent binary must not count as independent runtime evidence"
@@ -6926,10 +7601,7 @@ mod version_verification_tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o644));
         }
-        std::fs::write(
-            &unit_file,
-            b"[Service]\nExecStart=/opt/unitpkg/bin/mybin\n",
-        ).unwrap();
+        std::fs::write(&unit_file, b"[Service]\nExecStart=/opt/unitpkg/bin/mybin\n").unwrap();
         assert!(
             !has_independent_runtime_evidence("unitpkg", &env_cfg),
             "Service pointing to non-executable binary must not count as independent runtime evidence"
@@ -6944,7 +7616,8 @@ mod version_verification_tests {
         std::fs::write(
             &unit_file,
             b"[Service]\nExecStart=-@!\"/opt/unitpkg/bin/mybin\" --daemon\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             has_independent_runtime_evidence("unitpkg", &env_cfg),
             "Service pointing to valid executable binary must count as independent runtime evidence"
@@ -6959,7 +7632,8 @@ mod version_verification_tests {
             std::fs::write(
                 &unit_file,
                 b"[Service]\nExecStart=/usr/local/bin/unitpkg-link\n",
-            ).unwrap();
+            )
+            .unwrap();
             assert!(
                 has_independent_runtime_evidence("unitpkg", &env_cfg),
                 "Service pointing to symlink to valid executable must count as independent runtime evidence"
@@ -6976,7 +7650,8 @@ mod version_verification_tests {
         cmd.args(["-c", "(sleep 30) & echo finished-parent"]);
 
         let start = std::time::Instant::now();
-        let res = run_bounded_probe_command_cancellable(&mut cmd, Duration::from_millis(500), || false);
+        let res =
+            run_bounded_probe_command_cancellable(&mut cmd, Duration::from_millis(500), || false);
         let elapsed = start.elapsed();
 
         assert!(res.is_ok(), "Command should succeed: {:?}", res);
@@ -6993,7 +7668,11 @@ mod version_verification_tests {
         let mut hang_cmd = std::process::Command::new("sh");
         hang_cmd.args(["-c", "(sleep 30) & sleep 10"]);
         let start2 = std::time::Instant::now();
-        let hang_res = run_bounded_probe_command_cancellable(&mut hang_cmd, Duration::from_millis(200), || false);
+        let hang_res = run_bounded_probe_command_cancellable(
+            &mut hang_cmd,
+            Duration::from_millis(200),
+            || false,
+        );
         let elapsed2 = start2.elapsed();
         assert!(hang_res.is_err());
         assert!(hang_res.unwrap_err().contains("timed out"));
@@ -7007,7 +7686,8 @@ mod version_verification_tests {
         let mut cancel_cmd = std::process::Command::new("sh");
         cancel_cmd.args(["-c", "(sleep 30) & sleep 10"]);
         let start3 = std::time::Instant::now();
-        let cancel_res = run_bounded_probe_command_cancellable(&mut cancel_cmd, Duration::from_secs(5), || true);
+        let cancel_res =
+            run_bounded_probe_command_cancellable(&mut cancel_cmd, Duration::from_secs(5), || true);
         let elapsed3 = start3.elapsed();
         assert!(cancel_res.is_err());
         assert_eq!(cancel_res.unwrap_err(), "probe command cancelled");
@@ -7028,12 +7708,16 @@ mod version_verification_tests {
         assert!(res.is_ok(), "Probe command should succeed: {:?}", res);
         let out = res.unwrap();
         assert!(out.status.success());
-        assert!(start.elapsed() < Duration::from_secs(2), "Process group cleanup and reap must complete promptly");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "Process group cleanup and reap must complete promptly"
+        );
     }
 
     #[test]
     fn test_restore_candidate_receipts_parent_enotdir_fails_closed() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-enotdir-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-enotdir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let parent_file = temp_dir.join("parent_regular_file");
@@ -7049,7 +7733,9 @@ mod version_verification_tests {
         );
         let err_msg = res.unwrap_err();
         assert!(
-            err_msg.to_lowercase().contains("not a directory") || err_msg.contains("ENOTDIR") || err_msg.contains("stepwise"),
+            err_msg.to_lowercase().contains("not a directory")
+                || err_msg.contains("ENOTDIR")
+                || err_msg.contains("stepwise"),
             "Error must indicate stepwise open failure on non-directory: {}",
             err_msg
         );
@@ -7059,7 +7745,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_has_independent_runtime_evidence_systemd_reset_and_interpreter_checks() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-systemd-audit-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-systemd-audit-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -7068,10 +7755,7 @@ mod version_verification_tests {
         let unit_file = systemd_dir.join("testpkg.service");
 
         // Finding 4a: ExecStart=/bin/true followed by empty ExecStart= reset must be REJECTED
-        std::fs::write(
-            &unit_file,
-            b"[Service]\nExecStart=/bin/true\nExecStart=\n",
-        ).unwrap();
+        std::fs::write(&unit_file, b"[Service]\nExecStart=/bin/true\nExecStart=\n").unwrap();
         assert!(
             !has_independent_runtime_evidence("testpkg", &env_cfg),
             "Service with ExecStart reset by empty ExecStart= must be rejected"
@@ -7081,7 +7765,8 @@ mod version_verification_tests {
         std::fs::write(
             &unit_file,
             b"[Service]\nExecStart=/bin/sh /opt/testpkg/missing_script.sh\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             !has_independent_runtime_evidence("testpkg", &env_cfg),
             "Service using shell interpreter with nonexistent script path must be rejected"
@@ -7094,7 +7779,8 @@ mod version_verification_tests {
         std::fs::write(
             &unit_file,
             b"[Service]\nExecStart=/bin/sh /opt/testpkg/real_script.sh\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             has_independent_runtime_evidence("testpkg", &env_cfg),
             "Service using shell interpreter with existing regular script file must be accepted"
@@ -7143,7 +7829,11 @@ mod version_verification_tests {
         let res = run_bounded_probe_command_cancellable(&mut cmd, Duration::from_secs(5), || false);
         super::INJECT_WAITID_EPERM.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        assert!(res.is_ok(), "Probe command should succeed under injected waitid EPERM: {:?}", res);
+        assert!(
+            res.is_ok(),
+            "Probe command should succeed under injected waitid EPERM: {:?}",
+            res
+        );
         let out = res.unwrap();
         assert!(out.status.success());
         assert!(
@@ -7153,7 +7843,8 @@ mod version_verification_tests {
     }
 
     #[tokio::test]
-    async fn test_script_failure_triggers_receipt_and_blueprint_rollback_when_services_restart_cleanly() {
+    async fn test_script_failure_triggers_receipt_and_blueprint_rollback_when_services_restart_cleanly(
+    ) {
         let (root, _path, conn, _) = test_fixture();
         let sonarr_dir = root.join("var/lib/sonarr");
         std::fs::create_dir_all(&sonarr_dir).unwrap();
@@ -7182,15 +7873,28 @@ mod version_verification_tests {
             config_file: PathBuf,
         }
         impl LifecycleBackend for FailScriptBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8989 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8989
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(false) })
             }
-            fn control<'a>(&'a self, _: &'a str, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 let receipt_path = self.receipt_file.clone();
                 let uncommitted_path = self.uncommitted_receipt.clone();
                 let config_path = self.config_file.clone();
@@ -7218,10 +7922,14 @@ mod version_verification_tests {
             ..Default::default()
         };
 
-        let mut op = CoordinatedOperation::admit(conn, req, package, vec!["sonarr".into()]).unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["sonarr".into()]).unwrap();
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
-        assert_eq!(receipt.status, "failed", "Execute must return failed receipt when installer script fails");
+        assert_eq!(
+            receipt.status, "failed",
+            "Execute must return failed receipt when installer script fails"
+        );
 
         // Verify receipt and blueprint files were restored
         assert_eq!(
@@ -7250,7 +7958,10 @@ mod version_verification_tests {
         assert_eq!(status, "failed");
         assert_eq!(failure_category, "installer");
         assert!(
-            sanitized_summary.as_deref().unwrap_or("").contains("installer script failed deliberately"),
+            sanitized_summary
+                .as_deref()
+                .unwrap_or("")
+                .contains("installer script failed deliberately"),
             "Diagnostics must retain script failure: {:?}",
             sanitized_summary
         );
@@ -7260,7 +7971,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_snapshot_blueprint_targets_symlink_or_oversized_fails_closed() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-bp-snap-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-bp-snap-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -7275,7 +7987,11 @@ mod version_verification_tests {
         std::os::unix::fs::symlink(&victim_file, &config_target).unwrap();
 
         let snap_res = snapshot_blueprint_targets("sonarr", &env_cfg);
-        assert!(snap_res.is_err(), "Snapshotting a symlink blueprint target must fail closed: {:?}", snap_res);
+        assert!(
+            snap_res.is_err(),
+            "Snapshotting a symlink blueprint target must fail closed: {:?}",
+            snap_res
+        );
         let err_msg = snap_res.unwrap_err();
         assert!(
             err_msg.to_ascii_lowercase().contains("symlink"),
@@ -7285,7 +8001,10 @@ mod version_verification_tests {
         // Verify victim file and symlink were NOT deleted
         assert!(victim_file.is_file(), "Victim file must not be deleted");
         assert!(
-            std::fs::symlink_metadata(&config_target).unwrap().file_type().is_symlink(),
+            std::fs::symlink_metadata(&config_target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "Symlink must not be unlinked"
         );
 
@@ -7295,15 +8014,25 @@ mod version_verification_tests {
         std::fs::write(&config_target, &oversized_buf).unwrap();
 
         let snap_res_over = snapshot_blueprint_targets("sonarr", &env_cfg);
-        assert!(snap_res_over.is_err(), "Snapshotting an oversized blueprint target must fail closed: {:?}", snap_res_over);
+        assert!(
+            snap_res_over.is_err(),
+            "Snapshotting an oversized blueprint target must fail closed: {:?}",
+            snap_res_over
+        );
         let over_err = snap_res_over.unwrap_err();
         assert!(
             over_err.contains("exceeds") && over_err.contains("byte limit"),
             "Error must mention length cap: {}",
             over_err
         );
-        assert!(config_target.is_file(), "Oversized file must not be deleted");
-        assert_eq!(std::fs::metadata(&config_target).unwrap().len(), 2 * 1024 * 1024);
+        assert!(
+            config_target.is_file(),
+            "Oversized file must not be deleted"
+        );
+        assert_eq!(
+            std::fs::metadata(&config_target).unwrap().len(),
+            2 * 1024 * 1024
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -7343,7 +8072,11 @@ mod version_verification_tests {
 
         // Restore file
         let restore_res = restore_candidate_receipts(&[snap]);
-        assert!(restore_res.is_ok(), "Restoration must succeed: {:?}", restore_res);
+        assert!(
+            restore_res.is_ok(),
+            "Restoration must succeed: {:?}",
+            restore_res
+        );
 
         // Verify content
         assert_eq!(
@@ -7368,7 +8101,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_systemd_unit_exec_start_outside_service_section_rejected() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-unit-section-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-unit-section-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -7426,15 +8160,28 @@ mod version_verification_tests {
             root: PathBuf,
         }
         impl LifecycleBackend for PostCommitFailBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8384 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8384
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(false) })
             }
-            fn control<'a>(&'a self, _: &'a str, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 let r = self.root.clone();
                 Box::pin(async move {
                     // Create var/lib as directory with syncthing as regular file (causing ENOTDIR on rollback)
@@ -7449,14 +8196,18 @@ mod version_verification_tests {
         }
 
         let backend = PostCommitFailBackend { root: root.clone() };
-        let mut op = CoordinatedOperation::admit(conn, req, package, vec!["syncthing".into()]).unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["syncthing".into()]).unwrap();
 
         // Drop the settings table so post_commit fails when trying to synchronize ingress
         op.conn.execute("DROP TABLE settings", []).unwrap();
 
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
-        assert_eq!(receipt.status, "failed", "Execute must mark receipt as failed when post-commit sync fails");
+        assert_eq!(
+            receipt.status, "failed",
+            "Execute must mark receipt as failed when post-commit sync fails"
+        );
 
         let (status, category, diag): (String, String, Option<String>) = op
             .conn
@@ -7523,15 +8274,30 @@ mod version_verification_tests {
         // Attached curl -u credentials
         let curl_attached = "curl -uadmin:supersecret https://example.com/api";
         let sanitized_attached = sanitize_lifecycle_field(curl_attached);
-        assert!(!sanitized_attached.contains("supersecret"), "Attached curl password must be redacted");
-        assert!(!sanitized_attached.contains("admin:supersecret"), "Attached curl credentials must be redacted");
-        assert_eq!(sanitized_attached, "curl -u[REDACTED] https://example.com/api");
+        assert!(
+            !sanitized_attached.contains("supersecret"),
+            "Attached curl password must be redacted"
+        );
+        assert!(
+            !sanitized_attached.contains("admin:supersecret"),
+            "Attached curl credentials must be redacted"
+        );
+        assert_eq!(
+            sanitized_attached,
+            "curl -u[REDACTED] https://example.com/api"
+        );
 
         // Attached curl -u credentials with quotes
         let curl_quoted = "curl -u\"admin:supersecret\" https://example.com/api";
         let sanitized_quoted = sanitize_lifecycle_field(curl_quoted);
-        assert!(!sanitized_quoted.contains("supersecret"), "Quoted curl password must be redacted");
-        assert_eq!(sanitized_quoted, "curl -u[REDACTED] https://example.com/api");
+        assert!(
+            !sanitized_quoted.contains("supersecret"),
+            "Quoted curl password must be redacted"
+        );
+        assert_eq!(
+            sanitized_quoted,
+            "curl -u[REDACTED] https://example.com/api"
+        );
 
         // Attached curl -u at end of command or line
         let curl_bare = "curl -uadmin:supersecret";
@@ -7541,8 +8307,14 @@ mod version_verification_tests {
         // Attached curl with comma in credentials
         let curl_comma = "curl -uadmin:pass,word https://example.com";
         let sanitized_curl_comma = sanitize_lifecycle_field(curl_comma);
-        assert!(!sanitized_curl_comma.contains("pass,word"), "Comma-containing curl credential must be redacted");
-        assert_eq!(sanitized_curl_comma, "curl -u[REDACTED] https://example.com");
+        assert!(
+            !sanitized_curl_comma.contains("pass,word"),
+            "Comma-containing curl credential must be redacted"
+        );
+        assert_eq!(
+            sanitized_curl_comma,
+            "curl -u[REDACTED] https://example.com"
+        );
 
         // Unquoted credentials containing commas
         let input_comma = "Failed: password=part1,part2, status=500";
@@ -7558,7 +8330,10 @@ mod version_verification_tests {
         assert!(!sanitized_multi.contains("part1"));
         assert!(!sanitized_multi.contains("part2"));
         assert!(!sanitized_multi.contains("secret_token_xyz"));
-        assert_eq!(sanitized_multi, "error: password=[REDACTED], token: [REDACTED]; details");
+        assert_eq!(
+            sanitized_multi,
+            "error: password=[REDACTED], token: [REDACTED]; details"
+        );
 
         // Semicolon-delimited unquoted credentials with commas
         let input_semi = "password=part1,part2; token=token1,token2; url=https://example.com";
@@ -7567,7 +8342,10 @@ mod version_verification_tests {
         assert!(!sanitized_semi.contains("part2"));
         assert!(!sanitized_semi.contains("token1"));
         assert!(!sanitized_semi.contains("token2"));
-        assert_eq!(sanitized_semi, "password=[REDACTED]; token=[REDACTED]; url=https://example.com");
+        assert_eq!(
+            sanitized_semi,
+            "password=[REDACTED]; token=[REDACTED]; url=https://example.com"
+        );
     }
 
     #[tokio::test]
@@ -7595,7 +8373,11 @@ mod version_verification_tests {
             let events_for_hook = events.clone();
 
             *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
-                if snaps.iter().any(|s| s.path.to_string_lossy().contains("syncthing-order-script-fail")) {
+                if snaps.iter().any(|s| {
+                    s.path
+                        .to_string_lossy()
+                        .contains("syncthing-order-script-fail")
+                }) {
                     events_for_hook.lock().unwrap().push("rollback".to_string());
                 }
             }));
@@ -7606,10 +8388,18 @@ mod version_verification_tests {
                 receipt_at_start: Arc<std::sync::Mutex<Option<String>>>,
             }
             impl LifecycleBackend for OrderScriptFailBackend {
-                fn runtime_port(&self, _: &str) -> i32 { 8384 }
-                fn available_port(&self, _: i32) -> bool { true }
+                fn runtime_port(&self, _: &str) -> i32 {
+                    8384
+                }
+                fn available_port(&self, _: i32) -> bool {
+                    true
+                }
                 fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
-                    let rolled_back = self.events.lock().unwrap().contains(&"rollback".to_string());
+                    let rolled_back = self
+                        .events
+                        .lock()
+                        .unwrap()
+                        .contains(&"rollback".to_string());
                     if rolled_back {
                         self.events.lock().unwrap().push("active".to_string());
                     }
@@ -7626,7 +8416,12 @@ mod version_verification_tests {
                     };
                     Box::pin(async move { Ok(is_q) })
                 }
-                fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+                fn control<'a>(
+                    &'a self,
+                    _: &'a str,
+                    action: &'a str,
+                    _: &'a str,
+                ) -> BoxFuture<'a, Result<()>> {
                     self.events.lock().unwrap().push(action.to_string());
                     if action == "start" {
                         let content = std::fs::read_to_string(&self.receipt_file).ok();
@@ -7634,7 +8429,11 @@ mod version_verification_tests {
                     }
                     Box::pin(async { Ok(()) })
                 }
-                fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+                fn script<'a>(
+                    &'a self,
+                    _: &'a PackageRunnerRequest,
+                    _: &'a mpsc::Sender<String>,
+                ) -> BoxFuture<'a, Result<()>> {
                     self.events.lock().unwrap().push("script".to_string());
                     let rf = self.receipt_file.clone();
                     Box::pin(async move {
@@ -7660,7 +8459,13 @@ mod version_verification_tests {
                 ..Default::default()
             };
 
-            let mut op = CoordinatedOperation::admit(conn, req, package, vec!["syncthing-order-script-fail".into()]).unwrap();
+            let mut op = CoordinatedOperation::admit(
+                conn,
+                req,
+                package,
+                vec!["syncthing-order-script-fail".into()],
+            )
+            .unwrap();
             let (sender, _receiver) = mpsc::channel(32);
             let receipt = op.execute(&backend, &sender).await.unwrap();
             assert_eq!(receipt.status, "failed");
@@ -7711,13 +8516,20 @@ mod version_verification_tests {
             let events_for_cf = events.clone();
 
             *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
-                if snaps.iter().any(|s| s.path.to_string_lossy().contains("syncthing-order-cert-fail")) {
+                if snaps.iter().any(|s| {
+                    s.path
+                        .to_string_lossy()
+                        .contains("syncthing-order-cert-fail")
+                }) {
                     events_for_rb.lock().unwrap().push("rollback".to_string());
                 }
             }));
             *super::TEST_CERTIFY_FAIL_HOOK.lock().unwrap() = Some(Box::new(move |pkg| {
                 if pkg == "syncthing-order-cert-fail" {
-                    events_for_cf.lock().unwrap().push("certify_fail".to_string());
+                    events_for_cf
+                        .lock()
+                        .unwrap()
+                        .push("certify_fail".to_string());
                 }
             }));
 
@@ -7727,10 +8539,18 @@ mod version_verification_tests {
                 receipts_at_start: Arc<std::sync::Mutex<Vec<String>>>,
             }
             impl LifecycleBackend for OrderCertFailBackend {
-                fn runtime_port(&self, _: &str) -> i32 { 8384 }
-                fn available_port(&self, _: i32) -> bool { true }
+                fn runtime_port(&self, _: &str) -> i32 {
+                    8384
+                }
+                fn available_port(&self, _: i32) -> bool {
+                    true
+                }
                 fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
-                    let rolled_back = self.events.lock().unwrap().contains(&"rollback".to_string());
+                    let rolled_back = self
+                        .events
+                        .lock()
+                        .unwrap()
+                        .contains(&"rollback".to_string());
                     if rolled_back {
                         self.events.lock().unwrap().push("active".to_string());
                     }
@@ -7747,15 +8567,25 @@ mod version_verification_tests {
                     };
                     Box::pin(async move { Ok(is_q) })
                 }
-                fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+                fn control<'a>(
+                    &'a self,
+                    _: &'a str,
+                    action: &'a str,
+                    _: &'a str,
+                ) -> BoxFuture<'a, Result<()>> {
                     self.events.lock().unwrap().push(action.to_string());
                     if action == "start" {
-                        let content = std::fs::read_to_string(&self.receipt_file).unwrap_or_default();
+                        let content =
+                            std::fs::read_to_string(&self.receipt_file).unwrap_or_default();
                         self.receipts_at_start.lock().unwrap().push(content);
                     }
                     Box::pin(async { Ok(()) })
                 }
-                fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+                fn script<'a>(
+                    &'a self,
+                    _: &'a PackageRunnerRequest,
+                    _: &'a mpsc::Sender<String>,
+                ) -> BoxFuture<'a, Result<()>> {
                     self.events.lock().unwrap().push("script".to_string());
                     let rf = self.receipt_file.clone();
                     Box::pin(async move {
@@ -7790,7 +8620,13 @@ mod version_verification_tests {
                 ..Default::default()
             };
 
-            let mut op = CoordinatedOperation::admit(conn, req, syncthing_package, vec!["syncthing-order-cert-fail".into()]).unwrap();
+            let mut op = CoordinatedOperation::admit(
+                conn,
+                req,
+                syncthing_package,
+                vec!["syncthing-order-cert-fail".into()],
+            )
+            .unwrap();
             let (sender, _receiver) = mpsc::channel(32);
             let receipt = op.execute(&backend, &sender).await.unwrap();
             assert_eq!(receipt.status, "failed");
@@ -7822,7 +8658,10 @@ mod version_verification_tests {
             let starts = receipts_at_start.lock().unwrap().clone();
             assert_eq!(starts.len(), 2);
             assert_eq!(starts[0], "1.5.0\n");
-            assert_eq!(starts[1], "1.0.0\n", "Final service restart must see restored pre-op receipt");
+            assert_eq!(
+                starts[1], "1.0.0\n",
+                "Final service restart must see restored pre-op receipt"
+            );
 
             let _ = std::fs::remove_dir_all(root);
         }
@@ -7831,15 +8670,15 @@ mod version_verification_tests {
     #[test]
     fn test_parse_systemd_active_state_only_active_is_true() {
         // "active" must be confirmed active
-        assert_eq!(super::parse_systemd_active_state("active").unwrap(), true);
-        assert_eq!(super::parse_systemd_active_state("  active  \n").unwrap(), true);
+        assert!(super::parse_systemd_active_state("active").unwrap());
+        assert!(super::parse_systemd_active_state("  active  \n").unwrap());
 
         // Transitional and stopped states must return Ok(false)
-        assert_eq!(super::parse_systemd_active_state("activating").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("deactivating").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("reloading").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("inactive").unwrap(), false);
-        assert_eq!(super::parse_systemd_active_state("failed").unwrap(), false);
+        assert!(!super::parse_systemd_active_state("activating").unwrap());
+        assert!(!super::parse_systemd_active_state("deactivating").unwrap());
+        assert!(!super::parse_systemd_active_state("reloading").unwrap());
+        assert!(!super::parse_systemd_active_state("inactive").unwrap());
+        assert!(!super::parse_systemd_active_state("failed").unwrap());
 
         // Unknown states must return Err
         assert!(super::parse_systemd_active_state("unknown").is_err());
@@ -7850,15 +8689,15 @@ mod version_verification_tests {
     #[test]
     fn test_parse_systemd_quiesced_state_inactive_and_failed_are_true() {
         // Genuinely quiescent states must return Ok(true)
-        assert_eq!(super::parse_systemd_quiesced_state("inactive").unwrap(), true);
-        assert_eq!(super::parse_systemd_quiesced_state("  inactive  \n").unwrap(), true);
-        assert_eq!(super::parse_systemd_quiesced_state("failed").unwrap(), true);
+        assert!(super::parse_systemd_quiesced_state("inactive").unwrap());
+        assert!(super::parse_systemd_quiesced_state("  inactive  \n").unwrap());
+        assert!(super::parse_systemd_quiesced_state("failed").unwrap());
 
         // Live and transitional states must return Ok(false)
-        assert_eq!(super::parse_systemd_quiesced_state("active").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("activating").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("deactivating").unwrap(), false);
-        assert_eq!(super::parse_systemd_quiesced_state("reloading").unwrap(), false);
+        assert!(!super::parse_systemd_quiesced_state("active").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("activating").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("deactivating").unwrap());
+        assert!(!super::parse_systemd_quiesced_state("reloading").unwrap());
 
         // Unknown states must return Err
         assert!(super::parse_systemd_quiesced_state("unknown").is_err());
@@ -7872,9 +8711,15 @@ mod version_verification_tests {
         assert!(is_incomplete_rollback_error("incomplete rollback"));
         assert!(is_incomplete_rollback_error("incomplete_rollback"));
         assert!(is_incomplete_rollback_error("Rclone rollback aborted because service quiescence failed; preserving recovery archive ... (incomplete-rollback)"));
-        assert!(is_incomplete_rollback_error("Application recovery is incomplete; recovery backup preserved"));
-        assert!(is_incomplete_rollback_error("Rollback incomplete; recovery backup preserved"));
-        assert!(is_incomplete_rollback_error("Failed to stop unit sonarr.service"));
+        assert!(is_incomplete_rollback_error(
+            "Application recovery is incomplete; recovery backup preserved"
+        ));
+        assert!(is_incomplete_rollback_error(
+            "Rollback incomplete; recovery backup preserved"
+        ));
+        assert!(is_incomplete_rollback_error(
+            "Failed to stop unit sonarr.service"
+        ));
 
         // Unrelated errors must return false
         assert!(!is_incomplete_rollback_error("connection reset by peer"));
@@ -7889,13 +8734,22 @@ mod version_verification_tests {
             events: Arc<std::sync::Mutex<Vec<String>>>,
         }
         impl LifecycleBackend for QuiesceFailBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 self.events.lock().unwrap().push("active".to_string());
                 Box::pin(async { Ok(true) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push(action.to_string());
                 if action == "stop" {
                     Box::pin(async { anyhow::bail!("systemctl stop failed deliberately") })
@@ -7903,13 +8757,19 @@ mod version_verification_tests {
                     Box::pin(async { Ok(()) })
                 }
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
 
         let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let backend = QuiesceFailBackend { events: events.clone() };
+        let backend = QuiesceFailBackend {
+            events: events.clone(),
+        };
 
         let rollback_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rb_called_hook = rollback_called.clone();
@@ -7939,15 +8799,25 @@ mod version_verification_tests {
         *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
 
         // 1. rollback_operation_state must NOT have been called!
-        assert!(!rollback_called.load(std::sync::atomic::Ordering::SeqCst), "Rollback must be gated on successful quiescence");
+        assert!(
+            !rollback_called.load(std::sync::atomic::Ordering::SeqCst),
+            "Rollback must be gated on successful quiescence"
+        );
 
         // 2. Services must NOT have been restarted!
         let recorded = events.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["stop"], "Backend must only receive stop, never start or active verification");
+        assert_eq!(
+            recorded,
+            vec!["stop"],
+            "Backend must only receive stop, never start or active verification"
+        );
 
         // 3. receipt_restore_error must indicate quiescence failure
-        let r_err = receipt_restore_error.expect("receipt_restore_error must be set on quiesce failure");
-        assert!(r_err.contains("Skipped snapshot restoration because service quiescence failed (incomplete-rollback)"));
+        let r_err =
+            receipt_restore_error.expect("receipt_restore_error must be set on quiesce failure");
+        assert!(r_err.contains(
+            "Skipped snapshot restoration because service quiescence failed (incomplete-rollback)"
+        ));
 
         // 4. restart_failures must contain the stop failure
         assert!(!restart_failures.is_empty());
@@ -7962,8 +8832,12 @@ mod version_verification_tests {
             events: Arc<std::sync::Mutex<Vec<String>>>,
         }
         impl LifecycleBackend for SnapshotFailBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 self.events.lock().unwrap().push("active".to_string());
                 Box::pin(async { Ok(true) })
@@ -7971,16 +8845,26 @@ mod version_verification_tests {
             fn quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(true) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push(action.to_string());
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
 
-        let temp_dir = std::env::temp_dir().join(format!("af-test-snap-fail-gate-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-snap-fail-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let blocking_file = temp_dir.join("block");
         std::fs::write(&blocking_file, b"file").unwrap();
@@ -7988,7 +8872,9 @@ mod version_verification_tests {
         let bad_snap = FileSnapshot::absent(blocking_file.join(".af-version"));
 
         let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let backend = SnapshotFailBackend { events: events.clone() };
+        let backend = SnapshotFailBackend {
+            events: events.clone(),
+        };
 
         let stopped = vec!["mock-unit.service".to_string()];
         let mut receipt_restore_error = None;
@@ -8013,13 +8899,19 @@ mod version_verification_tests {
 
         // 1. Backend must have stopped the unit, but NEVER called start or active
         let recorded = events.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["stop"], "Backend must not call start after snapshot restoration failure");
+        assert_eq!(
+            recorded,
+            vec!["stop"],
+            "Backend must not call start after snapshot restoration failure"
+        );
 
         // 2. receipt_restore_error must be populated
         assert!(receipt_restore_error.is_some());
 
         // 3. restart_failures must record refusal to restart
-        assert!(restart_failures.iter().any(|f| f.contains("Refusing to restart pre-stopped service after snapshot restoration failure")));
+        assert!(restart_failures.iter().any(|f| f.contains(
+            "Refusing to restart pre-stopped service after snapshot restoration failure"
+        )));
     }
 
     #[tokio::test]
@@ -8030,8 +8922,12 @@ mod version_verification_tests {
             events: Arc<std::sync::Mutex<Vec<String>>>,
         }
         impl LifecycleBackend for IncRollbackBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 self.events.lock().unwrap().push("active".to_string());
                 Box::pin(async { Ok(true) })
@@ -8039,17 +8935,28 @@ mod version_verification_tests {
             fn quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(true) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push(action.to_string());
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
 
         let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let backend = IncRollbackBackend { events: events.clone() };
+        let backend = IncRollbackBackend {
+            events: events.clone(),
+        };
 
         let stopped = vec!["mock-unit.service".to_string()];
         let mut receipt_restore_error = None;
@@ -8072,10 +8979,16 @@ mod version_verification_tests {
 
         // 1. Backend must have stopped the unit, but NEVER called start or active
         let recorded = events.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["stop"], "Backend must not call start after incomplete rollback");
+        assert_eq!(
+            recorded,
+            vec!["stop"],
+            "Backend must not call start after incomplete rollback"
+        );
 
         // 2. restart_failures must record refusal to restart
-        assert!(restart_failures.iter().any(|f| f.contains("Refusing to restart pre-stopped service after incomplete rollback")));
+        assert!(restart_failures.iter().any(
+            |f| f.contains("Refusing to restart pre-stopped service after incomplete rollback")
+        ));
     }
 
     #[tokio::test]
@@ -8087,8 +9000,12 @@ mod version_verification_tests {
             events: std::sync::Mutex<Vec<String>>,
         }
         impl LifecycleBackend for RecoveryBlockedBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 self.events.lock().unwrap().push("active".to_string());
                 Box::pin(async { Ok(true) })
@@ -8096,30 +9013,47 @@ mod version_verification_tests {
             fn quiescent<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async move { Ok(self.quiescent) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push(action.to_string());
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
 
         for (quiescent, incomplete_rollback) in [(false, false), (true, true)] {
-            let root = std::env::temp_dir().join(format!("af-test-blocked-recovery-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir()
+                .join(format!("af-test-blocked-recovery-{}", uuid::Uuid::new_v4()));
             let runtime = root.join("opt/sonarr");
             std::fs::create_dir_all(&runtime).unwrap();
             let live_file = runtime.join("database.db");
             std::fs::write(&live_file, b"original-database").unwrap();
             let env_cfg = crate::PackageExecutionEnv::isolated(&root);
-            let mut snapshot = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false).unwrap();
+            let mut snapshot =
+                PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false).unwrap();
             let backup_root = snapshot.backup_root.clone();
-            let backup_file = snapshot.entries.iter().find_map(|entry| match entry {
-                RuntimeSnapshotEntry::Directory { target_path, backup_path, .. } if target_path == &runtime => {
-                    Some(backup_path.join("database.db"))
-                }
-                _ => None,
-            }).expect("runtime directory must be captured");
+            let backup_file = snapshot
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    RuntimeSnapshotEntry::Directory {
+                        target_path,
+                        backup_path,
+                        ..
+                    } if target_path == &runtime => Some(backup_path.join("database.db")),
+                    _ => None,
+                })
+                .expect("runtime directory must be captured");
             std::fs::write(&live_file, b"installer-modified-database").unwrap();
             let backend = RecoveryBlockedBackend {
                 quiescent,
@@ -8142,15 +9076,21 @@ mod version_verification_tests {
                 incomplete_rollback,
                 true,
                 Some(&mut snapshot),
-            ).await;
+            )
+            .await;
 
             assert_eq!(*backend.events.lock().unwrap(), vec!["stop"]);
-            assert_eq!(std::fs::read(&live_file).unwrap(), b"installer-modified-database");
+            assert_eq!(
+                std::fs::read(&live_file).unwrap(),
+                b"installer-modified-database"
+            );
             assert!(snapshot.preserve_on_drop);
             assert!(!restart_failures.is_empty());
             if quiescent {
                 assert!(receipt_restore_error.is_none());
-                assert!(restart_failures.iter().any(|failure| failure.contains("incomplete rollback")));
+                assert!(restart_failures
+                    .iter()
+                    .any(|failure| failure.contains("incomplete rollback")));
             } else {
                 assert!(receipt_restore_error.unwrap().contains("quiescence failed"));
             }
@@ -8188,11 +9128,20 @@ mod version_verification_tests {
         let hook_b = unit_b_active.clone();
 
         *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
-            if snaps.iter().any(|s| s.path.to_string_lossy().contains("test-multi-unit")) {
+            if snaps
+                .iter()
+                .any(|s| s.path.to_string_lossy().contains("test-multi-unit"))
+            {
                 let a_is_active = *hook_a.lock().unwrap();
                 let b_is_active = *hook_b.lock().unwrap();
-                assert!(!a_is_active, "unit-a.service must be inactive BEFORE rollback_operation_state");
-                assert!(!b_is_active, "unit-b.service must be inactive BEFORE rollback_operation_state");
+                assert!(
+                    !a_is_active,
+                    "unit-a.service must be inactive BEFORE rollback_operation_state"
+                );
+                assert!(
+                    !b_is_active,
+                    "unit-b.service must be inactive BEFORE rollback_operation_state"
+                );
                 hook_events.lock().unwrap().push("rollback".to_string());
             }
         }));
@@ -8204,19 +9153,34 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for MultiUnitBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8384 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8384
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let is_act = match unit {
                     "unit-a.service" => *self.unit_a_active.lock().unwrap(),
                     "unit-b.service" => *self.unit_b_active.lock().unwrap(),
                     _ => false,
                 };
-                self.events.lock().unwrap().push(format!("active:{}:{}", unit, is_act));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("active:{}:{}", unit, is_act));
                 Box::pin(async move { Ok(is_act) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
-                self.events.lock().unwrap().push(format!("{}:{}", action, unit));
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", action, unit));
                 match action {
                     "stop" => {
                         if unit == "unit-a.service" {
@@ -8236,11 +9200,18 @@ mod version_verification_tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push("script".to_string());
                 // Installer script starts initially-inactive unit-b.service
                 *self.unit_b_active.lock().unwrap() = true;
-                self.events.lock().unwrap().push("script_started:unit-b.service".to_string());
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("script_started:unit-b.service".to_string());
                 // Then script fails
                 Box::pin(async { anyhow::bail!("installer failed deliberately") })
             }
@@ -8278,11 +9249,20 @@ mod version_verification_tests {
         let recorded = events.lock().unwrap().clone();
 
         // 1. Rollback must have occurred
-        let rollback_pos = recorded.iter().position(|e| e == "rollback").expect("Rollback must be recorded");
+        let rollback_pos = recorded
+            .iter()
+            .position(|e| e == "rollback")
+            .expect("Rollback must be recorded");
 
         // 2. Both unit-a and unit-b must have been stopped BEFORE rollback
-        let stop_a_quiesce = recorded[..rollback_pos].iter().rposition(|e| e == "stop:unit-a.service").expect("unit-a must be stopped before rollback");
-        let stop_b_quiesce = recorded[..rollback_pos].iter().rposition(|e| e == "stop:unit-b.service").expect("unit-b must be stopped before rollback");
+        let stop_a_quiesce = recorded[..rollback_pos]
+            .iter()
+            .rposition(|e| e == "stop:unit-a.service")
+            .expect("unit-a must be stopped before rollback");
+        let stop_b_quiesce = recorded[..rollback_pos]
+            .iter()
+            .rposition(|e| e == "stop:unit-b.service")
+            .expect("unit-b must be stopped before rollback");
         assert!(stop_a_quiesce < rollback_pos);
         assert!(stop_b_quiesce < rollback_pos);
 
@@ -8292,11 +9272,21 @@ mod version_verification_tests {
             .filter(|e| e.starts_with("start:"))
             .cloned()
             .collect();
-        assert_eq!(starts_after_rollback, vec!["start:unit-a.service"], "Only initially-active unit-a must be restarted");
+        assert_eq!(
+            starts_after_rollback,
+            vec!["start:unit-a.service"],
+            "Only initially-active unit-a must be restarted"
+        );
 
         // 4. Verify final active states: unit-a is active, unit-b remains inactive
-        assert!(*unit_a_active.lock().unwrap(), "unit-a must be active after restoration");
-        assert!(!*unit_b_active.lock().unwrap(), "unit-b must remain inactive after restoration");
+        assert!(
+            *unit_a_active.lock().unwrap(),
+            "unit-a must be active after restoration"
+        );
+        assert!(
+            !*unit_b_active.lock().unwrap(),
+            "unit-b must remain inactive after restoration"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8323,9 +9313,15 @@ mod version_verification_tests {
         let hook_unit = fresh_unit_active.clone();
 
         *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
-            if snaps.iter().any(|s| s.path.to_string_lossy().contains("test-fresh-pkg")) {
+            if snaps
+                .iter()
+                .any(|s| s.path.to_string_lossy().contains("test-fresh-pkg"))
+            {
                 let unit_is_active = *hook_unit.lock().unwrap();
-                assert!(!unit_is_active, "fresh-unit.service must be quiesced/inactive BEFORE rollback_operation_state");
+                assert!(
+                    !unit_is_active,
+                    "fresh-unit.service must be quiesced/inactive BEFORE rollback_operation_state"
+                );
                 hook_events.lock().unwrap().push("rollback".to_string());
             }
         }));
@@ -8336,19 +9332,34 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for FreshInstallBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8484 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8484
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let is_act = if unit == "fresh-unit.service" {
                     *self.fresh_unit_active.lock().unwrap()
                 } else {
                     false
                 };
-                self.events.lock().unwrap().push(format!("active:{}:{}", unit, is_act));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("active:{}:{}", unit, is_act));
                 Box::pin(async move { Ok(is_act) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
-                self.events.lock().unwrap().push(format!("{}:{}", action, unit));
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", action, unit));
                 if action == "stop" && unit == "fresh-unit.service" {
                     *self.fresh_unit_active.lock().unwrap() = false;
                 } else if action == "start" && unit == "fresh-unit.service" {
@@ -8356,11 +9367,18 @@ mod version_verification_tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push("script".to_string());
                 // Fresh installer starts fresh-unit.service during installation
                 *self.fresh_unit_active.lock().unwrap() = true;
-                self.events.lock().unwrap().push("installer_started:fresh-unit.service".to_string());
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("installer_started:fresh-unit.service".to_string());
                 // Then installer fails
                 Box::pin(async { anyhow::bail!("fresh installer failed deliberately") })
             }
@@ -8380,13 +9398,9 @@ mod version_verification_tests {
             ..Default::default()
         };
 
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            req,
-            package,
-            vec!["fresh-unit.service".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["fresh-unit.service".into()])
+                .unwrap();
 
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
@@ -8397,10 +9411,16 @@ mod version_verification_tests {
         let recorded = events.lock().unwrap().clone();
 
         // 1. Rollback must have occurred
-        let rollback_pos = recorded.iter().position(|e| e == "rollback").expect("Rollback must be recorded");
+        let rollback_pos = recorded
+            .iter()
+            .position(|e| e == "rollback")
+            .expect("Rollback must be recorded");
 
         // 2. fresh-unit.service must have been stopped during rollback quiescence (before rollback hook)
-        let stop_quiesce = recorded[..rollback_pos].iter().rposition(|e| e == "stop:fresh-unit.service").expect("fresh-unit.service must be stopped during rollback quiescence");
+        let stop_quiesce = recorded[..rollback_pos]
+            .iter()
+            .rposition(|e| e == "stop:fresh-unit.service")
+            .expect("fresh-unit.service must be stopped during rollback quiescence");
         assert!(stop_quiesce < rollback_pos);
 
         // 3. fresh-unit.service must NOT have been started after rollback (it was not initially active)
@@ -8409,10 +9429,16 @@ mod version_verification_tests {
             .filter(|e| e.starts_with("start:"))
             .cloned()
             .collect();
-        assert!(starts_after_rollback.is_empty(), "Fresh installer started unit must not be restarted after rollback");
+        assert!(
+            starts_after_rollback.is_empty(),
+            "Fresh installer started unit must not be restarted after rollback"
+        );
 
         // 4. Verify final active state: fresh-unit is inactive
-        assert!(!*fresh_unit_active.lock().unwrap(), "fresh-unit.service must remain inactive");
+        assert!(
+            !*fresh_unit_active.lock().unwrap(),
+            "fresh-unit.service must remain inactive"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8444,11 +9470,20 @@ mod version_verification_tests {
         let hook_oneshot = oneshot_active.clone();
 
         *super::TEST_ROLLBACK_HOOK.lock().unwrap() = Some(Box::new(move |snaps| {
-            if snaps.iter().any(|s| s.path.to_string_lossy().contains("test-oneshot")) {
+            if snaps
+                .iter()
+                .any(|s| s.path.to_string_lossy().contains("test-oneshot"))
+            {
                 let timer_is_active = *hook_timer.lock().unwrap();
                 let oneshot_is_active = *hook_oneshot.lock().unwrap();
-                assert!(!timer_is_active, "recyclarr.timer must be inactive BEFORE rollback");
-                assert!(!oneshot_is_active, "recyclarr oneshot must be inactive BEFORE rollback");
+                assert!(
+                    !timer_is_active,
+                    "recyclarr.timer must be inactive BEFORE rollback"
+                );
+                assert!(
+                    !oneshot_is_active,
+                    "recyclarr oneshot must be inactive BEFORE rollback"
+                );
                 hook_events.lock().unwrap().push("rollback".to_string());
             }
         }));
@@ -8460,19 +9495,34 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for OneshotBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8585 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8585
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let is_act = match unit {
                     "recyclarr.timer" => *self.timer_active.lock().unwrap(),
                     "recyclarr" => *self.oneshot_active.lock().unwrap(),
                     _ => false,
                 };
-                self.events.lock().unwrap().push(format!("active:{}:{}", unit, is_act));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("active:{}:{}", unit, is_act));
                 Box::pin(async move { Ok(is_act) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
-                self.events.lock().unwrap().push(format!("{}:{}", action, unit));
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", action, unit));
                 match action {
                     "stop" => {
                         if unit == "recyclarr.timer" {
@@ -8492,11 +9542,18 @@ mod version_verification_tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push("script".to_string());
                 // Installer script starts running oneshot again
                 *self.oneshot_active.lock().unwrap() = true;
-                self.events.lock().unwrap().push("script_started:recyclarr".to_string());
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("script_started:recyclarr".to_string());
                 // Then fails
                 Box::pin(async { anyhow::bail!("installer failed deliberately") })
             }
@@ -8534,16 +9591,27 @@ mod version_verification_tests {
         let recorded = events.lock().unwrap().clone();
 
         // 1. Both timer and running oneshot must be stopped before script execution (pre-operation)
-        let script_pos = recorded.iter().position(|e| e == "script").expect("Script must run");
+        let script_pos = recorded
+            .iter()
+            .position(|e| e == "script")
+            .expect("Script must run");
         assert!(recorded[..script_pos].contains(&"stop:recyclarr.timer".to_string()));
         assert!(recorded[..script_pos].contains(&"stop:recyclarr".to_string()));
 
         // 2. Rollback must have occurred
-        let rollback_pos = recorded.iter().position(|e| e == "rollback").expect("Rollback must be recorded");
+        let rollback_pos = recorded
+            .iter()
+            .position(|e| e == "rollback")
+            .expect("Rollback must be recorded");
 
         // 3. During rollback quiescence, running oneshot is stopped
-        let stop_oneshot_quiesce = recorded[script_pos..rollback_pos].iter().rposition(|e| e == "stop:recyclarr");
-        assert!(stop_oneshot_quiesce.is_some(), "Running oneshot recyclarr must be stopped during rollback quiescence");
+        let stop_oneshot_quiesce = recorded[script_pos..rollback_pos]
+            .iter()
+            .rposition(|e| e == "stop:recyclarr");
+        assert!(
+            stop_oneshot_quiesce.is_some(),
+            "Running oneshot recyclarr must be stopped during rollback quiescence"
+        );
 
         // 4. ONLY recyclarr.timer is restarted after rollback; recyclarr oneshot is NOT restarted!
         let starts_after_rollback: Vec<_> = recorded[rollback_pos..]
@@ -8551,11 +9619,21 @@ mod version_verification_tests {
             .filter(|e| e.starts_with("start:"))
             .cloned()
             .collect();
-        assert_eq!(starts_after_rollback, vec!["start:recyclarr.timer".to_string()], "Only recyclarr.timer should be restarted, not oneshot");
+        assert_eq!(
+            starts_after_rollback,
+            vec!["start:recyclarr.timer".to_string()],
+            "Only recyclarr.timer should be restarted, not oneshot"
+        );
 
         // 5. Final states
-        assert!(*timer_active.lock().unwrap(), "recyclarr.timer must be active");
-        assert!(!*oneshot_active.lock().unwrap(), "recyclarr oneshot must be inactive");
+        assert!(
+            *timer_active.lock().unwrap(),
+            "recyclarr.timer must be active"
+        );
+        assert!(
+            !*oneshot_active.lock().unwrap(),
+            "recyclarr oneshot must be inactive"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8604,22 +9682,40 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for TransBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8686 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8686
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let st = self.unit_state.lock().unwrap().clone();
                 let is_act = parse_systemd_active_state(&st).unwrap();
-                self.events.lock().unwrap().push(format!("active:{}:{}", unit, is_act));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("active:{}:{}", unit, is_act));
                 Box::pin(async move { Ok(is_act) })
             }
             fn quiescent<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let st = self.unit_state.lock().unwrap().clone();
                 let is_q = parse_systemd_quiesced_state(&st).unwrap();
-                self.events.lock().unwrap().push(format!("quiescent:{}:{}", unit, is_q));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("quiescent:{}:{}", unit, is_q));
                 Box::pin(async move { Ok(is_q) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
-                self.events.lock().unwrap().push(format!("{}:{}", action, unit));
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", action, unit));
                 match action {
                     "stop" => {
                         *self.unit_state.lock().unwrap() = "inactive".to_string();
@@ -8631,7 +9727,11 @@ mod version_verification_tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push("script".to_string());
                 Box::pin(async { anyhow::bail!("script failed deliberately") })
             }
@@ -8651,13 +9751,9 @@ mod version_verification_tests {
             ..Default::default()
         };
 
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            req,
-            package,
-            vec!["trans-unit.service".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["trans-unit.service".into()])
+                .unwrap();
 
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
@@ -8666,7 +9762,10 @@ mod version_verification_tests {
         let recorded = events.lock().unwrap().clone();
 
         // 1. Pre-operation stopped trans-unit.service because !backend.quiescent returned true for "activating"
-        let script_pos = recorded.iter().position(|e| e == "script").expect("Script must run");
+        let script_pos = recorded
+            .iter()
+            .position(|e| e == "script")
+            .expect("Script must run");
         assert!(recorded[..script_pos].contains(&"stop:trans-unit.service".to_string()));
 
         // 2. Rollback restarts trans-unit.service because it was included in stopped
@@ -8704,22 +9803,40 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for TransCertBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8787 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8787
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let st = self.unit_state.lock().unwrap().clone();
                 let is_act = parse_systemd_active_state(&st).unwrap();
-                self.events.lock().unwrap().push(format!("active:{}:{}:{}", unit, st, is_act));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("active:{}:{}:{}", unit, st, is_act));
                 Box::pin(async move { Ok(is_act) })
             }
             fn quiescent<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
                 let st = self.unit_state.lock().unwrap().clone();
                 let is_q = parse_systemd_quiesced_state(&st).unwrap();
-                self.events.lock().unwrap().push(format!("quiescent:{}:{}:{}", unit, st, is_q));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("quiescent:{}:{}:{}", unit, st, is_q));
                 Box::pin(async move { Ok(is_q) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
-                self.events.lock().unwrap().push(format!("{}:{}", action, unit));
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", action, unit));
                 match action {
                     "stop" => {
                         *self.unit_state.lock().unwrap() = "inactive".to_string();
@@ -8732,7 +9849,11 @@ mod version_verification_tests {
                 }
                 Box::pin(async { Ok(()) })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push("script".to_string());
                 Box::pin(async { Ok(()) })
             }
@@ -8752,26 +9873,31 @@ mod version_verification_tests {
             ..Default::default()
         };
 
-        let mut op = CoordinatedOperation::admit(
-            conn,
-            req,
-            package,
-            vec!["trans-cert.service".into()],
-        )
-        .unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["trans-cert.service".into()])
+                .unwrap();
 
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
-        assert_eq!(receipt.status, "failed", "Operation must fail when service remains in activating state after start");
+        assert_eq!(
+            receipt.status, "failed",
+            "Operation must fail when service remains in activating state after start"
+        );
 
         let recorded = events.lock().unwrap().clone();
 
         // 1. Pre-operation stopped trans-cert.service because !backend.quiescent returned true for activating
-        let script_pos = recorded.iter().position(|e| e == "script").expect("Script must run");
+        let script_pos = recorded
+            .iter()
+            .position(|e| e == "script")
+            .expect("Script must run");
         assert!(recorded[..script_pos].contains(&"stop:trans-cert.service".to_string()));
 
         // 2. Start was attempted after installer script
-        let start_pos = recorded.iter().position(|e| e == "start:trans-cert.service").expect("Start must be called");
+        let start_pos = recorded
+            .iter()
+            .position(|e| e == "start:trans-cert.service")
+            .expect("Start must be called");
         assert!(start_pos > script_pos);
 
         // 3. Post-start active check saw "activating" and returned false, failing certification
@@ -8786,13 +9912,17 @@ mod version_verification_tests {
                 |row| Ok((row.get(0)?,)),
             )
             .unwrap();
-        assert!(diag.as_deref().unwrap_or("").contains("is not active after start"));
+        assert!(diag
+            .as_deref()
+            .unwrap_or("")
+            .contains("is not active after start"));
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_stop_failure_gates_restoration() {
+    async fn test_absent_unit_rollback_allows_snapshot_restoration_whereas_active_stop_failure_gates_restoration(
+    ) {
         let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
 
         struct AbsentRollbackBackend {
@@ -8802,29 +9932,51 @@ mod version_verification_tests {
         }
 
         impl LifecycleBackend for AbsentRollbackBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8080 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8080
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(false) })
             }
             fn quiescent<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
-                self.events.lock().unwrap().push(format!("quiescent:{unit}"));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("quiescent:{unit}"));
                 let res = self.quiescent_result;
                 Box::pin(async move { Ok(res) })
             }
-            fn control<'a>(&'a self, unit: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                unit: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 self.events.lock().unwrap().push(format!("{action}:{unit}"));
                 if action == "stop" {
                     if self.fail_as_absent {
-                        Box::pin(async { anyhow::bail!("Unit radarr.service not loaded (exit status: 5)") })
+                        Box::pin(async {
+                            anyhow::bail!("Unit radarr.service not loaded (exit status: 5)")
+                        })
                     } else {
-                        Box::pin(async { anyhow::bail!("Failed to stop radarr.service: unit is active and locked") })
+                        Box::pin(async {
+                            anyhow::bail!(
+                                "Failed to stop radarr.service: unit is active and locked"
+                            )
+                        })
                     }
                 } else {
                     Box::pin(async { Ok(()) })
                 }
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 Box::pin(async { Ok(()) })
             }
         }
@@ -8869,9 +10021,18 @@ mod version_verification_tests {
             *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
 
             // Rollback restoration must NOT be gated because the unit is absent and quiescent!
-            assert!(rollback_called.load(std::sync::atomic::Ordering::SeqCst), "Rollback must proceed for absent quiescent unit");
-            assert!(receipt_restore_error.is_none(), "receipt_restore_error must not be set on benign absent stop");
-            assert!(restart_failures.is_empty(), "restart_failures must be empty for absent quiescent unit");
+            assert!(
+                rollback_called.load(std::sync::atomic::Ordering::SeqCst),
+                "Rollback must proceed for absent quiescent unit"
+            );
+            assert!(
+                receipt_restore_error.is_none(),
+                "receipt_restore_error must not be set on benign absent stop"
+            );
+            assert!(
+                restart_failures.is_empty(),
+                "restart_failures must be empty for absent quiescent unit"
+            );
         }
 
         // Scenario 2: Active unit where stop fails
@@ -8913,8 +10074,14 @@ mod version_verification_tests {
             *super::TEST_ROLLBACK_HOOK.lock().unwrap() = None;
 
             // Rollback restoration MUST be gated on non-absent quiesce failure!
-            assert!(!rollback_called.load(std::sync::atomic::Ordering::SeqCst), "Rollback must be gated when active unit stop fails");
-            assert!(receipt_restore_error.is_some(), "receipt_restore_error must indicate quiescence failure");
+            assert!(
+                !rollback_called.load(std::sync::atomic::Ordering::SeqCst),
+                "Rollback must be gated when active unit stop fails"
+            );
+            assert!(
+                receipt_restore_error.is_some(),
+                "receipt_restore_error must indicate quiescence failure"
+            );
             assert!(receipt_restore_error.as_ref().unwrap().contains("Skipped snapshot restoration because service quiescence failed (incomplete-rollback)"));
             assert!(!restart_failures.is_empty());
             assert!(restart_failures[0].contains("radarr.service: stop before restoration failed"));
@@ -8924,42 +10091,102 @@ mod version_verification_tests {
     #[test]
     fn test_sanitize_lifecycle_field_redacts_nested_json_object_and_array_secrets() {
         // Raw key-value with nested object
-        let raw_obj = sanitize_lifecycle_field("failed with password: {\"value\":\"CANARY_SECRET\"}");
-        assert!(!raw_obj.contains("CANARY_SECRET"), "Secret must be redacted: {}", raw_obj);
-        assert!(raw_obj.contains("password: [REDACTED]"), "Must redact raw object: {}", raw_obj);
+        let raw_obj =
+            sanitize_lifecycle_field("failed with password: {\"value\":\"CANARY_SECRET\"}");
+        assert!(
+            !raw_obj.contains("CANARY_SECRET"),
+            "Secret must be redacted: {}",
+            raw_obj
+        );
+        assert!(
+            raw_obj.contains("password: [REDACTED]"),
+            "Must redact raw object: {}",
+            raw_obj
+        );
 
         // JSON key-value with nested object
         let json_obj = sanitize_lifecycle_field("{\"password\":{\"value\":\"CANARY_SECRET\"}}");
-        assert!(!json_obj.contains("CANARY_SECRET"), "Secret must be redacted: {}", json_obj);
-        assert!(json_obj.contains("\"password\":[REDACTED]"), "Must redact JSON object: {}", json_obj);
+        assert!(
+            !json_obj.contains("CANARY_SECRET"),
+            "Secret must be redacted: {}",
+            json_obj
+        );
+        assert!(
+            json_obj.contains("\"password\":[REDACTED]"),
+            "Must redact JSON object: {}",
+            json_obj
+        );
 
         // Raw key-value with JSON array
-        let raw_arr = sanitize_lifecycle_field("secret: [\"CANARY_SECRET_1\", \"CANARY_SECRET_2\"]");
-        assert!(!raw_arr.contains("CANARY_SECRET"), "Secrets in array must be redacted: {}", raw_arr);
-        assert!(raw_arr.contains("secret: [REDACTED]"), "Must redact raw array: {}", raw_arr);
+        let raw_arr =
+            sanitize_lifecycle_field("secret: [\"CANARY_SECRET_1\", \"CANARY_SECRET_2\"]");
+        assert!(
+            !raw_arr.contains("CANARY_SECRET"),
+            "Secrets in array must be redacted: {}",
+            raw_arr
+        );
+        assert!(
+            raw_arr.contains("secret: [REDACTED]"),
+            "Must redact raw array: {}",
+            raw_arr
+        );
 
         // JSON key-value with array
         let json_arr = sanitize_lifecycle_field("{\"token\":[\"SECRET_A\",\"SECRET_B\"]}");
-        assert!(!json_arr.contains("SECRET"), "Secrets in JSON array must be redacted: {}", json_arr);
-        assert!(json_arr.contains("\"token\":[REDACTED]"), "Must redact JSON array: {}", json_arr);
+        assert!(
+            !json_arr.contains("SECRET"),
+            "Secrets in JSON array must be redacted: {}",
+            json_arr
+        );
+        assert!(
+            json_arr.contains("\"token\":[REDACTED]"),
+            "Must redact JSON array: {}",
+            json_arr
+        );
 
         // 2 levels of nested braces
-        let nested_2_lvl = sanitize_lifecycle_field("api_key: {\"outer\": {\"inner\": \"SECRET_KEY\"}}");
-        assert!(!nested_2_lvl.contains("SECRET_KEY"), "2-level nested secret must be redacted: {}", nested_2_lvl);
+        let nested_2_lvl =
+            sanitize_lifecycle_field("api_key: {\"outer\": {\"inner\": \"SECRET_KEY\"}}");
+        assert!(
+            !nested_2_lvl.contains("SECRET_KEY"),
+            "2-level nested secret must be redacted: {}",
+            nested_2_lvl
+        );
         assert!(nested_2_lvl.contains("api_key: [REDACTED]"));
 
         // 3-level and 4-level nested JSON objects
-        let nested_3_lvl = sanitize_lifecycle_field("{\"password\": {\"l1\": {\"l2\": {\"l3\": \"CANARY_3LVL\"}}}}");
-        assert!(!nested_3_lvl.contains("CANARY_3LVL"), "3-level nested secret must be redacted: {}", nested_3_lvl);
-        assert!(nested_3_lvl.contains("\"password\": [REDACTED]") || nested_3_lvl.contains("\"password\":[REDACTED]"));
+        let nested_3_lvl = sanitize_lifecycle_field(
+            "{\"password\": {\"l1\": {\"l2\": {\"l3\": \"CANARY_3LVL\"}}}}",
+        );
+        assert!(
+            !nested_3_lvl.contains("CANARY_3LVL"),
+            "3-level nested secret must be redacted: {}",
+            nested_3_lvl
+        );
+        assert!(
+            nested_3_lvl.contains("\"password\": [REDACTED]")
+                || nested_3_lvl.contains("\"password\":[REDACTED]")
+        );
 
-        let nested_4_lvl = sanitize_lifecycle_field("api_key: {\"l1\": {\"l2\": {\"l3\": {\"l4\": \"CANARY_4LVL\"}}}}");
-        assert!(!nested_4_lvl.contains("CANARY_4LVL"), "4-level nested secret must be redacted: {}", nested_4_lvl);
+        let nested_4_lvl = sanitize_lifecycle_field(
+            "api_key: {\"l1\": {\"l2\": {\"l3\": {\"l4\": \"CANARY_4LVL\"}}}}",
+        );
+        assert!(
+            !nested_4_lvl.contains("CANARY_4LVL"),
+            "4-level nested secret must be redacted: {}",
+            nested_4_lvl
+        );
         assert!(nested_4_lvl.contains("api_key: [REDACTED]"));
 
         // Multiline nested JSON objects
-        let nested_multiline = sanitize_lifecycle_field("\"secret\": {\n  \"l1\": {\n    \"l2\": \"CANARY_MULTILINE\"\n  }\n}");
-        assert!(!nested_multiline.contains("CANARY_MULTILINE"), "Multiline nested secret must be redacted: {}", nested_multiline);
+        let nested_multiline = sanitize_lifecycle_field(
+            "\"secret\": {\n  \"l1\": {\n    \"l2\": \"CANARY_MULTILINE\"\n  }\n}",
+        );
+        assert!(
+            !nested_multiline.contains("CANARY_MULTILINE"),
+            "Multiline nested secret must be redacted: {}",
+            nested_multiline
+        );
         assert!(nested_multiline.contains("\"secret\": [REDACTED]"));
 
         // Already redacted strings should not be corrupted
@@ -8997,8 +10224,12 @@ mod version_verification_tests {
             files_before_final_start: Arc<std::sync::Mutex<Vec<(String, String)>>>,
         }
         impl LifecycleBackend for PostCertFailBackend {
-            fn runtime_port(&self, _: &str) -> i32 { 8384 }
-            fn available_port(&self, _: i32) -> bool { true }
+            fn runtime_port(&self, _: &str) -> i32 {
+                8384
+            }
+            fn available_port(&self, _: i32) -> bool {
+                true
+            }
             fn active<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<bool>> {
                 Box::pin(async { Ok(true) })
             }
@@ -9013,7 +10244,12 @@ mod version_verification_tests {
                 };
                 Box::pin(async move { Ok(is_q) })
             }
-            fn control<'a>(&'a self, _: &'a str, action: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            fn control<'a>(
+                &'a self,
+                _: &'a str,
+                action: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<()>> {
                 let r = self.root.clone();
                 let acts = self.actions.clone();
                 let files_rec = self.files_before_final_start.clone();
@@ -9021,13 +10257,25 @@ mod version_verification_tests {
                 Box::pin(async move {
                     acts.lock().unwrap().push(action_str.clone());
                     if action_str == "start" {
-                        let total_starts = acts.lock().unwrap().iter().filter(|a| a.as_str() == "start").count();
+                        let total_starts = acts
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|a| a.as_str() == "start")
+                            .count();
                         if total_starts >= 2 {
                             // This is the post-rollback restart!
-                            let bin = std::fs::read_to_string(r.join("opt/syncthing/syncthing")).unwrap_or_default();
-                            let usr_bin = std::fs::read_to_string(r.join("usr/local/bin/syncthing")).unwrap_or_default();
-                            let cfg = std::fs::read_to_string(r.join("var/lib/syncthing/config.txt")).unwrap_or_default();
-                            let ver = std::fs::read_to_string(r.join("var/lib/syncthing/.af-version")).unwrap_or_default();
+                            let bin = std::fs::read_to_string(r.join("opt/syncthing/syncthing"))
+                                .unwrap_or_default();
+                            let usr_bin =
+                                std::fs::read_to_string(r.join("usr/local/bin/syncthing"))
+                                    .unwrap_or_default();
+                            let cfg =
+                                std::fs::read_to_string(r.join("var/lib/syncthing/config.txt"))
+                                    .unwrap_or_default();
+                            let ver =
+                                std::fs::read_to_string(r.join("var/lib/syncthing/.af-version"))
+                                    .unwrap_or_default();
                             let mut lock = files_rec.lock().unwrap();
                             *lock = vec![
                                 ("bin".into(), bin),
@@ -9040,12 +10288,17 @@ mod version_verification_tests {
                     Ok(())
                 })
             }
-            fn script<'a>(&'a self, _: &'a PackageRunnerRequest, _: &'a mpsc::Sender<String>) -> BoxFuture<'a, Result<()>> {
+            fn script<'a>(
+                &'a self,
+                _: &'a PackageRunnerRequest,
+                _: &'a mpsc::Sender<String>,
+            ) -> BoxFuture<'a, Result<()>> {
                 let r = self.root.clone();
                 Box::pin(async move {
                     std::fs::write(r.join("opt/syncthing/syncthing"), b"bin-1.23.4").unwrap();
                     std::fs::write(r.join("usr/local/bin/syncthing"), b"bin-1.23.4").unwrap();
-                    std::fs::write(r.join("var/lib/syncthing/config.txt"), b"state-1.23.4").unwrap();
+                    std::fs::write(r.join("var/lib/syncthing/config.txt"), b"state-1.23.4")
+                        .unwrap();
                     std::fs::write(r.join("var/lib/syncthing/.af-version"), b"1.23.4\n").unwrap();
                     Ok(())
                 })
@@ -9069,10 +10322,14 @@ mod version_verification_tests {
             ..Default::default()
         };
 
-        let mut op = CoordinatedOperation::admit(conn, req, package, vec!["syncthing".into()]).unwrap();
+        let mut op =
+            CoordinatedOperation::admit(conn, req, package, vec!["syncthing".into()]).unwrap();
         let (sender, _receiver) = mpsc::channel(32);
         let receipt = op.execute(&backend, &sender).await.unwrap();
-        assert_eq!(receipt.status, "failed", "Execute must mark receipt as failed when certification fails");
+        assert_eq!(
+            receipt.status, "failed",
+            "Execute must mark receipt as failed when certification fails"
+        );
 
         // Verify BEFORE final restart:
         let recorded = files_before_final_start.lock().unwrap().clone();
@@ -9089,16 +10346,26 @@ mod version_verification_tests {
 
         // Verify on disk afterward:
         assert_eq!(std::fs::read_to_string(&bin_file).unwrap(), "bin-1.22.0");
-        assert_eq!(std::fs::read_to_string(&usr_bin_file).unwrap(), "bin-1.22.0");
-        assert_eq!(std::fs::read_to_string(&config_txt).unwrap(), "state-1.22.0");
-        assert_eq!(std::fs::read_to_string(&receipt_file).unwrap().trim(), "1.22.0");
+        assert_eq!(
+            std::fs::read_to_string(&usr_bin_file).unwrap(),
+            "bin-1.22.0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_txt).unwrap(),
+            "state-1.22.0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&receipt_file).unwrap().trim(),
+            "1.22.0"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn test_filebot_receipt_resolution_prefers_filebot_node_over_cli() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-filebot-receipt-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-filebot-receipt-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -9129,12 +10396,21 @@ mod version_verification_tests {
         let paths = candidate_version_marker_paths_with_env("filebot", &env_cfg).unwrap();
         let node_path = temp_dir.join("opt/filebot-node/.af-version");
         let cli_path = temp_dir.join("opt/filebot/.af-version");
-        assert!(paths.contains(&node_path), "Must contain /opt/filebot-node/.af-version");
-        assert!(paths.contains(&cli_path), "Must contain /opt/filebot/.af-version");
+        assert!(
+            paths.contains(&node_path),
+            "Must contain /opt/filebot-node/.af-version"
+        );
+        assert!(
+            paths.contains(&cli_path),
+            "Must contain /opt/filebot/.af-version"
+        );
 
         let node_idx = paths.iter().position(|p| p == &node_path).unwrap();
         let cli_idx = paths.iter().position(|p| p == &cli_path).unwrap();
-        assert!(node_idx < cli_idx, "/opt/filebot-node/.af-version must appear before /opt/filebot/.af-version");
+        assert!(
+            node_idx < cli_idx,
+            "/opt/filebot-node/.af-version must appear before /opt/filebot/.af-version"
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -9172,7 +10448,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave23_large_sparse_mutable_database_restored_on_mutation_and_deletion() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w23-sparse-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w23-sparse-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -9195,7 +10472,10 @@ mod version_verification_tests {
             let mut snap = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false).unwrap();
             {
                 use std::io::{Seek, SeekFrom, Write};
-                let mut f = std::fs::OpenOptions::new().write(true).open(&db_file).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&db_file)
+                    .unwrap();
                 f.write_all(b"NEW_DB02").unwrap();
                 f.seek(SeekFrom::Start(file_len - 8)).unwrap();
                 f.write_all(b"TRAILNEW").unwrap();
@@ -9244,7 +10524,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave23_catalog_footprint_plex_and_mcvnc_unit_restoration() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w23-footprint-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w23-footprint-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -9280,7 +10561,8 @@ mod version_verification_tests {
         std::fs::write(&mcvnc_unit, b"OLD_UNIT").unwrap();
 
         // Capture with &[] units (catalog expands mcvnc -> af-mcvnc.service)
-        let mut mcvnc_snap = PackageRuntimeSnapshot::capture("mcvnc", &[], &env_cfg, false).unwrap();
+        let mut mcvnc_snap =
+            PackageRuntimeSnapshot::capture("mcvnc", &[], &env_cfg, false).unwrap();
         std::fs::write(&mcvnc_unit, b"NEW_UNIT").unwrap();
         mcvnc_snap.restore().expect("mcvnc restore must succeed");
         assert_eq!(std::fs::read(&mcvnc_unit).unwrap(), b"OLD_UNIT");
@@ -9303,18 +10585,28 @@ mod version_verification_tests {
             sanitized1
         );
 
-        let input2 = r#"curl -H "Set-Cookie: token=\"COOKIE_CANARY\"; Path=/" https://example.invalid"#;
+        let input2 =
+            r#"curl -H "Set-Cookie: token=\"COOKIE_CANARY\"; Path=/" https://example.invalid"#;
         let sanitized2 = sanitize_lifecycle_field(input2);
-        assert!(!sanitized2.contains("COOKIE_CANARY"), "Set-Cookie canary must be redacted: {}", sanitized2);
+        assert!(
+            !sanitized2.contains("COOKIE_CANARY"),
+            "Set-Cookie canary must be redacted: {}",
+            sanitized2
+        );
 
         let input3 = r#"{"args": ["curl", "-H", "Cookie: sid=\"COOKIE_CANARY\""]}"#;
         let sanitized3 = sanitize_lifecycle_field(input3);
-        assert!(!sanitized3.contains("COOKIE_CANARY"), "JSON escaped cookie must be redacted: {}", sanitized3);
+        assert!(
+            !sanitized3.contains("COOKIE_CANARY"),
+            "JSON escaped cookie must be redacted: {}",
+            sanitized3
+        );
     }
 
     #[test]
     fn test_wave23_runtime_restore_failure_never_rewinds_embedded_receipt() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w23-receipt-gate-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w23-receipt-gate-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
@@ -9342,13 +10634,15 @@ mod version_verification_tests {
 
         // Direct rt.restore() must fail
         let res = rt.restore();
-        assert!(res.is_err(), "rt.restore must fail when ancestor is blocked");
+        assert!(
+            res.is_err(),
+            "rt.restore must fail when ancestor is blocked"
+        );
 
         // .af-version MUST still be "2.0.0\n" (never rewound to 1.0.0!)
         let current_receipt = std::fs::read_to_string(&receipt_file).unwrap();
         assert_eq!(
-            current_receipt,
-            "2.0.0\n",
+            current_receipt, "2.0.0\n",
             "Receipt must NOT be rewound when runtime restore fails!"
         );
 
@@ -9365,7 +10659,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave24_merged_usr_catalog_capture_and_restore() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w24-merged-usr-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w24-merged-usr-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         merged_usr_aliases(&temp_dir);
         let mut env_cfg = crate::PackageExecutionEnv::default();
@@ -9378,7 +10673,11 @@ mod version_verification_tests {
         let catalog: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
         let names: Vec<String> = catalog
             .iter()
-            .filter_map(|pkg| pkg.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .filter_map(|pkg| {
+                pkg.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert!(
             names.len() >= 70,
@@ -9406,8 +10705,9 @@ mod version_verification_tests {
         std::fs::create_dir_all(opt_bin.parent().unwrap()).unwrap();
         std::fs::write(&opt_bin, b"OLD_BIN").unwrap();
 
-        let mut snap = PackageRuntimeSnapshot::capture("sonarr", &["sonarr.service".into()], &env_cfg, false)
-            .expect("sonarr capture on merged-/usr");
+        let mut snap =
+            PackageRuntimeSnapshot::capture("sonarr", &["sonarr.service".into()], &env_cfg, false)
+                .expect("sonarr capture on merged-/usr");
         let lib_prefix = temp_dir.join("lib");
         for entry in &snap.entries {
             let target = match entry {
@@ -9444,15 +10744,28 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave24_installer_footprint_round_trip() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w24-footprint-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w24-footprint-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
 
         let files = [
-            ("grafana", "usr/share/grafana/public/build/app.js", "OLD_GRAFANA"),
-            ("jellyfin", "usr/share/jellyfin/web/index.html", "OLD_JELLYFIN"),
+            (
+                "grafana",
+                "usr/share/grafana/public/build/app.js",
+                "OLD_GRAFANA",
+            ),
+            (
+                "jellyfin",
+                "usr/share/jellyfin/web/index.html",
+                "OLD_JELLYFIN",
+            ),
             ("netdata", "usr/sbin/netdata", "OLD_NETDATA_BIN"),
-            ("netdata", "usr/libexec/netdata/plugins.d/apps.plugin", "OLD_NETDATA_PLUGIN"),
+            (
+                "netdata",
+                "usr/libexec/netdata/plugins.d/apps.plugin",
+                "OLD_NETDATA_PLUGIN",
+            ),
             ("kasmvnc", "usr/share/kasmvnc/www/vnc.html", "OLD_KASM_WWW"),
             ("kasmvnc", "usr/bin/Xvnc", "OLD_XVNC"),
         ];
@@ -9475,7 +10788,8 @@ mod version_verification_tests {
             std::fs::write(&path, b"NEW").unwrap();
         }
         for (pkg, mut snap) in snaps {
-            snap.restore().unwrap_or_else(|e| panic!("{pkg} restore failed: {e}"));
+            snap.restore()
+                .unwrap_or_else(|e| panic!("{pkg} restore failed: {e}"));
         }
         for (_, rel, body) in files {
             let path = temp_dir.join(rel);
@@ -9491,7 +10805,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave24_unreadable_database_never_yields_partial_snapshot() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w24-perm-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w24-perm-{}", uuid::Uuid::new_v4()));
         let mut env_cfg = crate::PackageExecutionEnv::default();
         env_cfg.fs_root = Some(temp_dir.clone());
         let db_dir = temp_dir.join("var/lib/sonarr");
@@ -9514,16 +10829,19 @@ mod version_verification_tests {
                     .expect("unreadable database must remain on disk");
                 assert!(meta.is_file());
                 assert_eq!(meta.len(), b"SECRETDB".len() as u64);
-                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o644)).unwrap();
+                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
                 assert_eq!(std::fs::read(&protected).unwrap(), b"SECRETDB");
-                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000)).unwrap();
+                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000))
+                    .unwrap();
             } else {
                 let mut snap = captured.expect("root can read mode 000");
                 std::fs::remove_file(&protected).unwrap();
                 snap.restore().expect("root restore keeps the database");
                 assert_eq!(std::fs::read(&protected).unwrap(), b"SECRETDB");
                 std::fs::write(&protected, b"SECRETDB").unwrap();
-                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000)).unwrap();
+                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000))
+                    .unwrap();
             }
         }
         let _ = std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o644));
@@ -9573,10 +10891,14 @@ mod version_verification_tests {
 
         let json_password = "AF_DIAG_FAILURE={\"stage\": \"password=[REDACTED]\\\"SECRET words\\\\\\\"\", \"status\": \"ok\"}";
         let sanitized_password = sanitize_lifecycle_field(json_password);
-        assert!(!sanitized_password.contains("SECRET"), "{sanitized_password}");
+        assert!(
+            !sanitized_password.contains("SECRET"),
+            "{sanitized_password}"
+        );
         let payload = sanitized_password.trim_start_matches("AF_DIAG_FAILURE=");
-        serde_json::from_str::<serde_json::Value>(payload)
-            .unwrap_or_else(|e| panic!("password diagnostic is not JSON ({e}): {sanitized_password}"));
+        serde_json::from_str::<serde_json::Value>(payload).unwrap_or_else(|e| {
+            panic!("password diagnostic is not JSON ({e}): {sanitized_password}")
+        });
 
         let json_user = "AF_DIAG_FAILURE={\"stage\": \"--user [REDACTED]\\\"user:SECRET words\\\\\\\"\", \"status\": \"ok\"}";
         let sanitized_user = sanitize_lifecycle_field(json_user);
@@ -9610,7 +10932,8 @@ mod version_verification_tests {
 
     #[test]
     fn test_wave25_capture_failure_drops_orphan_backup_root() {
-        let temp_dir = std::env::temp_dir().join(format!("af-test-w25-orphan-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("af-test-w25-orphan-{}", uuid::Uuid::new_v4()));
         let snap_tmp = temp_dir.join("snap-tmp");
         std::fs::create_dir_all(&snap_tmp).unwrap();
         let mut env_cfg = crate::PackageExecutionEnv::default();
@@ -9638,8 +10961,14 @@ mod version_verification_tests {
         std::os::unix::fs::symlink(&etc_real, &etc_parent).unwrap();
         let err = PackageRuntimeSnapshot::capture("sonarr", &[], &env_cfg, false)
             .expect_err("symlink ancestor must fail capture even as root");
-        assert!(err.to_ascii_lowercase().contains("symlink"), "unexpected capture failure: {err}");
-        assert!(err.contains("/etc"), "failure must follow capture of /opt/sonarr: {err}");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected capture failure: {err}"
+        );
+        assert!(
+            err.contains("/etc"),
+            "failure must follow capture of /opt/sonarr: {err}"
+        );
         let after = sonarr_runtime_snap_dirs_in(&snap_tmp);
         assert!(
             after.is_empty(),
@@ -9663,7 +10992,9 @@ mod version_verification_tests {
         std::fs::remove_dir_all(&opt).unwrap();
         std::fs::remove_dir_all(&opt_parent).unwrap();
         std::fs::write(&opt_parent, b"not-a-directory").unwrap();
-        let restore_err = snap.restore().expect_err("non-directory ancestor must fail restore");
+        let restore_err = snap
+            .restore()
+            .expect_err("non-directory ancestor must fail restore");
         assert!(
             snap.preserve_on_drop,
             "incomplete restore must preserve backup_root, err={restore_err}"
@@ -9718,7 +11049,9 @@ mod version_verification_tests {
             "curl --password [REDACTED] --verbose"
         );
         assert_eq!(
-            sanitize_lifecycle_field("curl --user operator:prefix\\ SENTINEL https://example.invalid"),
+            sanitize_lifecycle_field(
+                "curl --user operator:prefix\\ SENTINEL https://example.invalid"
+            ),
             "curl --user [REDACTED] https://example.invalid"
         );
         assert_eq!(
@@ -9774,7 +11107,10 @@ mod version_verification_tests {
 
         let closer = r#"{"note":"--password [REDACTED]\" https://example.invalid"}"#;
         let closer_out = sanitize_lifecycle_field(closer);
-        assert!(closer_out.contains("https://example.invalid"), "{closer_out}");
+        assert!(
+            closer_out.contains("https://example.invalid"),
+            "{closer_out}"
+        );
         assert!(!closer_out.contains("SENTINEL"), "{closer_out}");
         serde_json::from_str::<serde_json::Value>(&closer_out)
             .unwrap_or_else(|e| panic!("closer JSON broken ({e}): {closer_out}"));

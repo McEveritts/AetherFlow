@@ -91,15 +91,15 @@ tools should not copy `.deployment.json` into `.recovery_state.json`.
 ## Documented Parity Gaps & Intentional Boundaries
 
 1. **`--from-source` Fallback Mode (`ReleaseError::Unsupported`)**:
-   - `deploy/release-manager.sh --from-source` runs `git fetch`, `rsync`, `npm ci && npm run build`, and `cargo build --release` or `go build` on the target host.
-   - `af-release` intentionally rejects `--from-source` with `ReleaseError::Unsupported` (`ExitCode::ConfigurationOrUsageError = 4`) to enforce the v4.0 pull-based, SHA-256-verified single-binary architecture and avoid requiring Node.js/Rust/Go toolchains on production hosts. Callers needing an emergency source build should invoke `deploy/release-manager.sh --from-source` directly (checked via [`is_unsupported_error`]).
+   - `deploy/release-manager.sh --from-source` runs `git fetch`, `rsync`, `npm ci && NEXT_STATIC_EXPORT=1 npm run build`, and `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend` on the target host.
+   - `af-release` intentionally rejects `--from-source` with `ReleaseError::Unsupported` (`ExitCode::ConfigurationOrUsageError = 4`) to enforce the v4.0 pull-based, SHA-256-verified single-binary architecture and avoid requiring Node.js/Rust toolchains on production hosts. Callers needing an emergency source build should invoke `deploy/release-manager.sh --from-source` directly (checked via [`is_unsupported_error`]).
 2. **OS User Ownership (`chown aetherflow:aetherflow`)**:
    - `af-release` enforces `0700` directory permissions on `DATA_DIR` and `data-snapshot/`, and `0600` file permissions **before writing** on SQLite databases, snapshots, manifests, recovery journals, and `.env` files on Unix.
    - During Stage 0 migration and Stage 4 database restore, `af-release` preserves existing `(uid, gid)` metadata from the previous database/secret file or resolves the `aetherflow` service user via `getpwnam_r` (`lchown`) so files created while running as `root` (`af-runner`) remain readable by `User=aetherflow` (`aetherflow-api.service`).
 3. **Parent Workspace & Runner Integration (`af-runner` & `af-api`)**:
    - `crates/af-release` is registered in `backend-rs/Cargo.toml` and wired into `af-runner/src/lib.rs` (`handle_self_update`), `af-api/src/storage.rs` (`run_update`), and `af-cli` (`af release`).
    - `handle_self_update` validates incoming requests with `af_release::validate_self_update_request(&req)` (supporting `stable` and `nightly` channels) and executes `af_release::execute_self_update_sync` inside `tokio::task::spawn_blocking` when `AETHERFLOW_USE_RUST_RELEASE=1` is set (or when `deploy/release-manager.sh` is absent), with automatic fallback to `deploy/release-manager.sh` in its detached cgroup.
-   - `artifact::prepare_release_permissions` normalizes executable permissions (`0755`) on `aetherflow-api`, `af` (`bin/af`), `deploy/release-manager.sh`, `packages/system/*`, and `packages/package/{install,remove,update}/*` after extraction, and `ReqwestArtifactProvider` falls back to `/releases/latest` HTTP redirect location headers when the GitHub JSON API is rate-limited on the `stable` channel.
+   - `artifact::prepare_release_permissions` normalizes executable permissions (`0755`) on `aetherflow-api`, `af` (`bin/af`), `speedtest-backend` (`bin/speedtest-backend`), `deploy/release-manager.sh`, `deploy/verify-provenance.py`, `deploy/log-retention.py`, `packages/system/*`, and `packages/package/{install,remove,update}/*` after extraction, and `ReqwestArtifactProvider` falls back to `/releases/latest` HTTP redirect location headers when the GitHub JSON API is rate-limited on the `stable` channel.
 
 ## Isolated Linux Validation
 

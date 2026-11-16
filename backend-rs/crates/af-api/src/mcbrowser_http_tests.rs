@@ -311,13 +311,20 @@ async fn disposable_mcbrowser_transport_server() {
     let browser_acceptance = env::var("AF_MCBROWSER_BROWSER_ACCEPTANCE").as_deref() == Ok("1");
     if browser_acceptance {
         let connection = af_db::get_conn().unwrap();
-        connection.execute_batch(
-            "INSERT OR IGNORE INTO users (id, username, role) VALUES (1, 'alice', 'user');
+        connection
+            .execute_batch(
+                "INSERT OR IGNORE INTO users (id, username, role) VALUES (1, 'alice', 'user');
              INSERT OR IGNORE INTO user_quotas (user_id, username, quota_bytes, used_bytes, status)
              VALUES (1, 'alice', 1073741824, 0, 'active');",
-        ).unwrap();
+            )
+            .unwrap();
         policy::ensure_policy_tables(&connection).unwrap();
-        connection.execute("INSERT OR IGNORE INTO mcbrowser_policies (user_id, perm_execute) VALUES (1, 1)", []).unwrap();
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO mcbrowser_policies (user_id, perm_execute) VALUES (1, 1)",
+                [],
+            )
+            .unwrap();
     }
     let mut application = Router::new().nest(
         "/api/v1/auth",
@@ -2369,9 +2376,15 @@ async fn mounted_delete_and_recursive_delete_preserve_accounting_pending_and_pen
     )
     .await;
     assert_eq!(delete_single.status(), StatusCode::OK);
-    let single_payload: serde_json::Value =
-        serde_json::from_slice(&delete_single.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let single_payload: serde_json::Value = serde_json::from_slice(
+        &delete_single
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(
         single_payload,
         serde_json::json!({ "success": true, "accounting_pending": true })
@@ -2405,9 +2418,15 @@ async fn mounted_delete_and_recursive_delete_preserve_accounting_pending_and_pen
     )
     .await;
     assert_eq!(partial_abort.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let partial_abort_payload: serde_json::Value =
-        serde_json::from_slice(&partial_abort.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let partial_abort_payload: serde_json::Value = serde_json::from_slice(
+        &partial_abort
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(partial_abort_payload["code"], "ACCOUNTING_PENDING");
     assert!(!fixture.user_root().join("partial_abort/first.txt").exists());
     assert!(fixture.user_root().join("partial_abort").exists());
@@ -2435,7 +2454,10 @@ async fn mounted_delete_and_recursive_delete_preserve_accounting_pending_and_pen
     )
     .await;
     assert_eq!(partial_clean.status(), StatusCode::FORBIDDEN);
-    assert!(!fixture.user_root().join("partial_clean/second.txt").exists());
+    assert!(!fixture
+        .user_root()
+        .join("partial_clean/second.txt")
+        .exists());
     assert!(fixture.user_root().join("partial_clean").exists());
     assert_eq!(fixture.used_bytes(), 30);
 
@@ -2549,9 +2571,15 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
     )
     .await;
     assert_eq!(copy_file_alias.status(), StatusCode::OK);
-    let copy_file_payload: serde_json::Value =
-        serde_json::from_slice(&copy_file_alias.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let copy_file_payload: serde_json::Value = serde_json::from_slice(
+        &copy_file_alias
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(copy_file_payload["from"], "note-alias.txt");
     assert_eq!(copy_file_payload["to"], "copied-note.txt");
     assert_eq!(copy_file_payload["path"], "copied-note.txt");
@@ -2573,9 +2601,15 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
     )
     .await;
     assert_eq!(copy_keep_both.status(), StatusCode::OK);
-    let keep_both_payload: serde_json::Value =
-        serde_json::from_slice(&copy_keep_both.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let keep_both_payload: serde_json::Value = serde_json::from_slice(
+        &copy_keep_both
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(keep_both_payload["path"], "copied-note(1).txt");
     assert_eq!(fixture.used_bytes(), 36);
 
@@ -2607,12 +2641,21 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
     assert_eq!(copy_bundle.status(), StatusCode::OK);
     assert_eq!(fixture.used_bytes(), 63);
     assert_eq!(
-        fs::read_to_string(fixture.user_root().join("copied-bundle/nested/linked-note.txt"))
-            .unwrap(),
+        fs::read_to_string(
+            fixture
+                .user_root()
+                .join("copied-bundle/nested/linked-note.txt")
+        )
+        .unwrap(),
         "hello"
     );
     assert_eq!(
-        fs::read_to_string(fixture.user_root().join("copied-bundle/linked-sub/deep.txt")).unwrap(),
+        fs::read_to_string(
+            fixture
+                .user_root()
+                .join("copied-bundle/linked-sub/deep.txt")
+        )
+        .unwrap(),
         "world!"
     );
 
@@ -2638,9 +2681,15 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
     )
     .await;
     assert_eq!(overwrite_shrink.status(), StatusCode::OK);
-    let shrink_payload: serde_json::Value =
-        serde_json::from_slice(&overwrite_shrink.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let shrink_payload: serde_json::Value = serde_json::from_slice(
+        &overwrite_shrink
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(shrink_payload["from"], "note-alias.txt");
     assert_eq!(shrink_payload["to"], "shrink-target.txt");
     assert_eq!(shrink_payload["accounting_pending"], false);
@@ -2678,9 +2727,15 @@ async fn mounted_confined_alias_copy_enforces_policy_hops_conflicts_quota_and_au
     )
     .await;
     assert_eq!(pending_shrink.status(), StatusCode::OK);
-    let pending_payload: serde_json::Value =
-        serde_json::from_slice(&pending_shrink.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
+    let pending_payload: serde_json::Value = serde_json::from_slice(
+        &pending_shrink
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
     assert_eq!(pending_payload["accounting_pending"], true);
     assert_eq!(
         fs::read_to_string(fixture.user_root().join("pending-shrink.txt")).unwrap(),

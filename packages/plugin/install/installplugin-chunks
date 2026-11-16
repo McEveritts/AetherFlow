@@ -20,57 +20,65 @@
 #   under the GPL along with build & install instructions.
 #
 
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-  # shellcheck source=/dev/null
-  source /opt/AetherFlow/packages/common.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
   # shellcheck source=/dev/null
   source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/current/packages/common.sh
+elif [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
 fi
 OUTTO="${LOGFILE:-/var/log/aetherflow/install.log}"
+LOGFILE="${OUTTO}"
+af_prepare_logfile_path "${LOGFILE}"
 rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 function _installplugin-chunks() {
   username=$(whoami);
   rutorrent="${rutorrent:-/var/www/rutorrent/}"
   PLUGIN="chunks"
-  echo "Accessing $PLUGIN in the plugin vault ... " >>"${OUTTO}" 2>&1;
-  PLUGINVAULT="/etc/AetherFlow/rtplugins/"
+  log "Accessing $PLUGIN in the plugin vault ... "
+  PLUGINVAULT="${PLUGINVAULT:-/etc/AetherFlow/rtplugins/}"
   mkdir -p "${rutorrent}plugins"
   cd "${rutorrent}plugins"
 
-  echo "Installing $PLUGIN plugin ... " >>"${OUTTO}" 2>&1;
+  log "Installing $PLUGIN plugin ... "
   for i in $PLUGIN; do
     if [[ -d "${PLUGINVAULT}$i" ]]; then
       cp -R "${PLUGINVAULT}$i" .
     elif [[ -d "${rutorrent}plugins/$i" ]]; then
-      echo "Plugin $i is already present in ${rutorrent}plugins" >>"${OUTTO}" 2>&1
+      log "Plugin $i is already present in ${rutorrent}plugins"
     else
-      echo "Plugin vault directory not found: ${PLUGINVAULT}$i. Attempting fallback clone..." >>"${OUTTO}" 2>&1
-      tmp_git="/tmp/rutorrent-git-$$"
-      if git clone --depth 1 https://github.com/Novik/ruTorrent.git "$tmp_git" >>"${OUTTO}" 2>&1; then
-        if [[ -d "${tmp_git}/plugins/$i" ]]; then
-          cp -R "${tmp_git}/plugins/$i" .
+      log "Plugin vault directory not found: ${PLUGINVAULT}$i. Attempting fallback clone..."
+      tmp_git="$(mktemp -d "${TMPDIR:-/tmp}/rutorrent-git.XXXXXXXXXX")"
+      trap '[[ -n "${tmp_git:-}" ]] && rm -rf "${tmp_git}"' RETURN
+      if af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "${tmp_git}/repo"; then
+        if [[ -d "${tmp_git}/repo/plugins/$i" ]]; then
+          cp -R "${tmp_git}/repo/plugins/$i" .
         fi
         rm -rf "$tmp_git"
+        tmp_git=""
       else
         rm -rf "$tmp_git"
-        echo "Warning: Plugin vault missing and upstream fallback unavailable for $i" >>"${OUTTO}" 2>&1
+        tmp_git=""
+        log "Warning: Plugin vault missing and upstream fallback unavailable for $i"
       fi
     fi
   done
 
-  echo "Adjusting permissions ... " >>"${OUTTO}" 2>&1;
+  log "Adjusting permissions ... "
   for i in $PLUGIN; do
     if [[ -d "${rutorrent}plugins/$i" ]]; then
-      chown -R www-data: "${rutorrent}plugins/$i" 2>>"${OUTTO}" || true
+      af_logged_stderr chown -R www-data: "${rutorrent}plugins/$i" || true
     fi
   done
-  echo "$PLUGIN Plugin Install Complete!" >>"${OUTTO}" 2>&1;
+  log "$PLUGIN Plugin Install Complete!"
 
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
+  log ""
+  log ""
+  log "Close this dialog box to refresh your browser"
 
   exit 0
 }

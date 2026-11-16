@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardware & System Telemetry Models (`backend/models/hardware.go` & `models.go`)
+// Hardware & System Telemetry Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -113,7 +113,7 @@ pub struct SystemMetrics {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// User, Session & Ingress Models (`backend/models/user.go` & `models.go`)
+// User, Session & Ingress Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -157,7 +157,7 @@ impl Default for AppIngressConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Marketplace & Package Automation Models (`backend/models/package.go`)
+// Marketplace & Package Automation Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -392,7 +392,7 @@ pub struct PackageJobOutcomeRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Privileged Runner IPC Models (`backend/services/privileged_runner.go`)
+// Privileged Runner IPC Models
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -881,7 +881,11 @@ where
         if !trimmed_file.is_empty() {
             let env_file_path = std::path::PathBuf::from(trimmed_file);
             if let Some(root_path) = isolated_root {
-                validate_path_within_isolated_root(&env_file_path, root_path, "AETHERFLOW_ENV_FILE")?;
+                validate_path_within_isolated_root(
+                    &env_file_path,
+                    root_path,
+                    "AETHERFLOW_ENV_FILE",
+                )?;
             }
             candidate_files.push(env_file_path);
         }
@@ -985,21 +989,22 @@ where
         .map(|raw_dir| raw_dir.trim().to_string())
         .filter(|trimmed_dir| !trimmed_dir.is_empty());
 
-    let custom_non_default_data_dir = configured_data_dir
-        .as_deref()
-        .filter(|dir_str| normalize_path_for_comparison(std::path::Path::new(dir_str)) != "/var/lib/aetherflow");
+    let custom_non_default_data_dir = configured_data_dir.as_deref().filter(|dir_str| {
+        normalize_path_for_comparison(std::path::Path::new(dir_str)) != "/var/lib/aetherflow"
+    });
 
-    let file_has_explicit_default_db = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"]
-        .iter()
-        .any(|key| {
-            file_env_map
-                .get(*key)
-                .map(|val| {
-                    normalize_path_for_comparison(std::path::Path::new(val.trim()))
-                        == "/var/lib/aetherflow/aetherflow.sqlite"
-                })
-                .unwrap_or(false)
-        });
+    let file_has_explicit_default_db =
+        ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"]
+            .iter()
+            .any(|key| {
+                file_env_map
+                    .get(*key)
+                    .map(|val| {
+                        normalize_path_for_comparison(std::path::Path::new(val.trim()))
+                            == "/var/lib/aetherflow/aetherflow.sqlite"
+                    })
+                    .unwrap_or(false)
+            });
 
     if let Some((first_key, first_path)) = db_overrides.first() {
         let first_norm = normalize_path_for_comparison(first_path);
@@ -1018,7 +1023,10 @@ where
         let is_legacy_unit_default_db = first_norm == "/var/lib/aetherflow/aetherflow.sqlite"
             && *first_key != "AF_DB_PATH"
             && !file_has_explicit_default_db;
-        if !(is_legacy_unit_default_db && custom_non_default_data_dir.is_some() && isolated_root.is_none()) {
+        if !(is_legacy_unit_default_db
+            && custom_non_default_data_dir.is_some()
+            && isolated_root.is_none())
+        {
             if let Some(ref root_path) = isolated_root {
                 return validate_path_within_isolated_root(first_path, root_path, first_key);
             }
@@ -1095,7 +1103,8 @@ where
             {
                 return root_path.join("var/lib/aetherflow/aetherflow.sqlite");
             }
-            if let Some(root_path) = explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
+            if let Some(root_path) =
+                explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
             {
                 return root_path.join("var/lib/aetherflow/aetherflow.sqlite");
             }
@@ -1257,7 +1266,8 @@ where
             {
                 return root_path.join("var/lib/aetherflow/backups");
             }
-            if let Some(root_path) = explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
+            if let Some(root_path) =
+                explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
             {
                 return root_path.join("var/lib/aetherflow/backups");
             }
@@ -1332,9 +1342,11 @@ where
         &mut get_env,
     )?;
 
-    if let Some(val) = get_env("AETHERFLOW_MAINTENANCE_LOCK_PATH")
-        .or_else(|| file_env_map.get("AETHERFLOW_MAINTENANCE_LOCK_PATH").cloned())
-    {
+    if let Some(val) = get_env("AETHERFLOW_MAINTENANCE_LOCK_PATH").or_else(|| {
+        file_env_map
+            .get("AETHERFLOW_MAINTENANCE_LOCK_PATH")
+            .cloned()
+    }) {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             let candidate_lock = std::path::PathBuf::from(trimmed);
@@ -1422,8 +1434,7 @@ where
                 && !parent.as_os_str().is_empty()
             {
                 return Ok(map_default_lock_parent_to_shared_runtime_anchor(
-                    parent,
-                    None,
+                    parent, None,
                 ));
             }
         }
@@ -1541,7 +1552,8 @@ where
                     Some(&root_path),
                 );
             }
-            if let Some(root_path) = explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
+            if let Some(root_path) =
+                explicit_root.filter(|path_val| !path_val.as_os_str().is_empty())
             {
                 let isolated_var_lib = root_path.join("var/lib/aetherflow");
                 return map_default_lock_parent_to_shared_runtime_anchor(
@@ -1699,19 +1711,20 @@ mod tests {
     #[test]
     fn test_unified_db_backup_and_lock_path_resolution() {
         let mut env = HashMap::new();
-        env.insert("DB_PATH".to_string(), "/srv/custom/legacy.sqlite".to_string());
+        env.insert(
+            "DB_PATH".to_string(),
+            "/srv/custom/legacy.sqlite".to_string(),
+        );
         let db = try_resolve_active_db_path_with_env(None, "data/aetherflow.sqlite", |key| {
             env.get(key).cloned()
         })
         .unwrap();
         assert_eq!(db, std::path::PathBuf::from("/srv/custom/legacy.sqlite"));
 
-        let backup_dir = resolve_active_backup_dir_with_env(
-            None,
-            Some(&db),
-            "data/backups",
-            |key| env.get(key).cloned(),
-        );
+        let backup_dir =
+            resolve_active_backup_dir_with_env(None, Some(&db), "data/backups", |key| {
+                env.get(key).cloned()
+            });
         assert_eq!(backup_dir, std::path::PathBuf::from("/srv/custom/backups"));
 
         let lock_path = resolve_canonical_maintenance_lock_path_with_env(
@@ -1731,7 +1744,10 @@ mod tests {
         });
         assert!(conflict.is_err());
 
-        env.insert("AF_DB_PATH".to_string(), "/srv/custom/legacy.sqlite".to_string());
+        env.insert(
+            "AF_DB_PATH".to_string(),
+            "/srv/custom/legacy.sqlite".to_string(),
+        );
         let resolved_same =
             try_resolve_active_db_path_with_env(None, "data/aetherflow.sqlite", |key| {
                 env.get(key).cloned()
@@ -1808,10 +1824,7 @@ mod tests {
             Some(std::path::PathBuf::from("/srv/af/live.sqlite"))
         );
         assert_eq!(
-            resolve_contained_sqlite_restore_override(
-                std::path::Path::new("/"),
-                Some(custom_db)
-            ),
+            resolve_contained_sqlite_restore_override(std::path::Path::new("/"), Some(custom_db)),
             Some(std::path::PathBuf::from("/srv/af/live.sqlite"))
         );
         assert_eq!(
@@ -1859,7 +1872,9 @@ mod tests {
             error: "boom".to_string(),
             exit_code: Some(0),
         };
-        assert!(bad_failed_zero.validate_invariants(Some(valid_unit)).is_err());
+        assert!(bad_failed_zero
+            .validate_invariants(Some(valid_unit))
+            .is_err());
     }
 
     #[test]
@@ -1909,7 +1924,10 @@ mod tests {
         let req_json = serde_json::to_string(&req).unwrap();
         assert!(req_json.contains("expected_target_version"));
         let parsed: PackageRunnerRequest = serde_json::from_str(&req_json).unwrap();
-        assert_eq!(parsed.expected_target_version.as_deref(), Some("5.3.6.8612"));
+        assert_eq!(
+            parsed.expected_target_version.as_deref(),
+            Some("5.3.6.8612")
+        );
         assert_eq!(parsed.achieved_version.as_deref(), Some("5.3.6.8612"));
 
         let rec = PackageLifecycleRecord {
@@ -1927,7 +1945,10 @@ mod tests {
         };
         let rec_json = serde_json::to_string(&rec).unwrap();
         let parsed_rec: PackageLifecycleRecord = serde_json::from_str(&rec_json).unwrap();
-        assert_eq!(parsed_rec.failed_stage.as_deref(), Some("target_verification"));
+        assert_eq!(
+            parsed_rec.failed_stage.as_deref(),
+            Some("target_verification")
+        );
         assert_eq!(parsed_rec.exit_code, Some(1));
     }
 }

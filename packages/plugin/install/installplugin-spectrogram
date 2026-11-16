@@ -21,12 +21,15 @@
 
 # To get most output from commands that are run, set to nothing
 
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-  # shellcheck source=/dev/null
-  source /opt/AetherFlow/packages/common.sh
-elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
   # shellcheck source=/dev/null
   source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/current/packages/common.sh
+elif [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
 fi
 MIN_OUTPUT=  #yes
 
@@ -36,7 +39,7 @@ LOGFILE="${LOGFILE:-/srv/rutorrent/home/db/output.log}"
 rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 # Location of AetherFlow ruTorrent plugins on localhost
-PLUGINVAULT=/etc/AetherFlow/rtplugins/
+PLUGINVAULT="${PLUGINVAULT:-/etc/AetherFlow/rtplugins/}"
 
 # Plugin to install
 PLUGIN=spectrogram
@@ -49,7 +52,7 @@ _print() {
   if [[ -z "${USE_LOGFILE}" ]]; then
     echo "$1"
   else
-    echo "$1" >>"${LOGFILE}" 2>&1
+    log "$1"
   fi
 }
 
@@ -93,14 +96,17 @@ _installplugin-spectrogram() {
       _print "Plugin $i is already present in ${rutorrent}plugins"
     else
       _print "Plugin vault directory not found: ${PLUGINVAULT}$i. Attempting fallback clone..."
-      tmp_git="/tmp/rutorrent-git-$$"
-      if git clone --depth 1 https://github.com/Novik/ruTorrent.git "$tmp_git" >>"${LOGFILE}" 2>&1; then
-        if [[ -d "${tmp_git}/plugins/$i" ]]; then
-          cp -R "${tmp_git}/plugins/$i" .
+      tmp_git="$(mktemp -d "${TMPDIR:-/tmp}/rutorrent-git.XXXXXXXXXX")"
+      trap '[[ -n "${tmp_git:-}" ]] && rm -rf "${tmp_git}"' RETURN
+      if af_logged git clone --depth 1 https://github.com/Novik/ruTorrent.git "${tmp_git}/repo"; then
+        if [[ -d "${tmp_git}/repo/plugins/$i" ]]; then
+          cp -R "${tmp_git}/repo/plugins/$i" .
         fi
         rm -rf "$tmp_git"
+        tmp_git=""
       else
         rm -rf "$tmp_git"
+        tmp_git=""
         _print "Warning: Plugin vault missing and upstream fallback unavailable for $i"
       fi
     fi
@@ -109,7 +115,7 @@ _installplugin-spectrogram() {
   _print "Adjusting permissions ... "
   for i in $PLUGIN; do
     if [[ -d "${rutorrent}plugins/$i" ]]; then
-      chown -R www-data: "${rutorrent}plugins/$i" >>"${LOGFILE}" 2>&1 || true
+      af_logged chown -R www-data: "${rutorrent}plugins/$i" || true
     fi
   done
   _print "$PLUGIN Plugin Install Complete!"

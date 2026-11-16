@@ -19,6 +19,9 @@ export function getSystemMetrics(pluginId = '{{PLUGIN_ID}}'): Promise<SystemMetr
             }, 5000);
 
             function onMessage(event: MessageEvent) {
+                if (event.source !== window.parent) {
+                    return;
+                }
                 const msg = event.data || {};
                 if (msg.type === 'AF_PLUGIN_PROXY_RESPONSE' && (!msg.pluginId || msg.pluginId === pluginId)) {
                     window.clearTimeout(timeout);

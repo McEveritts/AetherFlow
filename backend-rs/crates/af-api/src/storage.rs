@@ -397,7 +397,7 @@ mod audit_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Backups, Chunked Upload/Download, Retention & Smart Schedule (`backup.go`)
+// 1. Backups, Chunked Upload/Download, Retention & Smart Schedule
 // ─────────────────────────────────────────────────────────────────────────────
 
 static VALID_BACKUP_FILENAME_RE: Lazy<Regex> =
@@ -430,6 +430,75 @@ struct BackupUploadSessionMeta {
     upload_id: String,
 }
 
+fn ensure_private_backup_dir(dir: &StdPath) -> anyhow::Result<()> {
+    use std::path::Component;
+    let mut acc = std::path::PathBuf::new();
+    for comp in dir.components() {
+        match comp {
+            Component::Prefix(p) => acc.push(p.as_os_str()),
+            Component::RootDir => acc.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "parent traversal rejected in backup directory {}",
+                    dir.display()
+                );
+            }
+            Component::Normal(part) => {
+                acc.push(part);
+                match fs::symlink_metadata(&acc) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            anyhow::bail!("symlink rejected in backup directory {}", acc.display());
+                        }
+                        if !meta.is_dir() {
+                            anyhow::bail!(
+                                "non-directory component in backup path {}",
+                                acc.display()
+                            );
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::DirBuilderExt;
+                            let mut builder = fs::DirBuilder::new();
+                            builder.mode(0o700);
+                            if let Err(mk_err) = builder.create(&acc) {
+                                if mk_err.kind() != std::io::ErrorKind::AlreadyExists {
+                                    return Err(mk_err.into());
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            fs::create_dir(&acc)?;
+                        }
+                        let meta = fs::symlink_metadata(&acc)?;
+                        if meta.file_type().is_symlink() || !meta.is_dir() {
+                            anyhow::bail!("invalid backup directory created at {}", acc.display());
+                        }
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    if !acc.as_os_str().is_empty() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = fs::symlink_metadata(&acc)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            anyhow::bail!("symlink or non-directory at backup root {}", acc.display());
+        }
+        let euid = unsafe { libc::geteuid() };
+        if (meta.mode() & 0o777) != 0o700 && (euid == 0 || meta.uid() == euid) {
+            fs::set_permissions(&acc, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 struct CrossProcessUploadLock {
     file: fs::File,
 }
@@ -437,17 +506,27 @@ struct CrossProcessUploadLock {
 impl CrossProcessUploadLock {
     fn acquire(lock_path: &StdPath) -> anyhow::Result<Self> {
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_private_backup_dir(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).read(true).write(true).truncate(false);
         #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = opts.open(lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
             use std::os::unix::io::AsRawFd;
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.nlink() != 1 {
+                anyhow::bail!(
+                    "upload lock {} must be a single-link regular file",
+                    lock_path.display()
+                );
+            }
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
             if rc != 0 {
                 return Err(anyhow::anyhow!(
@@ -629,6 +708,7 @@ struct CachedBackupVerification {
     verification: af_runner::af_host::ChecksumVerification,
     manifest: af_runner::af_host::BackupManifest,
 }
+#[allow(clippy::type_complexity)]
 static BACKUP_VERIFICATIONS: Lazy<
     Mutex<HashMap<(PathBuf, Option<u32>), CachedBackupVerification>>,
 > = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -751,15 +831,55 @@ fn backup_download_chunk(q: &HashMap<String, String>) -> anyhow::Result<Option<(
 }
 
 struct BackupReauth {
-    attempts: HashMap<i64, Vec<Instant>>,
+    next_id: u64,
+    attempts: HashMap<i64, Vec<(u64, Instant)>>,
     verified: HashMap<(i64, String, [u8; 32]), Instant>,
 }
 static BACKUP_REAUTH: Lazy<Mutex<BackupReauth>> = Lazy::new(|| {
     Mutex::new(BackupReauth {
+        next_id: 1,
         attempts: HashMap::new(),
         verified: HashMap::new(),
     })
 });
+
+fn reserve_backup_reauth_attempt(user_id: i64) -> Option<u64> {
+    let Ok(mut state) = BACKUP_REAUTH.lock() else {
+        return None;
+    };
+    let now = Instant::now();
+    state.attempts.retain(|_, entries| {
+        entries.retain(|(_, time)| now.duration_since(*time) < StdDuration::from_secs(60));
+        !entries.is_empty()
+    });
+    if state.attempts.get(&user_id).map_or(0, Vec::len) >= 10 {
+        return None;
+    }
+    if state.attempts.len() >= 4096 && !state.attempts.contains_key(&user_id) {
+        return None;
+    }
+    let attempt_id = state.next_id;
+    state.next_id = state.next_id.wrapping_add(1);
+    state
+        .attempts
+        .entry(user_id)
+        .or_default()
+        .push((attempt_id, now));
+    Some(attempt_id)
+}
+
+fn refund_backup_reauth_attempt(user_id: i64, attempt_id: u64) {
+    if let Ok(mut state) = BACKUP_REAUTH.lock() {
+        let mut remove_user = false;
+        if let Some(entries) = state.attempts.get_mut(&user_id) {
+            entries.retain(|(id, _)| *id != attempt_id);
+            remove_user = entries.is_empty();
+        }
+        if remove_user {
+            state.attempts.remove(&user_id);
+        }
+    }
+}
 
 fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &str) -> bool {
     let mut digest = Sha256::new();
@@ -771,33 +891,51 @@ fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &st
         session.to_string(),
         <[u8; 32]>::from(digest.finalize()),
     );
-    let Ok(mut state) = BACKUP_REAUTH.lock() else {
-        return false;
+    let reserved_id = {
+        let Ok(mut state) = BACKUP_REAUTH.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        state
+            .verified
+            .retain(|_, timestamp| now.duration_since(*timestamp) < StdDuration::from_secs(60));
+        if state.verified.contains_key(&key) {
+            return true;
+        }
+        state.attempts.retain(|_, entries| {
+            entries.retain(|(_, time)| now.duration_since(*time) < StdDuration::from_secs(60));
+            !entries.is_empty()
+        });
+        if state.attempts.get(&user_id).map_or(0, Vec::len) >= 10 {
+            return false;
+        }
+        if state.attempts.len() >= 4096 && !state.attempts.contains_key(&user_id) {
+            return false;
+        }
+        let attempt_id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        state
+            .attempts
+            .entry(user_id)
+            .or_default()
+            .push((attempt_id, now));
+        attempt_id
     };
-    let now = Instant::now();
-    state
-        .verified
-        .retain(|_, timestamp| now.duration_since(*timestamp) < StdDuration::from_secs(60));
-    if state.verified.contains_key(&key) {
-        return true;
-    }
-    state.attempts.retain(|_, entries| {
-        entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
-        !entries.is_empty()
-    });
-    let attempts = state.attempts.entry(user_id).or_default();
-    if attempts.len() >= 10 {
-        return false;
-    }
-    attempts.push(now);
-    drop(state);
     let valid = !hash.is_empty() && bcrypt::verify(password, hash).unwrap_or(false);
     if valid {
         if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            let mut remove_user = false;
+            if let Some(entries) = state.attempts.get_mut(&user_id) {
+                entries.retain(|(id, _)| *id != reserved_id);
+                remove_user = entries.is_empty();
+            }
+            if remove_user {
+                state.attempts.remove(&user_id);
+            }
             if state.verified.len() >= 1024 {
                 state.verified.clear();
             }
-            state.verified.insert(key, now);
+            state.verified.insert(key, Instant::now());
         }
     }
     valid
@@ -867,13 +1005,30 @@ fn backup_ticket_cookie(token: &str, max_age: i64) -> String {
     .replace("Path=/;", "Path=/api/v1/admin/backup/download/;")
 }
 
-async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool {
+async fn authorize_backup_password(
+    user: &AuthUser,
+    session_auth_time: Option<i64>,
+    headers: &HeaderMap,
+) -> bool {
     let password = headers
         .get("X-Reauth-Password")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    if password.is_empty() || password.len() > 1024 {
+    let totp_code = headers
+        .get("X-Reauth-TOTP")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let confirm_header = headers
+        .get("X-Reauth-Confirm")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let oauth_confirm = confirm_header.eq_ignore_ascii_case("oauth")
+        || confirm_header.eq_ignore_ascii_case("download-backup");
+    if password.len() > 1024 || totp_code.len() > 128 {
         return false;
     }
     let uid = user.user_id;
@@ -881,13 +1036,55 @@ async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool
     matches!(
         blocking_auth_work(move || -> anyhow::Result<bool> {
             let conn = af_db::get_read_conn()?;
-            let hash: String = conn.query_row(
-                "SELECT COALESCE(password_hash, '') FROM users WHERE id = ?1",
+            let (hash, totp_enabled): (String, i64) = conn.query_row(
+                "SELECT COALESCE(password_hash, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
                 params![uid],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            drop(conn);
-            Ok(verify_backup_password(uid, &session, &password, &hash))
+            if !hash.is_empty() {
+                drop(conn);
+                if password.is_empty() {
+                    let _ = reserve_backup_reauth_attempt(uid);
+                    return Ok(false);
+                }
+                return Ok(verify_backup_password(uid, &session, &password, &hash));
+            }
+            // Passwordless OAuth-only admin step-up path: atomically reserve an attempt slot first.
+            let Some(reserved_id) = reserve_backup_reauth_attempt(uid) else {
+                return Ok(false);
+            };
+            if totp_enabled != 0 {
+                drop(conn);
+                if totp_code.is_empty() {
+                    return Ok(false);
+                }
+                let ok = crate::auth::verify_user_totp_stepup(uid, &totp_code);
+                if ok {
+                    refund_backup_reauth_attempt(uid, reserved_id);
+                }
+                return Ok(ok);
+            }
+            if !oauth_confirm || session.trim().is_empty() {
+                return Ok(false);
+            }
+            let now = Utc::now().timestamp();
+            let Some(auth_ts) = session_auth_time else {
+                return Ok(false);
+            };
+            if auth_ts <= 0 || now.saturating_sub(auth_ts) > 300 || auth_ts > now + 60 {
+                return Ok(false);
+            }
+            let fresh_session: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND expires_at > ?3)",
+                    params![session, uid, now],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if fresh_session {
+                refund_backup_reauth_attempt(uid, reserved_id);
+            }
+            Ok(fresh_session)
         })
         .await,
         Ok(Ok(true))
@@ -908,7 +1105,11 @@ pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request)
             "Invalid backup path",
         );
     }
-    if !authorize_backup_password(&user, req.headers()).await {
+    let session_auth_time = req
+        .extensions()
+        .get::<crate::auth::SessionAuthTime>()
+        .map(|t| t.0);
+    if !authorize_backup_password(&user, session_auth_time, req.headers()).await {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -1107,7 +1308,13 @@ pub async fn download_backup(
     let ticket_authorized = ticket
         .as_deref()
         .is_some_and(|token| redeem_backup_download_ticket(token, &user, &filename));
-    if !ticket_authorized && !authorize_backup_password(&user, req.headers()).await {
+    let session_auth_time = req
+        .extensions()
+        .get::<crate::auth::SessionAuthTime>()
+        .map(|t| t.0);
+    if !ticket_authorized
+        && !authorize_backup_password(&user, session_auth_time, req.headers()).await
+    {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -1305,7 +1512,7 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
     };
     let session_key = format!("u{}-{}-{}", user_id, session_jti, upload_id);
 
-    if fs::create_dir_all(backup_dir).is_err() {
+    if ensure_private_backup_dir(backup_dir).is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1876,7 +2083,7 @@ pub async fn set_backup_schedule(Json(req): Json<serde_json::Value>) -> Response
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. FileShare Upload, Download, Delete & Quota Headroom (`fileshare.go`)
+// 2. FileShare Upload, Download, Delete & Quota Headroom
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MAX_UPLOAD_SIZE: usize = 50 * 1024 * 1024; // 50 MiB
@@ -2028,6 +2235,7 @@ static FILESHARE_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
 static FILESHARE_UPLOADS: Lazy<Mutex<HashMap<(i64, String), FileshareUpload>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[allow(clippy::too_many_arguments)]
 fn append_fileshare_chunk_with(
     sessions: &mut HashMap<(i64, String), FileshareUpload>,
     root: &StdPath,
@@ -2131,6 +2339,7 @@ fn append_fileshare_chunk_with(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn append_fileshare_chunk(
     sessions: &mut HashMap<(i64, String), FileshareUpload>,
     root: &StdPath,
@@ -2395,7 +2604,7 @@ pub async fn delete_shared_file(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Storage Quotas (`quota_handlers.go` & `quota_manager.go`)
+// 3. Storage Quotas
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2603,7 +2812,7 @@ pub async fn refresh_user_quota(Path(user_id): Path<i64>) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Updater & Deploy SSE (`updater.go`, `deploy_api.go`, `sse_handler.go`)
+// 4. Updater & Deploy SSE
 // ─────────────────────────────────────────────────────────────────────────────
 
 static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
@@ -2616,6 +2825,7 @@ struct DeploymentRegistration {
     sender: broadcast::Sender<String>,
 }
 
+#[allow(clippy::result_large_err)]
 fn register_deployment(app_name: &str) -> Result<DeploymentRegistration, Response> {
     let mut streams = DEPLOY_STREAMS.lock().map_err(|_| {
         api_error(
@@ -3678,6 +3888,7 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_admin(auth_user: &AuthUser) -> Result<(), Response> {
     if auth_user.role != "admin" {
         return Err(api_error(
@@ -3730,17 +3941,31 @@ fn deployment_ingress_config(
     config
 }
 
-fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+fn snapshot_deploy_files(
+    bp: &af_services::AppBlueprint,
+) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     let mut snapshots = Vec::new();
     let cfg_path = af_services::mutators::resolve_config_path(&bp.config_file_path);
     if !cfg_path.as_os_str().is_empty() {
         snapshots.push((cfg_path.clone(), std::fs::read(&cfg_path).ok()));
     }
     for vhost_rel in [
-        format!("/etc/apache2/sites-available/aetherflow-app-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-enabled/aetherflow-app-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-available/aetherflow-ext-{}.conf", bp.app_name),
-        format!("/etc/apache2/sites-enabled/aetherflow-ext-{}.conf", bp.app_name),
+        format!(
+            "/etc/apache2/sites-available/aetherflow-app-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-enabled/aetherflow-app-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-available/aetherflow-ext-{}.conf",
+            bp.app_name
+        ),
+        format!(
+            "/etc/apache2/sites-enabled/aetherflow-ext-{}.conf",
+            bp.app_name
+        ),
     ] {
         let resolved = af_services::mutators::resolve_config_path(&vhost_rel);
         if !resolved.as_os_str().is_empty() {
@@ -3946,12 +4171,77 @@ async fn cleanup_deploy_channel(_app_name: &str) {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
+fn deploy_sse_session_still_authorized(
+    auth_user: &AuthUser,
+    initial_revoked_after: Option<i64>,
+) -> bool {
+    if auth_user.plugin_id.is_some() || auth_user.role != "admin" {
+        return false;
+    }
+    let Ok(conn) = af_db::get_read_conn() else {
+        return false;
+    };
+    if !crate::auth::table_exists(&conn, "users").unwrap_or(false) {
+        return true;
+    }
+    if !auth_user.jti.is_empty()
+        && crate::auth::is_session_token_revoked_beyond_grace_with_conn(
+            &conn,
+            &auth_user.jti,
+            auth_user.user_id,
+        )
+    {
+        return false;
+    }
+    let Ok(subj) = crate::auth::load_active_human_subject(&conn, auth_user.user_id) else {
+        return false;
+    };
+    if subj.role != "admin" {
+        return false;
+    }
+    if let Some(issued_ver) = initial_revoked_after {
+        if subj.sessions_revoked_after > issued_ver {
+            return false;
+        }
+    }
+    true
+}
+
+async fn deploy_sse_session_still_authorized_async(
+    auth_user: &AuthUser,
+    initial_revoked_after: Option<i64>,
+) -> bool {
+    let cloned = auth_user.clone();
+    crate::auth::blocking_auth_work(move || {
+        deploy_sse_session_still_authorized(&cloned, initial_revoked_after)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 pub async fn handle_deploy_stream(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = require_admin(&auth_user) {
         return resp;
+    }
+    let uid = auth_user.user_id;
+    let initial_revoked_after = crate::auth::blocking_auth_work(move || {
+        af_db::get_read_conn()
+            .ok()
+            .and_then(|c| crate::auth::load_active_human_subject(&c, uid).ok())
+            .map(|s| s.sessions_revoked_after)
+    })
+    .await
+    .ok()
+    .flatten();
+    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Administrative session is no longer active",
+        );
     }
     let Some(app_name) = q.get("appName").filter(|s| !s.is_empty()) else {
         return (
@@ -3977,11 +4267,29 @@ pub async fn handle_deploy_stream(
     };
 
     let stream = async_stream::stream! {
-        while let Ok(msg) = rx.recv().await {
-            let safe_msg = af_common::redact::redact_secrets(&msg);
-            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
-            if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
-                break;
+        let mut revalidate_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        revalidate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = revalidate_tick.tick().await;
+        loop {
+            tokio::select! {
+                _ = revalidate_tick.tick() => {
+                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                        break;
+                    }
+                }
+                recv_res = rx.recv() => {
+                    let Ok(msg) = recv_res else {
+                        break;
+                    };
+                    if !deploy_sse_session_still_authorized_async(&auth_user, initial_revoked_after).await {
+                        break;
+                    }
+                    let safe_msg = af_common::redact::redact_secrets(&msg);
+                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", safe_msg));
+                    if safe_msg.starts_with("[SUCCESS]") || safe_msg.starts_with("[ROLLBACK]") || safe_msg.starts_with("[ERROR]") {
+                        break;
+                    }
+                }
             }
         }
     };
@@ -4225,5 +4533,140 @@ mod updater_tests {
         assert_eq!(plex.default_port, 32400);
         assert!(!plex.supports_dynamic_port);
         assert_eq!(allocate_or_verify_deploy_port(&plex), 32400);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_oauth_only_admin_backup_stepup_against_live_schema_v24() {
+        let _db_env_guard = crate::streaming_ext::tests::TEST_STREAMING_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp_dir =
+            std::env::temp_dir().join(format!("af-oauth-backup-stepup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let db_file = tmp_dir.join("stepup.sqlite");
+
+        let keys = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        for &k in &keys {
+            std::env::set_var(k, &db_file);
+        }
+
+        af_db::init_db().expect("initialize full v24 schema");
+        let now = Utc::now().timestamp();
+        {
+            let conn = af_db::get_conn().unwrap();
+            let max_ver: i64 = conn
+                .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(max_ver, 24);
+            conn.execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_enabled) VALUES (77, 'oauth-admin', 'admin', '', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
+                 VALUES ('oauth-jti-fresh', 77, '127.0.0.1', 'TestUA', ?1, ?2, 'fam-77')",
+                params![now + 3600, now],
+            )
+            .unwrap();
+        }
+
+        let admin = AuthUser {
+            user_id: 77,
+            username: "oauth-admin".to_string(),
+            role: "admin".to_string(),
+            jti: "oauth-jti-fresh".to_string(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Reauth-Confirm", HeaderValue::from_static("oauth"));
+
+        // 1. Fresh authenticated OAuth session (<= 300s) with live active_sessions row succeeds
+        assert!(authorize_backup_password(&admin, Some(now - 60), &headers).await);
+
+        // 2. Stale authenticated OAuth session (> 300s) fails closed even if refreshed session is active
+        assert!(!authorize_backup_password(&admin, Some(now - 301), &headers).await);
+
+        // 3. Revoked/absent active_sessions row fails closed even with fresh auth_time
+        let revoked_admin = AuthUser {
+            jti: "oauth-jti-missing".to_string(),
+            ..admin
+        };
+        assert!(!authorize_backup_password(&revoked_admin, Some(now - 10), &headers).await);
+
+        for (k, val) in saved {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn backup_reauth_reserves_quota_atomically_under_concurrency() {
+        let user_id: i64 = 999_881;
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            state.attempts.remove(&user_id);
+        }
+        let hash = bcrypt::hash("correct-horse-battery-staple", 4).expect("hash");
+
+        // Launch 16 concurrent invalid password verifications; at most 10 may reserve a slot
+        // and execute bcrypt, while all 16 fail closed and leave exactly 10 active attempts.
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for idx in 0..16 {
+                let h = hash.clone();
+                handles.push(s.spawn(move || {
+                    verify_backup_password(user_id, &format!("sess-{idx}"), "wrong-pass", &h)
+                }));
+            }
+            for handle in handles {
+                assert!(!handle.join().expect("thread join"));
+            }
+        });
+
+        let active_after_burst = BACKUP_REAUTH
+            .lock()
+            .expect("lock")
+            .attempts
+            .get(&user_id)
+            .map_or(0, Vec::len);
+        assert_eq!(active_after_burst, 10);
+        // Even the valid password is now rate-limited while 10 failures are active in the window.
+        assert!(!verify_backup_password(
+            user_id,
+            "sess-valid",
+            "correct-horse-battery-staple",
+            &hash,
+        ));
+
+        // Clear one slot and verify a valid password check refunds its own temporary reservation.
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            if let Some(entries) = state.attempts.get_mut(&user_id) {
+                entries.pop();
+            }
+        }
+        assert!(verify_backup_password(
+            user_id,
+            "sess-valid-2",
+            "correct-horse-battery-staple",
+            &hash,
+        ));
+        let active_after_valid = BACKUP_REAUTH
+            .lock()
+            .expect("lock")
+            .attempts
+            .get(&user_id)
+            .map_or(0, Vec::len);
+        assert_eq!(active_after_valid, 9);
+
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            state.attempts.remove(&user_id);
+        }
     }
 }

@@ -2155,10 +2155,15 @@ export default function StreamingTab() {
                                                 width={56}
                                             />
                                             <Tooltip
+                                                allowEscapeViewBox={{ x: false, y: false }}
+                                                wrapperStyle={{ maxWidth: 'calc(100vw - 32px)', zIndex: 30 }}
                                                 contentStyle={{
                                                     backgroundColor: '#0f172a',
                                                     border: '1px solid rgba(255,255,255,0.12)',
                                                     borderRadius: '10px',
+                                                    maxWidth: 'calc(100vw - 32px)',
+                                                    whiteSpace: 'normal',
+                                                    wordBreak: 'break-word',
                                                 }}
                                                 labelFormatter={(label) => label ? `${label} UTC` : ''}
                                                 labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
@@ -2221,10 +2226,15 @@ export default function StreamingTab() {
                                                 width={56}
                                             />
                                             <Tooltip
+                                                allowEscapeViewBox={{ x: false, y: false }}
+                                                wrapperStyle={{ maxWidth: 'calc(100vw - 32px)', zIndex: 30 }}
                                                 contentStyle={{
                                                     backgroundColor: '#0f172a',
                                                     border: '1px solid rgba(255,255,255,0.12)',
                                                     borderRadius: '10px',
+                                                    maxWidth: 'calc(100vw - 32px)',
+                                                    whiteSpace: 'normal',
+                                                    wordBreak: 'break-word',
                                                 }}
                                                 labelFormatter={(label) => label ? `${label} UTC` : ''}
                                                 labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
@@ -2322,10 +2332,15 @@ export default function StreamingTab() {
                                                 width={48}
                                             />
                                             <Tooltip
+                                                allowEscapeViewBox={{ x: false, y: false }}
+                                                wrapperStyle={{ maxWidth: 'calc(100vw - 32px)', zIndex: 30 }}
                                                 contentStyle={{
                                                     backgroundColor: '#0f172a',
                                                     border: '1px solid rgba(255,255,255,0.12)',
                                                     borderRadius: '10px',
+                                                    maxWidth: 'calc(100vw - 32px)',
+                                                    whiteSpace: 'normal',
+                                                    wordBreak: 'break-word',
                                                 }}
                                                 labelFormatter={(label) => label ? `${label} UTC` : ''}
                                                 labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
@@ -2380,10 +2395,15 @@ export default function StreamingTab() {
                                                 width={48}
                                             />
                                             <Tooltip
+                                                allowEscapeViewBox={{ x: false, y: false }}
+                                                wrapperStyle={{ maxWidth: 'calc(100vw - 32px)', zIndex: 30 }}
                                                 contentStyle={{
                                                     backgroundColor: '#0f172a',
                                                     border: '1px solid rgba(255,255,255,0.12)',
                                                     borderRadius: '10px',
+                                                    maxWidth: 'calc(100vw - 32px)',
+                                                    whiteSpace: 'normal',
+                                                    wordBreak: 'break-word',
                                                 }}
                                                 labelFormatter={(label) => label ? `${label} UTC` : ''}
                                                 labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}

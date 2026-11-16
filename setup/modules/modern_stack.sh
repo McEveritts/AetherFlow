@@ -46,41 +46,9 @@ _af_resolve_release_channel() {
 
 _af_is_v4_release_tag() {
     local tag="${1:-}"
-    case "${tag,,}" in
-        experimental|experimental-*|nightly|nightly-*|v4.*|4.*)
-            return 0
-            ;;
-        v[0-9]*)
-            local major="${tag#v}"
-            major="${major%%.*}"
-            [[ "${major}" =~ ^[0-9]+$ && "${major}" -ge 4 ]]
-            return $?
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
-_install_go() {
-    if ! _af_modern_from_source_enabled; then
-        echo "Prebuilt v4 Rust release mode active; skipping Go compiler installation."
-        return 0
-    fi
-
-    # Install Go Compiler (only when --from-source is explicitly requested)
-    if ! command -v go >/dev/null 2>&1; then
-        if [[ ! -s "${AF_GO_ARCHIVE}" ]]; then
-            _af_prefetch_runtime_archives || return 1
-        fi
-
-        rm -rf /usr/local/go
-        tar -C /usr/local -xzf "${AF_GO_ARCHIVE}" || return 1
-        rm -f "${AF_GO_ARCHIVE}"
-    fi
-
-    _af_ensure_path_entry "/usr/local/go/bin" 'export PATH=/usr/local/go/bin:$PATH'
-}
 
 _install_node() {
     if ! _af_modern_from_source_enabled; then
@@ -219,7 +187,11 @@ _stage_prebuilt_release_archive() {
     if [[ -z "${expected_sha256}" && -n "${sha256_manifest}" && -f "${sha256_manifest}" ]]; then
         expected_sha256="$(awk -v f="${artifact_name}" '$2 == f || $2 == "*"f {print tolower($1); exit}' "${sha256_manifest}")"
         if [[ -z "${expected_sha256}" ]]; then
-            expected_sha256="$(awk 'NF >= 1 {print tolower($1); exit}' "${sha256_manifest}")"
+            expected_sha256="$(awk '
+                /^[[:space:]]*(#|$)/ { next }
+                { count++; if (NF == 1 && count == 1) digest = tolower($1); else bad = 1 }
+                END { if (count == 1 && !bad && length(digest) == 64) print digest }
+            ' "${sha256_manifest}")"
         fi
     fi
 
@@ -233,6 +205,29 @@ _stage_prebuilt_release_archive() {
     if [[ "${actual_sha256}" != "${expected_sha256,,}" ]]; then
         echo "[ERROR] SHA-256 mismatch for ${archive_path} (expected=${expected_sha256,,}, actual=${actual_sha256}). Refusing unverified binary." >&2
         return 1
+    fi
+
+    if [[ "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        local prov_channel="${5:-$(_af_resolve_release_channel)}"
+        local staged_bundle="${6:-}"
+        local effective_bundle="${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-${staged_bundle}}"
+        local github_repo="${GITHUB_REPO:-McEveritts/AetherFlow}"
+        local -a prov_args=(
+            --repo "${github_repo}"
+            --digest "${actual_sha256}"
+            --artifact-name "${artifact_name}"
+            --tag "${release_tag}"
+            --channel "${prov_channel}"
+        )
+        if [[ -n "${effective_bundle}" ]]; then
+            prov_args+=(--bundle-file "${effective_bundle}")
+        fi
+        if [[ ! -f "${af_root}/deploy/verify-provenance.py" ]] || ! python3 -I -B "${af_root}/deploy/verify-provenance.py" "${prov_args[@]}"; then
+            echo "[ERROR] Sigstore provenance verification failed for ${release_tag} (${artifact_name}). Refusing unverified binary." >&2
+            return 1
+        fi
+    else
+        echo "[WARN] AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set; bypassing Sigstore build provenance verification for ${release_tag}." >&2
     fi
 
     if ! _validate_prebuilt_tarball "${archive_path}"; then
@@ -260,45 +255,76 @@ _stage_prebuilt_release_archive() {
     fi
 
     chmod 0755 "${release_dir}/aetherflow-api"
-    if [[ -f "${release_dir}/af" && ! -L "${release_dir}/af" ]]; then
-        chmod 0755 "${release_dir}/af"
-        mkdir -p "${release_dir}/bin"
-        if [[ ! -e "${release_dir}/bin/af" && ! -L "${release_dir}/bin/af" ]]; then
-            cp -f "${release_dir}/af" "${release_dir}/bin/af"
+    local companion_bin
+    for companion_bin in af speedtest-backend; do
+        if [[ -f "${release_dir}/${companion_bin}" && ! -L "${release_dir}/${companion_bin}" ]]; then
+            chmod 0755 "${release_dir}/${companion_bin}"
+            mkdir -p "${release_dir}/bin"
+            if [[ ! -e "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
+                cp -f "${release_dir}/${companion_bin}" "${release_dir}/bin/${companion_bin}"
+            fi
+            chmod 0755 "${release_dir}/bin/${companion_bin}"
+        elif [[ -f "${release_dir}/bin/${companion_bin}" && ! -L "${release_dir}/bin/${companion_bin}" ]]; then
+            chmod 0755 "${release_dir}/bin/${companion_bin}"
+            rm -f "${release_dir}/${companion_bin}"
+            cp -f "${release_dir}/bin/${companion_bin}" "${release_dir}/${companion_bin}"
+            chmod 0755 "${release_dir}/${companion_bin}"
         fi
-        chmod 0755 "${release_dir}/bin/af"
-    elif [[ -f "${release_dir}/bin/af" && ! -L "${release_dir}/bin/af" ]]; then
-        chmod 0755 "${release_dir}/bin/af"
-        rm -f "${release_dir}/af"
-        cp -f "${release_dir}/bin/af" "${release_dir}/af"
-        chmod 0755 "${release_dir}/af"
-    fi
+    done
 
-    if [[ ! -s "${release_dir}/.version" ]]; then
-        printf '%s\n' "${release_tag}" > "${release_dir}/.version"
+    if [[ ! -f "${release_dir}/.version" || -L "${release_dir}/.version" || ! -s "${release_dir}/.version" ]]; then
+        echo "[ERROR] Extracted release archive is missing a non-empty regular .version stamp." >&2
+        rm -rf "${release_dir}"
+        return 1
+    fi
+    local archive_version
+    archive_version="$(tr -d '[:space:]' < "${release_dir}/.version")"
+    if [[ "${archive_version}" != "${release_tag}" ]]; then
+        echo "[ERROR] Extracted release archive .version '${archive_version}' does not match expected tag '${release_tag}'." >&2
+        rm -rf "${release_dir}"
+        return 1
     fi
 
     if [[ -f "${af_root}/deploy/release-manager.sh" ]]; then
-        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" ]]; then
+        if [[ -L "${release_dir}/deploy" || -L "${release_dir}/deploy/release-manager.sh" || -L "${release_dir}/deploy/release-manager.conf" || -L "${release_dir}/deploy/verify-provenance.py" || -L "${release_dir}/deploy/log-retention.py" ]]; then
             echo "[ERROR] Refusing to stage release-manager into symlinked deploy path." >&2
             rm -rf "${release_dir}"
             return 1
         fi
         mkdir -p "${release_dir}/deploy"
-        rm -f "${release_dir}/deploy/release-manager.sh"
-        cp -f "${af_root}/deploy/release-manager.sh" "${release_dir}/deploy/release-manager.sh"
-        chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        if [[ -f "${release_dir}/deploy/release-manager.sh" ]]; then
+            chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        else
+            cp -f "${af_root}/deploy/release-manager.sh" "${release_dir}/deploy/release-manager.sh"
+            chmod 0755 "${release_dir}/deploy/release-manager.sh"
+        fi
+        if [[ -f "${release_dir}/deploy/verify-provenance.py" ]]; then
+            chmod 0755 "${release_dir}/deploy/verify-provenance.py"
+        elif [[ -f "${af_root}/deploy/verify-provenance.py" ]]; then
+            cp -f "${af_root}/deploy/verify-provenance.py" "${release_dir}/deploy/verify-provenance.py"
+            chmod 0755 "${release_dir}/deploy/verify-provenance.py"
+        fi
+        if [[ -f "${release_dir}/deploy/log-retention.py" ]]; then
+            chmod 0755 "${release_dir}/deploy/log-retention.py"
+        elif [[ -f "${af_root}/deploy/log-retention.py" ]]; then
+            cp -f "${af_root}/deploy/log-retention.py" "${release_dir}/deploy/log-retention.py"
+            chmod 0755 "${release_dir}/deploy/log-retention.py"
+        fi
         if [[ -f "${af_root}/deploy/release-manager.conf" ]]; then
             rm -f "${release_dir}/deploy/release-manager.conf"
             cp -f "${af_root}/deploy/release-manager.conf" "${release_dir}/deploy/release-manager.conf"
+            chmod 0644 "${release_dir}/deploy/release-manager.conf"
         fi
     fi
 
     find "${release_dir}" -type d -exec chmod 0755 {} +
     find "${release_dir}" -type f -exec chmod a+r,go-w {} +
     chmod 0755 "${release_dir}/aetherflow-api"
-    [[ -f "${release_dir}/af" ]] && chmod 0755 "${release_dir}/af"
-    [[ -f "${release_dir}/bin/af" ]] && chmod 0755 "${release_dir}/bin/af"
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
+        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+    done
 
     if [[ -L "${current_link}" ]]; then
         readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
@@ -329,74 +355,79 @@ _pull_prebuilt_v4_release() {
     local checksum_name="${CHECKSUM_NAME:-SHA256SUMS}"
 
     if [[ -n "${AETHERFLOW_PREBUILT_TARBALL:-}" ]]; then
-        local staged_tag="${AETHERFLOW_RELEASE_TAG:-v4.0.0-${channel}}"
+        local default_staged_tag="v4.0.0"
+        [[ "${channel}" == "nightly" ]] && default_staged_tag="v4.0.0-nightly.0.0"
+        local staged_tag="${AETHERFLOW_RELEASE_TAG:-${default_staged_tag}}"
         if ! _af_is_v4_release_tag "${staged_tag}"; then
-            echo "[ERROR] Refusing pre-v4 release tag '${staged_tag}' (implicit v3 downgrade is forbidden)." >&2
+            echo "[ERROR] Refusing pre-v4 or malformed release tag '${staged_tag}' (implicit v3 downgrade is forbidden)." >&2
             return 1
         fi
         _stage_prebuilt_release_archive \
             "${AETHERFLOW_PREBUILT_TARBALL}" \
             "${AETHERFLOW_PREBUILT_SHA256_FILE:-}" \
             "${AETHERFLOW_PREBUILT_SHA256:-}" \
-            "${staged_tag}"
+            "${staged_tag}" \
+            "${channel}"
         return $?
     fi
 
     local target_tag="${AETHERFLOW_RELEASE_TAG:-}"
     if [[ -n "${target_tag}" ]] && ! _af_is_v4_release_tag "${target_tag}"; then
-        echo "[ERROR] Refusing pre-v4 release tag '${target_tag}' (implicit v3 downgrade is forbidden)." >&2
+        echo "[ERROR] Refusing pre-v4 or malformed release tag '${target_tag}' (implicit v3 downgrade is forbidden)." >&2
         return 1
     fi
 
     if [[ -z "${target_tag}" ]]; then
         local api_url="https://api.github.com/repos/${github_repo}/releases"
         local releases_json=""
-        releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null || true)"
+        releases_json="$(curl --proto '=https' --proto-redir '=https' --max-filesize 16777216 -sfL --max-time 15 "${api_url}" 2>/dev/null || true)"
 
         if [[ "${channel}" == "nightly" ]]; then
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
-                target_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+                target_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+nightly_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+-[Nn]ightly\.[0-9]+(?:\.[0-9]+)?$")
 try:
     for r in json.load(sys.stdin):
-        if r.get("draft"):
+        if not isinstance(r, dict) or r.get("draft"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
-            if tag.startswith("v4.") or "v4" in tag.lower():
-                print(tag)
-                break
+        if (
+            nightly_re.fullmatch(tag)
+            and target != "experimental"
+            and (bool(r.get("prerelease")) or target == "nightly")
+        ):
+            print(tag)
+            break
 except Exception:
     pass
 ' 2>/dev/null || true)"
             fi
-            [[ -n "${target_tag}" ]] || target_tag="nightly"
         else
             if [[ -n "${releases_json}" ]] && command -v python3 >/dev/null 2>&1; then
-                target_tag="$(printf '%s' "${releases_json}" | python3 -c '
-import json, sys
+                target_tag="$(printf '%s' "${releases_json}" | python3 -I -c '
+import json, re, sys
+tag_re = re.compile(r"^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$")
 try:
     releases = json.load(sys.stdin)
     for r in releases:
-        if r.get("draft") or r.get("prerelease"):
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag.startswith("v") and "-" not in tag and target not in ("nightly", "experimental"):
-            major = int(tag.lstrip("v").split(".", 1)[0])
-            if major >= 4:
-                print(tag)
-                sys.exit(0)
+        if tag_re.fullmatch(tag) and target not in ("nightly", "experimental"):
+            print(tag)
+            sys.exit(0)
 except Exception:
     pass
 ' 2>/dev/null || true)"
             fi
             if [[ -z "${target_tag}" ]]; then
                 local latest_url
-                latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${github_repo}/releases/latest" 2>/dev/null || true)"
+                latest_url="$(curl --proto '=https' --proto-redir '=https' --max-filesize 1048576 -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${github_repo}/releases/latest" 2>/dev/null || true)"
                 local candidate_tag="${latest_url##*/}"
-                if [[ "${latest_url}" == "https://github.com/${github_repo}/releases/tag/"* ]] && _af_is_v4_release_tag "${candidate_tag}"; then
+                if [[ "${latest_url}" == "https://github.com/${github_repo}/releases/tag/"* && "${candidate_tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
                     target_tag="${candidate_tag}"
                 fi
             fi
@@ -414,19 +445,32 @@ except Exception:
     local dl_dir
     dl_dir="$(mktemp -d "${tmp_base}/af-prebuilt-XXXXXX")"
 
-    if ! curl -fsSL --retry 3 --max-time 180 -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}"; then
+    local -a proto_flags=()
+    if [[ "${base_url,,}" == https://* ]]; then
+        proto_flags=(--proto '=https' --proto-redir '=https')
+    fi
+
+    if ! curl "${proto_flags[@]}" --max-filesize 536870912 -fsSL --retry 3 --max-time 180 -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}"; then
         echo "[ERROR] Failed to download prebuilt v4 release ${base_url}/${artifact_name}. Refusing implicit source-build fallback." >&2
         rm -rf "${dl_dir}"
         return 1
     fi
 
-    if ! curl -fsSL --retry 3 --max-time 30 -o "${dl_dir}/${checksum_name}" "${base_url}/${checksum_name}"; then
+    if ! curl "${proto_flags[@]}" --max-filesize 4194304 -fsSL --retry 3 --max-time 30 -o "${dl_dir}/${checksum_name}" "${base_url}/${checksum_name}"; then
         echo "[ERROR] Failed to download SHA-256 manifest ${base_url}/${checksum_name}. Refusing unverified binary." >&2
         rm -rf "${dl_dir}"
         return 1
     fi
 
-    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}"; then
+    local downloaded_bundle=""
+    if [[ -z "${AETHERFLOW_PROVENANCE_BUNDLE_FILE:-}" && "${AETHERFLOW_SKIP_PROVENANCE_VERIFY:-0}" != "1" ]]; then
+        local candidate_bundle="${dl_dir}/${artifact_name}.sigstore.json"
+        if curl "${proto_flags[@]}" --max-filesize 8388608 -fsSL --max-time 30 -o "${candidate_bundle}" "${base_url}/${artifact_name}.sigstore.json" 2>/dev/null && [[ -s "${candidate_bundle}" ]]; then
+            downloaded_bundle="${candidate_bundle}"
+        fi
+    fi
+
+    if ! _stage_prebuilt_release_archive "${dl_dir}/${artifact_name}" "${dl_dir}/${checksum_name}" "${AETHERFLOW_PREBUILT_SHA256:-}" "${target_tag}" "${channel}" "${downloaded_bundle}"; then
         rm -rf "${dl_dir}"
         return 1
     fi
@@ -471,25 +515,108 @@ _build_modern_stack_from_source() {
             return 1
         }
 
-        # Populate both neutral web/dist and legacy backend/web/dist for single-binary embedding
-        mkdir -p "${af_root}/web/dist" "${af_root}/backend/web/dist"
-        rm -rf "${af_root}/web/dist/"* "${af_root}/backend/web/dist/"*
+        # Populate web/dist for single-binary rust-embed asset embedding
+        mkdir -p "${af_root}/web/dist"
+        rm -rf "${af_root}/web/dist/"*
         if [ -d "${af_root}/frontend/out" ]; then
             cp -r "${af_root}/frontend/out/"* "${af_root}/web/dist/"
-            cp -r "${af_root}/frontend/out/"* "${af_root}/backend/web/dist/"
         fi
     fi
 
-    # ── Compile Single Binary with Embedded UI Assets (Rust preferred, Go explicit fallback) ──
+    # ── Compile Single Binary with Embedded UI Assets (Rust backend-rs only) ──
     local epoch
     epoch="$(date +%s)"
     local release_dir="${af_root}/releases/${epoch}"
     mkdir -p "${release_dir}"
 
+    export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:/usr/local/cargo/bin:${PATH}"
+    local need_rust_bootstrap=0
+    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+        need_rust_bootstrap=1
+    else
+        local current_rustc_ver
+        current_rustc_ver="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
+        if [[ "${current_rustc_ver}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+            local r_maj="${BASH_REMATCH[1]}" r_min="${BASH_REMATCH[2]}"
+            if (( 10#${r_maj} < 1 || (10#${r_maj} == 1 && 10#${r_min} < 95) )); then
+                need_rust_bootstrap=1
+            fi
+        fi
+    fi
+    if [ -d "${af_root}/backend-rs" ] && [[ "${need_rust_bootstrap}" -eq 1 ]]; then
+        if [[ "${EUID:-$(id -u)}" -eq 0 && "${AF_OFFLINE:-0}" != "1" ]]; then
+            local rust_tc="${AF_RUST_TOOLCHAIN:-1.99.1}"
+            echo "Rust toolchain >= 1.95.0 required for Zero-Go workspace; bootstrapping toolchain ${rust_tc} and linker prerequisites for --from-source..."
+            if command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang mold >/dev/null 2>&1 || true
+            fi
+            local bootstrapped_via_rustup=0
+            if command -v rustup >/dev/null 2>&1; then
+                if rustup toolchain install "${rust_tc}" --profile minimal && rustup default "${rust_tc}"; then
+                    bootstrapped_via_rustup=1
+                fi
+            fi
+            local rustup_arch="" rustup_sha256=""
+            case "$(uname -m)" in
+                x86_64|amd64)
+                    rustup_arch="x86_64-unknown-linux-gnu"
+                    rustup_sha256="a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f"
+                    ;;
+                aarch64|arm64)
+                    rustup_arch="aarch64-unknown-linux-gnu"
+                    rustup_sha256="c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a"
+                    ;;
+                armv7l|armhf)
+                    rustup_arch="armv7-unknown-linux-gnueabihf"
+                    rustup_sha256="62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb"
+                    ;;
+            esac
+            if [[ "${bootstrapped_via_rustup}" -eq 0 && -n "${rustup_arch}" ]]; then
+                local rustup_ver="${AF_RUSTUP_VERSION:-1.28.1}"
+                local rustup_parent="${AF_RUSTUP_TMPDIR:-}"
+                if [[ -z "${rustup_parent}" ]]; then
+                    if [[ -d "${af_root}" && -w "${af_root}" ]]; then
+                        rustup_parent="${af_root}/.staging-rustup"
+                        mkdir -p -m 0700 "${rustup_parent}"
+                    elif [[ -d "/var/tmp" && -w "/var/tmp" ]]; then
+                        rustup_parent="/var/tmp"
+                    else
+                        rustup_parent="${HOME:-/root}/.cache/aetherflow-rustup"
+                        mkdir -p -m 0700 "${rustup_parent}"
+                    fi
+                else
+                    mkdir -p -m 0700 "${rustup_parent}"
+                fi
+                local rustup_stage_dir
+                rustup_stage_dir="$(mktemp -d "${rustup_parent}/af-rustup-stage.XXXXXX")"
+                chmod 0700 "${rustup_stage_dir}"
+                local rustup_bin="${rustup_stage_dir}/rustup-init"
+                if curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+                    "https://static.rust-lang.org/rustup/archive/${rustup_ver}/${rustup_arch}/rustup-init" \
+                    -o "${rustup_bin}" \
+                    && printf '%s  %s\n' "${AF_RUSTUP_SHA256:-${rustup_sha256}}" "${rustup_bin}" | sha256sum -c - >/dev/null 2>&1; then
+                    chmod 0700 "${rustup_bin}"
+                    if ! "${rustup_bin}" -y --profile minimal --default-toolchain "${rust_tc}"; then
+                        echo "[WARN] rustup-init exited non-zero from ${rustup_stage_dir} (check mount noexec or network connectivity)." >&2
+                    fi
+                else
+                    echo "[WARN] Pinned rustup-init download or SHA-256 verification failed; skipping automatic Rust bootstrap." >&2
+                fi
+                rm -rf "${rustup_stage_dir}"
+            fi
+            export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:${PATH}"
+        fi
+    fi
+
     if [ -d "${af_root}/backend-rs" ] && command -v cargo >/dev/null 2>&1; then
         have_backend=true
         (
             cd "${af_root}/backend-rs" || exit 1
+            if ! command -v mold >/dev/null 2>&1; then
+                export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            fi
             local -a locked_args=(--locked)
             if [[ ! -f "${af_root}/backend-rs/Cargo.lock" ]]; then
                 if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
@@ -499,61 +626,71 @@ _build_modern_stack_from_source() {
                     exit 1
                 fi
             fi
-            cargo build --release "${locked_args[@]}" --bin aetherflow-api --bin af || exit 1
-            cp -f "${af_root}/backend-rs/target/release/aetherflow-api" "${release_dir}/aetherflow-api"
-            if [[ -f "${af_root}/backend-rs/target/release/af" ]]; then
-                cp -f "${af_root}/backend-rs/target/release/af" "${release_dir}/af"
-                mkdir -p "${release_dir}/bin"
-                cp -f "${af_root}/backend-rs/target/release/af" "${release_dir}/bin/af"
+            local af_build_ver="source-${epoch}"
+            if [[ -f "${af_root}/.version" ]]; then
+                af_build_ver="$(tr -d '\r\n' < "${af_root}/.version")"
             fi
+            local -a bin_args=(--bin aetherflow-api --bin af)
+            if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
+                bin_args+=(--bin speedtest-backend)
+            fi
+            AF_BUILD_VERSION="${af_build_ver}" AETHERFLOW_VERSION="${af_build_ver}" \
+                cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
+            local cargo_target_dir="${CARGO_TARGET_DIR:-${af_root}/backend-rs/target}"
+            cp -f "${cargo_target_dir}/release/aetherflow-api" "${release_dir}/aetherflow-api"
+            local built_bin
+            for built_bin in af speedtest-backend; do
+                if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
+                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/${built_bin}"
+                    mkdir -p "${release_dir}/bin"
+                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/bin/${built_bin}"
+                fi
+            done
         ) || {
             rm -rf "${release_dir}"
             echo "Rust backend compilation failed." >&2
-            return 1
-        }
-    elif [ -d "${af_root}/backend" ]; then
-        have_backend=true
-        (
-            cd "${af_root}/backend" || exit 1
-            export PATH="/usr/local/go/bin:/usr/local/nodejs/bin:${PATH}"
-
-            # go-sqlite3 requires CGO (gcc)
-            _af_apt_install gcc build-essential || exit 1
-
-            mkdir -p "${af_root}/backend/data"
-
-            export GOOS=linux
-            export GOARCH=amd64
-            export CGO_ENABLED=1
-            /usr/local/go/bin/go build -o aetherflow-api main.go || exit 1
-            cp -f "${af_root}/backend/aetherflow-api" "${release_dir}/aetherflow-api"
-            /usr/local/go/bin/go clean -cache -modcache -testcache >/dev/null 2>&1 || true
-            rm -rf /tmp/go-build /root/.cache/go-build /root/go/pkg/mod "${AF_RUNTIME_CACHE_DIR}"
-        ) || {
-            rm -rf "${release_dir}"
-            echo "Backend compilation failed." >&2
             return 1
         }
     fi
 
     if [[ "${have_backend}" != "true" ]]; then
         rm -rf "${release_dir}"
-        echo "[ERROR] No backend source directory found under ${af_root}." >&2
+        echo "[ERROR] Rust backend source (${af_root}/backend-rs) and cargo toolchain are required for --from-source builds." >&2
         return 1
     fi
 
     [[ -d "${af_root}/config" ]] && cp -R "${af_root}/config" "${release_dir}/config"
-    [[ ! -d "${release_dir}/config" && -d "${af_root}/backend/config" ]] && cp -R "${af_root}/backend/config" "${release_dir}/config"
     [[ -d "${af_root}/packages" ]] && cp -R "${af_root}/packages" "${release_dir}/packages"
     [[ -d "${af_root}/deploy" ]] && cp -R "${af_root}/deploy" "${release_dir}/deploy"
     printf 'source-%s\n' "${epoch}" > "${release_dir}/.version"
-    chmod 0755 "${release_dir}/aetherflow-api"
-    [[ -f "${release_dir}/af" ]] && chmod 0755 "${release_dir}/af"
-    [[ -f "${release_dir}/bin/af" ]] && chmod 0755 "${release_dir}/bin/af"
 
-    ln -sfn "${release_dir}" "${af_root}/current"
+    find "${release_dir}" -type d -exec chmod 0755 {} +
+    find "${release_dir}" -type f -exec chmod a+r,go-w {} +
+    chmod 0755 "${release_dir}/aetherflow-api"
+    local companion_chmod
+    for companion_chmod in af speedtest-backend; do
+        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
+        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+    done
+
+    local releases_dir="${af_root}/releases"
+    local current_link="${af_root}/current"
+    if [[ -L "${current_link}" ]]; then
+        readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
+    fi
+
+    local tmp_link="${current_link}.tmp.${epoch}"
+    ln -s "${release_dir}" "${tmp_link}"
+    mv -Tf "${tmp_link}" "${current_link}"
+
     mkdir -p "${af_root}/backend"
-    ln -sfn "${af_root}/current/aetherflow-api" "${af_root}/backend/aetherflow-api"
+    ln -sfn "${current_link}/aetherflow-api" "${af_root}/backend/aetherflow-api"
+    if [[ -x "${current_link}/af" ]]; then
+        ln -sfn "${current_link}/af" "${af_root}/backend/af"
+        if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" && -d /usr/local/bin && ! -f /usr/local/bin/AetherFlow/system/af ]]; then
+            ln -sfn "${current_link}/af" /usr/local/bin/af
+        fi
+    fi
     return 0
 }
 
@@ -565,8 +702,8 @@ _af_read_env_raw() {
         {
             line = $0
             sub(/\r$/, "", line)
-            if (line ~ "^[[:space:]]*" k "=") {
-                sub("^[[:space:]]*" k "=", "", line)
+            if (line ~ "^[[:space:]]*(export[[:space:]]+)?" k "=") {
+                sub("^[[:space:]]*(export[[:space:]]+)?" k "=", "", line)
                 value = line
                 found = 1
             }
@@ -616,12 +753,12 @@ _build_modern_stack() {
         rm -f /etc/sudoers.d/aether* 2>/dev/null || true
     fi
 
-    # Ensure FHS data dir and legacy backend data dir exist
-    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" 2>/dev/null || true
+    # Ensure FHS data dir, log dir, and legacy backend data dir exist
+    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" /var/log/aetherflow 2>/dev/null || true
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
         chown -R aetherflow:aetherflow "${data_dir}" "${af_root}/backend/data" 2>/dev/null || true
-        chown root:aetherflow "${run_dir}" 2>/dev/null || true
-        chmod 1770 "${run_dir}" 2>/dev/null || true
+        chown root:aetherflow "${run_dir}" /var/log/aetherflow 2>/dev/null || true
+        chmod 0750 "${run_dir}" /var/log/aetherflow 2>/dev/null || true
     fi
     chmod 0700 "${data_dir}" 2>/dev/null || true
 
@@ -661,6 +798,7 @@ _build_modern_stack() {
     local existing_priv_runner=""
     local existing_db_path=""
     local existing_af_db_path=""
+    local existing_af_env=""
     local existing_gin_mode=""
 
     if [[ -f "${existing_env}" ]]; then
@@ -676,6 +814,7 @@ _build_modern_stack() {
         existing_priv_runner="$(_af_read_env_raw "${existing_env}" "PRIVILEGED_RUNNER_ENABLED")"
         existing_db_path="$(_af_read_env_raw "${existing_env}" "DB_PATH")"
         existing_af_db_path="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_DB_PATH")"
+        existing_af_env="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_ENV")"
         existing_gin_mode="$(_af_read_env_raw "${existing_env}" "GIN_MODE")"
     fi
 
@@ -683,18 +822,19 @@ _build_modern_stack() {
     local aes_key
     if [[ -n "${existing_aes_key}" ]]; then
         aes_key="${existing_aes_key}"
+    elif command -v openssl >/dev/null 2>&1; then
+        aes_key="$(openssl rand -hex 32)"
     else
-        aes_key="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)"
-        while [[ ${#aes_key} -lt 32 ]]; do
-            aes_key="${aes_key}$(head -c 4 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 1)"
-        done
+        aes_key="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     fi
 
     local jwt_secret
     if [[ -n "${existing_jwt_secret}" ]]; then
         jwt_secret="${existing_jwt_secret}"
+    elif command -v openssl >/dev/null 2>&1; then
+        jwt_secret="$(openssl rand -hex 32)"
     else
-        jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
+        jwt_secret="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     fi
 
     local saved_domain=""
@@ -798,15 +938,23 @@ _build_modern_stack() {
     local effective_af_db_path="${existing_af_db_path:-${AETHERFLOW_DB_PATH:-${effective_db_path}}}"
     local final_hosts="${existing_hosts:-${allowed_hosts}}"
     local final_cors="${existing_cors:-${cors_origins}}"
+    local af_env="${existing_af_env:-production}"
     local gin_mode="${existing_gin_mode:-release}"
 
     # Preserve any custom operator environment variables from existing file before overwriting
     local extra_lines=""
     if [[ -f "${existing_env}" ]]; then
-        extra_lines="$(grep -v -E '^[[:space:]]*(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
+        extra_lines="$(grep -v -E '^[[:space:]]*(export[[:space:]]+)?(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|AETHERFLOW_ENV|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     fi
 
-    cat > "${env_dir}/aetherflow.env" <<EOF
+    if [[ -L "${env_dir}" || -L "${env_dir}/aetherflow.env" ]]; then
+        echo "[ERROR] Refusing symlinked environment configuration path under ${env_dir}" >&2
+        return 1
+    fi
+    local tmp_env
+    tmp_env="$(umask 0027; mktemp "${env_dir}/.aetherflow.env.tmp.XXXXXX")" || return 1
+    chmod 0640 "${tmp_env}"
+    cat > "${tmp_env}" <<EOF
 AES_MASTER_KEY=${aes_key}
 JWT_SECRET=${jwt_secret}
 PORT=${port}
@@ -819,16 +967,18 @@ AETHERFLOW_DB_PATH=${effective_af_db_path}
 AETHERFLOW_RUNNER_SOCK=${runner_sock}
 PRIVILEGED_RUNNER_ENABLED=${priv_runner}
 COOKIE_SECURE=${cookie_secure}
+AETHERFLOW_ENV=${af_env}
 GIN_MODE=${gin_mode}
 EOF
 
     if [[ -n "${extra_lines}" ]]; then
-        printf "\n# Preserved Operator Custom Configurations\n%s\n" "${extra_lines}" >> "${env_dir}/aetherflow.env"
+        printf "\n# Preserved Operator Custom Configurations\n%s\n" "${extra_lines}" >> "${tmp_env}"
     fi
-    chmod 0640 "${env_dir}/aetherflow.env"
+    chmod 0640 "${tmp_env}"
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
-        chown root:aetherflow "${env_dir}/aetherflow.env" 2>/dev/null || true
+        chown root:aetherflow "${tmp_env}" 2>/dev/null || true
     fi
+    mv -f "${tmp_env}" "${env_dir}/aetherflow.env"
 
     # ── Install systemd unit files from templates ────────────────────────
     local sysd_dir="${af_root}/setup/templates/sysd"

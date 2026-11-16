@@ -74,11 +74,52 @@ pub fn append_jsonl_log(log_file: &Path, level: &str, msg: &str) {
         msg: msg.to_string(),
     };
     if let Ok(serialized) = serde_json::to_string(&entry) {
-        if let Some(parent) = log_file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
-            let _ = writeln!(file, "{}", serialized);
+        let path_safe = if let Some(parent) = log_file.parent() {
+            create_dir_all_no_symlinks(parent, 0o750).is_ok()
+                && ensure_no_symlink_ancestors(log_file).is_ok()
+        } else {
+            ensure_no_symlink_ancestors(log_file).is_ok()
+        };
+        let target_is_symlink = fs::symlink_metadata(log_file)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if path_safe && !target_is_symlink {
+            let mut opts = OpenOptions::new();
+            opts.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o640).custom_flags(libc::O_NOFOLLOW);
+            }
+            if let Ok(mut file) = opts.open(log_file) {
+                #[cfg(unix)]
+                let fd_ok = {
+                    use std::os::unix::fs::MetadataExt;
+                    file.metadata()
+                        .map(|m| m.is_file() && m.nlink() == 1)
+                        .unwrap_or(false)
+                };
+                #[cfg(not(unix))]
+                let fd_ok = file.metadata().map(|m| m.is_file()).unwrap_or(false);
+                if fd_ok {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        unsafe {
+                            let _ = libc::flock(file.as_raw_fd(), libc::LOCK_SH);
+                        }
+                    }
+                    let _ = writeln!(file, "{}", serialized);
+                    let _ = file.flush();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        unsafe {
+                            let _ = libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                        }
+                    }
+                }
+            }
         }
     }
     match level {
@@ -165,13 +206,7 @@ where
     health_prober: H,
 }
 
-impl
-    ReleaseEngine<
-        GithubHttpArtifactProvider,
-        SystemdLifecycleController,
-        ReqwestHealthProber,
-    >
-{
+impl ReleaseEngine<GithubHttpArtifactProvider, SystemdLifecycleController, ReqwestHealthProber> {
     /// Constructs a production `ReleaseEngine` wired to GitHub Releases HTTP, bare-metal `systemctl`,
     /// and `/health/ready` probing.
     pub fn new_production(base_config: ReleaseConfig) -> Self {
@@ -218,17 +253,22 @@ where
             self.lifecycle.query_unit_environment("aetherflow-api")
         };
         let resolved_db = try_resolve_db_path(&self.base_config, unit_env.as_deref())?;
-        let current_release = read_current_link_target(&self.base_config.current_link);
+        let current_release =
+            read_current_link_target(&self.base_config.current_link).filter(|dir| {
+                is_confined_to_isolated_root(dir, self.base_config.isolated_root.as_deref())
+            });
         let current_version = current_release
             .as_ref()
-            .and_then(|dir| fs::read_to_string(dir.join(".version")).ok())
+            .and_then(|dir| read_small_regular_file_nofollow(&dir.join(".version")))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let previous_release = fs::read_to_string(self.base_config.releases_dir.join(".previous_release"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
+        let previous_release = read_small_regular_file_nofollow(
+            &self.base_config.releases_dir.join(".previous_release"),
+        )
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|dir| is_confined_to_isolated_root(dir, self.base_config.isolated_root.as_deref()));
 
         let mut available_releases = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_config.releases_dir) {
@@ -408,16 +448,22 @@ where
             ),
         );
 
+        let current_slot_dirs = resolve_confined_legacy_current_slots(cfg);
+
         let fhs_db = cfg.host_data_dir.join(&cfg.sqlite_db);
         if resolved.path == fhs_db && !fhs_db.is_file() {
-            let legacy_candidates = [
+            let mut legacy_candidates = vec![
                 cfg.legacy_opt_root
                     .join("backend/data")
                     .join(&cfg.sqlite_db),
                 cfg.legacy_opt_root.join("backend").join(&cfg.sqlite_db),
             ];
+            for slot_dir in &current_slot_dirs {
+                legacy_candidates.push(slot_dir.join("backend/data").join(&cfg.sqlite_db));
+                legacy_candidates.push(slot_dir.join("backend").join(&cfg.sqlite_db));
+            }
             for legacy_db in &legacy_candidates {
-                if legacy_db.is_file() {
+                if is_regular_non_symlink_file(legacy_db) {
                     if dry_run {
                         append_jsonl_log(
                             &cfg.log_file,
@@ -463,12 +509,16 @@ where
         }
 
         if !dry_run && !cfg.host_env_file.is_file() {
-            let legacy_envs = [
+            let mut legacy_envs = vec![
                 cfg.legacy_opt_root.join("backend/.env"),
                 cfg.legacy_opt_root.join(".env"),
             ];
+            for slot_dir in &current_slot_dirs {
+                legacy_envs.push(slot_dir.join("backend/.env"));
+                legacy_envs.push(slot_dir.join(".env"));
+            }
             for legacy_env in &legacy_envs {
-                if legacy_env.is_file() {
+                if is_regular_non_symlink_file(legacy_env) {
                     append_jsonl_log(
                         &cfg.log_file,
                         "INFO",
@@ -526,7 +576,10 @@ where
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
-            &format!("=== STAGE 1: Release Scaffold (Channel: {}) ===", opts.channel),
+            &format!(
+                "=== STAGE 1: Release Scaffold (Channel: {}) ===",
+                opts.channel
+            ),
         );
         if let Err(err) = create_new_dir_exclusive(&release_dir, 0o755, 0o755) {
             recovery.phase = ReleasePhase::Failed;
@@ -817,9 +870,12 @@ where
         ));
         create_new_dir_exclusive(&staging_dir, 0o755, 0o700)?;
 
-        let bundle_res = self
-            .artifact_provider
-            .fetch_release_bundle(cfg, &target_tag, &staging_dir);
+        let bundle_res = self.artifact_provider.fetch_release_bundle(
+            cfg,
+            opts.channel,
+            &target_tag,
+            &staging_dir,
+        );
         let (archive_path, manifest_content) = match bundle_res {
             Ok(pair) => pair,
             Err(err) => {
@@ -837,7 +893,11 @@ where
                 return Err(err);
             }
         };
-        append_jsonl_log(&cfg.log_file, "INFO", &format!("SHA-256 OK {}", actual_digest));
+        append_jsonl_log(
+            &cfg.log_file,
+            "INFO",
+            &format!("SHA-256 OK {}", actual_digest),
+        );
 
         let extract_res =
             extract_and_validate_release_archive(&archive_path, release_dir, &target_tag, cfg);
@@ -917,6 +977,8 @@ where
             }
         };
 
+        let current_before_rollback = fs::canonicalize(&cfg.current_link).ok();
+
         let epoch_id = allocate_unique_release_epoch_id(&cfg.releases_dir);
         atomic_replace_symlink(
             &cfg.current_link,
@@ -940,8 +1002,14 @@ where
             .and_then(|r| r.candidate_release.as_deref())
             .filter(|p| p.join("data-snapshot").is_dir());
 
+        let outgoing_current_snapshot = current_before_rollback.as_deref().filter(|cur| {
+            canonicalize_preserve_normal(cur) != canonicalize_preserve_normal(&previous_target)
+                && cur.join("data-snapshot").is_dir()
+        });
+
         let snapshot_release = failed_deploy_release
             .or(inferred_failed_candidate)
+            .or(outgoing_current_snapshot)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| previous_target.clone());
         append_jsonl_log(
@@ -994,7 +1062,9 @@ where
                 let stop_error = if dry_run {
                     None
                 } else {
-                    self.lifecycle.stop_database_services(&resolved_db.path).err()
+                    self.lifecycle
+                        .stop_database_services(&resolved_db.path)
+                        .err()
                 };
                 let failure = match stop_error {
                     Some(stop_error) => format!(
@@ -1016,6 +1086,19 @@ where
 
         if !dry_run {
             if let Err(err) = self.lifecycle.restart_systemd_units(cfg) {
+                recovery.phase = ReleasePhase::Failed;
+                recovery.last_error = Some(err.to_string());
+                let _ = recovery.save(&cfg.releases_dir);
+                return Err(err);
+            }
+            if let Err(err) = poll_readiness_probe(
+                &self.health_prober,
+                &cfg.health_endpoint,
+                cfg.health_retries,
+                cfg.health_interval,
+            )
+            .and_then(|_| self.lifecycle.verify_running_release(cfg))
+            {
                 recovery.phase = ReleasePhase::Failed;
                 recovery.last_error = Some(err.to_string());
                 let _ = recovery.save(&cfg.releases_dir);
@@ -1176,4 +1259,141 @@ where
             dry_run: false,
         })
     }
+}
+
+fn is_regular_non_symlink_file(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_file() && !meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
+fn resolve_confined_legacy_current_slots(cfg: &ReleaseConfig) -> Vec<PathBuf> {
+    let mut allowed_roots = Vec::new();
+    for root in [&cfg.releases_dir, &cfg.legacy_opt_root] {
+        if let Ok(canon) = fs::canonicalize(root) {
+            if !allowed_roots.contains(&canon) {
+                allowed_roots.push(canon);
+            }
+        }
+    }
+    if allowed_roots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let legacy_current = cfg.legacy_opt_root.join("current");
+    for candidate in [&cfg.current_link, &legacy_current] {
+        let Ok(canon_slot) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if !canon_slot.is_dir() {
+            continue;
+        }
+        let confined = allowed_roots
+            .iter()
+            .any(|allowed| canon_slot != *allowed && canon_slot.starts_with(allowed));
+        if confined && !out.contains(&canon_slot) {
+            out.push(canon_slot);
+        }
+    }
+    out
+}
+
+fn is_confined_to_isolated_root(candidate: &Path, isolated_root: Option<&Path>) -> bool {
+    let Some(root) = isolated_root else {
+        return true;
+    };
+    let Ok(canon_root) = fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(canon_cand) = fs::canonicalize(candidate) else {
+        return false;
+    };
+    canon_cand == canon_root || canon_cand.starts_with(&canon_root)
+}
+
+fn read_small_regular_file_nofollow(path: &Path) -> Option<String> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let file = {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+        use std::path::Component;
+
+        let leaf_os = path.file_name()?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut cur_dir: Option<OwnedFd> = None;
+
+        for comp in parent.components() {
+            let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+            match comp {
+                Component::Prefix(_) | Component::ParentDir => return None,
+                Component::CurDir => {}
+                Component::RootDir => {
+                    let c_root = CString::new("/").ok()?;
+                    let fd = unsafe {
+                        libc::open(
+                            c_root.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return None;
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+                Component::Normal(seg) => {
+                    let c_seg = CString::new(seg.as_bytes()).ok()?;
+                    let fd = unsafe {
+                        libc::openat(
+                            dirfd,
+                            c_seg.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        )
+                    };
+                    if fd < 0 {
+                        return None;
+                    }
+                    cur_dir = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+            }
+        }
+
+        let dirfd = cur_dir.as_ref().map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        let c_leaf = CString::new(leaf_os.as_bytes()).ok()?;
+        let leaf_fd = unsafe {
+            libc::openat(
+                dirfd,
+                c_leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if leaf_fd < 0 {
+            return None;
+        }
+        let f = fs::File::from(unsafe { OwnedFd::from_raw_fd(leaf_fd) });
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 4096 || (meta.permissions().mode() & 0o002) != 0 {
+            return None;
+        }
+        f
+    };
+
+    #[cfg(not(unix))]
+    let file = {
+        let f = fs::OpenOptions::new().read(true).open(path).ok()?;
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 4096 {
+            return None;
+        }
+        f
+    };
+
+    let mut buf = String::new();
+    file.take(4096).read_to_string(&mut buf).ok()?;
+    Some(buf)
 }

@@ -538,7 +538,9 @@ impl BackupManifest {
                     return Err(HostBackupError::IncompatibleVersion {
                         backup_version: format!("sqlite_user_version={}", snap.sqlite_user_version),
                         host_version: format!("max_sqlite_user_version={}", max_uv),
-                        reason: "backup SQLite schema user_version is newer than supported by this host".to_string(),
+                        reason:
+                            "backup SQLite schema user_version is newer than supported by this host"
+                                .to_string(),
                     });
                 }
             }
@@ -629,11 +631,7 @@ pub fn parse_semver_triplet(raw: &str) -> HostBackupResult<(u32, u32, u32)> {
             "version string must not be empty".to_string(),
         ));
     }
-    let core = trimmed
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let core = trimmed.split(['-', '+']).next().unwrap_or(trimmed).trim();
     let mut parts = core.split('.');
     let major_str = parts.next().unwrap_or("");
     let minor_str = parts.next().unwrap_or("0");

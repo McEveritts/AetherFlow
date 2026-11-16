@@ -123,8 +123,8 @@ describe('LoginPage OPUS-002 MFA Challenge & Google SSO Integration', () => {
     const recoveryBtn = screen.getByText('Lost your device? Use recovery code');
     fireEvent.click(recoveryBtn);
 
-    const recoveryInput = screen.getByPlaceholderText('XXXX-XXXX');
-    fireEvent.change(recoveryInput, { target: { value: 'ABCD1234' } });
+    const recoveryInput = screen.getByPlaceholderText('XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX');
+    fireEvent.change(recoveryInput, { target: { value: 'ABCDEFG-HIJKLMN-OPQRSTU-VWXYZ23' } });
 
     const submitBtn = screen.getByRole('button', { name: /Authorize Action/i });
     fireEvent.click(submitBtn);
@@ -136,7 +136,7 @@ describe('LoginPage OPUS-002 MFA Challenge & Google SSO Integration', () => {
     expect(verifyRequestBody).not.toBeNull();
     const parsedBody = JSON.parse(verifyRequestBody!);
     expect(parsedBody.mfa_token).toBe('valid-challenge-token');
-    expect(parsedBody.code).toBe('ABCD1234');
+    expect(parsedBody.code).toBe('ABCDEFG-HIJKLMN-OPQRSTU-VWXYZ23');
   });
 
   it('displays meaningful message for ?error=not_authorized and clears error param from URL', async () => {

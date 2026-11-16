@@ -85,7 +85,11 @@ pub fn sqlite_online_backup(src: &Path, dest: &Path) -> ReleaseResult<()> {
 
         let mut dst_conn = Connection::open(&tmp_dest).map_err(|e| ReleaseError::Snapshot {
             db_path: dest.to_path_buf(),
-            reason: format!("failed to open destination DB {}: {}", tmp_dest.display(), e),
+            reason: format!(
+                "failed to open destination DB {}: {}",
+                tmp_dest.display(),
+                e
+            ),
         })?;
         let _ = dst_conn.busy_timeout(Duration::from_secs(10));
 
@@ -166,8 +170,7 @@ pub fn sqlite_integrity(db_path: &Path) -> String {
         return "error".to_string();
     };
     let _ = conn.busy_timeout(Duration::from_secs(5));
-    let res: Result<String, _> =
-        conn.query_row("PRAGMA integrity_check;", [], |row| row.get(0));
+    let res: Result<String, _> = conn.query_row("PRAGMA integrity_check;", [], |row| row.get(0));
     match res {
         Ok(raw) => {
             let first_line = raw.lines().next().unwrap_or("");
@@ -498,12 +501,7 @@ where
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    atomic_copy_file_with_mode(
-        &bak_path,
-        &staged_tmp,
-        0o600,
-        preserved_ownership.as_ref(),
-    )?;
+    atomic_copy_file_with_mode(&bak_path, &staged_tmp, 0o600, preserved_ownership.as_ref())?;
 
     let staged_integrity = sqlite_integrity(&staged_tmp);
     if staged_integrity != "ok" {

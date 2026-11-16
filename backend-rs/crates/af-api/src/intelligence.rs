@@ -5,7 +5,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::{Duration, Utc};
 use once_cell::sync::Lazy;
-use rand::RngCore;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -145,7 +144,7 @@ mod audit_tests {
             std::fs::write(root.join(name), []).unwrap();
         }
         let mut files = Vec::new();
-        collect_mediaflow_files(&root, &root, &mut files);
+        collect_mediaflow_files(&root, &root, 0, &mut files);
         assert_eq!(files, vec![root.join("nested/movie.MKV")]);
     }
 
@@ -166,7 +165,7 @@ mod audit_tests {
             StatusCode::FORBIDDEN
         );
         let mut files = Vec::new();
-        collect_mediaflow_files(&root, &root, &mut files);
+        collect_mediaflow_files(&root, &root, 0, &mut files);
         assert!(files.is_empty());
     }
 
@@ -686,7 +685,7 @@ mod audit_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. FlowAI Multi-Provider Chat, Support & Connection Test (`backend/api/ai.go`)
+// 1. FlowAI Multi-Provider Chat, Support & Connection Test
 // ─────────────────────────────────────────────────────────────────────────────
 
 static ALLOWED_AI_MODELS: &[&str] = &[
@@ -869,19 +868,13 @@ pub fn resolve_provider_settings() -> ProviderSettings {
     }
 
     if !ps.gemini_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.gemini_api_key) {
-            ps.gemini_api_key = dec;
-        }
+        ps.gemini_api_key = af_db::decrypt_key(&ps.gemini_api_key).unwrap_or_default();
     }
     if !ps.openai_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.openai_api_key) {
-            ps.openai_api_key = dec;
-        }
+        ps.openai_api_key = af_db::decrypt_key(&ps.openai_api_key).unwrap_or_default();
     }
     if !ps.anthropic_api_key.is_empty() {
-        if let Ok(dec) = af_db::decrypt_key(&ps.anthropic_api_key) {
-            ps.anthropic_api_key = dec;
-        }
+        ps.anthropic_api_key = af_db::decrypt_key(&ps.anthropic_api_key).unwrap_or_default();
     }
 
     if ps.gemini_api_key.is_empty() {
@@ -979,6 +972,30 @@ pub fn get_system_metrics_context() -> String {
     sb
 }
 
+const MAX_AI_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+async fn read_bounded_ai_response_bytes(mut resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_AI_RESPONSE_BYTES as u64 {
+            anyhow::bail!(
+                "AI response payload exceeds {} byte limit",
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len().saturating_add(chunk.len()) > MAX_AI_RESPONSE_BYTES {
+            anyhow::bail!(
+                "AI response payload exceeds {} byte limit",
+                MAX_AI_RESPONSE_BYTES
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 async fn call_gemini_api(
     api_key: &str,
     model_name: &str,
@@ -989,7 +1006,7 @@ async fn call_gemini_api(
     if api_key.trim().is_empty() {
         anyhow::bail!("gemini API key not configured. Set it in Settings → FlowAI Engine");
     }
-    let client = reqwest::Client::builder()
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()?;
 
@@ -1019,10 +1036,14 @@ async fn call_gemini_api(
 
     let send_for_model = |m: &str| {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            m, api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            m
         );
-        client.post(url).json(&body).send()
+        client
+            .post(url)
+            .header("x-goog-api-key", api_key.trim())
+            .json(&body)
+            .send()
     };
 
     let mut resp = send_for_model(model_name).await?;
@@ -1030,13 +1051,14 @@ async fn call_gemini_api(
         resp = send_for_model("gemini-2.5-pro").await?;
     }
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("gemini API error ({}): {}", status, text);
     }
 
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let mut out = String::new();
     if let Some(parts) = val
         .pointer("/candidates/0/content/parts")
@@ -1065,8 +1087,7 @@ async fn call_openai_compatible_api(
             model_name.trim()
         );
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -1090,12 +1111,13 @@ async fn call_openai_compatible_api(
         req = req.bearer_auth(api_key);
     }
     let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("openai API error ({}): {}", status, text);
     }
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let content = val
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
@@ -1130,8 +1152,7 @@ async fn call_anthropic_api(
             "anthropic API key not configured. Set it in Settings \u{2192} FlowAI Engine"
         );
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let client = af_services::streaming_http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -1160,13 +1181,13 @@ async fn call_anthropic_api(
     }
 
     let resp = req.send().await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let status = resp.status();
+    let raw_bytes = read_bounded_ai_response_bytes(resp).await?;
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&raw_bytes);
         anyhow::bail!("anthropic API error ({}): {}", status, text);
     }
-    let val: serde_json::Value = resp.json().await?;
+    let val: serde_json::Value = serde_json::from_slice(&raw_bytes)?;
     let mut out = String::new();
     if let Some(arr) = val.get("content").and_then(|v| v.as_array()) {
         for block in arr {
@@ -1231,6 +1252,10 @@ fn extract_service_target(message: &str) -> &'static str {
 }
 
 fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<ProposedAction> {
+    let target = extract_service_target(user_message);
+    if target == "target service" {
+        return None;
+    }
     let combined = format!("{} {}", ai_reply, user_message).to_lowercase();
     let specs: &[(&[&str], &str, &str, &str)] = &[
         (
@@ -1245,24 +1270,11 @@ fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<Propose
             "Stop",
             "Service will become unavailable until manually started.",
         ),
-        (
-            &["delete", "remove", "uninstall", "purge"],
-            "critical",
-            "Delete",
-            "Data associated with this service may be permanently lost.",
-        ),
-        (
-            &["update", "upgrade", "patch"],
-            "warn",
-            "Update",
-            "Service will restart after update. Configuration may change.",
-        ),
     ];
 
     for (keywords, classification, verb, impact) in specs {
         for kw in *keywords {
             if combined.contains(kw) {
-                let target = extract_service_target(user_message);
                 let title = format!("{} {}", verb, target);
                 return Some(ProposedAction {
                     action_type: "system_action".to_string(),
@@ -1448,36 +1460,48 @@ async fn run_chat_session(
         }
     };
 
-    if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
-        let (action_id, needs_approval) = af_db::queue_action(
-            &proposal.danger_level,
-            "FlowAI",
-            &proposal.title,
-            &proposal.description,
-        );
-        if needs_approval {
-            proposal.action_id = action_id;
-            let (uid, uname) = user
-                .map(|u| (u.user_id, u.username))
-                .unwrap_or((0, "anonymous".to_string()));
-            af_db::record_audit(
-                uid,
-                &uname,
-                "ai_action_proposed",
-                "pending_action",
-                &action_id.to_string(),
-                &format!(
-                    "classification={} title={}",
-                    proposal.danger_level, proposal.title
-                ),
-                ip,
-                ua,
-            );
-            return Json(serde_json::json!({
-                "reply": reply_text,
-                "proposed_action": proposal,
-            }))
-            .into_response();
+    let is_admin = user.as_ref().is_some_and(|u| u.role == "admin");
+    if is_admin {
+        if let Some(mut proposal) = extract_proposed_action(&reply_text, &message) {
+            let pending_flow_ai = af_db::list_pending_actions(100, 0)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|r| r.status == "pending" && r.source == "FlowAI")
+                        .count()
+                })
+                .unwrap_or(0);
+            if pending_flow_ai < 50 {
+                let (action_id, needs_approval) = af_db::queue_action(
+                    &proposal.danger_level,
+                    "FlowAI",
+                    &proposal.title,
+                    &proposal.description,
+                );
+                if needs_approval {
+                    proposal.action_id = action_id;
+                    let (uid, uname) = user
+                        .map(|u| (u.user_id, u.username))
+                        .unwrap_or((0, "anonymous".to_string()));
+                    af_db::record_audit(
+                        uid,
+                        &uname,
+                        "ai_action_proposed",
+                        "pending_action",
+                        &action_id.to_string(),
+                        &format!(
+                            "classification={} title={}",
+                            proposal.danger_level, proposal.title
+                        ),
+                        ip,
+                        ua,
+                    );
+                    return Json(serde_json::json!({
+                        "reply": reply_text,
+                        "proposed_action": proposal,
+                    }))
+                    .into_response();
+                }
+            }
         }
     }
 
@@ -1894,6 +1918,8 @@ struct EnricherState {
     processed: usize,
     results: Vec<serde_json::Value>,
     last_err: String,
+    truncated: bool,
+    next_cursor: Option<String>,
 }
 
 static ENRICHER_STATE: Lazy<Mutex<EnricherState>> =
@@ -2027,25 +2053,414 @@ pub(crate) async fn call_configured_ai(
     }
 }
 
-fn collect_files_recursive(dir: &StdPath, allowed_exts: &[&str], out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.starts_with('.') {
-            continue;
-        }
-        if path.is_dir() {
-            collect_files_recursive(&path, allowed_exts, out);
-        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let dot_ext = format!(".{}", ext.to_lowercase());
-            if allowed_exts.iter().any(|&a| a == dot_ext) {
-                out.push(path);
+const MAX_SCAN_DEPTH: usize = 32;
+const MAX_SCAN_FILES: usize = 10_000;
+
+#[derive(Debug, Default, Clone)]
+struct PagedScanOutcome {
+    files: Vec<PathBuf>,
+    truncated: bool,
+    truncated_by_limit: bool,
+    truncated_by_depth: bool,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MediaflowScanTelemetry {
+    last_directory: String,
+    last_batch_count: usize,
+    truncated: bool,
+    next_cursor: Option<String>,
+}
+
+static METADATA_SCAN_CURSORS: Lazy<Mutex<HashMap<PathBuf, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static MEDIAFLOW_SCAN_CURSORS: Lazy<Mutex<HashMap<PathBuf, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static MEDIAFLOW_LAST_SCAN: Lazy<Mutex<MediaflowScanTelemetry>> =
+    Lazy::new(|| Mutex::new(MediaflowScanTelemetry::default()));
+
+static MEDIAFLOW_SCANNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct MediaflowScanGuard;
+impl Drop for MediaflowScanGuard {
+    fn drop(&mut self) {
+        MEDIAFLOW_SCANNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct EnricherScanGuard {
+    keep_scanning: bool,
+}
+impl Drop for EnricherScanGuard {
+    fn drop(&mut self) {
+        if !self.keep_scanning {
+            if let Ok(mut st) = ENRICHER_STATE.lock() {
+                st.scanning = false;
             }
         }
     }
+}
+
+const DIR_SCAN_WINDOW_CAP: usize = 1024;
+
+#[allow(clippy::too_many_arguments)]
+fn collect_matching_files_paged_inner<F>(
+    dir: &StdPath,
+    root: &StdPath,
+    cursor_parts: Option<&[&str]>,
+    depth: usize,
+    max_depth: usize,
+    max_files: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: &F,
+    rel_parts: &mut Vec<String>,
+    last_rel_key: &mut Option<String>,
+    out: &mut PagedScanOutcome,
+) where
+    F: Fn(&str) -> bool,
+{
+    if out.truncated_by_limit {
+        return;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return;
+    }
+    let Ok(resolved_dir) = dir.canonicalize() else {
+        return;
+    };
+    if !resolved_dir.starts_with(root) {
+        return;
+    }
+
+    let mut window_after: Option<String> = None;
+    loop {
+        if out.truncated_by_limit {
+            return;
+        }
+        let Ok(read_dir) = std::fs::read_dir(&resolved_dir) else {
+            return;
+        };
+
+        let mut heap: std::collections::BinaryHeap<(String, bool, PathBuf)> =
+            std::collections::BinaryHeap::with_capacity(DIR_SCAN_WINDOW_CAP.min(256));
+        let mut spilled = false;
+
+        for entry in read_dir.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name.starts_with('.') {
+                continue;
+            }
+            if skip_mediaflow_trash && file_name == ".mediaflow_trash" {
+                continue;
+            }
+            if let Some(ref after_name) = window_after {
+                if file_name <= *after_name {
+                    continue;
+                }
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let is_dir = ft.is_dir();
+            let is_file = ft.is_file();
+            if !is_dir && !is_file {
+                continue;
+            }
+
+            if window_after.is_none() {
+                if let Some(c_parts) = cursor_parts {
+                    if c_parts.len() > rel_parts.len() {
+                        let min_name = c_parts[rel_parts.len()];
+                        if is_dir && file_name.as_str() < min_name {
+                            continue;
+                        }
+                        if is_file && file_name.as_str() <= min_name {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if is_file
+                && !StdPath::new(&file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(ext_matches)
+            {
+                continue;
+            }
+
+            if heap.len() < DIR_SCAN_WINDOW_CAP {
+                heap.push((file_name, is_dir, entry.path()));
+            } else if let Some(max_top) = heap.peek() {
+                spilled = true;
+                if file_name < max_top.0 {
+                    heap.pop();
+                    heap.push((file_name, is_dir, entry.path()));
+                }
+            }
+        }
+
+        if heap.is_empty() {
+            break;
+        }
+
+        let batch = heap.into_sorted_vec();
+        for (file_name, is_dir, path) in batch {
+            if out.truncated_by_limit {
+                return;
+            }
+            window_after = Some(file_name.clone());
+            rel_parts.push(file_name);
+            if is_dir {
+                let mut next_cursor_slice = cursor_parts;
+                let mut skip_dir = false;
+                if let Some(c_parts) = cursor_parts {
+                    let common_len = c_parts.len().min(rel_parts.len());
+                    let rel_prefix = &rel_parts[..common_len];
+                    let cur_prefix = &c_parts[..common_len];
+                    let ord = rel_prefix
+                        .iter()
+                        .map(String::as_str)
+                        .cmp(cur_prefix.iter().copied());
+                    match ord {
+                        std::cmp::Ordering::Less => {
+                            skip_dir = true;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            next_cursor_slice = None;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            if c_parts.len() == rel_parts.len() {
+                                next_cursor_slice = None;
+                            }
+                        }
+                    }
+                }
+                if !skip_dir {
+                    if depth >= max_depth {
+                        out.truncated = true;
+                        out.truncated_by_depth = true;
+                    } else {
+                        collect_matching_files_paged_inner(
+                            &path,
+                            root,
+                            next_cursor_slice,
+                            depth + 1,
+                            max_depth,
+                            max_files,
+                            skip_mediaflow_trash,
+                            ext_matches,
+                            rel_parts,
+                            last_rel_key,
+                            out,
+                        );
+                    }
+                }
+            } else {
+                let after_cursor = match cursor_parts {
+                    None => true,
+                    Some(c_parts) => rel_parts
+                        .iter()
+                        .map(String::as_str)
+                        .gt(c_parts.iter().copied()),
+                };
+                if after_cursor {
+                    if let Ok(canonical_file) = path.canonicalize() {
+                        if canonical_file.starts_with(root)
+                            && canonical_file
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(ext_matches)
+                        {
+                            if out.files.len() >= max_files {
+                                out.truncated = true;
+                                out.truncated_by_limit = true;
+                                out.next_cursor = last_rel_key.clone();
+                                rel_parts.pop();
+                                return;
+                            }
+                            *last_rel_key = Some(rel_parts.join("/"));
+                            out.files.push(canonical_file);
+                        }
+                    }
+                }
+            }
+            rel_parts.pop();
+        }
+
+        if !spilled {
+            break;
+        }
+    }
+}
+
+fn collect_matching_files_paged<F>(
+    root: &StdPath,
+    after_cursor: Option<&str>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PagedScanOutcome
+where
+    F: Fn(&str) -> bool,
+{
+    let Ok(canonical_root) = root.canonicalize() else {
+        return PagedScanOutcome::default();
+    };
+    let cursor_vec: Option<Vec<&str>> = after_cursor
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split('/').filter(|seg| !seg.is_empty()).collect())
+        .filter(|v: &Vec<&str>| !v.is_empty());
+    let mut outcome = PagedScanOutcome::default();
+    let mut rel_parts = Vec::new();
+    let mut last_rel_key = None;
+    collect_matching_files_paged_inner(
+        &canonical_root,
+        &canonical_root,
+        cursor_vec.as_deref(),
+        0,
+        max_depth,
+        max_files,
+        skip_mediaflow_trash,
+        &ext_matches,
+        &mut rel_parts,
+        &mut last_rel_key,
+        &mut outcome,
+    );
+    if outcome.truncated && outcome.next_cursor.is_none() {
+        outcome.next_cursor = last_rel_key;
+    }
+    outcome
+}
+
+struct PreparedAutoScan {
+    canonical_root: PathBuf,
+    outcome: PagedScanOutcome,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_auto_continuing_scan<F>(
+    root: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PreparedAutoScan
+where
+    F: Fn(&str) -> bool,
+{
+    let Ok(canonical_root) = root.canonicalize() else {
+        return PreparedAutoScan {
+            canonical_root: PathBuf::new(),
+            outcome: PagedScanOutcome::default(),
+        };
+    };
+    let (effective_cursor, used_stored_cursor) = if reset_cursor {
+        (None, false)
+    } else if let Some(exp) = explicit_cursor {
+        let trimmed = exp.trim();
+        if trimmed.is_empty() {
+            (None, false)
+        } else {
+            (Some(trimmed.to_string()), false)
+        }
+    } else {
+        let stored = cursor_store
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&canonical_root).cloned());
+        let has_stored = stored.is_some();
+        (stored, has_stored)
+    };
+
+    let mut outcome = collect_matching_files_paged(
+        &canonical_root,
+        effective_cursor.as_deref(),
+        max_files,
+        max_depth,
+        skip_mediaflow_trash,
+        &ext_matches,
+    );
+
+    // If an auto-stored cursor hit EOF with 0 remaining files (e.g., tail files were removed),
+    // wrap around immediately so repeated root scans never return an empty pass on a non-empty tree.
+    if used_stored_cursor && outcome.files.is_empty() && !outcome.truncated {
+        outcome = collect_matching_files_paged(
+            &canonical_root,
+            None,
+            max_files,
+            max_depth,
+            skip_mediaflow_trash,
+            &ext_matches,
+        );
+    }
+
+    PreparedAutoScan {
+        canonical_root,
+        outcome,
+    }
+}
+
+fn commit_auto_continuing_scan(
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    prepared: &PreparedAutoScan,
+) {
+    if prepared.canonical_root.as_os_str().is_empty() {
+        return;
+    }
+    if let Ok(mut map) = cursor_store.lock() {
+        if let (true, Some(next_cur)) = (
+            prepared.outcome.truncated_by_limit,
+            prepared.outcome.next_cursor.as_ref(),
+        ) {
+            map.insert(prepared.canonical_root.clone(), next_cur.clone());
+        } else {
+            map.remove(&prepared.canonical_root);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_auto_continuing_scan<F>(
+    root: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+    cursor_store: &Mutex<HashMap<PathBuf, String>>,
+    max_files: usize,
+    max_depth: usize,
+    skip_mediaflow_trash: bool,
+    ext_matches: F,
+) -> PagedScanOutcome
+where
+    F: Fn(&str) -> bool,
+{
+    let prepared = prepare_auto_continuing_scan(
+        root,
+        explicit_cursor,
+        reset_cursor,
+        cursor_store,
+        max_files,
+        max_depth,
+        skip_mediaflow_trash,
+        ext_matches,
+    );
+    commit_auto_continuing_scan(cursor_store, &prepared);
+    prepared.outcome
 }
 
 fn parse_filename_metadata(filename: &str) -> (String, String, String, String, Vec<String>) {
@@ -2222,14 +2637,26 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
             "Path traversal not allowed",
         );
     }
-    let allowed_roots = mediaflow_library_roots();
-    let clean_path = match validate_mediaflow_directory(&PathBuf::from(raw_path), &allowed_roots) {
-        Ok(path) => path,
-        Err((status, message)) => return api_error(status, "INVALID_SCAN_PATH", message),
+    let raw_path_owned = raw_path.to_string();
+    let check_path = PathBuf::from(&raw_path_owned);
+    let clean_path = match tokio::task::spawn_blocking(move || {
+        validate_mediaflow_directory(&check_path, &mediaflow_library_roots())
+    })
+    .await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err((status, message))) => return api_error(status, "INVALID_SCAN_PATH", message),
+        Err(error) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                error.to_string(),
+            )
+        }
     };
 
     {
-        let st = ENRICHER_STATE.lock().unwrap();
+        let mut st = ENRICHER_STATE.lock().unwrap();
         if st.scanning {
             return api_error(
                 StatusCode::CONFLICT,
@@ -2237,69 +2664,139 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                 "A scan is already in progress",
             );
         }
-    }
-
-    let mut media_files = Vec::new();
-    collect_files_recursive(&clean_path, MEDIA_EXTENSIONS, &mut media_files);
-    let total_files = media_files.len();
-
-    if let Ok(mut st) = ENRICHER_STATE.lock() {
         st.scanning = true;
         st.progress = 0.0;
-        st.total = total_files;
+        st.total = 0;
         st.done = 0;
         st.processed = 0;
         st.results.clear();
         st.last_err.clear();
+        st.truncated = false;
+        st.next_cursor = None;
     }
+    let mut scan_guard = EnricherScanGuard {
+        keep_scanning: false,
+    };
 
     let ps = resolve_provider_settings();
     let has_gemini_key = !ps.gemini_api_key.is_empty();
+    let explicit_cursor = req
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let reset_cursor = req.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // First pass: deterministically parse filenames and persist immediately so results
-    // and progress are immediately available even before optional AI enrichment completes.
-    let mut enriched_items = Vec::with_capacity(total_files);
-    for (idx, path) in media_files.iter().enumerate() {
-        let file_path_str = path.to_string_lossy().to_string();
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
-        if let Some(row) = upsert_media_metadata_row(
-            &file_path_str,
-            &filename,
-            &title,
-            &year,
-            &language,
-            &quality,
-            &subs,
-        ) {
-            enriched_items.push(row);
+    let scan_root = clean_path.clone();
+    let initial_result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<(PagedScanOutcome, Vec<serde_json::Value>)> {
+            let prepared = prepare_auto_continuing_scan(
+                &scan_root,
+                explicit_cursor.as_deref(),
+                reset_cursor,
+                &METADATA_SCAN_CURSORS,
+                MAX_SCAN_FILES,
+                MAX_SCAN_DEPTH,
+                false,
+                |ext| {
+                    let dot_ext = format!(".{}", ext.to_ascii_lowercase());
+                    MEDIA_EXTENSIONS.contains(&dot_ext.as_str())
+                },
+            );
+            let total_files = prepared.outcome.files.len();
+            if let Ok(mut st) = ENRICHER_STATE.lock() {
+                st.total = total_files;
+                st.truncated = prepared.outcome.truncated;
+                st.next_cursor = prepared.outcome.next_cursor.clone();
+            }
+
+            let mut enriched_items = Vec::with_capacity(total_files);
+            if total_files > 0 {
+                let mut conn = af_db::get_conn()?;
+                let tx = conn.transaction()?;
+                let now_str = Utc::now().to_rfc3339();
+                for path in &prepared.outcome.files {
+                    let file_path_str = path.to_string_lossy().to_string();
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let (title, year, language, quality, subs) = parse_filename_metadata(&filename);
+                    let subs_json =
+                        serde_json::to_string(&subs).unwrap_or_else(|_| "[]".to_string());
+                    let updated = tx.execute(
+                        "UPDATE media_metadata SET filename = ?2, title = ?3, year = ?4, language = ?5, quality = ?6, subtitles_json = ?7, enriched_at = ?8 WHERE file_path = ?1",
+                        params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                    )?;
+                    if updated == 0 {
+                        tx.execute(
+                            "INSERT INTO media_metadata (file_path, filename, title, year, language, quality, subtitles_json, enriched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![file_path_str, filename, title, year, language, quality, subs_json, now_str],
+                        )?;
+                    }
+                    let id = tx.query_row(
+                        "SELECT id FROM media_metadata WHERE file_path = ?1 ORDER BY id DESC LIMIT 1",
+                        params![file_path_str],
+                        |r| r.get::<_, i64>(0),
+                    )?;
+                    enriched_items.push(serde_json::json!({
+                        "id": id,
+                        "file_path": file_path_str,
+                        "filename": filename,
+                        "title": title,
+                        "year": year,
+                        "language": language,
+                        "quality": quality,
+                        "subtitles_json": subs_json,
+                        "enriched_at": now_str,
+                    }));
+                }
+                tx.commit()?;
+            }
+            commit_auto_continuing_scan(&METADATA_SCAN_CURSORS, &prepared);
+            Ok((prepared.outcome, enriched_items))
+        },
+    )
+    .await;
+
+    let (scan_outcome, enriched_items) = match initial_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Metadata scan failed: {e}"),
+            );
         }
-        if let Ok(mut st) = ENRICHER_STATE.lock() {
-            st.done = idx + 1;
-            st.processed = idx + 1;
-            st.progress = if total_files > 0 {
-                ((idx + 1) as f64 / total_files as f64) * 100.0
-            } else {
-                100.0
-            };
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Metadata scan worker failed: {e}"),
+            );
         }
-    }
+    };
+    let media_files = scan_outcome.files;
+    let scan_truncated = scan_outcome.truncated;
+    let scan_next_cursor = scan_outcome.next_cursor;
+    let total_files = media_files.len();
 
     if let Ok(mut st) = ENRICHER_STATE.lock() {
+        st.done = total_files;
+        st.processed = total_files;
         st.results = enriched_items;
         st.progress = 100.0;
-        if !has_gemini_key || media_files.is_empty() {
-            st.scanning = false;
-        }
+        st.truncated = scan_truncated;
+        st.next_cursor = scan_next_cursor.clone();
     }
 
     if has_gemini_key && !media_files.is_empty() {
+        scan_guard.keep_scanning = true;
         let api_key = ps.gemini_api_key.clone();
         tokio::spawn(async move {
+            let _async_guard = EnricherScanGuard {
+                keep_scanning: false,
+            };
             let batch_size = 10usize;
             let total = media_files.len();
             let mut updated_results = Vec::new();
@@ -2381,18 +2878,44 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
         });
     }
 
+    let scan_status = if scan_truncated {
+        "partial"
+    } else {
+        "completed"
+    };
     Json(serde_json::json!({
-        "message": "Metadata enrichment scan started",
+        "message": if scan_truncated {
+            "Metadata enrichment partial batch scanned; invoke again or pass next_cursor to continue"
+        } else {
+            "Metadata enrichment scan started"
+        },
         "path": raw_path,
         "total": total_files,
+        "status": scan_status,
+        "partial": scan_truncated,
+        "truncated": scan_truncated,
+        "next_cursor": scan_next_cursor,
     }))
     .into_response()
 }
 
 pub async fn metadata_status() -> Response {
     let st = ENRICHER_STATE.lock().unwrap();
+    let status = if st.scanning {
+        "scanning"
+    } else if !st.last_err.is_empty() {
+        "error"
+    } else if st.truncated {
+        "partial"
+    } else {
+        "completed"
+    };
     Json(serde_json::json!({
         "scanning": st.scanning,
+        "status": status,
+        "partial": st.truncated,
+        "truncated": st.truncated,
+        "next_cursor": st.next_cursor,
         "progress": st.progress,
         "total": st.total,
         "done": st.done,
@@ -2565,6 +3088,8 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
         .unwrap_or(0);
 
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_default();
@@ -3273,60 +3798,62 @@ fn validate_mediaflow_directory(
     Ok(resolved)
 }
 
-fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<PathBuf>) {
-    let Ok(metadata) = std::fs::symlink_metadata(directory) else {
-        return;
-    };
-    if metadata.file_type().is_symlink() {
-        return;
-    }
-    let Ok(resolved) = directory.canonicalize() else {
-        return;
-    };
-    if !resolved.starts_with(root) {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(&resolved) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if file_type.is_dir() {
-            collect_mediaflow_files(&path, root, out);
-        } else if file_type.is_file() {
-            let Ok(path) = path.canonicalize() else {
-                continue;
-            };
-            if path.starts_with(root)
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| {
-                        MEDIAFLOW_VIDEO_EXTS
-                            .iter()
-                            .any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
-                    })
-            {
-                out.push(path);
-            }
-        }
-    }
+fn is_mediaflow_extension(ext: &str) -> bool {
+    MEDIAFLOW_VIDEO_EXTS
+        .iter()
+        .any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
 }
 
-fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
-    let mut video_files = Vec::new();
-    collect_mediaflow_files(root_dir, root_dir, &mut video_files);
+#[cfg(test)]
+fn collect_mediaflow_files(
+    directory: &StdPath,
+    root: &StdPath,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    let remaining = MAX_SCAN_FILES.saturating_sub(out.len());
+    let max_depth = MAX_SCAN_DEPTH.saturating_sub(depth);
+    let outcome = if directory == root && depth == 0 && out.is_empty() {
+        run_auto_continuing_scan(
+            root,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            remaining,
+            max_depth,
+            true,
+            is_mediaflow_extension,
+        )
+    } else {
+        collect_matching_files_paged(
+            directory,
+            None,
+            remaining,
+            max_depth,
+            true,
+            is_mediaflow_extension,
+        )
+    };
+    out.extend(outcome.files);
+}
 
-    for path in video_files {
+fn scan_directory_for_mediaflow(
+    root_dir: &StdPath,
+    explicit_cursor: Option<&str>,
+    reset_cursor: bool,
+) -> anyhow::Result<PagedScanOutcome> {
+    let prepared = prepare_auto_continuing_scan(
+        root_dir,
+        explicit_cursor,
+        reset_cursor,
+        &MEDIAFLOW_SCAN_CURSORS,
+        MAX_SCAN_FILES,
+        MAX_SCAN_DEPTH,
+        true,
+        is_mediaflow_extension,
+    );
+
+    for path in &prepared.outcome.files {
         let path_str = path.to_string_lossy().to_string();
         if path_str.contains(".mediaflow_trash") {
             continue;
@@ -3343,11 +3870,11 @@ fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
             continue;
         }
 
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.file_type().is_file() || !path.canonicalize()?.starts_with(root_dir) {
             continue;
         }
-        let (codec, size) = probe_video_codec_and_size(&path);
+        let (codec, size) = probe_video_codec_and_size(path);
         if codec != "hevc" && codec != "av1" {
             let conn = af_db::get_conn()?;
             conn.execute(
@@ -3356,7 +3883,15 @@ fn scan_directory_for_mediaflow(root_dir: &StdPath) -> anyhow::Result<()> {
             )?;
         }
     }
-    Ok(())
+
+    commit_auto_continuing_scan(&MEDIAFLOW_SCAN_CURSORS, &prepared);
+    if let Ok(mut st) = MEDIAFLOW_LAST_SCAN.lock() {
+        st.last_directory = root_dir.to_string_lossy().into_owned();
+        st.last_batch_count = prepared.outcome.files.len();
+        st.truncated = prepared.outcome.truncated;
+        st.next_cursor = prepared.outcome.next_cursor.clone();
+    }
+    Ok(prepared.outcome)
 }
 
 pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Response {
@@ -3372,6 +3907,11 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         )
             .into_response();
     }
+    let explicit_cursor = req
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let reset_cursor = req.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
     let directory = PathBuf::from(dir);
     let dir_buf = match tokio::task::spawn_blocking(move || {
         validate_mediaflow_directory(&directory, &mediaflow_library_roots())
@@ -3388,10 +3928,50 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
             )
         }
     };
+    if MEDIAFLOW_SCANNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "A MediaFlow scan is already in progress",
+        );
+    }
     let response_directory = dir_buf.to_string_lossy().into_owned();
+    let pending_cursor = if reset_cursor {
+        None
+    } else {
+        MEDIAFLOW_SCAN_CURSORS
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&dir_buf).cloned())
+    };
+    let explicit_cursor_for_task = explicit_cursor.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(error) = scan_directory_for_mediaflow(&dir_buf) {
-            tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
+        let _guard = MediaflowScanGuard;
+        match scan_directory_for_mediaflow(
+            &dir_buf,
+            explicit_cursor_for_task.as_deref(),
+            reset_cursor,
+        ) {
+            Ok(outcome) if outcome.truncated => {
+                tracing::info!(
+                    directory = %dir_buf.display(),
+                    batch_count = outcome.files.len(),
+                    next_cursor = ?outcome.next_cursor,
+                    "MediaFlow partial scan batch completed; cursor stored for continuation"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, directory = %dir_buf.display(), "MediaFlow scan failed");
+            }
         }
     });
 
@@ -3400,6 +3980,7 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
         Json(serde_json::json!({
             "message": "Scan initiated in background",
             "directory": response_directory,
+            "resuming_from_cursor": explicit_cursor.or(pending_cursor),
         })),
     )
         .into_response()
@@ -3457,7 +4038,7 @@ pub async fn decline_mediaflow_item(Path(id): Path<String>) -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Network VPN Management (`backend/api/network_handlers.go` & `network.go`)
+// 3. Network VPN Management
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3868,6 +4449,7 @@ pub async fn get_bookmarks(req: Request) -> Response {
 }
 
 pub async fn get_cluster_nodes() -> Response {
+    af_services::cluster_daemon::ensure_cluster_schema();
     let Ok(conn) = af_db::get_conn() else {
         return Json(serde_json::json!({
             "nodes": [],
@@ -3875,6 +4457,10 @@ pub async fn get_cluster_nodes() -> Response {
                 "total_nodes": 0,
                 "online": 0,
                 "offline": 0,
+                "online_nodes": 0,
+                "degraded_nodes": 0,
+                "offline_nodes": 0,
+                "healthy": true,
                 "total_cpu_avg": 0.0,
                 "total_mem_used": 0.0,
                 "total_mem_total": 0.0,
@@ -3887,37 +4473,244 @@ pub async fn get_cluster_nodes() -> Response {
 
     let mut nodes = Vec::new();
     let mut online = 0usize;
+    let mut degraded = 0usize;
     let mut offline = 0usize;
+    let mut cpu_sum = 0.0f64;
+    let mut cpu_count = 0usize;
+    let mut total_mem_used = 0.0f64;
+    let mut total_mem_total = 0.0f64;
+    let mut total_disk_used = 0.0f64;
+    let mut total_disk_total = 0.0f64;
+
     if let Ok(mut stmt) = conn.prepare(
         "SELECT id, hostname, address, COALESCE(role, 'worker'), COALESCE(status, 'offline'), \
-         COALESCE(last_heartbeat, ''), COALESCE(enrolled_at, '') FROM cluster_nodes",
+         COALESCE(last_heartbeat, ''), COALESCE(enrolled_at, ''), \
+         COALESCE(cpu_usage, 0.0), COALESCE(ram_usage, 0.0), COALESCE(disk_usage, 0.0) \
+         FROM cluster_nodes",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
-            let status: String = r.get(4)?;
             Ok((
-                status.clone(),
-                serde_json::json!({
-                    "id": r.get::<_, String>(0)?,
-                    "hostname": r.get::<_, String>(1)?,
-                    "address": r.get::<_, String>(2)?,
-                    "role": r.get::<_, String>(3)?,
-                    "status": status,
-                    "version": "4.0.0",
-                    "last_heartbeat": r.get::<_, String>(5)?,
-                    "enrolled_at": r.get::<_, String>(6)?,
-                }),
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, f64>(7).unwrap_or(0.0),
+                r.get::<_, f64>(8).unwrap_or(0.0),
+                r.get::<_, f64>(9).unwrap_or(0.0),
             ))
         }) {
-            for (status, node) in rows.flatten() {
-                if status == "online" {
-                    online += 1;
-                } else {
-                    offline += 1;
+            for (
+                id,
+                hostname,
+                address,
+                role,
+                status,
+                last_heartbeat,
+                enrolled_at,
+                db_cpu,
+                db_ram,
+                db_disk,
+            ) in rows.flatten()
+            {
+                let cached = af_services::cluster_daemon::get_cached_worker_metrics(&id);
+                let version = cached
+                    .as_ref()
+                    .and_then(|c| c.get("version"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("4.0.0")
+                    .to_string();
+
+                let metrics_obj = cached.as_ref().and_then(|c| c.get("metrics"));
+                let sys_info_obj = cached.as_ref().and_then(|c| c.get("system_info"));
+
+                let cpu = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("cpu_usage"))
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            metrics_obj
+                                .and_then(|m| m.get("cpu_usage"))
+                                .and_then(|v| v.as_f64())
+                        })
+                        .unwrap_or(db_cpu),
+                );
+                let ram_pct = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("ram_usage"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(db_ram),
+                );
+                let disk_pct = af_hardware::sanitize_f64(
+                    cached
+                        .as_ref()
+                        .and_then(|c| c.get("disk_usage"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(db_disk),
+                );
+
+                let mem_total_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("mem_total_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("memory")
+                                    .and_then(|x| x.get("total"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            sys_info_obj
+                                .and_then(|s| s.get("total_memory_bytes"))
+                                .and_then(|v| v.as_f64())
+                                .filter(|&b| b > 0.0)
+                                .map(|b| b / (1024.0 * 1024.0 * 1024.0))
+                        })
+                        .unwrap_or(0.0),
+                );
+                let mem_used_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("mem_used_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("memory")
+                                    .and_then(|x| x.get("used"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            if mem_total_gb > 0.0 && ram_pct > 0.0 {
+                                Some((mem_total_gb * ram_pct / 100.0 * 100.0).round() / 100.0)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0.0),
+                );
+
+                let disk_total_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("disk_total_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("disk_space")
+                                    .and_then(|x| x.get("total"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            sys_info_obj
+                                .and_then(|s| s.get("total_disk_bytes"))
+                                .and_then(|v| v.as_f64())
+                                .filter(|&b| b > 0.0)
+                                .map(|b| b / (1024.0 * 1024.0 * 1024.0))
+                        })
+                        .unwrap_or(0.0),
+                );
+                let disk_used_gb = af_hardware::sanitize_f64(
+                    metrics_obj
+                        .and_then(|m| {
+                            m.get("disk_used_gb").and_then(|v| v.as_f64()).or_else(|| {
+                                m.get("disk_space")
+                                    .and_then(|x| x.get("used"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                        })
+                        .or_else(|| {
+                            if disk_total_gb > 0.0 && disk_pct > 0.0 {
+                                Some((disk_total_gb * disk_pct / 100.0 * 100.0).round() / 100.0)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0.0),
+                );
+
+                let net_rx_speed = metrics_obj
+                    .and_then(|m| m.get("net_rx_speed"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0 B/s");
+                let net_tx_speed = metrics_obj
+                    .and_then(|m| m.get("net_tx_speed"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0 B/s");
+                let uptime = metrics_obj
+                    .and_then(|m| m.get("uptime"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let load_average = metrics_obj
+                    .and_then(|m| m.get("load_average"))
+                    .filter(|v| v.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+
+                match status.as_str() {
+                    "online" => {
+                        online += 1;
+                        cpu_sum += cpu;
+                        cpu_count += 1;
+                        total_mem_used += mem_used_gb;
+                        total_mem_total += mem_total_gb;
+                        total_disk_used += disk_used_gb;
+                        total_disk_total += disk_total_gb;
+                    }
+                    "degraded" => {
+                        degraded += 1;
+                        cpu_sum += cpu;
+                        cpu_count += 1;
+                        total_mem_used += mem_used_gb;
+                        total_mem_total += mem_total_gb;
+                        total_disk_used += disk_used_gb;
+                        total_disk_total += disk_total_gb;
+                    }
+                    _ => {
+                        offline += 1;
+                    }
                 }
-                nodes.push(node);
+
+                let node_metrics = serde_json::json!({
+                    "cpu_usage": cpu,
+                    "ram_usage": ram_pct,
+                    "disk_usage": disk_pct,
+                    "mem_used_gb": mem_used_gb,
+                    "mem_total_gb": mem_total_gb,
+                    "disk_used_gb": disk_used_gb,
+                    "disk_total_gb": disk_total_gb,
+                    "net_rx_speed": net_rx_speed,
+                    "net_tx_speed": net_tx_speed,
+                    "uptime": uptime,
+                    "load_average": load_average,
+                });
+
+                nodes.push(serde_json::json!({
+                    "id": id,
+                    "hostname": hostname,
+                    "address": address,
+                    "role": role,
+                    "status": status,
+                    "version": version,
+                    "last_heartbeat": last_heartbeat,
+                    "enrolled_at": enrolled_at,
+                    "cpu_usage": cpu,
+                    "ram_usage": ram_pct,
+                    "disk_usage": disk_pct,
+                    "metrics": node_metrics,
+                    "services": cached.as_ref().and_then(|c| c.get("services")).cloned().unwrap_or(serde_json::Value::Null),
+                    "services_status": cached.as_ref().and_then(|c| c.get("services_status")).and_then(|v| v.as_str()).unwrap_or("unknown"),
+                    "services_observed_at": cached.as_ref().and_then(|c| c.get("services_observed_at")).cloned().unwrap_or(serde_json::Value::Null),
+                    "system_info": sys_info_obj.cloned().unwrap_or(serde_json::Value::Null),
+                }));
             }
         }
     }
+
+    let total_cpu_avg = if cpu_count > 0 {
+        af_hardware::sanitize_f64(((cpu_sum / (cpu_count as f64)) * 100.0).round() / 100.0)
+    } else {
+        0.0
+    };
 
     Json(serde_json::json!({
         "nodes": nodes,
@@ -3925,24 +4718,35 @@ pub async fn get_cluster_nodes() -> Response {
             "total_nodes": nodes.len(),
             "online": online,
             "offline": offline,
-            "total_cpu_avg": 0.0,
-            "total_mem_used": 0.0,
-            "total_mem_total": 0.0,
-            "total_disk_used": 0.0,
-            "total_disk_total": 0.0
+            "online_nodes": online,
+            "degraded_nodes": degraded,
+            "offline_nodes": offline,
+            "healthy": offline == 0 && degraded == 0,
+            "total_cpu_avg": total_cpu_avg,
+            "total_mem_used": af_hardware::sanitize_f64((total_mem_used * 100.0).round() / 100.0),
+            "total_mem_total": af_hardware::sanitize_f64((total_mem_total * 100.0).round() / 100.0),
+            "total_disk_used": af_hardware::sanitize_f64((total_disk_used * 100.0).round() / 100.0),
+            "total_disk_total": af_hardware::sanitize_f64((total_disk_total * 100.0).round() / 100.0),
         }
     }))
     .into_response()
 }
 
 pub async fn enroll_worker() -> Response {
-    let mut token_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut token_bytes);
-    let token = hex::encode(token_bytes);
+    let token = match af_services::cluster_daemon::issue_cluster_enrollment_token() {
+        Ok(tok) => tok,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Failed to persist cluster enrollment token: {e}"),
+            );
+        }
+    };
     Json(serde_json::json!({
         "enrollment_token": token,
         "instructions": format!(
-            "Run on the worker node: aetherflow-api --cluster-mode=worker --master-addr=<this-server>:50051 --psk={}",
+            "Configure /etc/aetherflow/aetherflow.env on the worker node with mTLS certificates:\nCLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:50051\nCLUSTER_CA_CERT=/etc/aetherflow/certs/ca.crt\nCLUSTER_CLIENT_CERT=/etc/aetherflow/certs/worker.crt\nCLUSTER_CLIENT_KEY=/etc/aetherflow/certs/worker.key\nCLUSTER_PSK={}\nThen restart aetherflow-api.service.",
             token
         ),
     }))
@@ -4032,7 +4836,9 @@ mod tests {
         }
         let response = get_worker_metrics(Path(node)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["status"], "online");
         assert!(payload["services"].is_null());
@@ -4082,5 +4888,241 @@ mod tests {
         let error_only = filter_log_entries(raw, "homeassistant.service", "ERROR", "core", 0, 50);
         assert_eq!(error_only.len(), 1);
         assert_eq!(error_only[0]["service"], "hass");
+    }
+
+    #[test]
+    fn test_media_scan_10001_files_reports_partial_cursor_and_resumes_to_completion() {
+        let tmp = std::env::temp_dir().join(format!("af-scan-10001-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("Season_01")).unwrap();
+        std::fs::create_dir_all(tmp.join("Season_02")).unwrap();
+
+        for idx in 0..5_000usize {
+            std::fs::write(
+                tmp.join("Season_01").join(format!("ep_{:05}.mkv", idx)),
+                b"",
+            )
+            .unwrap();
+        }
+        for idx in 5_000..10_001usize {
+            std::fs::write(
+                tmp.join("Season_02").join(format!("ep_{:05}.mkv", idx)),
+                b"",
+            )
+            .unwrap();
+        }
+
+        // First scan hits MAX_SCAN_FILES (10,000), surfaces explicit truncation + next_cursor
+        let page1 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            MAX_SCAN_FILES,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page1.files.len(), 10_000);
+        assert!(page1.truncated);
+        assert!(page1.truncated_by_limit);
+        let cursor = page1
+            .next_cursor
+            .clone()
+            .expect("truncated 10,001-file scan must surface next_cursor");
+        assert_eq!(cursor, "Season_02/ep_09999.mkv");
+
+        // Second scan on the same root automatically resumes from cursor and reaches file #10,001
+        let page2 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &MEDIAFLOW_SCAN_CURSORS,
+            MAX_SCAN_FILES,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page2.files.len(), 1);
+        assert!(!page2.truncated);
+        assert!(page2.next_cursor.is_none());
+        assert!(page2.files[0].ends_with("Season_02/ep_10000.mkv"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bounded_flat_dir_windowing_and_deferred_cursor_commit_on_db_failure() {
+        let tmp = std::env::temp_dir().join(format!("af-flat-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Populate a single flat directory with 2,505 media files (> 2 * DIR_SCAN_WINDOW_CAP = 2048)
+        // plus non-media sidecars to exercise multi-pass BinaryHeap windowing and extension pre-filtering.
+        for idx in (0..2_505usize).rev() {
+            std::fs::write(tmp.join(format!("movie_{:05}.mkv", idx)), b"").unwrap();
+            if idx % 5 == 0 {
+                std::fs::write(tmp.join(format!("movie_{:05}.nfo", idx)), b"meta").unwrap();
+            }
+        }
+
+        let cursor_store: Mutex<HashMap<PathBuf, String>> = Mutex::new(HashMap::new());
+
+        // Simulate a DB write failure after `prepare_auto_continuing_scan` BEFORE `commit_auto_continuing_scan`:
+        // cursor_store MUST remain untouched so retry re-processes from `movie_00000.mkv` without losing batch 1!
+        let prepared_fail = prepare_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(prepared_fail.outcome.files.len(), 2_200);
+        assert!(prepared_fail.outcome.truncated_by_limit);
+        assert_eq!(
+            prepared_fail.outcome.next_cursor.as_deref(),
+            Some("movie_02199.mkv")
+        );
+        assert!(
+            cursor_store.lock().unwrap().is_empty(),
+            "cursor must NOT advance before SQLite persistence commits"
+        );
+
+        // Retry after DB recovers: starts from the very beginning (`movie_00000.mkv`), then commits cursor
+        let prepared_ok = prepare_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert!(prepared_ok.outcome.files[0].ends_with("movie_00000.mkv"));
+        assert!(prepared_ok.outcome.files[2_199].ends_with("movie_02199.mkv"));
+        commit_auto_continuing_scan(&cursor_store, &prepared_ok);
+
+        // Next continuation picks up at `movie_02200.mkv` through `movie_02504.mkv` (305 remaining files)
+        let page2 = run_auto_continuing_scan(
+            &tmp,
+            None,
+            false,
+            &cursor_store,
+            2_200,
+            MAX_SCAN_DEPTH,
+            true,
+            is_mediaflow_extension,
+        );
+        assert_eq!(page2.files.len(), 305);
+        assert!(!page2.truncated);
+        assert!(page2.files[0].ends_with("movie_02200.mkv"));
+        assert!(page2.files[304].ends_with("movie_02504.mkv"));
+        assert!(cursor_store.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn cluster_nodes_summary_rollups_and_persisted_single_use_enrollment() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        crate::plugins::tests::ensure_shared_test_db();
+
+        let enroll_resp = enroll_worker().await;
+        assert_eq!(enroll_resp.status(), StatusCode::OK);
+        let enroll_bytes = axum::body::to_bytes(enroll_resp.into_body(), 65536)
+            .await
+            .unwrap();
+        let enroll_json: serde_json::Value = serde_json::from_slice(&enroll_bytes).unwrap();
+        let tok = enroll_json["enrollment_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(tok.len(), 64);
+
+        // Enroll worker using the persisted single-use token
+        let reg = af_services::cluster_daemon::register_worker_node(
+            &af_services::cluster_daemon::RegisterWorkerRequest {
+                node_id: "node-rollup-worker".to_string(),
+                hostname: "rollup-worker".to_string(),
+                address: "198.51.100.77:8080".to_string(),
+                psk: tok.clone(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            },
+        )
+        .unwrap();
+        assert!(reg.accepted);
+
+        // Replay of single-use token by another node must fail
+        let replay = af_services::cluster_daemon::register_worker_node(
+            &af_services::cluster_daemon::RegisterWorkerRequest {
+                node_id: "node-rollup-attacker".to_string(),
+                hostname: "rollup-attacker".to_string(),
+                address: "198.51.100.88:8080".to_string(),
+                psk: tok.clone(),
+                version: "4.0.0".to_string(),
+                system_info: None,
+            },
+        )
+        .unwrap();
+        assert!(!replay.accepted);
+
+        // Push heartbeat with rich telemetry and verify get_cluster_nodes populates metrics & summary
+        af_services::cluster_daemon::process_worker_heartbeat(
+            &af_services::cluster_daemon::WorkerHeartbeatRequest {
+                node_id: "node-rollup-worker".to_string(),
+                hostname: "rollup-worker".to_string(),
+                address: "198.51.100.77:8080".to_string(),
+                psk: tok,
+                timestamp: Utc::now().timestamp(),
+                cpu_usage: Some(40.0),
+                ram_usage: Some(50.0),
+                disk_usage: Some(25.0),
+                metrics: serde_json::json!({
+                    "cpu_usage": 40.0,
+                    "mem_used_gb": 8.0,
+                    "mem_total_gb": 16.0,
+                    "disk_used_gb": 100.0,
+                    "disk_total_gb": 400.0,
+                    "net_rx_speed": "10 MB/s",
+                    "net_tx_speed": "5 MB/s",
+                    "uptime": "2d",
+                    "load_average": [0.5, 0.4, 0.3]
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let nodes_resp = get_cluster_nodes().await;
+        assert_eq!(nodes_resp.status(), StatusCode::OK);
+        let nodes_bytes = axum::body::to_bytes(nodes_resp.into_body(), 65536)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&nodes_bytes).unwrap();
+        let worker_entry = payload["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "node-rollup-worker")
+            .expect("enrolled worker must appear in /admin/cluster/nodes");
+        assert_eq!(
+            worker_entry["metrics"]["cpu_usage"],
+            serde_json::json!(40.0)
+        );
+        assert_eq!(
+            worker_entry["metrics"]["mem_used_gb"],
+            serde_json::json!(8.0)
+        );
+        assert_eq!(
+            worker_entry["metrics"]["mem_total_gb"],
+            serde_json::json!(16.0)
+        );
+        assert!(payload["summary"]["total_mem_used"].as_f64().unwrap() >= 8.0);
+        assert!(payload["summary"]["total_disk_total"].as_f64().unwrap() >= 400.0);
     }
 }

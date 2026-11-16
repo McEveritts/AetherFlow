@@ -16,7 +16,7 @@ from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 # ============================================================================
 class TestB32StaticExportFailureHaltsPipeline(TestCase):
     def __init__(self):
-        super().__init__("T2_B32_01", "F32", 2, "Failure during static export halts pipeline before Go compile")
+        super().__init__("T2_B32_01", "F32", 2, "Failure during static export halts pipeline before Rust compile")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
@@ -27,16 +27,16 @@ class TestB32SpaFallbackRouteHandling(TestCase):
         super().__init__("T2_B32_02", "F32", 2, "Single binary serves index.html on deep non-asset paths (SPA fallback)")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        embed = inspector.read_file("backend/web/embed.go")
-        self.assert_true(bool(embed and ("index.html" in embed or "spa" in embed.lower() or "Fallback" in embed)), "B32: embed.go must handle SPA client-side routing fallback")
+        embed = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
+        self.assert_true(bool(embed and "index.html" in embed and "EmbeddedNeutralDist" in embed), "B32: embed.rs must handle SPA client-side routing fallback")
 
 class TestB32StaticAssetMimeTypesCorrect(TestCase):
     def __init__(self):
         super().__init__("T2_B32_03", "F32", 2, "Embedded static assets served with valid Content-Type headers")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        embed = inspector.read_file("backend/web/embed.go")
-        self.assert_true(bool(embed and ("mime" in embed.lower() or "Content-Type" in embed or "http.FileServer" in embed)), "B32: Embedded web server must serve correct MIME types")
+        embed = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
+        self.assert_true(bool(embed and "build_file_response" in embed and ("CONTENT_TYPE" in embed or "mime" in embed.lower())), "B32: Embedded web server must serve correct MIME types")
 
 class TestB32BinaryFilePermissionsExecutable(TestCase):
     def __init__(self):
@@ -244,32 +244,47 @@ class TestB37ConcurrentSqliteWriteSafety(TestCase):
         super().__init__("T2_B37_02", "F37", 2, "Concurrent write operations do not trigger database table locks in WAL mode")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        db_code = inspector.read_file("backend/db/db.go")
-        self.assert_true(bool(db_code and "WAL" in db_code and "_busy_timeout" in db_code), "B37: db.go must configure WAL mode with busy timeout")
+        db_code = inspector.read_file("backend-rs/crates/af-db/src/lib.rs")
+        self.assert_true(
+            bool(db_code and "PRAGMA journal_mode=WAL" in db_code and "PRAGMA busy_timeout=5000" in db_code),
+            "B37: af-db/src/lib.rs must configure WAL mode with busy_timeout=5000",
+        )
+
 
 class TestB37CsrfProtectionEnforcedOnMutations(TestCase):
     def __init__(self):
         super().__init__("T2_B37_03", "F37", 2, "Mutating endpoints (POST, PUT, DELETE) reject requests with forged CSRF tokens")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        auth_code = inspector.read_file("backend/api/auth.go")
-        self.assert_true(bool(auth_code and "CSRFMiddleware" in auth_code), "B37: auth.go must implement CSRFMiddleware")
+        auth_code = inspector.read_file("backend-rs/crates/af-api/src/auth.rs")
+        self.assert_true(
+            bool(auth_code and "csrf_middleware" in auth_code),
+            "B37: af-api/src/auth.rs must implement csrf_middleware",
+        )
+
 
 class TestB37RateLimitingOrPayloadLimitsActive(TestCase):
     def __init__(self):
         super().__init__("T2_B37_04", "F37", 2, "Public login and password endpoints enforce rate limits or payload constraints")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        routes = inspector.read_file("backend/api/routes.go")
-        self.assert_true(bool(routes and ("RateLimit" in routes or "Limit" in routes or "publicGroup" in routes)), "B37: Public routes must enforce rate limit protection")
+        routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs")
+        self.assert_true(
+            bool(routes and "auth_rate_limit_middleware" in routes),
+            "B37: af-api/src/routes.rs must enforce auth_rate_limit_middleware protection",
+        )
+
 
 class TestB37GracefulShutdownHandling(TestCase):
     def __init__(self):
         super().__init__("T2_B37_05", "F37", 2, "API server handles SIGINT/SIGTERM with graceful connection drainage")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        main_code = inspector.read_file("backend/main.go")
-        self.assert_true(bool(main_code and ("os.Interrupt" in main_code or "SIGTERM" in main_code or "Shutdown" in main_code)), "B37: main.go must implement graceful shutdown handling")
+        main_code = inspector.read_file("backend-rs/crates/af-api/src/main.rs")
+        self.assert_true(
+            bool(main_code and "shutdown_signal" in main_code and "with_graceful_shutdown" in main_code),
+            "B37: af-api/src/main.rs must implement graceful shutdown handling",
+        )
 
 def get_tests():
     return [

@@ -1,3 +1,37 @@
+## Nightly Patch Notes — November 15, 2026 — Zero-Go Cutover, Native Rust LibreSpeed & Neutral Staging
+
+This release completes the **Zero-Go cutover** across AetherFlow's repository layout, CI/release/security pipelines, test suites, and documentation (superseding all legacy Go toolchain/SAST gates referenced in pre-cutover release notes below):
+- **Zero-Go Repository Hygiene**: Decommissioned `backend/`, `plugins/sdk-template/`, and `packages/package/assets/librespeed/backend-patches/`, removed all legacy Go CI/security/release steps, and enforced `git ls-files '*.go' '*go.mod' '*go.sum'` checks plus locked Cargo gates across both `backend-rs/` and `plugins/sdk-template-rust/backend/` (`cargo fmt`, `cargo clippy -D warnings`, `cargo test --locked`, `cargo-deny`, `cargo-audit`, and scaffold compilation checks).
+- **Native Rust LibreSpeed (`af-librespeed` -> `speedtest-backend`)**: Replaced upstream `speedtest-go` + Go overlay patches with memory-safe `af-librespeed`, enforcing `X-AetherFlow-Proxy-Token` HMAC-SHA256 loopback proxy auth, Apache `SSLProxyCACertificateFile` pinning, PID-1 systemd socket activation (`librespeed.socket`), universal `GuardedBody` HTTP/1.1 & HTTP/2 zero-window stream deadlines, `openat` + `O_NOFOLLOW` asset/TLS/DB confinement, `0600` SQLite WAL telemetry with positional-`pread` BoltDB v2 (`speedtest.bolt`) migration, legacy Go 22-char `base64url` share-link resolution, recursive JSON/location/IPv6 CIDR redaction, and SLSA v1 Sigstore provenance verification across `amd64`, `arm64`, and `armv7`.
+- **Zero-CDN OpenAPI 3.1 UI & Canonical Root Config**: Embedded a zero-`innerHTML`, zero-CDN OpenAPI 3.1 explorer in `af-api`, migrated CI/release staging and runtime config loading to neutral `web/dist` and canonical root `config/` with `O_NOFOLLOW` symlink rejection, and added end-to-end invariant coverage in `tests/test_zero_go_cutover.py`.
+
+---
+
+## Nightly Patch Notes — November 15, 2026 — Control-Plane Hardening, OIDC/PKCE Parity & Sigstore Provenance
+
+### Highlights
+- **Control-Plane, Sandboxing & Log Retention**: Hardened systemd unit sandboxing across `aetherflow-api` and `aetherflow-runner` (`PrivateTmp=yes`, kernel/clock/cgroup/personality/realtime protections, and native syscall filtering while preserving Debian `sudo` 1.9+ privilege drops), installed vendor-managed baseline and security drop-ins (`05-aetherflow-unit-defaults.conf` and `10-aetherflow-hardening.conf`) during release upgrades without mutating operator units, pruned `backend/data`, `dashboard/db`, `logs`, and `releases/*/data-snapshot` from setup `_harden_permissions` (enforcing `0700`/`0600` `root:root` confinement on `/opt/AetherFlow/logs` bootstrap receipts and scoping Nextcloud Apache `Alias` inside its loopback `<VirtualHost>`), enforced `root:aetherflow` (`0750`) ownership on `/var/log/aetherflow` and `/run/aetherflow` with race-free `O_NOFOLLOW` + `LOCK_SH` `/proc/<pid>/fd` descriptor logging (`af_logged`), `O_NOFOLLOW` + `LOCK_EX` `clean_log` truncation, `O_NOFOLLOW` live log tailing in `af-api`, and `os.Root` (`openat2`) symlink confinement + `af-host.backup-manifest.v1` sidecar parity + magic-byte/SQLite upload validation across Go fileshare and backup handlers.
+- **OIDC, PKCE, Auth, Outbound SSRF Pinning & Go/Rust Parity**: Added 64-hex (`openssl rand -hex 32`) `AES_MASTER_KEY` support across Rust, Go, `setup/modules/05-finalize.sh`, and `packages/common.sh`, immediate write-locked SQLite transactions (`db.BeginWriteTx` / `get_write_tx`) across Go and Rust auth/MFA/OIDC state transitions, unexpired `used=1` OIDC authorization-code replay tombstone retention during pruning, authoritative `Authorization: Bearer` enforcement without cookie fallback, expired-within-grace session family revocation on logout, startup `>= 32`-byte `JWT_SECRET` strength enforcement, strict raster/HTTPS avatar and protocol-relative link protections, route-scoped CSP (`default-src 'none'` on `/api/*` + host-scoped `connect-src`), connect-time DNS-rebinding-pinned SSRF protection across AI providers (`x-goog-api-key` header, `Policy::none()`, 2 MiB response cap), webhooks, and streaming probes (blocking IPv4-mapped IPv6, NAT64 `64:ff9b::/96` & `64:ff9b:1::/48`, 6to4 `2002::/16`, and cloud metadata addresses), non-admin WebSocket `SanitizeServicesForViewer` map redaction, panic-safe single-flight `StreamHub` deploy SSE on read-pooled SQLite connections, compact 8-char recovery-code normalization, and WebSocket 3-strike REST fallback polling.
+- **Sigstore Provenance, Release Engine & CI Supply-Chain**: Upgraded zero-PyPI cryptographic Sigstore verification (`deploy/verify-provenance.py`) to support both Rekor v1 (`dsse` v0.0.1 + SET) and Rekor v2 (`rekor-tiles` `dsseV002` + C2SP `tlog-checkpoint` Ed25519 key hints + RFC 3161 TSA timestamp verification) with candidate-signature-bound timestamp/certificate/PAE validation, fail-closed `MANIFEST.sha256` backup snapshotting and explicit audit warnings when `AETHERFLOW_SKIP_PROVENANCE_VERIFY=1` is used, persisted `.recovery_state.json` post-swap deploy guards and outgoing `current/data-snapshot` standalone rollback restoration across both `af-release` and `deploy/release-manager.sh`, newline-escaped runner env serialization, HTTPS-only `--proto '=https' --proto-redir '=https'` curl redirects, and full `govulncheck`, `staticcheck`, `gosec` (`G201`/`G202`), `go test -race`, `cargo deny`, `cargo-audit`, `gitleaks` `8.30.1`, and `npm audit --workspaces` gates.
+
+---
+
+## Nightly Patch Notes — November 13, 2026 — Toolchain Hygiene, Probe Hardening & Installer Reliability
+
+### Toolchain, Dependencies & CI Actions
+
+* Bump `backend/go.mod` from Go `1.26.10` to `1.26.11` and remove unused workspace dependencies (`thiserror` in `af-db`, `anyhow` and `tracing` in `af-host`) from `backend-rs`.
+* Upgrade GitHub Actions across `ci.yml`, `release.yml`, `security.yml`, and `deploy-pages.yml` onto Node-24 compatible majors (`actions/checkout@v7`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `actions/setup-go@v7`, `actions/configure-pages@v6`, `actions/upload-pages-artifact@v5`, `actions/deploy-pages@v5`, `actions/attest-build-provenance@v4`) and bump `GITLEAKS_VERSION` to `8.30.1`.
+* Update `frontend/` dependencies (`next` `16.4.6`, `tailwindcss` `4.3.5`, `@types/react*` `19.3.0`, pinned `@playwright/test` `1.59.1`, and compatible runtime packages) with zero `npm audit` findings, and document changes in `docs/codebase-version-audit-2026-11-13.md`.
+
+### Service Version Probes, Installers & Frontend Polish
+
+* Restrict generic live git version probing in `af-services` to `git`-sourced packages with `-c safe.directory=*`, add `apt_receipt_matches_live_debian_revision` receipt reconciliation, and refresh `version_command` entries in `backend/config/package_automation.json` across 13 packages while keeping `piped` and `invidious` probes unchanged.
+* Require `MainPID == 0` for `failed` units in `systemd_unit_inactive`, guard `$LOGFILE` redirections with `${LOGFILE:-/dev/null}`, split `installpackage-listenarr` `jq` filters onto single lines, and harden `installpackage-kasmvnc` TLS credential copying, state-dir symlink checks, and rollback scratch cleanup ordering.
+* Clarify `FileshareTab` chunk-streaming messaging (`5 MiB Chunk Streaming · 50 MiB Max`) and clamp all four Recharts chart tooltips in `StreamingTab` inside viewbox and viewport bounds; resolve unclosed `sqlite3.connect` handles and align mock `systemctl` fixtures across the Python installer test suite.
+
+---
+
 ## Nightly Patch Notes — November 13, 2026 — Streaming Proxy Timeouts
 
 * Replace the subdomain proxy's 60-second total HTTP deadline with a 10-second connection timeout. Long-lived Jellyfin, media, and download response bodies can continue streaming beyond 60 seconds while connection setup remains bounded.
@@ -6,11 +40,28 @@
 
 ---
 
-## Nightly Patch Notes — November 11, 2026 — Release Test Isolation
+## Nightly Patch Notes — November 11, 2026 — Release Test Isolation & Multi-Ecosystem Vulnerability Cleanup
 
 * Make the runner's rclone version-extraction regression use an isolated package catalog and mock executable while preserving the production version regex and receipt-certification assertions. The release tests no longer depend on rclone or AetherFlow being installed on the CI host.
 * Restore the test's catalog environment before checking its result so an assertion failure does not leak fixture configuration to later tests. Keep production probes and all release security gates unchanged.
 * Update the YouTube installer fixtures for Piped's clean build environment, trusted Rust toolchain lookup, and running-proxy provenance checks. Exercise the real source-copy and artifact-certification paths, including rejection of a proxy running from a stale path, while retaining the loopback listener guard.
+
+### Rust Control Plane Advisories & Policy
+
+* Upgrade `jsonwebtoken` from `9.3.1` to `10.4.0` with the `aws_lc_rs` cryptographic backend to remediate `GHSA-h395-gr6q-cpjc` (`CVE-2026-25537`), a type-confusion authorization bypass advisory, without re-introducing `rsa` 0.9 transitive dependencies.
+* Upgrade `rsa` from `0.9.10` to `0.10.0` in `af-api` OIDC RS256 key management (`PrivateKey`/`PublicKey` and minimal RFC 7518 `Base64urlUInt` component encoding) to remediate `RUSTSEC-2023-0071` (`CVE-2023-49092`), and remove the `RUSTSEC-2023-0071` advisory exception from `backend-rs/deny.toml`, `.github/workflows/security.yml`, and `.github/workflows/release.yml`.
+* Add `bzip2-1.0.6` to the explicit SPDX license allowlist in `backend-rs/deny.toml` for `libbz2-rs-sys`.
+
+### Frontend & NPM Workspace Advisories
+
+* Add semver-scoped workspace `overrides` in `package.json` and regenerate `package-lock.json` to upgrade vulnerable transitive ranges to `glob` `14.0.4` (`GHSA-3g3m-2fjr-6pw4` / `CVE-2026-118773`), `minimatch` `11.0.6` (`GHSA-g3hv-75wg-m249` / `CVE-2026-118764`), and `deepmerge` `4.1.2` (`GHSA-gcqx-w48m-w2h4` / `CVE-2026-93753`) while preserving `minimatch` `3.x` compatibility for ESLint 9.
+
+### Legacy Go Backend Advisories, SAST & Security Gate
+
+* Upgrade `golang.org/x/net` to `v0.62.0` (`GO-2026-6860` / `CVE-2026-78661`, `GO-2026-6866` / `CVE-2026-97045`) and `golang.org/x/crypto` to `v0.58.1-0.20261109165751-4e10f38b063d` (`GO-2026-5932`).
+* Remove the unauthenticated `net/http/pprof` import and `127.0.0.1:6060` listener from `backend/main.go` (`G108` / `CWE-200`), migrate `AppSubdomainProxyMiddleware` from deprecated `ReverseProxy.Director` to `ReverseProxy.Rewrite` (`SA1019`), clean operator-configured filesystem paths (`G703`), and align Go 1.26 security gate tooling (`gosec` `v2.30.0`, `staticcheck` `v0.8.2`, `govulncheck` `v1.9.0`) in `.github/workflows/security.yml`.
+
+---
 
 ## Nightly Patch Notes — November 10, 2026 — SQLite Security, Open Canvas UI & Marketplace Lifecycle
 

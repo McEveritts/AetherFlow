@@ -79,7 +79,7 @@ export default function SecurityTab() {
     const initSetup = useCallback(async () => {
         setIsSettingUp(true);
         try {
-            const res = await apiFetch('/api/v1/auth/user/2fa/setup');
+            const res = await apiFetch('/api/v1/auth/user/2fa/setup', { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json();
                 addToast(data.message || data.error || 'Failed to initiate 2FA setup.', 'error');

@@ -1,6 +1,6 @@
 # AetherFlow Operational Runbook
 
-> **Version**: v4.0.0 · **Control Plane**: 11-Crate Rust Workspace (`backend-rs`) + Embedded Next.js 16 (Obsidian V2)  
+> **Version**: v4.0.0 · **Control Plane**: 12-Crate Rust Workspace (`backend-rs`) + Embedded Next.js 16 (Obsidian V2)
 > **Audience**: System administrators and operators managing AetherFlow bare-metal deployments.
 
 ---

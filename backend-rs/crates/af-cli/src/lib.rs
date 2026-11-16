@@ -55,15 +55,16 @@ pub use provision::{
 };
 
 pub use af_host::{
-    assemble_verified_chunks, create_host_archive_backup, create_sqlite_snapshot_backup,
-    delete_backup_artifacts, execute_destructive_restore, list_backup_inventory,
-    maintenance_helper_ownership_registry, plan_restore_from_manifest_with_sqlite_overrides,
+    apply_network_tuning, assemble_verified_chunks, clean_system_logs,
+    compute_sysctl_network_tuning, create_host_archive_backup, create_sqlite_snapshot_backup,
+    delete_backup_artifacts, execute_destructive_restore, inspect_home_disk_space,
+    list_backup_inventory, maintenance_helper_ownership_registry,
+    plan_restore_from_manifest_with_sqlite_overrides,
     preflight_restore_directory_with_sqlite_overrides_and_trusted_uid,
     preflight_tar_gz_archive_with_sqlite_overrides_and_trusted_uid, prune_backup_inventory,
-    safe_backup_file_path, split_backup_into_chunks, verify_backup_artifact_with_trusted_uid,
-    BackupManifest, HostBackupConfig, RestorePlan, RestorePreflightOptions,
-    apply_network_tuning, clean_system_logs, compute_sysctl_network_tuning,
-    inspect_home_disk_space, sentinel_scan_auth_log,
+    safe_backup_file_path, sentinel_scan_auth_log, split_backup_into_chunks,
+    verify_backup_artifact_with_trusted_uid, BackupManifest, HostBackupConfig, RestorePlan,
+    RestorePreflightOptions,
 };
 use af_models::SelfUpdateJobStatus;
 use af_release::{ReleaseConfig, ReleaseEngine, ReleaseOutcome};
@@ -427,7 +428,12 @@ fn execute_maintenance_command(
             };
             let mut lines = vec![format!("Home disk space usage ({} users):", filtered.len())];
             for e in &filtered {
-                lines.push(format!("{:>10} {}/ ({})", e.human, e.user, e.home_path.display()));
+                lines.push(format!(
+                    "{:>10} {}/ ({})",
+                    e.human,
+                    e.user,
+                    e.home_path.display()
+                ));
             }
             Ok(CliResponseEnvelope::success(
                 "maintenance",
@@ -538,11 +544,9 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
     if !db_path.is_file() {
         return None;
     }
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     for table in ["app_ingress_configs", "retained_app_ingress_configs"] {
         let sql = format!(
             "SELECT listen_port FROM {} WHERE LOWER(app_name) = LOWER(?1) LIMIT 1",
@@ -582,7 +586,9 @@ fn resolve_cli_package_port(
             }
         }
         candidate_dbs.push(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"));
-        candidate_dbs.push(PathBuf::from("/opt/AetherFlow/backend/data/aetherflow.sqlite"));
+        candidate_dbs.push(PathBuf::from(
+            "/opt/AetherFlow/backend/data/aetherflow.sqlite",
+        ));
         candidate_dbs.push(PathBuf::from("data/aetherflow.sqlite"));
     }
 
@@ -904,7 +910,10 @@ fn execute_package_command(
                 } else {
                     "[AVAILABLE]"
                 };
-                lines.push(format!("  {:<13} {:<20} (service: {})", badge, item.package_id, item.service_name));
+                lines.push(format!(
+                    "  {:<13} {:<20} (service: {})",
+                    badge, item.package_id, item.service_name
+                ));
             }
 
             Ok(CliResponseEnvelope::success(
@@ -922,9 +931,7 @@ fn execute_package_command(
             let lookup_id = resolve_package_lock_name(package);
             let def = get_runner_package_definition(lookup_id)
                 .or_else(|| get_runner_package_definition(package))
-                .ok_or_else(|| {
-                    CliError::Validation(format!("unknown package {:?}", package))
-                })?;
+                .ok_or_else(|| CliError::Validation(format!("unknown package {:?}", package)))?;
             let (install_lock, swizzin_lock) = resolve_package_lock_paths(global, lookup_id);
             let installed = install_lock.exists() || swizzin_lock.exists();
             let lock_path = if !install_lock.exists() && swizzin_lock.exists() {
@@ -964,7 +971,11 @@ fn execute_package_command(
             Ok(CliResponseEnvelope::success(
                 "package",
                 "cancel",
-                format!("Package cancellation for '{}': {}", package, resp.output.trim()),
+                format!(
+                    "Package cancellation for '{}': {}",
+                    package,
+                    resp.output.trim()
+                ),
                 Some(json!({ "request": req, "runner_response": resp })),
             ))
         }
@@ -1188,15 +1199,13 @@ fn resolve_local_self_update_status_context(
     explicit_status_file: Option<&Path>,
     explicit_job_unit: Option<&str>,
 ) -> (Option<PathBuf>, String) {
-    let status_file = explicit_status_file
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            std::env::var("AETHERFLOW_SELF_UPDATE_STATUS_FILE")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        });
+    let status_file = explicit_status_file.map(Path::to_path_buf).or_else(|| {
+        std::env::var("AETHERFLOW_SELF_UPDATE_STATUS_FILE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    });
     let unit_name = explicit_job_unit
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -1230,8 +1239,20 @@ fn execute_local_release_with_status_receipt(
 
     let result: CliResult<CliResponseEnvelope> = (|| {
         let cfg = load_release_config(global, config_path, keep_releases)?;
-        let opts = build_release_engine_options(cmd, global.dry_run)
+        let mut opts = build_release_engine_options(cmd, global.dry_run)
             .expect("deploy/rollback always yields ReleaseOptions");
+        let is_channel_explicit = match cmd {
+            ReleaseCliCommand::Deploy {
+                channel_explicit, ..
+            }
+            | ReleaseCliCommand::Rollback {
+                channel_explicit, ..
+            } => *channel_explicit,
+            _ => true,
+        };
+        if !is_channel_explicit {
+            opts.channel = cfg.release_channel;
+        }
         let engine = ReleaseEngine::new_production(cfg);
         let outcome = engine.execute(&opts)?;
         format_release_outcome(action_str, outcome)
@@ -1357,6 +1378,7 @@ fn execute_release_command(
         }
         ReleaseCliCommand::Deploy {
             channel,
+            channel_explicit,
             mode,
             config_path,
             keep_releases,
@@ -1375,7 +1397,14 @@ fn execute_release_command(
                         job_unit.as_deref(),
                         "af release deploy",
                     )?;
-                    let req = build_self_update_runner_request(action_str, *channel)?;
+                    let effective_channel = if *channel_explicit {
+                        *channel
+                    } else {
+                        load_release_config(global, None, None)
+                            .map(|c| c.release_channel)
+                            .unwrap_or(*channel)
+                    };
+                    let req = build_self_update_runner_request(action_str, effective_channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
                             "release",
@@ -1415,6 +1444,7 @@ fn execute_release_command(
         }
         ReleaseCliCommand::Rollback {
             channel,
+            channel_explicit,
             mode,
             config_path,
             job_status_file,
@@ -1431,7 +1461,14 @@ fn execute_release_command(
                         job_unit.as_deref(),
                         "af release rollback",
                     )?;
-                    let req = build_self_update_runner_request(action_str, *channel)?;
+                    let effective_channel = if *channel_explicit {
+                        *channel
+                    } else {
+                        load_release_config(global, None, None)
+                            .map(|c| c.release_channel)
+                            .unwrap_or(*channel)
+                    };
+                    let req = build_self_update_runner_request(action_str, effective_channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
                             "release",
@@ -1521,7 +1558,12 @@ fn format_release_outcome(action: &str, outcome: ReleaseOutcome) -> CliResult<Cl
             rep.health_status.as_deref().unwrap_or("not probed")
         ),
     };
-    Ok(CliResponseEnvelope::success("release", action, msg, Some(val)))
+    Ok(CliResponseEnvelope::success(
+        "release",
+        action,
+        msg,
+        Some(val),
+    ))
 }
 
 fn resolve_backup_config(
@@ -1569,9 +1611,8 @@ fn resolve_backup_config(
     }
     if let Some(db) = explicit_db_path {
         if let Some(ref root) = global.root {
-            let validated_db =
-                af_models::validate_path_within_isolated_root(db, root, "--db-path")
-                    .map_err(CliError::Validation)?;
+            let validated_db = af_models::validate_path_within_isolated_root(db, root, "--db-path")
+                .map_err(CliError::Validation)?;
             cfg.sqlite_db_path = Some(validated_db);
         } else {
             cfg.sqlite_db_path = Some(db.to_path_buf());
@@ -1610,23 +1651,57 @@ fn execute_backup_command(
         af_models::try_resolve_trusted_sqlite_ids_from_env(global.root.as_deref())
             .map_err(CliError::Validation)?;
     let mutating_backup_dir = match cmd {
-        BackupCliCommand::RestoreDestructive { confirm_destructive_restore: false, .. } => None,
-        BackupCliCommand::Create { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::RestoreDestructive { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::RecoverInterrupted { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::Delete { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::Prune { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::Chunk { backup_dir, operator_privileged, .. }
-        | BackupCliCommand::Assemble { backup_dir, operator_privileged, .. } => {
-            Some((backup_dir.as_deref(), *operator_privileged))
+        BackupCliCommand::RestoreDestructive {
+            confirm_destructive_restore: false,
+            ..
+        } => None,
+        BackupCliCommand::Create {
+            backup_dir,
+            operator_privileged,
+            ..
         }
+        | BackupCliCommand::RestoreDestructive {
+            backup_dir,
+            operator_privileged,
+            ..
+        }
+        | BackupCliCommand::RecoverInterrupted {
+            backup_dir,
+            operator_privileged,
+            ..
+        }
+        | BackupCliCommand::Delete {
+            backup_dir,
+            operator_privileged,
+            ..
+        }
+        | BackupCliCommand::Prune {
+            backup_dir,
+            operator_privileged,
+            ..
+        }
+        | BackupCliCommand::Chunk {
+            backup_dir,
+            operator_privileged,
+            ..
+        }
+        | BackupCliCommand::Assemble {
+            backup_dir,
+            operator_privileged,
+            ..
+        } => Some((backup_dir.as_deref(), *operator_privileged)),
         _ => None,
     };
     let _maintenance_lock = if global.dry_run {
         None
     } else if let Some((backup_dir, operator_privileged)) = mutating_backup_dir {
         let cfg = resolve_backup_config(global, backup_dir, None, "v4.0.0")?;
-        require_backup_write_privilege(global, &cfg.backup_dir, operator_privileged, cmd.action_name())?;
+        require_backup_write_privilege(
+            global,
+            &cfg.backup_dir,
+            operator_privileged,
+            cmd.action_name(),
+        )?;
         let timeout = std::time::Duration::from_secs(30);
         Some(if backup_dir.is_none() {
             let lock_path = af_models::try_resolve_canonical_maintenance_lock_path_from_env(
@@ -1793,16 +1868,15 @@ fn execute_backup_command(
                 require_artifact_sidecar: true,
             };
 
-            let sqlite_override_buf = if global.root.is_none()
-                || global.root.as_deref() == Some(target_root.as_path())
-            {
-                af_models::resolve_contained_sqlite_restore_override(
-                    target_root,
-                    cfg.sqlite_db_path.as_deref(),
-                )
-            } else {
-                None
-            };
+            let sqlite_override_buf =
+                if global.root.is_none() || global.root.as_deref() == Some(target_root.as_path()) {
+                    af_models::resolve_contained_sqlite_restore_override(
+                        target_root,
+                        cfg.sqlite_db_path.as_deref(),
+                    )
+                } else {
+                    None
+                };
             let sqlite_override = sqlite_override_buf.as_deref();
             let sqlite_target_rel = sqlite_override
                 .and_then(|db_p| af_models::derive_sqlite_target_rel_path(target_root, db_p));
@@ -1862,7 +1936,8 @@ fn execute_backup_command(
         } => {
             let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             if !*confirm_destructive_restore {
-                let dummy_manifest = BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
+                let dummy_manifest =
+                    BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
                 let dummy_stage = target_root
                     .clone()
                     .unwrap_or_else(|| cfg.backup_dir.join("restore-stage"));
@@ -1939,9 +2014,9 @@ fn execute_backup_command(
                 allow_overwrite: *allow_overwrite,
                 confirm_destructive_restore: true,
                 quiesce_services: Vec::new(),
-                sqlite_target_rel_path: trusted_sqlite_db_path
-                    .as_deref()
-                    .and_then(|db_p| af_models::derive_sqlite_target_rel_path(&resolved_target, db_p)),
+                sqlite_target_rel_path: trusted_sqlite_db_path.as_deref().and_then(|db_p| {
+                    af_models::derive_sqlite_target_rel_path(&resolved_target, db_p)
+                }),
                 trusted_sqlite_db_path,
                 trusted_sqlite_uid: (*trusted_sqlite_uid).or(env_trusted_uid),
                 trusted_sqlite_gid: (*trusted_sqlite_gid).or(env_trusted_gid),
@@ -2084,7 +2159,10 @@ fn execute_backup_command(
                 return Ok(CliResponseEnvelope::success(
                     "backup",
                     "delete",
-                    format!("[DRY-RUN] Would delete backup artifacts for {}", target.display()),
+                    format!(
+                        "[DRY-RUN] Would delete backup artifacts for {}",
+                        target.display()
+                    ),
                     Some(json!({ "dry_run": true, "artifact": target })),
                 ));
             }
@@ -2260,10 +2338,7 @@ fn execute_backup_command(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn resolve_provision_paths(global: &GlobalOptions) -> CliResult<ProvisionPaths> {
-    let root = global
-        .root
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/"));
+    let root = global.root.clone().unwrap_or_else(|| PathBuf::from("/"));
     ProvisionPaths::for_root(root)
 }
 
@@ -2370,14 +2445,8 @@ fn execute_provision_command(
             steps,
             require_root,
         } => {
-            let report = execute_provision_steps(
-                &store,
-                steps,
-                false,
-                true,
-                *require_root,
-                global.dry_run,
-            )?;
+            let report =
+                execute_provision_steps(&store, steps, false, true, *require_root, global.dry_run)?;
             Ok(CliResponseEnvelope::success(
                 "provision",
                 "repair",

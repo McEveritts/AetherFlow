@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import os
@@ -154,7 +155,7 @@ class NextcloudPurgeTests(unittest.TestCase):
         with InstallerFixture('nextcloud') as fixture:
             config, values = self.configure(fixture, dbtype='sqlite3')
             database = fixture.root / 'var/lib/nextcloud/data/owncloud.db'
-            with sqlite3.connect(database) as connection:
+            with contextlib.closing(sqlite3.connect(database)) as connection, connection:
                 connection.execute('CREATE TABLE operator_data (value TEXT)')
             unrelated = fixture.file('unrelated-mysql-nextcloud', 'unrelated-database\n')
             result = fixture.run('uninstall', DELETE_DATA='true')

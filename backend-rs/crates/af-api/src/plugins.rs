@@ -250,6 +250,7 @@ fn default_plugin_aud() -> String {
 struct ActivePluginProcess {
     child: Child,
     port: u16,
+    pgid: Option<i32>,
 }
 
 static ACTIVE_PROCESSES: Lazy<Mutex<HashMap<String, ActivePluginProcess>>> =
@@ -421,7 +422,10 @@ pub fn normalize_scope_entry(
         }
     };
 
-    if methods.iter().any(|method| scope_delegates_admin_user_write(method, &raw_route)) {
+    if methods
+        .iter()
+        .any(|method| scope_delegates_admin_user_write(method, &raw_route))
+    {
         return Err(format!(
             "Plugin API scope '{}' delegates an admin-user-only destructive HTTP capability",
             raw_route
@@ -994,7 +998,7 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
     if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
         if let Some(jtis) = map.remove(plugin_id) {
             for jti in jtis {
-                af_db::revoke_token(
+                let _ = af_db::revoke_token(
                     &jti,
                     Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
                 );
@@ -1008,19 +1012,41 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(PathBuf, Vec<String>)> {
-    if !manifest.backend.binary_name.trim().is_empty() {
-        for rel in [
-            format!(
-                "backend/target/release/{}",
-                manifest.backend.binary_name.trim()
-            ),
-            format!(
-                "backend/target/debug/{}",
-                manifest.backend.binary_name.trim()
-            ),
-            format!("bin/{}", manifest.backend.binary_name.trim()),
-            manifest.backend.binary_name.trim().to_string(),
+    let bin = manifest.backend.binary_name.trim();
+    if !bin.is_empty() {
+        let mut candidates = Vec::with_capacity(8);
+
+        // 1. Honor explicit Cargo manifest directory from `backend.manifest_path`
+        // (e.g. `backend/Cargo.toml` -> `backend/target/{release,debug}/<bin>`).
+        let manifest_path_trimmed = manifest.backend.manifest_path.trim();
+        if !manifest_path_trimmed.is_empty() {
+            if let Some(parent) = std::path::Path::new(manifest_path_trimmed).parent() {
+                let parent_str = parent.to_string_lossy().trim_matches('/').to_string();
+                if parent_str.is_empty() || parent_str == "." {
+                    candidates.push(format!("target/release/{bin}"));
+                    candidates.push(format!("target/debug/{bin}"));
+                } else {
+                    candidates.push(format!("{parent_str}/target/release/{bin}"));
+                    candidates.push(format!("{parent_str}/target/debug/{bin}"));
+                }
+            }
+        }
+
+        // 2. Canonical Rust plugin workspace target & packaged binary layouts.
+        for default_rel in [
+            format!("backend-rs/target/release/{bin}"),
+            format!("backend-rs/target/debug/{bin}"),
+            format!("backend/target/release/{bin}"),
+            format!("backend/target/debug/{bin}"),
+            format!("bin/{bin}"),
+            bin.to_string(),
         ] {
+            if !candidates.contains(&default_rel) {
+                candidates.push(default_rel);
+            }
+        }
+
+        for rel in candidates {
             if let Ok(path) = validate_relative_plugin_subpath(&manifest.plugin_dir, &rel, true) {
                 if path.is_file() {
                     return Some((path, Vec::new()));
@@ -1073,12 +1099,15 @@ fn configure_unprivileged_command(
         .env("AETHERFLOW_PLUGIN_TOKEN", scoped_token);
 
     #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            // Ensure no new privileges can be acquired by plugin child processes
-            let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-            Ok(())
-        });
+    {
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                // Ensure no new privileges can be acquired by plugin child processes
+                let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                Ok(())
+            });
+        }
     }
 }
 
@@ -1132,8 +1161,12 @@ pub async fn start_plugin_instance(
         match cmd.spawn() {
             Ok(child) => {
                 spawned_managed = true;
+                let pgid = child.id().and_then(|id| i32::try_from(id).ok());
                 if let Ok(mut map) = ACTIVE_PROCESSES.lock() {
-                    map.insert(manifest.id.clone(), ActivePluginProcess { child, port });
+                    map.insert(
+                        manifest.id.clone(),
+                        ActivePluginProcess { child, port, pgid },
+                    );
                 }
             }
             Err(err) => {
@@ -1163,20 +1196,78 @@ pub async fn start_plugin_instance(
     Ok(build_runtime_view(manifest, &state, healthy))
 }
 
+fn send_signal_to_process_group(pgid: Option<i32>, sig: i32) {
+    #[cfg(unix)]
+    if let Some(pg) = pgid.filter(|&p| p > 0) {
+        unsafe {
+            libc::kill(-pg, sig);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (pgid, sig);
+}
+
 async fn stop_running_process(plugin_id: &str) {
     let maybe_proc = ACTIVE_PROCESSES
         .lock()
         .ok()
         .and_then(|mut map| map.remove(plugin_id));
     if let Some(mut proc_entry) = maybe_proc {
-        let _ = proc_entry.child.kill().await;
-        let _ = proc_entry.child.wait().await;
+        #[cfg(unix)]
+        send_signal_to_process_group(proc_entry.pgid, libc::SIGTERM);
+        let exited = tokio::time::timeout(Duration::from_secs(2), proc_entry.child.wait())
+            .await
+            .is_ok();
+        if !exited {
+            let _ = proc_entry.child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), proc_entry.child.wait()).await;
+        }
+        // Always sweep any surviving background descendants in the plugin process group,
+        // even when the immediate leader process exited cleanly after SIGTERM.
+        #[cfg(unix)]
+        send_signal_to_process_group(proc_entry.pgid, libc::SIGKILL);
+    }
+}
+
+async fn run_plugin_stop_hook(manifest: &ValidatedPluginManifest, port: u16) {
+    let raw_hook = manifest.lifecycle_hooks.on_stop.trim();
+    if raw_hook.is_empty() || !cfg!(unix) {
+        return;
+    }
+    let Ok(hook_path) = validate_relative_plugin_subpath(&manifest.plugin_dir, raw_hook, true)
+    else {
+        return;
+    };
+    if !hook_path.is_file() {
+        return;
+    }
+    let scoped_token = mint_scoped_plugin_token(manifest, Some(60))
+        .map(|(t, _)| t)
+        .unwrap_or_default();
+    let mut cmd = Command::new("/bin/bash");
+    cmd.arg(&hook_path);
+    configure_unprivileged_command(&mut cmd, manifest, port, &scoped_token);
+    if let Ok(mut child) = cmd.spawn() {
+        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
+        if tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .is_err()
+        {
+            #[cfg(unix)]
+            send_signal_to_process_group(pgid, libc::SIGTERM);
+            let _ = child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+        }
+        #[cfg(unix)]
+        send_signal_to_process_group(pgid, libc::SIGKILL);
     }
 }
 
 pub async fn stop_plugin_instance(
     manifest: &ValidatedPluginManifest,
 ) -> Result<PluginRuntimeView, String> {
+    let existing = get_or_init_registry_state(&manifest.id);
+    run_plugin_stop_hook(manifest, existing.allocated_port).await;
     stop_running_process(&manifest.id).await;
     revoke_all_tokens_for_plugin(&manifest.id);
     let existing = get_or_init_registry_state(&manifest.id);
@@ -1660,6 +1751,7 @@ pub async fn proxy_plugin_wildcard_handler(
     proxy_plugin_request_inner(id, rest, auth_user, req).await
 }
 
+#[allow(clippy::result_large_err)]
 async fn collect_proxy_body(body: Body) -> Result<axum::body::Bytes, Response> {
     match axum::body::to_bytes(body, MAX_PLUGIN_PROXY_BODY_BYTES).await {
         Ok(bytes) => Ok(bytes),
@@ -1685,6 +1777,7 @@ async fn collect_proxy_body(body: Body) -> Result<axum::body::Bytes, Response> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn collect_proxy_response(mut upstream_resp: reqwest::Response) -> Result<Vec<u8>, Response> {
     let mut resp_bytes = Vec::new();
     loop {
@@ -1818,25 +1911,32 @@ async fn proxy_plugin_request_inner(
         .request(reqwest_method, &target_url)
         .body(body_bytes.to_vec());
 
-    // Forward safe headers ONLY — strip Cookie, Authorization, X-CSRF-Token, and hop-by-hop headers
+    // Forward safe headers ONLY — strip Cookie, Authorization, X-CSRF-Token, identity headers, and hop-by-hop headers
     for (name, val) in req_headers.iter() {
         let lower = name.as_str().to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "cookie"
-                | "authorization"
-                | "x-csrf-token"
-                | "host"
-                | "connection"
-                | "keep-alive"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "content-length"
-        ) {
+        if lower.starts_with("x-aetherflow-")
+            || matches!(
+                lower.as_str(),
+                "cookie"
+                    | "authorization"
+                    | "x-csrf-token"
+                    | "remote-user"
+                    | "x-remote-user"
+                    | "x-forwarded-user"
+                    | "x-forwarded-email"
+                    | "x-forwarded-groups"
+                    | "host"
+                    | "connection"
+                    | "keep-alive"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "te"
+                    | "trailer"
+                    | "transfer-encoding"
+                    | "upgrade"
+                    | "content-length"
+            )
+        {
             continue;
         }
         if let (Ok(r_name), Ok(r_val)) = (
@@ -2261,7 +2361,8 @@ pub(crate) mod tests {
 
         // Write permissions allow explicit POST scope on non-denied route
         let write_perms = vec!["services:control:write".to_string()];
-        let valid_post = RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
+        let valid_post =
+            RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
         let rules = normalize_scope_entry(&valid_post, &write_perms).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].method, "POST");
@@ -2276,6 +2377,7 @@ pub(crate) mod tests {
             exp: Utc::now().timestamp() + 900,
             jti: "op-session-1".to_string(),
             cfp: String::new(),
+            ver: 0,
             plugin_id: String::new(),
             plugin_scopes: Vec::new(),
         };
@@ -2389,6 +2491,154 @@ pub(crate) mod tests {
             "expected concurrent health probes to complete under 700ms, took {:?}",
             elapsed
         );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_running_process_terminates_detached_grandchild_in_process_group() {
+        let plugin_id = format!("pgid-test-{}", uuid::Uuid::new_v4());
+        let tmp = env::temp_dir().join(&plugin_id);
+        fs::create_dir_all(&tmp).unwrap();
+        let pid_file = tmp.join("grandchild.pid");
+
+        let manifest = ValidatedPluginManifest {
+            id: plugin_id.clone(),
+            name: "pgid-test".to_string(),
+            version: "1.0.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: Vec::new(),
+            granted_scopes: Vec::new(),
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec::default(),
+            frontend: PluginFrontendSpec::default(),
+            plugin_dir: tmp.clone(),
+        };
+
+        let script = format!("sleep 30 & echo $! > {:?}; wait", pid_file);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        configure_unprivileged_command(&mut cmd, &manifest, 21111, "test-token");
+        let child = cmd.spawn().unwrap();
+        let pgid = child.id().and_then(|id| i32::try_from(id).ok());
+        {
+            let mut map = ACTIVE_PROCESSES.lock().unwrap();
+            map.insert(
+                plugin_id.clone(),
+                ActivePluginProcess {
+                    child,
+                    port: 21111,
+                    pgid,
+                },
+            );
+        }
+
+        let mut gc_pid: i32 = -1;
+        for _ in 0..40 {
+            if let Ok(raw) = fs::read_to_string(&pid_file) {
+                if let Ok(parsed) = raw.trim().parse::<i32>() {
+                    gc_pid = parsed;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(gc_pid > 0, "grandchild pid should be recorded");
+
+        stop_running_process(&plugin_id).await;
+        for _ in 0..20 {
+            let alive = unsafe { libc::kill(gc_pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_ne!(
+            unsafe { libc::kill(gc_pid, 0) },
+            0,
+            "grandchild pid {gc_pid} must be terminated when plugin process group stops"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_plugin_executable_supports_sdk_template_manifest_path_and_backend_rs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = env::temp_dir().join(format!("af-plugin-bin-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let make_exec = |rel: &str| {
+            let p = tmp.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let mut manifest = ValidatedPluginManifest {
+            id: "bin-test".to_string(),
+            name: "bin-test".to_string(),
+            version: "1.0.0".to_string(),
+            sdk: "rust".to_string(),
+            contract_version: "v1".to_string(),
+            runtime_status: "managed".to_string(),
+            description: String::new(),
+            author: String::new(),
+            permissions: Vec::new(),
+            granted_scopes: Vec::new(),
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec {
+                manifest_path: "backend/Cargo.toml".to_string(),
+                binary_name: "my-plugin-bin".to_string(),
+                ..Default::default()
+            },
+            frontend: PluginFrontendSpec::default(),
+            plugin_dir: tmp.clone(),
+        };
+
+        // 1. Fallback order from lowest to highest priority when manifest_path = "backend/Cargo.toml":
+        // root <bin> -> bin/<bin> -> backend-rs/target/debug -> backend-rs/target/release -> backend/target/debug -> backend/target/release.
+        let root_bin = make_exec("my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, root_bin);
+
+        let bin_dir_bin = make_exec("bin/my-plugin-bin");
+        assert_eq!(resolve_plugin_executable(&manifest).unwrap().0, bin_dir_bin);
+
+        let debug_rs_bin = make_exec("backend-rs/target/debug/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            debug_rs_bin
+        );
+
+        let release_rs_bin = make_exec("backend-rs/target/release/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            release_rs_bin
+        );
+
+        let sdk_debug_bin = make_exec("backend/target/debug/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            sdk_debug_bin
+        );
+
+        let sdk_release_bin = make_exec("backend/target/release/my-plugin-bin");
+        assert_eq!(
+            resolve_plugin_executable(&manifest).unwrap().0,
+            sdk_release_bin
+        );
+
+        // Clearing binary_name skips candidate resolution.
+        manifest.backend.binary_name.clear();
+        assert!(resolve_plugin_executable(&manifest).is_none());
 
         let _ = fs::remove_dir_all(&tmp);
     }

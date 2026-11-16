@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +12,8 @@ from installer_test_helpers import ROOT, common_functions, replace_paths_once
 
 
 FAKE_COMMAND = '''#!/usr/bin/python3
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -69,11 +73,13 @@ class MarketplaceTeardownTests(unittest.TestCase):
         return path
 
     def rebase(self, source):
-        return replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in
-                                          ('/etc/', '/var/', '/opt/', '/home/', '/install/', '/usr/local/', '/usr/bin/', '/run/', '/srv/', '/data')])
+        import re
+        rebased = replace_paths_once(source, [(prefix, str(self.root) + prefix) for prefix in
+                                              ('/etc/', '/var/', '/opt/', '/home/', '/install/', '/usr/local/', '/usr/bin/', '/run/', '/srv/')])
+        return re.sub(r'(?<![A-Za-z0-9_./-])/data(?=[/"\'\s]|$)', str(self.root) + '/data', rebased)
 
     def run_remove(self, package='syncthing', **environment):
-        names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists', 'purge_app_archive_backups', 'safe_rm_rf')
+        names = ('purge_systemd_unit', 'purge_system_user', 'remove_apache_app_listener', 'command_exists', 'purge_app_archive_backups', 'safe_rm_rf', 'validate_config_paths', 'safe_config_python', 'read_app_database_config', 'nextcloud_database_ownership')
         source = (ROOT / 'packages/common.sh').read_text()
         names += tuple(name for name in ('systemd_unit_inactive', 'stop_systemd_unit', 'purge_systemd_units')
                        if f'\n{name}() ' in source)
@@ -298,6 +304,33 @@ remove_lock() { rm -f "$TEST_ROOT/install/.$1.lock"; }
         self.file(f'etc/apache2/sites-enabled/{package}.conf', 'VirtualHost')
         if package == 'nextcloud':
             self.file('var/lib/nextcloud/sentinel', 'database-dependent data')
+            data_dir = f'{self.root}/var/lib/nextcloud/data'
+            self.file('var/lib/nextcloud/data/.af-purge-check', 'sentinel')
+            config_file = self.file(
+                'var/www/nextcloud/config/config.php',
+                "<?php\n$CONFIG = [\n"
+                "  'dbtype' => 'mysql',\n"
+                "  'dbname' => 'nextcloud',\n"
+                "  'dbhost' => 'localhost',\n"
+                "  'dbuser' => 'nextclouduser',\n"
+                "  'dbpassword' => 'secret',\n"
+                f"  'datadirectory' => '{data_dir}',\n"
+                "];\n",
+            )
+            config_file.chmod(0o640)
+            ownership_payload = {
+                'format': 1,
+                'application': 'nextcloud',
+                'backend': 'mysql',
+                'database': 'nextcloud',
+                'host': 'localhost',
+                'username': 'nextclouduser',
+                'password_sha256': hashlib.sha256(b'secret').hexdigest(),
+                'data_directory': data_dir,
+            }
+            owner_file = self.file('opt/AetherFlow/logs/nextcloud_database_owner.json', json.dumps(ownership_payload, sort_keys=True) + '\n')
+            owner_file.parent.chmod(0o755)
+            owner_file.chmod(0o600)
             self.file('opt/AetherFlow/logs/nextcloud_credentials.txt', 'credentials')
 
     def test_shared_apache_reload_failure_blocks_purge_and_sql(self):

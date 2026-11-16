@@ -20,16 +20,14 @@ StandardError=journal
 # Managed Directories
 StateDirectory=aetherflow
 StateDirectoryMode=0700
-LogsDirectory=aetherflow
-LogsDirectoryMode=0750
 
-Environment=GIN_MODE=release
 Environment=PORT=8080
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 Environment=PRIVILEGED_RUNNER_ENABLED=true
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
+Environment=AETHERFLOW_ENV=production
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 # Zero-Trust Namespace Isolation
 ProtectSystem=strict

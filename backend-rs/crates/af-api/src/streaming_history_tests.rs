@@ -9,10 +9,33 @@ use std::time::{Duration, Instant};
 #[test]
 fn search_matches_literal_wildcards_backslashes_and_bound_injection_text() {
     let conn = setup_local_db();
-    insert_row(&conn, &SeedRow { session_key: "literal", item_name: r"100%_complete\media ' OR 1=1 --", ..Default::default() });
-    insert_row(&conn, &SeedRow { session_key: "other", item_name: "100Xcomplete unrelated", ..Default::default() });
+    insert_row(
+        &conn,
+        &SeedRow {
+            session_key: "literal",
+            item_name: r"100%_complete\media ' OR 1=1 --",
+            ..Default::default()
+        },
+    );
+    insert_row(
+        &conn,
+        &SeedRow {
+            session_key: "other",
+            item_name: "100Xcomplete unrelated",
+            ..Default::default()
+        },
+    );
     for search in [r"%_", r"\media", "' OR 1=1 --", "100%_complete"] {
-        let page = query_history(&conn, HistoryQuery { search: search.into(), ..Default::default() }, &admin_user(1), 1_793_577_600).unwrap();
+        let page = query_history(
+            &conn,
+            HistoryQuery {
+                search: search.into(),
+                ..Default::default()
+            },
+            &admin_user(1),
+            1_793_577_600,
+        )
+        .unwrap();
         assert_eq!(page.counts.matching_records, 1, "{search}");
         assert_eq!(page.items[0].item_name, r"100%_complete\media ' OR 1=1 --");
     }
@@ -21,28 +44,90 @@ fn search_matches_literal_wildcards_backslashes_and_bound_injection_text() {
 #[test]
 fn serialized_archive_contract_preserves_provenance_nulls_and_linked_scope() {
     let conn = setup_local_db();
-    conn.execute("INSERT INTO users(id,username,role) VALUES(1,'operator','admin'),(2,'viewer','user')", []).unwrap();
+    conn.execute(
+        "INSERT INTO users(id,username,role) VALUES(1,'operator','admin'),(2,'viewer','user')",
+        [],
+    )
+    .unwrap();
     for (session_key, item_name, provenance, certainty, accuracy, started_at) in [
-        ("contract-observed", "Contract Observed Play", "observed_session", "observed", "estimated", "2026-10-30T20:00:00Z"),
-        ("contract-imported", "Contract Imported Play", "imported_event", "source_event", "unrecorded", "2026-10-29T20:00:00Z"),
-        ("contract-summary", "Contract Item Summary", "item_summary", "unrecorded", "unrecorded", ""),
-        ("contract-legacy", "Contract Legacy Record", "legacy_unverified", "legacy_unverified", "legacy_unverified", ""),
+        (
+            "contract-observed",
+            "Contract Observed Play",
+            "observed_session",
+            "observed",
+            "estimated",
+            "2026-10-30T20:00:00Z",
+        ),
+        (
+            "contract-imported",
+            "Contract Imported Play",
+            "imported_event",
+            "source_event",
+            "unrecorded",
+            "2026-10-29T20:00:00Z",
+        ),
+        (
+            "contract-summary",
+            "Contract Item Summary",
+            "item_summary",
+            "unrecorded",
+            "unrecorded",
+            "",
+        ),
+        (
+            "contract-legacy",
+            "Contract Legacy Record",
+            "legacy_unverified",
+            "legacy_unverified",
+            "legacy_unverified",
+            "",
+        ),
     ] {
-        insert_row(&conn, &SeedRow { session_key, item_name, provenance, timestamp_certainty: certainty, byte_accuracy: accuracy, started_at, ..Default::default() });
+        insert_row(
+            &conn,
+            &SeedRow {
+                session_key,
+                item_name,
+                provenance,
+                timestamp_certainty: certainty,
+                byte_accuracy: accuracy,
+                started_at,
+                ..Default::default()
+            },
+        );
     }
     conn.execute("INSERT INTO streaming_user_links(af_user_id,provider,server_id,provider_user_id) VALUES(2,'jellyfin','srv-main','jf-u1')", []).unwrap();
     let now = 1_793_577_600;
-    let administrative = query_history(&conn, HistoryQuery::default(), &admin_user(1), now).unwrap();
+    let administrative =
+        query_history(&conn, HistoryQuery::default(), &admin_user(1), now).unwrap();
     let linked = query_history(&conn, HistoryQuery::default(), &member_user(2), now).unwrap();
     assert_eq!(administrative.counts.confirmed_plays, 2);
     assert_eq!(administrative.counts.item_summaries, 1);
     assert_eq!(administrative.counts.legacy_records, 1);
     assert_eq!(administrative.counts.undated_records, 2);
-    assert!(linked.items.iter().all(|item| item.ip_address.is_none() && item.device_id.is_none()));
-    let summary = administrative.items.iter().find(|item| item.provenance == "item_summary").unwrap();
-    assert!(summary.started_at.is_none() && summary.watched_secs.is_none() && summary.estimated_bytes.is_none());
+    assert!(linked
+        .items
+        .iter()
+        .all(|item| item.ip_address.is_none() && item.device_id.is_none()));
+    let summary = administrative
+        .items
+        .iter()
+        .find(|item| item.provenance == "item_summary")
+        .unwrap();
+    assert!(
+        summary.started_at.is_none()
+            && summary.watched_secs.is_none()
+            && summary.estimated_bytes.is_none()
+    );
     if let Ok(path) = std::env::var("AF_STREAMING_ARCHIVE_FIXTURE") {
-        std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({"administrative": administrative, "linked": linked})).unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(
+                &serde_json::json!({"administrative": administrative, "linked": linked}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     }
 }
 
@@ -83,7 +168,9 @@ fn setup_local_db() -> Connection {
     let lib_src = include_str!("../../af-db/src/lib.rs");
 
     let core_marker = "CREATE TABLE IF NOT EXISTS settings (";
-    let core_idx = lib_src.find(core_marker).expect("core marker in af-db/lib.rs");
+    let core_idx = lib_src
+        .find(core_marker)
+        .expect("core marker in af-db/lib.rs");
     let raw_start = lib_src[..core_idx].rfind("r#\"").expect("core raw start");
     let raw_body = &lib_src[raw_start + 3..];
     let raw_end = raw_body.find("\"#").expect("core raw end");
@@ -103,7 +190,8 @@ fn setup_local_db() -> Connection {
         conn.execute_batch(&ddl).expect("migration 19 table DDL");
     }
     for idx_sql in extract_quoted_ddl(m19_block, "CREATE INDEX") {
-        conn.execute_batch(&idx_sql).expect("migration 19 index DDL");
+        conn.execute_batch(&idx_sql)
+            .expect("migration 19 index DDL");
     }
     conn.execute(
         "INSERT OR IGNORE INTO schema_versions (version, description) VALUES (19, 'v19')",
@@ -517,7 +605,10 @@ fn cursor_tamper_cross_scope_filter_mismatch_revision_invalidation_and_insert_wa
 
     for i in 1..=6 {
         let sk = format!("cursor-s-{i}");
-        let ts = Utc.timestamp_opt(1_779_000_000 + i * 60, 0).unwrap().to_rfc3339();
+        let ts = Utc
+            .timestamp_opt(1_779_000_000 + i * 60, 0)
+            .unwrap()
+            .to_rfc3339();
         insert_row(
             &conn,
             &SeedRow {
@@ -542,8 +633,22 @@ fn cursor_tamper_cross_scope_filter_mismatch_revision_invalidation_and_insert_wa
     let cursor = first_page.next_cursor.clone().expect("next_cursor present");
     let snapshot_token = first_page.scope.snapshot_token.clone();
 
-    for (cursor_value, snapshot_value) in [(Some(snapshot_token.clone()), None), (None, Some(cursor.clone()))] {
-        let error = query_history(&conn, HistoryQuery { page_size: 3, cursor: cursor_value, snapshot: snapshot_value, ..Default::default() }, &admin, now).unwrap_err();
+    for (cursor_value, snapshot_value) in [
+        (Some(snapshot_token.clone()), None),
+        (None, Some(cursor.clone())),
+    ] {
+        let error = query_history(
+            &conn,
+            HistoryQuery {
+                page_size: 3,
+                cursor: cursor_value,
+                snapshot: snapshot_value,
+                ..Default::default()
+            },
+            &admin,
+            now,
+        )
+        .unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
 
@@ -603,7 +708,10 @@ fn cursor_tamper_cross_scope_filter_mismatch_revision_invalidation_and_insert_wa
     )
     .unwrap_err();
     assert_eq!(payload_tamper_err.status, StatusCode::BAD_REQUEST);
-    assert_eq!(payload_tamper_err.message, "Invalid history cursor signature");
+    assert_eq!(
+        payload_tamper_err.message,
+        "Invalid history cursor signature"
+    );
 
     // 4. Cross-viewer / cross-scope usage is rejected (different user_id or different role)
     for wrong_viewer in [&other_admin, &member] {
@@ -880,8 +988,7 @@ fn tracking_policies_filter_minimum_watch_excluded_users_libraries_and_policy_st
     assert_eq!(all_page.counts.estimated_bytes, 300_000);
 
     for item in &all_page.items {
-        let should_be_included =
-            [id_ok, id_short_legacy, id_other_server_user].contains(&item.id);
+        let should_be_included = [id_ok, id_short_legacy, id_other_server_user].contains(&item.id);
         assert_eq!(
             item.included, should_be_included,
             "mismatch on item.included for id={}",
@@ -904,9 +1011,18 @@ fn timezone_dst_calendar_windows_and_half_open_bounds() {
     // Test America/New_York spring-forward DST day: 2026-03-08 (clocks jump 02:00 EST -> 03:00 EDT).
     // Local midnight 2026-03-08T00:00:00 in America/New_York is UTC-5 = 2026-03-08T05:00:00Z (1_772_946_000).
     // Reference `as_of`: 2026-03-08T18:00:00Z (1_772_992_800, which is 14:00 EDT).
-    let as_of = Utc.with_ymd_and_hms(2026, 3, 8, 18, 0, 0).unwrap().timestamp();
-    let ny_midnight_utc = Utc.with_ymd_and_hms(2026, 3, 8, 5, 0, 0).unwrap().timestamp();
-    let mar1_ny_midnight_utc = Utc.with_ymd_and_hms(2026, 3, 1, 5, 0, 0).unwrap().timestamp();
+    let as_of = Utc
+        .with_ymd_and_hms(2026, 3, 8, 18, 0, 0)
+        .unwrap()
+        .timestamp();
+    let ny_midnight_utc = Utc
+        .with_ymd_and_hms(2026, 3, 8, 5, 0, 0)
+        .unwrap()
+        .timestamp();
+    let mar1_ny_midnight_utc = Utc
+        .with_ymd_and_hms(2026, 3, 1, 5, 0, 0)
+        .unwrap()
+        .timestamp();
 
     // Row A: 1 second before NY midnight (2026-03-07 23:59:59 EST = 2026-03-08T04:59:59Z)
     let id_before_today = insert_row(
@@ -1225,12 +1341,29 @@ fn performance_100k_archive_initial_and_deep_cursor_queries_stay_within_budget()
 
     let cursor = first_page.next_cursor.expect("next_cursor on 100k archive");
     let mut deep_snapshot = decode(&cursor, now).unwrap();
-    deep_snapshot.anchor = Some(Anchor { missing: 0, timestamp: 1_700_005_000, id: 500 });
+    deep_snapshot.anchor = Some(Anchor {
+        missing: 0,
+        timestamp: 1_700_005_000,
+        id: 500,
+    });
     let deep_start = Instant::now();
-    let deep_page = query_history(&conn, HistoryQuery { page_size: 200, cursor: Some(sign(&deep_snapshot)), ..Default::default() }, &admin, now).unwrap();
+    let deep_page = query_history(
+        &conn,
+        HistoryQuery {
+            page_size: 200,
+            cursor: Some(sign(&deep_snapshot)),
+            ..Default::default()
+        },
+        &admin,
+        now,
+    )
+    .unwrap();
     let deep_elapsed = deep_start.elapsed();
     assert_eq!(deep_page.items[0].id, 499);
-    assert!(deep_elapsed < Duration::from_millis(250), "deep keyset seek: {deep_elapsed:?}");
+    assert!(
+        deep_elapsed < Duration::from_millis(250),
+        "deep keyset seek: {deep_elapsed:?}"
+    );
     println!("100k_deep_seek: duration={deep_elapsed:?} plan={actual_keyset_plan}");
     let start_second = Instant::now();
     let second_page = query_history(
@@ -1257,20 +1390,31 @@ fn performance_100k_archive_initial_and_deep_cursor_queries_stay_within_budget()
         "cursor seek page on 100k archive must stay within budget, took: {second_elapsed:?}"
     );
     let export_start = Instant::now();
-    let mut export_query = HistoryQuery { page_size: 200, snapshot: Some(first_page.scope.snapshot_token), ..Default::default() };
+    let mut export_query = HistoryQuery {
+        page_size: 200,
+        snapshot: Some(first_page.scope.snapshot_token),
+        ..Default::default()
+    };
     let mut exported = 0;
     let mut largest_chunk = 0;
     loop {
-        let page = query_history_batch(&conn, export_query.clone(), &admin, now, Some(1000)).unwrap();
+        let page =
+            query_history_batch(&conn, export_query.clone(), &admin, now, Some(1000)).unwrap();
         assert!(page.items.len() <= 1000);
         exported += page.items.len();
         largest_chunk = largest_chunk.max(csv_page(&page.items, true).len());
         match page.next_cursor {
-            Some(cursor) => { export_query.snapshot = None; export_query.cursor = Some(cursor); }
+            Some(cursor) => {
+                export_query.snapshot = None;
+                export_query.cursor = Some(cursor);
+            }
             None => break,
         }
     }
     assert_eq!(exported, 100_000);
     assert!(export_start.elapsed() < Duration::from_secs(30));
-    println!("100k_batched_csv: elapsed={:?}, rows={exported}, largest_chunk_bytes={largest_chunk}", export_start.elapsed());
+    println!(
+        "100k_batched_csv: elapsed={:?}, rows={exported}, largest_chunk_bytes={largest_chunk}",
+        export_start.elapsed()
+    );
 }

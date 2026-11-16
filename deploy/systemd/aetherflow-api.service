@@ -15,21 +15,22 @@ SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/current
 
 # ── FHS Managed Directories ──────────────────────────────────────────────────
-# Automatically provisions /var/lib/aetherflow and /var/log/aetherflow owned by
-# aetherflow:aetherflow and grants write access inside ProtectSystem=strict.
+# Automatically provisions /var/lib/aetherflow owned by aetherflow:aetherflow and
+# grants write access inside ProtectSystem=strict. /var/log/aetherflow is owned
+# by root:aetherflow via aetherflow-runner.service so log-retention stays strict.
 StateDirectory=aetherflow
 StateDirectoryMode=0700
-LogsDirectory=aetherflow
-LogsDirectoryMode=0750
 
 # ── Execution ────────────────────────────────────────────────────────────────
 ExecStart=/opt/AetherFlow/current/aetherflow-api
 
-Environment=GIN_MODE=release
+Environment=PORT=8080
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
+Environment=PRIVILEGED_RUNNER_ENABLED=true
+Environment=AETHERFLOW_ENV=production
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 # ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
 KillMode=control-group
@@ -53,6 +54,8 @@ ProtectClock=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
+ProtectProc=default
+ProcSubset=all
 LockPersonality=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes

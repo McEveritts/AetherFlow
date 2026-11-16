@@ -60,22 +60,22 @@ cleanup_invidious_install() {
                     safe_restore_path_from_backup "$RUNTIME_BACKUP/$runtime_index" "$runtime_path" || restore_failed=true
                 done
                 for runtime_unit in "${RUNTIME_UNITS[@]}"; do
-                    [[ -f "/etc/systemd/system/$runtime_unit" ]] || systemctl disable "$runtime_unit" >> "$LOGFILE" 2>&1 || restore_failed=true
+                    [[ -f "/etc/systemd/system/$runtime_unit" ]] || af_logged systemctl disable "$runtime_unit" || restore_failed=true
                 done
-                systemctl daemon-reload >> "$LOGFILE" 2>&1 || restore_failed=true
+                af_logged systemctl daemon-reload || restore_failed=true
                 if [[ "$restored" != true || "$restore_failed" == true ]]; then
                     restore_failed=true
                     export AF_PRESERVE_SCRATCH=1
                     print_error "Invidious recovery incomplete; backups retained in $RUNTIME_BACKUP"
                 else
                     for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-                        systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                        af_logged systemctl start "$runtime_unit" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
                     done
                 fi
             fi
         else
             for runtime_unit in "${PREVIOUS_UNITS[@]}"; do
-                systemctl start "$runtime_unit" >> "$LOGFILE" 2>&1 || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
+                af_logged systemctl start "$runtime_unit" || { restore_failed=true; export AF_PRESERVE_SCRATCH=1; }
             done
         fi
     fi
@@ -124,7 +124,7 @@ if [[ ! "$COMPANION_KEY" =~ ^[a-zA-Z0-9]{16}$ ]]; then
 fi
 af_set_stage "dependencies" 20
 report_progress 10 "Preparing experimental native Invidious and companion..."
-apt-get install --no-remove -y -qq build-essential libssl-dev libxml2-dev libyaml-dev libgmp-dev libreadline-dev librsvg2-bin libsqlite3-dev zlib1g-dev libpcre3-dev libevent-dev fonts-open-sans python3-yaml >> "$LOGFILE" 2>&1
+af_logged apt-get install --no-remove -y -qq build-essential libssl-dev libxml2-dev libyaml-dev libgmp-dev libreadline-dev librsvg2-bin libsqlite3-dev zlib1g-dev libpcre3-dev libevent-dev fonts-open-sans python3-yaml
 case "$(uname -m)" in
     x86_64) ARCH=x86_64 ;;
     aarch64) ARCH=aarch64 ;;
@@ -148,7 +148,7 @@ youtube_source iv-org/invidious "${INSTALL_DIR}/source"
 
 af_set_stage "build" 40
 report_progress 35 "Building Invidious as the service user..."
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${CRYSTAL_PATH}:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+af_logged runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${CRYSTAL_PATH}:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source"
 
 af_set_stage "configure" 70
 youtube_database
@@ -189,7 +189,7 @@ CACHE_DIRECTORY=${DATA_DIR}/cache
 EOF
 chown "root:$APP_NAME" "${CONFIG_DIR}/config.yml" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/companion.env"
 chmod 640 "${CONFIG_DIR}/config.yml" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/companion.env"
-runuser -u "$APP_NAME" -- env INVIDIOUS_CONFIG_FILE="${CONFIG_DIR}/config.yml" bash -euc 'cd "$1"; ./invidious --migrate' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+af_logged runuser -u "$APP_NAME" -- env INVIDIOUS_CONFIG_FILE="${CONFIG_DIR}/config.yml" bash -euc 'cd "$1"; ./invidious --migrate' _ "${INSTALL_DIR}/source"
 youtube_unit af-invidious-companion "${INSTALL_DIR}/invidious_companion"
 sed -i 's|/runtime.env|/companion.env|' /etc/systemd/system/af-invidious-companion.service
 youtube_unit af-invidious "${INSTALL_DIR}/source/invidious" af-invidious-companion.service
@@ -197,7 +197,7 @@ sed -i "s|WorkingDirectory=${DATA_DIR}|WorkingDirectory=${INSTALL_DIR}/source|" 
 
 af_set_stage "activate" 85
 systemctl daemon-reload
-systemctl enable af-invidious.service >> "$LOGFILE" 2>&1
+af_logged systemctl enable af-invidious.service
 systemctl restart af-invidious.service
 youtube_ready "http://127.0.0.1:${APP_PORT}/"
 systemctl is-active --quiet af-invidious.service

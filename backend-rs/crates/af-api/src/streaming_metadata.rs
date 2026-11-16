@@ -459,6 +459,7 @@ struct AncestorItemRaw {
     r#type: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_single_item_metadata(
     client: &Client,
     clean_url: &str,
@@ -703,7 +704,8 @@ fn apply_scoped_provider_item_metadata(
 ) -> Result<usize, StreamingMetadataError> {
     let norm_provider = normalize_metadata_provider(provider)?;
     let clean_server_id = server_id.trim();
-    let transaction = conn.unchecked_transaction()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let conn = &transaction;
 
     let configured_server_id: Option<String> = conn
@@ -775,10 +777,8 @@ fn apply_scoped_provider_item_metadata(
                 })
                 .map_err(|e| StreamingMetadataError::Database(e.to_string()))?;
 
-            for r in rows {
-                if let Ok((k, v)) = r {
-                    existing.insert(k, v);
-                }
+            for (k, v) in rows.flatten() {
+                existing.insert(k, v);
             }
 
             let mut history_changed = false;

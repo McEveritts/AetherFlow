@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, render } from '@testing-library/react';
 import { WebSocketProvider } from './WebSocketContext';
+import { useConnectionStore } from '@/store/useConnectionStore';
 
 const mockMutate = jest.fn();
 const mockAddToast = jest.fn();
@@ -87,4 +88,50 @@ it('cancels delayed refreshes after logout and unmount', async () => {
     next.view.unmount();
     act(() => { jest.advanceTimersByTime(1000); });
     expect(mockMutate).not.toHaveBeenCalled();
+});
+
+it('switches to FALLBACK REST polling after 3 consecutive failed reconnect attempts and recovers on WS open', async () => {
+    useConnectionStore.getState().reset();
+    mockApiFetch.mockImplementation(async (url: unknown) => {
+        if (url === '/api/v1/auth/ws/ticket') {
+            return { ok: false, status: 503 };
+        }
+        if (url === '/api/v1/auth/system/metrics') {
+            return { ok: true, text: async () => JSON.stringify({ cpu_usage: 12.5 }) };
+        }
+        return { ok: true, json: async () => ({}) };
+    });
+
+    const view = render(<WebSocketProvider><div /></WebSocketProvider>);
+    await act(async () => {});
+    // Attempt 1 failed -> RECONNECTING
+    expect(useConnectionStore.getState().connectionState).toBe('RECONNECTING');
+
+    // Advance past backoff for attempt 2
+    await act(async () => { jest.advanceTimersByTime(2500); });
+    expect(useConnectionStore.getState().connectionState).toBe('RECONNECTING');
+
+    // Advance past backoff for attempt 3 -> reaches MAX_RECONNECT_BEFORE_FALLBACK (3) -> FALLBACK
+    await act(async () => { jest.advanceTimersByTime(5000); });
+    expect(useConnectionStore.getState().connectionState).toBe('FALLBACK');
+    expect(mockApiFetch).toHaveBeenCalledWith('/api/v1/auth/system/metrics');
+
+    // Now allow ticket fetch to succeed on the next background WS recovery probe
+    mockApiFetch.mockImplementation(async (url: unknown) => {
+        if (url === '/api/v1/auth/ws/ticket') {
+            return { ok: true, json: async () => ({ ticket: 'recovered-ticket' }) };
+        }
+        if (url === '/api/v1/auth/system/metrics') {
+            return { ok: true, text: async () => JSON.stringify({ cpu_usage: 10.0 }) };
+        }
+        return { ok: true, json: async () => ({}) };
+    });
+
+    await act(async () => { jest.advanceTimersByTime(10000); });
+    const recoveredSocket = MockWebSocket.instances.at(-1);
+    expect(recoveredSocket).toBeDefined();
+    act(() => { recoveredSocket?.onopen?.(); });
+    expect(useConnectionStore.getState().connectionState).toBe('CONNECTED');
+
+    view.unmount();
 });

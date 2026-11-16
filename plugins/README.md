@@ -4,16 +4,12 @@ Community plugins live under `plugins/<plugin-id>/` and are discovered and valid
 
 ## Scaffolding a Plugin
 
-Generate a Rust plugin scaffold (recommended):
-
-```bash
-bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin rust
-```
-
-Or generate a Go companion scaffold:
+Rust (`plugins/sdk-template-rust/`) is the sole supported first-party plugin SDK. Generate a plugin scaffold (the optional 4th SDK argument defaults to `rust`):
 
 ```bash
 bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin
+# or explicitly:
+bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin rust
 ```
 
 ## Security & Isolation Contract
@@ -32,4 +28,4 @@ bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin
    - The host reverse proxy (`/api/v1/auth/plugins/:id/proxy/*`) targets only `127.0.0.1:<allocated_port>`, rejects path traversal, caps bodies at 2 MiB, and strips `Cookie`, `Authorization`, `X-CSRF-Token`, and `Set-Cookie`.
 5. **Sample vs. SDK Templates**:
    - `plugins/telemetry-inspector/` is a self-contained managed sample plugin (`sdk: "managed-sample"`) with an unprivileged loopback HTTP runtime (`backend/runtime.py` launched via `backend/hooks/start.sh`) and custom sandboxed UI bundle (`frontend/dist/index.html`) for end-to-end lifecycle, health, token, and proxy verification.
-   - `plugins/sdk-template-rust/` and `plugins/sdk-template/` are developer SDK templates used by `scripts/create-plugin-sdk.sh` and are excluded from runtime discovery until instantiated as a concrete plugin directory.
+   - `plugins/sdk-template-rust/` is the sole supported first-party developer SDK template used by `scripts/create-plugin-sdk.sh` and is excluded from runtime discovery until instantiated as a concrete plugin directory.

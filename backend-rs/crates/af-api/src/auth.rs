@@ -9,7 +9,7 @@ use data_encoding::BASE32_NOPAD;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use rand::RngCore;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Standard Error Helpers (`backend/api/errors.go`)
+// Standard Error Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -34,7 +34,7 @@ pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JWT Claims, Client Fingerprint & Rotation Grace (`auth.go` & `oidc.go`)
+// JWT Claims, Client Fingerprint & Rotation Grace
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,8 @@ pub struct SessionClaims {
     #[serde(default)]
     pub cfp: String,
     #[serde(default)]
+    pub ver: i64,
+    #[serde(default)]
     pub plugin_id: String,
     #[serde(default, alias = "scopes")]
     pub plugin_scopes: Vec<String>,
@@ -66,18 +68,241 @@ pub struct AuthUser {
     pub plugin_scopes: Vec<String>,
 }
 
+/// Cryptographically verified initial authentication timestamp (`auth_time` fallback `iat`)
+/// extracted from the validated session JWT in `auth_middleware`.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionAuthTime(pub i64);
+
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveSubject {
+    pub user_id: i64,
+    pub username: String,
+    pub role: String,
+    pub sessions_revoked_after: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectStatusError {
+    MissingOrPlugin,
+    Suspended,
+    DbError,
+}
+
+pub(crate) fn table_exists(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get(0),
+    )
+}
+
+pub(crate) fn column_exists(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"),
+        params![column],
+        |row| row.get(0),
+    )
+}
+
+pub(crate) fn load_active_human_subject(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> Result<ActiveSubject, SubjectStatusError> {
+    if user_id <= 0 {
+        return Err(SubjectStatusError::MissingOrPlugin);
+    }
+    let has_ver = column_exists(conn, "users", "sessions_revoked_after")
+        .map_err(|_| SubjectStatusError::DbError)?;
+    let has_role = column_exists(conn, "users", "role").map_err(|_| SubjectStatusError::DbError)?;
+    let sql = match (has_role, has_ver) {
+        (true, true) => {
+            "SELECT id, COALESCE(username, ''), COALESCE(role, 'user'), COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1"
+        }
+        (true, false) => {
+            "SELECT id, COALESCE(username, ''), COALESCE(role, 'user'), 0 FROM users WHERE id = ?1"
+        }
+        (false, true) => {
+            "SELECT id, COALESCE(username, ''), 'user', COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1"
+        }
+        (false, false) => {
+            "SELECT id, COALESCE(username, ''), 'user', 0 FROM users WHERE id = ?1"
+        }
+    };
+    let row =
+        if column_exists(conn, "users", "username").map_err(|_| SubjectStatusError::DbError)? {
+            conn.query_row(sql, params![user_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()
+            .map_err(|_| SubjectStatusError::DbError)?
+        } else {
+            let role_sql = if has_role {
+                "SELECT id, COALESCE(role, 'user') FROM users WHERE id = ?1"
+            } else {
+                "SELECT id, 'user' FROM users WHERE id = ?1"
+            };
+            conn.query_row(role_sql, params![user_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    String::new(),
+                    r.get::<_, String>(1)?,
+                    0i64,
+                ))
+            })
+            .optional()
+            .map_err(|_| SubjectStatusError::DbError)?
+        };
+
+    let Some((id, username, role, sessions_revoked_after)) = row else {
+        return Err(SubjectStatusError::MissingOrPlugin);
+    };
+    if username.trim().to_ascii_lowercase().starts_with("plugin:") {
+        return Err(SubjectStatusError::MissingOrPlugin);
+    }
+
+    if table_exists(conn, "user_quotas").map_err(|_| SubjectStatusError::DbError)? {
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT COALESCE(status, '') FROM user_quotas WHERE user_id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| SubjectStatusError::DbError)?;
+        if let Some(raw_status) = status {
+            let trimmed = raw_status.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("active") {
+                return Err(SubjectStatusError::Suspended);
+            }
+        }
+    }
+
+    Ok(ActiveSubject {
+        user_id: id,
+        username,
+        role,
+        sessions_revoked_after,
+    })
+}
+
+pub(crate) fn query_user_credential_version(conn: &rusqlite::Connection, user_id: i64) -> i64 {
+    if column_exists(conn, "users", "sessions_revoked_after").unwrap_or(false) {
+        conn.query_row(
+            "SELECT COALESCE(sessions_revoked_after, 0) FROM users WHERE id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    } else {
+        0
+    }
+}
+
 #[derive(Clone)]
 struct RotatedTokenGraceEntry {
     user_id: i64,
+    family_id: String,
+    successor_jti: String,
     new_token: String,
+    successor_exp: i64,
+    strict_fp: String,
     expires_at: Instant,
 }
 
 static ROTATED_TOKEN_GRACE: Lazy<Mutex<HashMap<String, RotatedTokenGraceEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static ROTATED_SESSION_SUCCESSOR: Lazy<Mutex<HashMap<String, (String, Instant)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 const SESSION_COOKIE_MAX_AGE: i64 = 86400;
 const SESSION_ABSOLUTE_LIFETIME: i64 = 30 * 86400;
+const MIN_REVOCATION_TTL: Duration = Duration::from_secs(8160);
+const ROTATED_TOKEN_GRACE_WINDOW: Duration = Duration::from_secs(10);
+
+pub(crate) fn oidc_session_tag(family_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"af-oidc-sess:");
+    hasher.update(family_id.trim().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    digest[..32].to_string()
+}
+
+pub(crate) fn resolve_session_family_id(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    jti: &str,
+) -> String {
+    let trimmed = jti.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let resolved_jti = resolve_current_session_jti(trimmed);
+    if let Some(fam) = ROTATED_TOKEN_GRACE
+        .lock()
+        .ok()
+        .and_then(|map| map.get(trimmed).cloned())
+        .filter(|e| e.user_id == user_id && !e.family_id.trim().is_empty())
+        .map(|e| e.family_id)
+    {
+        return fam;
+    }
+    if table_exists(conn, "active_sessions").unwrap_or(false)
+        && column_exists(conn, "active_sessions", "family_id").unwrap_or(false)
+    {
+        if let Ok(Some(fam)) = conn
+            .query_row(
+                "SELECT COALESCE(family_id, '') FROM active_sessions \
+                 WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3) AND COALESCE(family_id, '') != '' LIMIT 1",
+                params![user_id, trimmed, resolved_jti],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        {
+            if !fam.trim().is_empty() {
+                return fam.trim().to_string();
+            }
+        }
+    }
+    if let Ok(Some(fam)) = af_db::resolve_revoked_token_family_in_tx(conn, trimmed, user_id) {
+        if !fam.trim().is_empty() {
+            return fam.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+pub(crate) fn resolve_current_session_jti(jti: &str) -> String {
+    if jti.is_empty() {
+        return String::new();
+    }
+    let Ok(mut map) = ROTATED_SESSION_SUCCESSOR.lock() else {
+        return jti.to_string();
+    };
+    let now = Instant::now();
+    if map.len() > 4096 {
+        map.retain(|_, (_, exp)| *exp > now);
+    }
+    let mut current = jti.to_string();
+    for _ in 0..32 {
+        match map.get(&current) {
+            Some((next, exp)) if *exp > now && next != &current => {
+                current = next.clone();
+            }
+            _ => break,
+        }
+    }
+    current
+}
 
 static AUTH_BLOCKING_LIMIT: Lazy<tokio::sync::Semaphore> =
     Lazy::new(|| tokio::sync::Semaphore::new(16));
@@ -116,6 +341,25 @@ fn is_refresh_path(path: &str) -> bool {
     )
 }
 
+fn is_logout_path(path: &str) -> bool {
+    matches!(path, "/api/v1/auth/logout" | "/api/auth/logout" | "/logout")
+}
+
+fn attach_logout_clear_cookie(mut resp: Response) -> Response {
+    let clear_cookie = build_set_cookie(
+        "aetherflow_session",
+        "",
+        -1,
+        "Lax",
+        secure_cookie_enabled(),
+        true,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, hv);
+    }
+    resp
+}
+
 fn session_auth_time(claims: &SessionClaims) -> i64 {
     if claims.auth_time > 0 {
         claims.auth_time
@@ -135,6 +379,22 @@ pub fn secure_cookie_enabled() -> bool {
     env::var("COOKIE_SECURE")
         .map(|v| v.to_lowercase() != "false")
         .unwrap_or(true)
+}
+
+pub fn validate_startup_jwt_secret() -> anyhow::Result<()> {
+    let secret = env::var("JWT_SECRET").unwrap_or_default();
+    if secret.trim().is_empty() {
+        anyhow::bail!(
+            "FATAL: JWT_SECRET environment variable is not set. Refusing to start without a persistent signing key."
+        );
+    }
+    if secret.len() < 32 {
+        anyhow::bail!(
+            "FATAL: JWT_SECRET must be at least 32 bytes long (got {} bytes).",
+            secret.len()
+        );
+    }
+    Ok(())
 }
 
 pub fn jwt_secret_bytes() -> Vec<u8> {
@@ -182,16 +442,24 @@ pub fn create_standard_jwt(
     create_session_jwt(user_id, headers, Utc::now().timestamp())
 }
 
-fn create_session_jwt(
+pub(crate) fn create_session_jwt_in_conn(
+    conn: &rusqlite::Connection,
     user_id: i64,
     headers: &HeaderMap,
     auth_time: i64,
+    family_id: Option<&str>,
+    credential_ver: i64,
 ) -> anyhow::Result<(String, SessionClaims)> {
     let now = Utc::now().timestamp();
     let absolute_exp = auth_time.saturating_add(SESSION_ABSOLUTE_LIFETIME);
     anyhow::ensure!(now < absolute_exp, "Absolute session lifetime exceeded");
     let exp = (now + 900).min(absolute_exp);
     let jti = Uuid::new_v4().to_string();
+    let effective_family = family_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&jti)
+        .to_string();
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -208,6 +476,7 @@ fn create_session_jwt(
         exp,
         jti: jti.clone(),
         cfp,
+        ver: credential_ver,
         plugin_id: String::new(),
         plugin_scopes: Vec::new(),
     };
@@ -218,12 +487,17 @@ fn create_session_jwt(
         &EncodingKey::from_secret(&jwt_secret_bytes()),
     )?;
 
-    {
-        let conn = af_db::get_conn()?;
-        // Track the full refresh window; otherwise a still-refreshable session disappears from revocation UI.
-        let exp_rfc3339 = chrono::DateTime::from_timestamp((exp + 7200).min(absolute_exp), 0)
-            .ok_or_else(|| anyhow::anyhow!("Invalid session expiry"))?
-            .to_rfc3339();
+    // Track the full refresh window; otherwise a still-refreshable session disappears from revocation UI.
+    let exp_rfc3339 = chrono::DateTime::from_timestamp((exp + 7200).min(absolute_exp), 0)
+        .ok_or_else(|| anyhow::anyhow!("Invalid session expiry"))?
+        .to_rfc3339();
+    if column_exists(conn, "active_sessions", "family_id").unwrap_or(false) {
+        conn.execute(
+            "INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, ?6)",
+            params![jti, user_id, ip, ua, exp_rfc3339, effective_family],
+        )?;
+    } else {
         conn.execute(
             "INSERT OR REPLACE INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active) \
              VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)",
@@ -232,6 +506,16 @@ fn create_session_jwt(
     }
 
     Ok((token, claims))
+}
+
+fn create_session_jwt(
+    user_id: i64,
+    headers: &HeaderMap,
+    auth_time: i64,
+) -> anyhow::Result<(String, SessionClaims)> {
+    let conn = af_db::get_conn()?;
+    let ver = query_user_credential_version(&conn, user_id);
+    create_session_jwt_in_conn(&conn, user_id, headers, auth_time, None, ver)
 }
 
 pub fn mint_plugin_jwt(
@@ -252,6 +536,7 @@ pub fn mint_plugin_jwt(
         exp,
         jti,
         cfp: String::new(),
+        ver: 0,
         plugin_id: plugin_id.to_string(),
         plugin_scopes: scopes.to_vec(),
     };
@@ -266,16 +551,13 @@ pub fn mint_plugin_jwt(
 }
 
 pub fn resolve_raw_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth_hdr) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(bearer) = auth_hdr.strip_prefix("Bearer ") {
-            let trimmed = bearer.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+    if let Some(raw_auth) = headers.get(header::AUTHORIZATION) {
+        let auth_hdr = raw_auth.to_str().ok()?;
+        let bearer = auth_hdr.strip_prefix("Bearer ")?.trim();
+        if !bearer.is_empty() {
+            return Some(bearer.to_string());
         }
+        return None;
     }
     extract_cookie(headers, "aetherflow_session")
 }
@@ -301,14 +583,256 @@ pub fn decode_session_claims(token: &str, allow_expired: bool) -> anyhow::Result
     Ok(data.claims)
 }
 
-fn check_rotation_grace(jti: &str) -> Option<(i64, String)> {
+fn check_rotation_grace(jti: &str) -> Option<RotatedTokenGraceEntry> {
     let mut map = ROTATED_TOKEN_GRACE.lock().ok()?;
     map.retain(|_, v| v.expires_at > Instant::now());
-    map.get(jti).map(|e| (e.user_id, e.new_token.clone()))
+    map.get(jti).cloned()
+}
+
+fn resolve_latest_grace_token(
+    jti: &str,
+    user_id: i64,
+    caller_strict_fp: Option<&str>,
+) -> Option<(RotatedTokenGraceEntry, String, i64, String)> {
+    let grace = check_rotation_grace(jti).filter(|g| g.user_id == user_id)?;
+    if let Some(fp) = caller_strict_fp.filter(|s| !s.is_empty()) {
+        if !grace.strict_fp.is_empty() && grace.strict_fp != fp {
+            return None;
+        }
+    }
+    if grace.successor_jti.is_empty() || grace.new_token.is_empty() {
+        return None;
+    }
+    let mut latest_token = grace.new_token.clone();
+    let mut latest_exp = grace.successor_exp;
+    if let Ok(map) = ROTATED_TOKEN_GRACE.lock() {
+        let now = Instant::now();
+        let mut cur_succ = grace.successor_jti.clone();
+        for _ in 0..32 {
+            let Some(next) = map.get(&cur_succ) else {
+                break;
+            };
+            if next.user_id != user_id
+                || next.expires_at <= now
+                || next.new_token.is_empty()
+                || next.successor_jti == cur_succ
+            {
+                break;
+            }
+            if let Some(fp) = caller_strict_fp.filter(|s| !s.is_empty()) {
+                if !next.strict_fp.is_empty() && next.strict_fp != fp {
+                    return None;
+                }
+            }
+            latest_token = next.new_token.clone();
+            if next.successor_exp > 0 {
+                latest_exp = next.successor_exp;
+            }
+            if next.successor_jti.is_empty() {
+                break;
+            }
+            cur_succ = next.successor_jti.clone();
+        }
+    }
+    let leaf_jti = resolve_current_session_jti(&grace.successor_jti);
+    if leaf_jti.is_empty() {
+        return None;
+    }
+    if latest_exp <= 0 {
+        latest_exp = decode_session_claims(&latest_token, true)
+            .map(|c| c.exp)
+            .unwrap_or_else(|_| Utc::now().timestamp() + 900);
+    }
+    Some((grace, latest_token, latest_exp, leaf_jti))
+}
+
+pub(crate) fn is_session_token_revoked_beyond_grace_with_conn(
+    conn: &rusqlite::Connection,
+    jti: &str,
+    user_id: i64,
+) -> bool {
+    match af_db::token_revocation_status_with_conn(conn, jti) {
+        Ok(false) => false,
+        Err(_) => true,
+        Ok(true) => {
+            let Some((grace, _, _, leaf_jti)) = resolve_latest_grace_token(jti, user_id, None)
+            else {
+                return true;
+            };
+            if matches!(
+                af_db::token_revocation_status_with_conn(conn, &leaf_jti),
+                Ok(false)
+            ) {
+                false
+            } else {
+                evict_rotation_grace_for_family(&grace.family_id, jti);
+                true
+            }
+        }
+    }
+}
+
+pub(crate) fn is_session_token_revoked_beyond_grace_for_fp(
+    jti: &str,
+    user_id: i64,
+    caller_strict_fp: Option<&str>,
+) -> bool {
+    match af_db::token_revocation_status(jti) {
+        Ok(false) => false,
+        Err(_) => true,
+        Ok(true) => {
+            let Some((grace, _, _, leaf_jti)) =
+                resolve_latest_grace_token(jti, user_id, caller_strict_fp)
+            else {
+                return true;
+            };
+            if matches!(af_db::token_revocation_status(&leaf_jti), Ok(false)) {
+                false
+            } else {
+                evict_rotation_grace_for_family(&grace.family_id, jti);
+                true
+            }
+        }
+    }
+}
+
+pub(crate) fn is_session_token_revoked_beyond_grace(jti: &str, user_id: i64) -> bool {
+    is_session_token_revoked_beyond_grace_for_fp(jti, user_id, None)
+}
+
+pub(crate) fn evict_rotation_grace_for_family(family_id: &str, target_jti: &str) {
+    let mut evicted_jtis = std::collections::HashSet::new();
+    if !target_jti.is_empty() {
+        evicted_jtis.insert(target_jti.to_string());
+    }
+    if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
+        map.retain(|old_jti, entry| {
+            let leaf = resolve_current_session_jti(&entry.successor_jti);
+            let keep = old_jti != target_jti
+                && entry.successor_jti != target_jti
+                && (target_jti.is_empty() || leaf != target_jti)
+                && (family_id.is_empty() || entry.family_id != family_id);
+            if !keep {
+                evicted_jtis.insert(old_jti.clone());
+                if !entry.successor_jti.is_empty() {
+                    evicted_jtis.insert(entry.successor_jti.clone());
+                }
+                if !leaf.is_empty() {
+                    evicted_jtis.insert(leaf);
+                }
+            }
+            keep
+        });
+    }
+    if !evicted_jtis.is_empty() {
+        if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+            succ.retain(|old_jti, (next_jti, _)| {
+                !evicted_jtis.contains(old_jti) && !evicted_jtis.contains(next_jti)
+            });
+        }
+    }
+}
+
+pub(crate) fn evict_rotation_grace_for_user(user_id: i64) {
+    let mut evicted_jtis = std::collections::HashSet::new();
+    if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
+        map.retain(|old_jti, entry| {
+            let keep = entry.user_id != user_id;
+            if !keep {
+                evicted_jtis.insert(old_jti.clone());
+                if !entry.successor_jti.is_empty() {
+                    evicted_jtis.insert(entry.successor_jti.clone());
+                }
+            }
+            keep
+        });
+    }
+    if !evicted_jtis.is_empty() {
+        if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+            succ.retain(|old_jti, (next_jti, _)| {
+                !evicted_jtis.contains(old_jti) && !evicted_jtis.contains(next_jti)
+            });
+        }
+    }
+}
+
+/// Bumps `users.sessions_revoked_after` (monotonic credential epoch), revokes all
+/// active session JTIs for `user_id` into `revoked_tokens`, deletes `active_sessions`,
+/// and revokes all OIDC refresh tokens, auth codes, and pending device codes for `user_id`.
+/// Returns `(new_credential_ver, revoked_jtis)` so callers can cache JTIs and evict
+/// rotation grace after committing the SQLite transaction.
+pub(crate) fn revoke_all_user_credentials_in_tx(
+    tx: &rusqlite::Connection,
+    user_id: i64,
+) -> anyhow::Result<(i64, Vec<String>)> {
+    let mut new_ver = 1i64;
+    if column_exists(tx, "users", "sessions_revoked_after").unwrap_or(false) {
+        new_ver = tx.query_row(
+            "UPDATE users SET sessions_revoked_after = COALESCE(sessions_revoked_after, 0) + 1 \
+             WHERE id = ?1 RETURNING sessions_revoked_after",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+    }
+
+    let mut revoked_jtis = Vec::new();
+    if table_exists(tx, "active_sessions").unwrap_or(false) {
+        if column_exists(tx, "active_sessions", "jti").unwrap_or(false) {
+            let mut stmt = tx.prepare("SELECT jti FROM active_sessions WHERE user_id = ?1")?;
+            let rows = stmt.query_map(params![user_id], |r| r.get::<_, String>(0))?;
+            for row in rows {
+                revoked_jtis.push(row?);
+            }
+            drop(stmt);
+            if table_exists(tx, "revoked_tokens").unwrap_or(false) {
+                for jti in &revoked_jtis {
+                    af_db::revoke_token_in_tx(tx, jti, MIN_REVOCATION_TTL)?;
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM active_sessions WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
+
+    if table_exists(tx, "oidc_refresh_tokens").unwrap_or(false)
+        && column_exists(tx, "oidc_refresh_tokens", "revoked").unwrap_or(false)
+    {
+        tx.execute(
+            "UPDATE oidc_refresh_tokens SET revoked = 1 WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
+    if table_exists(tx, "oidc_auth_codes").unwrap_or(false)
+        && column_exists(tx, "oidc_auth_codes", "used").unwrap_or(false)
+    {
+        tx.execute(
+            "UPDATE oidc_auth_codes SET used = 1 WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
+    if table_exists(tx, "oidc_device_codes").unwrap_or(false) {
+        tx.execute(
+            "DELETE FROM oidc_device_codes WHERE user_id = ?1",
+            params![user_id],
+        )?;
+    }
+    af_db::delete_user_mfa_challenges_in_tx(tx, user_id)?;
+
+    Ok((new_ver, revoked_jtis))
+}
+
+pub(crate) fn finalize_user_credential_revocation(user_id: i64, revoked_jtis: &[String]) {
+    for jti in revoked_jtis {
+        af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
+    }
+    evict_rotation_grace_for_user(user_id);
+    af_db::delete_2fa_pending(user_id);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Auth, Admin & CSRF Middlewares (`auth.go` & `csrf.go`)
+// Auth, Admin & CSRF Middlewares
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
@@ -322,6 +846,7 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
     }
 
     let method = req.method().clone();
+    let is_logout = method == Method::POST && is_logout_path(&path);
     let headers = req.headers();
     let bearer_token = headers
         .get(header::AUTHORIZATION)
@@ -331,7 +856,12 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         .filter(|b| !b.is_empty());
 
     let Some(token) = resolve_raw_token(headers) else {
-        return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+        let resp = api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+        return if is_logout {
+            attach_logout_clear_cookie(resp)
+        } else {
+            resp
+        };
     };
 
     // Check if the caller presented a scoped short-lived plugin Bearer token
@@ -368,26 +898,163 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         }
     }
 
+    if is_logout {
+        if crate::plugins::decode_and_verify_plugin_token(&token).is_ok() {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                "Plugin tokens cannot revoke operator sessions",
+            );
+        }
+        let Ok(claims) = decode_session_claims(&token, true) else {
+            return attach_logout_clear_cookie(api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Unauthorized",
+            ));
+        };
+        if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                "Plugin-scoped tokens cannot revoke operator sessions",
+            );
+        }
+        let now = Utc::now().timestamp();
+        if claims.user_id <= 0
+            || claims.jti.trim().is_empty()
+            || now.saturating_sub(claims.exp) > 7200
+        {
+            return attach_logout_clear_cookie(api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Unauthorized",
+            ));
+        }
+        let req_peer_ip = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+        let req_ua = req
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let peer_derived_ip = crate::ws::extract_client_ip_for_peer(req.headers(), req_peer_ip);
+        let hdr_ip = extract_client_ip(req.headers());
+        if !matches_client_fingerprint(&claims.cfp, &peer_derived_ip, req_ua)
+            && !matches_client_fingerprint(&claims.cfp, &hdr_ip, req_ua)
+        {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "SESSION_HIJACKED",
+                "Session bound to a different client",
+            );
+        }
+        let caller_strict_fp = legacy_client_fingerprint(&hdr_ip, req_ua);
+        let check_uid = claims.user_id;
+        let check_ver = claims.ver;
+        let check_jti = claims.jti.clone();
+        let logout_subject = blocking_auth_work(move || -> Result<ActiveSubject, StatusCode> {
+            let conn = af_db::get_read_conn().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let subj = match load_active_human_subject(&conn, check_uid) {
+                Ok(s) => s,
+                Err(SubjectStatusError::Suspended) => return Err(StatusCode::FORBIDDEN),
+                Err(_) => return Err(StatusCode::UNAUTHORIZED),
+            };
+            if check_ver < subj.sessions_revoked_after {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            let revoked = af_db::token_revocation_status_with_conn(&conn, &check_jti)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if revoked {
+                let in_grace = ROTATED_TOKEN_GRACE
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(&check_jti).cloned())
+                    .is_some_and(|e| {
+                        e.user_id == check_uid
+                            && e.expires_at > Instant::now()
+                            && (e.strict_fp.is_empty() || e.strict_fp == caller_strict_fp)
+                    });
+                if !in_grace {
+                    let rotated_family_live = af_db::resolve_revoked_token_family_in_tx(
+                        &conn, &check_jti, check_uid,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|fam| {
+                        conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?2))",
+                            params![check_uid, fam],
+                            |r| r.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false)
+                    });
+                    if !rotated_family_live {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                }
+            }
+            Ok(subj)
+        })
+        .await;
+        let subj = match logout_subject {
+            Ok(Ok(subj)) => subj,
+            Ok(Err(StatusCode::FORBIDDEN)) => {
+                return attach_logout_clear_cookie(api_error(
+                    StatusCode::FORBIDDEN,
+                    "ACCOUNT_SUSPENDED",
+                    "Account is not active",
+                ));
+            }
+            _ => {
+                return attach_logout_clear_cookie(api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "UNAUTHORIZED",
+                    "Unauthorized",
+                ));
+            }
+        };
+        req.extensions_mut().insert(AuthUser {
+            user_id: claims.user_id,
+            username: subj.username,
+            role: subj.role,
+            jti: claims.jti,
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        return next.run(req).await;
+    }
+
     let Ok(claims) = decode_session_claims(&token, false) else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
     };
 
     let jti = claims.jti.clone();
-    let revocation = blocking_auth_work(move || af_db::token_revocation_status(&jti)).await;
-    let Ok(Ok(revoked)) = revocation else {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "SESSION_EXPIRED",
-            "Unable to validate session",
-        );
-    };
-    if revoked && check_rotation_grace(&claims.jti).is_none() {
+    let check_uid = claims.user_id;
+    let req_peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let req_ua = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let req_ip = crate::ws::extract_client_ip_for_peer(req.headers(), req_peer_ip);
+    let caller_strict_fp = legacy_client_fingerprint(&req_ip, req_ua);
+    let still_revoked = blocking_auth_work(move || {
+        is_session_token_revoked_beyond_grace_for_fp(&jti, check_uid, Some(&caller_strict_fp))
+    })
+    .await;
+    let Ok(false) = still_revoked else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "SESSION_EXPIRED",
             "Session revoked",
         );
-    }
+    };
 
     // Enforce scoped RBAC if this JWT is a plugin-scoped token (`plugin_id` or `plugin_scopes` set)
     if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
@@ -453,28 +1120,39 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
     }
 
     let uid = claims.user_id;
-    let user_row = blocking_auth_work(move || {
-        af_db::get_read_conn().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT username, role FROM users WHERE id = ?1",
-                params![uid],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .ok()
-        })
+    let subject_res = blocking_auth_work(move || {
+        let conn = af_db::get_read_conn().map_err(|_| SubjectStatusError::DbError)?;
+        load_active_human_subject(&conn, uid)
     })
-    .await
-    .ok()
-    .flatten();
+    .await;
 
-    let Some((username, role)) = user_row else {
-        return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
+    let subj = match subject_res {
+        Ok(Ok(subj)) => subj,
+        Ok(Err(SubjectStatusError::Suspended)) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is not active",
+            );
+        }
+        _ => return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized"),
     };
 
+    if claims.ver < subj.sessions_revoked_after {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "SESSION_EXPIRED",
+            "Session revoked",
+        );
+    }
+
+    let verified_auth_time = session_auth_time(&claims);
+    req.extensions_mut()
+        .insert(SessionAuthTime(verified_auth_time));
     req.extensions_mut().insert(AuthUser {
         user_id: claims.user_id,
-        username,
-        role,
+        username: subj.username,
+        role: subj.role,
         jti: claims.jti,
         plugin_id: None,
         plugin_scopes: Vec::new(),
@@ -585,7 +1263,7 @@ pub async fn issue_csrf_token() -> Response {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth & Setup Endpoints (`backend/api/auth.go`)
+// Auth & Setup Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -597,7 +1275,7 @@ pub struct CredentialsRequest {
 }
 
 pub async fn check_setup_needed() -> Response {
-    blocking_response(move || check_setup_needed_blocking()).await
+    blocking_response(check_setup_needed_blocking).await
 }
 
 fn check_setup_needed_blocking() -> Response {
@@ -614,125 +1292,145 @@ fn check_setup_needed_blocking() -> Response {
     Json(serde_json::json!({ "setupRequired": count == 0 })).into_response()
 }
 
-fn md5_hex(data: &[u8]) -> String {
-    const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    let mut msg = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    for chunk in msg.as_chunks::<64>().0 {
-        let mut m = [0u32; 16];
-        for (word_index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
-            m[word_index] = u32::from_le_bytes(*word);
-        }
-
-        let mut a = a0;
-        let mut b = b0;
-        let mut c = c0;
-        let mut d = d0;
-
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | (!b & d), i),
-                16..=31 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let temp = d;
-            d = c;
-            c = b;
-            let added = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
-            b = b.wrapping_add(added.rotate_left(S[i]));
-            a = temp;
-        }
-
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
-    }
-
-    let mut digest = [0u8; 16];
-    digest[0..4].copy_from_slice(&a0.to_le_bytes());
-    digest[4..8].copy_from_slice(&b0.to_le_bytes());
-    digest[8..12].copy_from_slice(&c0.to_le_bytes());
-    digest[12..16].copy_from_slice(&d0.to_le_bytes());
-    hex::encode(digest)
-}
-
 pub fn save_master_credentials(username: &str, password: &str) {
     let u = username.trim();
     if u.is_empty() || password.is_empty() {
         return;
     }
-    if af_services::mutators::save_master_credentials(u, password).is_ok() {
-        return;
+    let _ = af_services::mutators::save_master_credentials(u, password);
+}
+
+fn revoke_session_family_in_tx(
+    tx: &rusqlite::Connection,
+    user_id: i64,
+    target_jti: &str,
+    revoke_oidc_grants: bool,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let resolved_jti = resolve_current_session_jti(target_jti);
+    let grace_info = ROTATED_TOKEN_GRACE
+        .lock()
+        .ok()
+        .and_then(|map| map.get(target_jti).cloned())
+        .filter(|e| e.user_id == user_id);
+    let mut family_id = grace_info
+        .as_ref()
+        .map(|e| e.family_id.clone())
+        .unwrap_or_default();
+
+    let mut jtis_to_revoke = vec![target_jti.to_string()];
+    if !resolved_jti.is_empty() && !jtis_to_revoke.contains(&resolved_jti) {
+        jtis_to_revoke.push(resolved_jti.clone());
     }
-    let ha1 = md5_hex(password.as_bytes());
-    let payload = serde_json::json!({
-        "username": u,
-        "password": password,
-        "ha1": ha1,
-    });
-    let Ok(mut raw) = serde_json::to_vec(&payload) else {
-        return;
-    };
-    raw.push(b'\n');
-
-    let default_paths = || {
-        vec![
-            af_services::mutators::resolve_config_path("/var/lib/aetherflow/.master.creds"),
-            af_services::mutators::resolve_config_path(
-                "/opt/AetherFlow/backend/data/.master.creds",
-            ),
-            std::path::PathBuf::from("backend/data/.master.creds"),
-        ]
-    };
-
-    let paths: Vec<std::path::PathBuf> =
-        if let Ok(custom) = env::var("AETHERFLOW_MASTER_CREDS_FILE") {
-            let trimmed = custom.trim();
-            if !trimmed.is_empty() {
-                vec![std::path::PathBuf::from(trimmed)]
-            } else {
-                default_paths()
-            }
-        } else {
-            default_paths()
-        };
-
-    for p in paths {
-        if p.as_os_str().is_empty() {
-            continue;
+    if let Some(ref g) = grace_info {
+        if !g.successor_jti.is_empty() && !jtis_to_revoke.contains(&g.successor_jti) {
+            jtis_to_revoke.push(g.successor_jti.clone());
         }
-        let _ = af_services::mutators::write_file_atomic_mode(&p, &raw, Some(0o600));
     }
+
+    if family_id.is_empty() {
+        if let Ok(Some(fam)) = af_db::resolve_revoked_token_family_in_tx(tx, target_jti, user_id) {
+            if !fam.trim().is_empty() {
+                family_id = fam.trim().to_string();
+            }
+        }
+        if family_id.is_empty() && !resolved_jti.is_empty() && resolved_jti != target_jti {
+            if let Ok(Some(fam)) =
+                af_db::resolve_revoked_token_family_in_tx(tx, &resolved_jti, user_id)
+            {
+                if !fam.trim().is_empty() {
+                    family_id = fam.trim().to_string();
+                }
+            }
+        }
+    }
+
+    if table_exists(tx, "active_sessions").unwrap_or(false) {
+        let has_family = column_exists(tx, "active_sessions", "family_id").unwrap_or(false);
+        if has_family && family_id.is_empty() {
+            family_id = tx
+                .query_row(
+                    "SELECT COALESCE(family_id, '') FROM active_sessions \
+                     WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3 OR family_id = ?2 OR family_id = ?3) \
+                     AND COALESCE(family_id, '') != '' LIMIT 1",
+                    params![user_id, target_jti, resolved_jti],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+        }
+        if family_id.is_empty() {
+            family_id = target_jti.to_string();
+        }
+        if has_family && !family_id.is_empty() {
+            let mut stmt = tx.prepare(
+                "SELECT jti FROM active_sessions WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
+            )?;
+            let rows = stmt
+                .query_map(params![user_id, family_id, target_jti, resolved_jti], |r| {
+                    r.get::<_, String>(0)
+                })?;
+            for row in rows {
+                let found = row?;
+                if !found.is_empty() && !jtis_to_revoke.contains(&found) {
+                    jtis_to_revoke.push(found);
+                }
+            }
+        }
+    } else if family_id.is_empty() {
+        family_id = target_jti.to_string();
+    }
+
+    for jti in &jtis_to_revoke {
+        af_db::revoke_token_in_tx(tx, jti, MIN_REVOCATION_TTL)?;
+        if !family_id.is_empty() {
+            let _ = af_db::record_revoked_token_lineage_in_tx(tx, jti, &family_id, user_id);
+        }
+    }
+
+    if table_exists(tx, "active_sessions").unwrap_or(false) {
+        if !family_id.is_empty()
+            && column_exists(tx, "active_sessions", "family_id").unwrap_or(false)
+        {
+            tx.execute(
+                "DELETE FROM active_sessions WHERE user_id = ?1 AND family_id = ?2",
+                params![user_id, family_id],
+            )?;
+        }
+        for jti in &jtis_to_revoke {
+            tx.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti])?;
+        }
+    }
+
+    if revoke_oidc_grants {
+        let mut sess_tags = Vec::new();
+        if !family_id.is_empty() {
+            sess_tags.push(oidc_session_tag(&family_id));
+        }
+        let jti_tag = oidc_session_tag(target_jti);
+        if !sess_tags.contains(&jti_tag) {
+            sess_tags.push(jti_tag);
+        }
+        let has_oidc_table = table_exists(tx, "oidc_refresh_tokens").unwrap_or(false);
+        let has_oidc_fam = has_oidc_table
+            && column_exists(tx, "oidc_refresh_tokens", "family_id").unwrap_or(false);
+        for tag in sess_tags {
+            let marker = format!("oidc-sess:{}", tag);
+            af_db::revoke_token_in_tx(tx, &marker, MIN_REVOCATION_TTL)?;
+            if !jtis_to_revoke.contains(&marker) {
+                jtis_to_revoke.push(marker);
+            }
+            if has_oidc_fam {
+                let prefix = format!("sf:{}:", tag);
+                tx.execute(
+                    "UPDATE oidc_refresh_tokens SET revoked = 1 \
+                     WHERE user_id = ?1 AND substr(COALESCE(family_id, ''), 1, 36) = ?2",
+                    params![user_id, prefix],
+                )?;
+            }
+        }
+    }
+
+    Ok((family_id, jtis_to_revoke))
 }
 
 pub fn verify_password(password: &str, password_hash: &str) -> bool {
@@ -766,11 +1464,19 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         );
     }
 
-    if req.username.trim().is_empty() || req.password.is_empty() {
+    let trimmed_username = req.username.trim();
+    if trimmed_username.is_empty() || req.password.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
             "Username and password are required",
+        );
+    }
+    if trimmed_username.to_ascii_lowercase().starts_with("plugin:") {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "Reserved username prefix",
         );
     }
     if req.password.len() < 8 {
@@ -792,7 +1498,7 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     if conn
         .execute(
             "INSERT INTO users (username, password_hash, role) VALUES (?1, ?2, 'admin')",
-            params![req.username.trim(), hash],
+            params![trimmed_username, hash],
         )
         .is_err()
     {
@@ -805,7 +1511,8 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     let user_id = conn.last_insert_rowid();
     drop(conn);
 
-    save_master_credentials(req.username.trim(), &req.password);
+    // Provision dedicated random package credentials rather than persisting the operator's control-plane password.
+    af_services::mutators::ensure_provisioning_credentials(trimmed_username);
 
     let Ok((token, _)) = create_standard_jwt(user_id, &headers) else {
         return api_error(
@@ -825,7 +1532,7 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
     );
     let mut resp = Json(serde_json::json!({
         "message": "Admin account created",
-        "username": req.username.trim(),
+        "username": trimmed_username,
     }))
     .into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
@@ -839,11 +1546,19 @@ pub async fn local_login(headers: HeaderMap, Json(req): Json<CredentialsRequest>
 }
 
 fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response {
-    if req.username.trim().is_empty() || req.password.is_empty() {
+    let trimmed_username = req.username.trim();
+    if trimmed_username.is_empty() || req.password.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
             "Username and password are required",
+        );
+    }
+    if trimmed_username.to_ascii_lowercase().starts_with("plugin:") {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid username or password",
         );
     }
 
@@ -859,7 +1574,7 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
          COALESCE(password_hash, ''), COALESCE(google_id, ''), COALESCE(totp_enabled, 0) \
          FROM users WHERE username = ?1",
-        params![req.username.trim()],
+        params![trimmed_username],
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -874,7 +1589,8 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         },
     );
 
-    let Ok((id, username, email, avatar_url, role, password_hash, google_id, totp_enabled)) = row
+    let Ok((id, _username, _email, _avatar_url, _role, password_hash, _google_id, _totp_enabled)) =
+        row
     else {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -883,6 +1599,8 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         );
     };
 
+    let subject_status = load_active_human_subject(&conn, id);
+    let pre_auth_ver = query_user_credential_version(&conn, id);
     drop(conn);
 
     if password_hash.is_empty() {
@@ -902,11 +1620,122 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         );
     }
 
+    match subject_status {
+        Ok(_) => {}
+        Err(SubjectStatusError::Suspended) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is not active",
+            );
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Invalid username or password",
+            );
+        }
+        Err(SubjectStatusError::DbError) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database unavailable",
+            );
+        }
+    }
+
+    let Ok(mut write_conn) = af_db::get_conn() else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
+        );
+    };
+    let Ok(tx) = write_conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
+        );
+    };
+    match load_active_human_subject(&tx, id) {
+        Ok(_) => {}
+        Err(SubjectStatusError::Suspended) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is not active",
+            );
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Invalid username or password",
+            );
+        }
+        Err(SubjectStatusError::DbError) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database unavailable",
+            );
+        }
+    }
+    let current_row = tx.query_row(
+        "SELECT username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), \
+         COALESCE(password_hash, ''), COALESCE(google_id, ''), COALESCE(totp_enabled, 0) \
+         FROM users WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, bool>(6)?,
+            ))
+        },
+    );
+    let Ok((username, email, avatar_url, role, current_password_hash, google_id, totp_enabled)) =
+        current_row
+    else {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid username or password",
+        );
+    };
+    let current_ver = query_user_credential_version(&tx, id);
+    if current_password_hash.is_empty()
+        || current_password_hash != password_hash
+        || current_ver != pre_auth_ver
+    {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid username or password",
+        );
+    }
+
     if totp_enabled {
         let mut raw_token = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw_token);
         let mfa_token = hex::encode(raw_token);
-        if af_db::store_mfa_challenge(&mfa_token, id, Duration::from_secs(300)).is_err() {
+        if af_db::store_mfa_challenge_in_tx(
+            &tx,
+            &mfa_token,
+            id,
+            current_ver,
+            Duration::from_secs(300),
+        )
+        .is_err()
+            || tx.commit().is_err()
+        {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
@@ -925,20 +1754,28 @@ fn local_login_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if let Ok(history_conn) = af_db::get_conn() {
-        let _ = history_conn.execute(
-            "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
-            params![id, client_ip, user_agent],
-        );
-    }
+    let _ = tx.execute(
+        "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+        params![id, client_ip, user_agent],
+    );
 
-    let Ok((token, _)) = create_standard_jwt(id, &headers) else {
+    let Ok((token, _)) =
+        create_session_jwt_in_conn(&tx, id, &headers, Utc::now().timestamp(), None, current_ver)
+    else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to create session",
         );
     };
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to create session",
+        );
+    }
+    drop(write_conn);
 
     let user = User {
         id,
@@ -1016,20 +1853,19 @@ pub async fn logout(req: Request) -> Response {
 }
 
 fn logout_blocking(req: Request) -> Response {
-    if let Some(auth_user) = req.extensions().get::<AuthUser>() {
-        // Keep revocation entry across the entire 15m JWT lifetime + 2h refresh grace window (8100s)
-        af_db::revoke_token(&auth_user.jti, Duration::from_secs(8100));
-        if let Ok(conn) = af_db::get_conn() {
-            let _ = conn.execute(
-                "DELETE FROM active_sessions WHERE jti = ?1",
-                params![auth_user.jti],
-            );
-        }
-        if let Ok(mut grace) = ROTATED_TOKEN_GRACE.lock() {
-            grace.remove(&auth_user.jti);
-        }
-    }
-    let cookie = build_set_cookie(
+    let resolved_subject: Option<(i64, String)> = req
+        .extensions()
+        .get::<AuthUser>()
+        .map(|u| (u.user_id, u.jti.clone()))
+        .or_else(|| {
+            let raw = resolve_raw_token(req.headers())?;
+            let claims = decode_session_claims(&raw, true).ok()?;
+            if !claims.plugin_id.trim().is_empty() || claims.iss != "aetherflow" {
+                return None;
+            }
+            Some((claims.user_id, claims.jti))
+        });
+    let clear_cookie = build_set_cookie(
         "aetherflow_session",
         "",
         -1,
@@ -1037,18 +1873,58 @@ fn logout_blocking(req: Request) -> Response {
         secure_cookie_enabled(),
         true,
     );
-    let mut resp = Json(serde_json::json!({ "message": "Logged out" })).into_response();
-    if let Ok(hv) = HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, hv);
+    let attach_clear_cookie = |mut resp: Response| -> Response {
+        if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+            resp.headers_mut().insert(header::SET_COOKIE, hv);
+        }
+        resp
+    };
+    if let Some((user_id, session_jti)) = resolved_subject {
+        let Ok(mut conn) = af_db::get_conn() else {
+            return attach_clear_cookie(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke session",
+            ));
+        };
+        let tx_res = (|| -> anyhow::Result<(String, Vec<String>)> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let res = revoke_session_family_in_tx(&tx, user_id, &session_jti, true)?;
+            tx.commit()?;
+            Ok(res)
+        })();
+        let Ok((family_id, revoked_jtis)) = tx_res else {
+            return attach_clear_cookie(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke session",
+            ));
+        };
+        for jti in &revoked_jtis {
+            af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
+            evict_rotation_grace_for_family(&family_id, jti);
+        }
+        evict_rotation_grace_for_family(&family_id, &session_jti);
+        drop(conn);
     }
-    resp
+    attach_clear_cookie(Json(serde_json::json!({ "message": "Logged out" })).into_response())
+}
+
+pub async fn refresh_session_with_peer(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
+    headers: HeaderMap,
+) -> Response {
+    blocking_response(move || refresh_session_for_peer_blocking(headers, peer_ip)).await
 }
 
 pub async fn refresh_session(headers: HeaderMap) -> Response {
-    blocking_response(move || refresh_session_blocking(headers)).await
+    blocking_response(move || refresh_session_for_peer_blocking(headers, None)).await
 }
 
-fn refresh_session_blocking(headers: HeaderMap) -> Response {
+fn refresh_session_for_peer_blocking(
+    headers: HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Response {
     if let Some(auth_hdr) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1112,8 +1988,10 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let ip = extract_client_ip(&headers);
-    if !matches_client_fingerprint(&claims.cfp, &ip, ua) {
+    let ip = crate::ws::extract_client_ip_for_peer(&headers, peer_ip);
+    let caller_strict_fp = legacy_client_fingerprint(&ip, ua);
+    let fp_matches = matches_client_fingerprint(&claims.cfp, &ip, ua);
+    if !fp_matches && !af_db::is_token_revoked(&claims.jti) {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
@@ -1121,7 +1999,7 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     }
 
-    let Ok(conn) = af_db::get_read_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1129,56 +2007,257 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     };
 
-    let Ok((id, username, role)) = conn.query_row(
-        "SELECT id, username, role FROM users WHERE id = ?1",
-        params![claims.user_id],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    ) else {
+    let Ok(tx) = conn.transaction_with_behavior(TransactionBehavior::Immediate) else {
         return api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "User no longer exists",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
         );
     };
 
-    drop(conn);
+    let subj = match load_active_human_subject(&tx, claims.user_id) {
+        Ok(subj) => subj,
+        Err(SubjectStatusError::Suspended) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is not active",
+            );
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "User no longer exists",
+            );
+        }
+        Err(SubjectStatusError::DbError) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "SESSION_EXPIRED",
+                "Unable to validate session",
+            );
+        }
+    };
 
-    let Ok(revoked) = af_db::token_revocation_status(&claims.jti) else {
+    if claims.ver < subj.sessions_revoked_after {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Session has been revoked",
+        );
+    }
+
+    let has_sessions_table = match table_exists(&tx, "active_sessions") {
+        Ok(v) => v,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to inspect active sessions",
+            );
+        }
+    };
+    let has_family = if has_sessions_table {
+        match column_exists(&tx, "active_sessions", "family_id") {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to inspect session schema",
+                );
+            }
+        }
+    } else {
+        false
+    };
+    let existing_family_opt: Option<String> = if has_sessions_table {
+        let query_res = if has_family {
+            tx.query_row(
+                "SELECT COALESCE(family_id, '') FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
+                params![claims.jti, subj.user_id],
+                |r| r.get(0),
+            )
+            .optional()
+        } else {
+            tx.query_row(
+                "SELECT jti FROM active_sessions WHERE jti = ?1 AND user_id = ?2",
+                params![claims.jti, subj.user_id],
+                |r| r.get(0),
+            )
+            .optional()
+        };
+        match query_res {
+            Ok(v) => v,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to query session family",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let Ok(consumed) = af_db::try_consume_session_jti_in_tx(&tx, &claims.jti, MIN_REVOCATION_TTL)
+    else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "SESSION_EXPIRED",
             "Unable to validate session",
         );
     };
-    if revoked {
-        if let Some((_, existing_new_token)) =
-            check_rotation_grace(&claims.jti).filter(|(grace_user_id, _)| *grace_user_id == id)
-        {
-            let cookie = build_set_cookie(
-                "aetherflow_session",
-                &existing_new_token,
-                SESSION_COOKIE_MAX_AGE,
-                "Lax",
-                secure_cookie_enabled(),
-                true,
-            );
-            let mut resp = Json(serde_json::json!({
-                "status": "success",
-                "token": existing_new_token,
-                "expires_at": now + 900,
-                "user": { "id": id, "username": username, "role": role }
-            }))
-            .into_response();
-            if let Ok(hv) = HeaderValue::from_str(&cookie) {
-                resp.headers_mut().insert(header::SET_COOKIE, hv);
+
+    if !consumed {
+        if fp_matches {
+            if let Some((_, latest_token, latest_exp, leaf_succ)) =
+                resolve_latest_grace_token(&claims.jti, subj.user_id, Some(&caller_strict_fp))
+            {
+                let successor_revoked = leaf_succ.is_empty()
+                    || af_db::token_revocation_status_with_conn(&tx, &leaf_succ).unwrap_or(true);
+                let successor_active = has_sessions_table
+                    && tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2)",
+                            params![leaf_succ, subj.user_id],
+                            |r| r.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false);
+                if !successor_revoked && successor_active {
+                    let cookie = build_set_cookie(
+                        "aetherflow_session",
+                        &latest_token,
+                        SESSION_COOKIE_MAX_AGE,
+                        "Lax",
+                        secure_cookie_enabled(),
+                        true,
+                    );
+                    let mut resp = Json(serde_json::json!({
+                        "status": "success",
+                        "token": latest_token,
+                        "expires_at": latest_exp,
+                        "user": { "id": subj.user_id, "username": subj.username, "role": subj.role }
+                    }))
+                    .into_response();
+                    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+                        resp.headers_mut().insert(header::SET_COOKIE, hv);
+                    }
+                    return resp;
+                }
             }
-            return resp;
+        }
+        // Replay of an already-rotated or revoked token outside the 10s strict-fp grace window:
+        // revoke the entire descendant session family (and session-scoped OIDC grants) before returning 401.
+        let resolved_successor = resolve_current_session_jti(&claims.jti);
+        let mut wiped_jtis = Vec::new();
+        let mut resolved_family = existing_family_opt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if resolved_family.is_none() {
+            resolved_family =
+                af_db::resolve_revoked_token_family_in_tx(&tx, &claims.jti, subj.user_id)
+                    .ok()
+                    .flatten();
+        }
+        if resolved_family.is_none() {
+            resolved_family = ROTATED_TOKEN_GRACE
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&claims.jti).cloned())
+                .filter(|e| e.user_id == subj.user_id && !e.family_id.trim().is_empty())
+                .map(|e| e.family_id);
+        }
+        let wipe_outcome = (|| -> anyhow::Result<()> {
+            if table_exists(&tx, "active_sessions")? {
+                if resolved_family.is_none() && has_family {
+                    resolved_family = tx
+                        .query_row(
+                            "SELECT COALESCE(family_id, '') FROM active_sessions \
+                             WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3 OR family_id = ?2) LIMIT 1",
+                            params![subj.user_id, claims.jti, resolved_successor],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                }
+                let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
+                if has_family {
+                    let mut stmt = tx.prepare(
+                        "SELECT jti FROM active_sessions \
+                         WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![subj.user_id, target_family, claims.jti, resolved_successor],
+                        |r| r.get::<_, String>(0),
+                    )?;
+                    for row in rows {
+                        let jti = row?;
+                        if !jti.is_empty() {
+                            wiped_jtis.push(jti);
+                        }
+                    }
+                    drop(stmt);
+                    tx.execute(
+                        "DELETE FROM active_sessions \
+                         WHERE user_id = ?1 AND (family_id = ?2 OR jti = ?3 OR jti = ?4)",
+                        params![subj.user_id, target_family, claims.jti, resolved_successor],
+                    )?;
+                } else {
+                    if resolved_successor != claims.jti {
+                        wiped_jtis.push(resolved_successor.clone());
+                    }
+                    tx.execute(
+                        "DELETE FROM active_sessions WHERE user_id = ?1 AND (jti = ?2 OR jti = ?3)",
+                        params![subj.user_id, claims.jti, resolved_successor],
+                    )?;
+                }
+                for jti in &wiped_jtis {
+                    af_db::revoke_token_in_tx(&tx, jti, MIN_REVOCATION_TTL)?;
+                    af_db::record_revoked_token_lineage_in_tx(
+                        &tx,
+                        jti,
+                        target_family,
+                        subj.user_id,
+                    )?;
+                }
+                let sess_tag = oidc_session_tag(target_family);
+                let sess_marker = format!("oidc-sess:{}", sess_tag);
+                af_db::revoke_token_in_tx(&tx, &sess_marker, MIN_REVOCATION_TTL)?;
+                wiped_jtis.push(sess_marker);
+                if table_exists(&tx, "oidc_refresh_tokens").unwrap_or(false)
+                    && column_exists(&tx, "oidc_refresh_tokens", "family_id").unwrap_or(false)
+                {
+                    let prefix = format!("sf:{}:", sess_tag);
+                    tx.execute(
+                        "UPDATE oidc_refresh_tokens SET revoked = 1 \
+                         WHERE user_id = ?1 AND substr(COALESCE(family_id, ''), 1, 36) = ?2",
+                        params![subj.user_id, prefix],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if wipe_outcome.is_err() {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to revoke compromised session family",
+            );
+        }
+        for jti in &wiped_jtis {
+            af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
+        }
+        let target_family = resolved_family.as_deref().unwrap_or(&claims.jti);
+        evict_rotation_grace_for_family(target_family, &claims.jti);
+        for jti in &wiped_jtis {
+            evict_rotation_grace_for_family(target_family, jti);
         }
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -1187,8 +2266,29 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     }
 
-    let Ok((new_token, new_claims)) = create_session_jwt(id, &headers, session_auth_time(&claims))
-    else {
+    if !fp_matches {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Client fingerprint mismatch",
+        );
+    }
+
+    let family_id = existing_family_opt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&claims.jti)
+        .to_string();
+
+    let Ok((new_token, new_claims)) = create_session_jwt_in_conn(
+        &tx,
+        subj.user_id,
+        &headers,
+        session_auth_time(&claims),
+        Some(&family_id),
+        subj.sessions_revoked_after,
+    ) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1196,18 +2296,64 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         );
     };
 
+    if af_db::record_revoked_token_lineage_in_tx(&tx, &claims.jti, &family_id, subj.user_id)
+        .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to record token rotation lineage",
+        );
+    }
+    if table_exists(&tx, "active_sessions").unwrap_or(false)
+        && tx
+            .execute(
+                "DELETE FROM active_sessions WHERE jti = ?1",
+                params![claims.jti],
+            )
+            .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to retire rotated session",
+        );
+    }
+
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to commit rotated session",
+        );
+    }
+
+    // Populate revocation cache and rotation grace BEFORE releasing `conn` so serialized concurrent racers see the exact successor.
+    af_db::cache_revoked_token(&claims.jti, MIN_REVOCATION_TTL);
+    if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
+        succ.insert(
+            claims.jti.clone(),
+            (
+                new_claims.jti.clone(),
+                Instant::now() + Duration::from_secs(86400),
+            ),
+        );
+    }
     if let Ok(mut grace) = ROTATED_TOKEN_GRACE.lock() {
         grace.insert(
             claims.jti.clone(),
             RotatedTokenGraceEntry {
-                user_id: id,
+                user_id: subj.user_id,
+                family_id,
+                successor_jti: new_claims.jti.clone(),
                 new_token: new_token.clone(),
-                expires_at: Instant::now() + Duration::from_secs(15),
+                successor_exp: new_claims.exp,
+                strict_fp: caller_strict_fp,
+                expires_at: Instant::now() + ROTATED_TOKEN_GRACE_WINDOW,
             },
         );
     }
-
-    af_db::revoke_token(&claims.jti, Duration::from_secs(900));
+    drop(conn);
 
     let cookie = build_set_cookie(
         "aetherflow_session",
@@ -1221,7 +2367,7 @@ fn refresh_session_blocking(headers: HeaderMap) -> Response {
         "status": "success",
         "token": new_token,
         "expires_at": new_claims.exp,
-        "user": { "id": id, "username": username, "role": role }
+        "user": { "id": subj.user_id, "username": subj.username, "role": subj.role }
     }))
     .into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
@@ -1263,7 +2409,7 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if af_db::is_token_revoked(&claims.jti)
+    if is_session_token_revoked_beyond_grace(&claims.jti, claims.user_id)
         || !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent)
     {
         return api_error(
@@ -1279,20 +2425,40 @@ fn verify_proxy_auth_blocking(headers: HeaderMap) -> Response {
         )
             .into_response();
     };
-    let Ok(username) = conn.query_row(
-        "SELECT username FROM users WHERE id = ?1",
-        params![claims.user_id],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "User no longer exists" })),
-        )
-            .into_response();
+    let subj = match load_active_human_subject(&conn, claims.user_id) {
+        Ok(subj) => subj,
+        Err(SubjectStatusError::Suspended) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Account is not active" })),
+            )
+                .into_response();
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "User no longer exists" })),
+            )
+                .into_response();
+        }
+        Err(SubjectStatusError::DbError) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal validation error" })),
+            )
+                .into_response();
+        }
     };
+    if claims.ver < subj.sessions_revoked_after {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "Invalid or revoked session",
+        );
+    }
 
     let mut resp = StatusCode::OK.into_response();
-    if let Ok(hv) = HeaderValue::from_str(&username) {
+    if let Ok(hv) = HeaderValue::from_str(&subj.username) {
         resp.headers_mut().insert("X-Aetherflow-User", hv.clone());
         resp.headers_mut().insert("Remote-User", hv);
     }
@@ -1332,10 +2498,11 @@ fn list_active_sessions_blocking(req: Request) -> Response {
         }
     };
 
+    let current_session_jti = resolve_current_session_jti(&auth_user.jti);
     let mut sessions = Vec::new();
     if let Ok(rows) = stmt.query_map(params![auth_user.user_id], |r| {
         let full_jti: String = r.get(0)?;
-        let is_current = full_jti == auth_user.jti;
+        let is_current = full_jti == auth_user.jti || full_jti == current_session_jti;
         let masked = if full_jti.len() > 8 {
             format!("{}...", &full_jti[..8])
         } else {
@@ -1383,14 +2550,21 @@ fn revoke_session_blocking(jti_param: String, req: Request) -> Response {
             "Invalid session identifier",
         );
     }
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Database error",
         );
     };
-    let Ok(full_jti) = conn.query_row(
+    let Ok(tx) = conn.transaction_with_behavior(TransactionBehavior::Immediate) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database error",
+        );
+    };
+    let Ok(full_jti) = tx.query_row(
         "SELECT MIN(jti) FROM active_sessions WHERE substr(jti, 1, length(?1)) = ?1 AND user_id = ?2 HAVING COUNT(*) = 1",
         params![prefix, auth_user.user_id],
         |r| r.get::<_, String>(0),
@@ -1398,16 +2572,32 @@ fn revoke_session_blocking(jti_param: String, req: Request) -> Response {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Session not found");
     };
 
-    drop(conn);
-    if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
-        map.remove(&full_jti);
+    let Ok((family_id, revoked_jtis)) =
+        revoke_session_family_in_tx(&tx, auth_user.user_id, &full_jti, true)
+    else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to revoke session",
+        );
+    };
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to revoke session",
+        );
     }
-    af_db::revoke_token(&full_jti, Duration::from_secs(900));
+    for jti in &revoked_jtis {
+        af_db::cache_revoked_token(jti, MIN_REVOCATION_TTL);
+        evict_rotation_grace_for_family(&family_id, jti);
+    }
+    drop(conn);
     Json(serde_json::json!({ "message": "Session revoked" })).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2FA TOTP Setup, Verification & MFA Login (`backend/api/totp.go`)
+// 2FA TOTP Setup, Verification & MFA Login
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn matching_totp_step(secret_b32: &str, code: &str, now_secs: u64) -> Option<i64> {
@@ -1446,6 +2636,11 @@ pub(crate) fn consume_totp_code(
     ), Ok(1))
 }
 
+const RECOVERY_BCRYPT_COST: u32 = if cfg!(test) { 6 } else { bcrypt::DEFAULT_COST };
+const RECOVERY_CODE_GROUPS: usize = 4;
+const RECOVERY_CODE_GROUP_LEN: usize = 7;
+const RECOVERY_CODE_TOTAL_CHARS: usize = RECOVERY_CODE_GROUPS * RECOVERY_CODE_GROUP_LEN; // 28 chars * 5 bits = 140 bits entropy
+
 fn recovery_hash(salt: &[u8], compact: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"aetherflow-recovery-v1\0");
@@ -1456,19 +2651,27 @@ fn recovery_hash(salt: &[u8], compact: &str) -> String {
 
 pub(crate) fn generate_recovery_codes() -> Vec<String> {
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const UNBIASED_CEILING: usize = 256 - (256 % CHARSET.len());
     let mut codes = Vec::with_capacity(8);
     for _ in 0..8 {
-        let mut raw = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut raw);
-        let chars: Vec<char> = raw
-            .iter()
-            .map(|&b| CHARSET[(b as usize) % CHARSET.len()] as char)
-            .collect();
-        let code = format!(
-            "{}-{}",
-            chars[0..4].iter().collect::<String>(),
-            chars[4..8].iter().collect::<String>()
-        );
+        let mut chars = Vec::with_capacity(RECOVERY_CODE_TOTAL_CHARS);
+        while chars.len() < RECOVERY_CODE_TOTAL_CHARS {
+            let mut raw = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut raw);
+            for &b in &raw {
+                if (b as usize) < UNBIASED_CEILING {
+                    chars.push(CHARSET[(b as usize) % CHARSET.len()] as char);
+                    if chars.len() == RECOVERY_CODE_TOTAL_CHARS {
+                        break;
+                    }
+                }
+            }
+        }
+        let code = chars
+            .chunks(RECOVERY_CODE_GROUP_LEN)
+            .map(|grp| grp.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("-");
         codes.push(code);
     }
     codes
@@ -1484,14 +2687,14 @@ pub(crate) fn store_recovery_codes(
         params![user_id],
     )?;
     for code in codes {
-        let compact = code.replace('-', "");
-        let mut salt = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        let hash = format!(
-            "sha256:v1:{}:{}",
-            hex::encode(salt),
-            recovery_hash(&salt, &compact)
-        );
+        let compact: String = code
+            .trim()
+            .to_uppercase()
+            .chars()
+            .filter(|c| *c != '-')
+            .collect();
+        let hash = bcrypt::hash(&compact, RECOVERY_BCRYPT_COST)
+            .map_err(|e| anyhow::anyhow!("failed hashing recovery code with bcrypt: {e}"))?;
         transaction.execute(
             "INSERT INTO recovery_codes (user_id, code_hash, used) VALUES (?1, ?2, 0)",
             params![user_id, hash],
@@ -1510,7 +2713,11 @@ pub(crate) fn store_recovery_codes(
     Ok(())
 }
 
-fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &str) -> bool {
+pub(crate) fn validate_recovery_code(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    raw_code: &str,
+) -> bool {
     let normalized = raw_code.trim().to_uppercase();
     if normalized.is_empty() {
         return false;
@@ -1521,8 +2728,6 @@ fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &
     } else {
         normalized.clone()
     };
-    let sha_hash = hex::encode(Sha256::digest(dashed.as_bytes()));
-    let sha_compact_hash = hex::encode(Sha256::digest(normalized_compact.as_bytes()));
 
     let mut matched_id: Option<i64> = None;
     if let Ok(mut stmt) = conn.prepare(
@@ -1546,8 +2751,6 @@ fn validate_recovery_code(conn: &rusqlite::Connection, user_id: i64, raw_code: &
                             )
                     });
                 let is_match = salted_match
-                    || trimmed_hash.eq_ignore_ascii_case(&sha_hash)
-                    || trimmed_hash.eq_ignore_ascii_case(&sha_compact_hash)
                     || (trimmed_hash.starts_with("$2")
                         && (bcrypt::verify(&dashed, trimmed_hash).unwrap_or(false)
                             || bcrypt::verify(&normalized_compact, trimmed_hash).unwrap_or(false)));
@@ -1644,6 +2847,23 @@ pub async fn verify_2fa(req: Request) -> Response {
     };
 
     blocking_response(move || {
+    if let Ok(conn) = af_db::get_read_conn() {
+        let already_enabled: bool = conn
+            .query_row(
+                "SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
+                params![auth_user.user_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if already_enabled {
+            af_db::delete_2fa_pending(auth_user.user_id);
+            return api_error(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Two-factor authentication is already enabled",
+            );
+        }
+    }
     let Some(secret) = af_db::get_2fa_pending(auth_user.user_id) else {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1660,22 +2880,58 @@ pub async fn verify_2fa(req: Request) -> Response {
         );
     };
 
-    let enc_secret = af_db::encrypt_key(&secret).unwrap_or(secret);
+    let Ok(enc_secret) = af_db::encrypt_key(&secret) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CRYPTO_ERROR",
+            "Failed to encrypt two-factor secret",
+        );
+    };
     let recovery_codes = generate_recovery_codes();
-    let result = (|| -> anyhow::Result<()> {
+    let result = (|| -> Result<bool, anyhow::Error> {
         let conn = af_db::get_conn()?;
-        let transaction = conn.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let affected = transaction.execute(
             "UPDATE users SET totp_secret = ?1, totp_enabled = 1, last_totp_step = ?3 WHERE id = ?2 AND COALESCE(totp_enabled, 0) = 0",
             params![enc_secret, auth_user.user_id, verified_step],
         )?;
-        anyhow::ensure!(affected == 1, "User missing or 2FA already enabled");
+        if affected == 0 {
+            let already_enabled: bool = transaction
+                .query_row(
+                    "SELECT COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
+                    params![auth_user.user_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if already_enabled {
+                return Ok(false);
+            }
+            anyhow::bail!("User missing");
+        }
         store_recovery_codes(&transaction, auth_user.user_id, &recovery_codes)?;
         transaction.commit()?;
-        Ok(())
+        Ok(true)
     })();
-    if result.is_err() {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to enable two-factor authentication");
+    match result {
+        Ok(true) => {}
+        Ok(false) => {
+            af_db::delete_2fa_pending(auth_user.user_id);
+            return api_error(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Two-factor authentication is already enabled",
+            );
+        }
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to enable two-factor authentication",
+            );
+        }
     }
     af_db::delete_2fa_pending(auth_user.user_id);
 
@@ -1685,6 +2941,35 @@ pub async fn verify_2fa(req: Request) -> Response {
     }))
     .into_response()
     }).await
+}
+
+pub(crate) fn verify_user_totp_stepup(user_id: i64, code: &str) -> bool {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return false;
+    }
+    let Ok(mut conn) = af_db::get_conn() else {
+        return false;
+    };
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        return false;
+    };
+    let Ok((totp_enabled, enc_secret)) = tx.query_row(
+        "SELECT COALESCE(totp_enabled, 0), COALESCE(totp_secret, '') FROM users WHERE id = ?1",
+        params![user_id],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ) else {
+        return false;
+    };
+    if totp_enabled == 0 || enc_secret.is_empty() {
+        return false;
+    }
+    let Ok(secret) = af_db::decrypt_key(&enc_secret) else {
+        return false;
+    };
+    let ok = consume_totp_code(&tx, user_id, &secret, trimmed)
+        || validate_recovery_code(&tx, user_id, trimmed);
+    ok && tx.commit().is_ok()
 }
 
 pub async fn disable_2fa(req: Request) -> Response {
@@ -1705,11 +2990,11 @@ pub async fn disable_2fa(req: Request) -> Response {
     let Ok(payload) = serde_json::from_slice::<Disable2FaRequest>(&bytes) else {
         return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Invalid JSON");
     };
-    if payload.code.trim().is_empty() && payload.password.is_empty() {
+    if payload.code.trim().is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
-            "Verification code or password required",
+            "A valid TOTP or recovery code is required",
         );
     }
     blocking_auth_work(move || {
@@ -1724,21 +3009,43 @@ pub async fn disable_2fa(req: Request) -> Response {
             return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "User not found");
         };
         drop(conn);
-        let secret = af_db::decrypt_key(&encrypted_secret).unwrap_or(encrypted_secret);
-        let password_verified = !payload.password.is_empty() && !password_hash.is_empty()
-            && verify_password(&payload.password, &password_hash);
-        let result = (|| -> anyhow::Result<bool> {
-            let conn = af_db::get_conn()?;
-            let transaction = conn.unchecked_transaction()?;
+        let secret = if encrypted_secret.is_empty() {
+            String::new()
+        } else {
+            match af_db::decrypt_key(&encrypted_secret) {
+                Ok(s) => s,
+                Err(_) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "CRYPTO_ERROR",
+                        "Failed to decrypt 2FA secret",
+                    );
+                }
+            }
+        };
+        let password_ok = payload.password.is_empty()
+            || (!password_hash.is_empty() && verify_password(&payload.password, &password_hash));
+        let result = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
+            let mut conn = af_db::get_conn()?;
+            let transaction =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current: (String, String) = transaction.query_row(
                 "SELECT COALESCE(totp_secret, ''), COALESCE(password_hash, '') FROM users WHERE id = ?1",
                 params![auth_user.user_id], |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let current_secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
+            let current_secret = if current.0.is_empty() {
+                String::new()
+            } else {
+                af_db::decrypt_key(&current.0)?
+            };
             anyhow::ensure!(current_secret == secret && current.1 == password_hash, "Credentials changed");
-            if !password_verified && !consume_totp_code(&transaction, auth_user.user_id, &secret, &payload.code)
-                && !validate_recovery_code(&transaction, auth_user.user_id, &payload.code) {
-                return Ok(false);
+            if !password_ok {
+                return Ok(None);
+            }
+            if !consume_totp_code(&transaction, auth_user.user_id, &secret, &payload.code)
+                && !validate_recovery_code(&transaction, auth_user.user_id, &payload.code)
+            {
+                return Ok(None);
             }
             let affected = transaction.execute(
                 "UPDATE users SET totp_secret = '', totp_enabled = 0, last_totp_step = -1 WHERE id = ?1",
@@ -1746,19 +3053,41 @@ pub async fn disable_2fa(req: Request) -> Response {
             )?;
             anyhow::ensure!(affected == 1, "User not found");
             store_recovery_codes(&transaction, auth_user.user_id, &[])?;
+            let (new_ver, revoked_jtis) =
+                revoke_all_user_credentials_in_tx(&transaction, auth_user.user_id)?;
+            let (new_token, _) = create_session_jwt_in_conn(
+                &transaction,
+                auth_user.user_id,
+                &headers,
+                Utc::now().timestamp(),
+                None,
+                new_ver,
+            )?;
             transaction.commit()?;
-            Ok(true)
+            Ok(Some((new_token, revoked_jtis)))
         })();
-        match result {
-            Ok(true) => {}
-            Ok(false) => return api_error(StatusCode::FORBIDDEN, if payload.code.trim().is_empty() { "INVALID_CURRENT_PASSWORD" } else { "INVALID_2FA_CODE" }, "Invalid verification code or password"),
+        let (new_token, revoked_jtis) = match result {
+            Ok(Some(pair)) => pair,
+            Ok(None) => {
+                let err_code = if !payload.password.is_empty() && !password_ok {
+                    "INVALID_CURRENT_PASSWORD"
+                } else {
+                    "INVALID_2FA_CODE"
+                };
+                return api_error(StatusCode::FORBIDDEN, err_code, "Invalid verification code or password");
+            }
             Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to disable two-factor authentication"),
-        }
+        };
+        finalize_user_credential_revocation(auth_user.user_id, &revoked_jtis);
         af_db::record_audit(
             auth_user.user_id, &auth_user.username, "totp_disable", "user",
             &auth_user.user_id.to_string(), "Two-factor authentication disabled", &ip, &ua,
         );
-        Json(serde_json::json!({ "message": "Two-factor authentication disabled" })).into_response()
+        let mut resp =
+            Json(serde_json::json!({ "message": "Two-factor authentication disabled" }))
+                .into_response();
+        set_session_cookie(&mut resp, &new_token);
+        resp
     }).await.unwrap_or_else(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Verification failed"))
 }
 
@@ -1774,15 +3103,53 @@ pub async fn mfa_login_verify(headers: HeaderMap, Json(req): Json<MfaVerifyReque
     blocking_response(move || mfa_login_verify_blocking(headers, req)).await
 }
 
-fn verify_mfa_factor(
-    conn: &rusqlite::Connection,
+#[derive(Debug)]
+enum MfaVerifyOutcome {
+    Verified(User, Option<String>),
+    Invalid,
+    Suspended,
+}
+
+fn redeem_mfa_challenge_in_tx(
+    transaction: rusqlite::Transaction<'_>,
     token: &str,
     code: &str,
-) -> anyhow::Result<Option<User>> {
-    let transaction = conn.unchecked_transaction()?;
-    let Some(user_id) = af_db::begin_mfa_attempt(&transaction, token)? else {
-        return Ok(None);
+    session_headers: Option<&HeaderMap>,
+) -> anyhow::Result<MfaVerifyOutcome> {
+    let Some((user_id, challenge_ver)) = af_db::begin_mfa_attempt_with_epoch(&transaction, token)?
+    else {
+        return Ok(MfaVerifyOutcome::Invalid);
     };
+    let subj = match load_active_human_subject(&transaction, user_id) {
+        Ok(subj) => subj,
+        Err(SubjectStatusError::Suspended) => {
+            let _ = transaction.execute(
+                "DELETE FROM mfa_challenges WHERE token = ?1",
+                params![token],
+            );
+            transaction.commit()?;
+            return Ok(MfaVerifyOutcome::Suspended);
+        }
+        Err(SubjectStatusError::MissingOrPlugin) => {
+            let _ = transaction.execute(
+                "DELETE FROM mfa_challenges WHERE token = ?1",
+                params![token],
+            );
+            transaction.commit()?;
+            return Ok(MfaVerifyOutcome::Invalid);
+        }
+        Err(SubjectStatusError::DbError) => {
+            anyhow::bail!("Failed to verify account status during MFA");
+        }
+    };
+    if subj.sessions_revoked_after != challenge_ver {
+        let _ = transaction.execute(
+            "DELETE FROM mfa_challenges WHERE token = ?1",
+            params![token],
+        );
+        transaction.commit()?;
+        return Ok(MfaVerifyOutcome::Invalid);
+    }
     let (user, encrypted): (User, String) = transaction.query_row(
         "SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(role, 'user'), COALESCE(google_id, ''), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0) FROM users WHERE id = ?1",
         params![user_id], |r| {
@@ -1802,22 +3169,81 @@ fn verify_mfa_factor(
             params![token, af_db::MAX_MFA_ATTEMPTS],
         )?;
         transaction.commit()?;
-        return Ok(None);
+        return Ok(MfaVerifyOutcome::Invalid);
     }
     anyhow::ensure!(
-        af_db::consume_mfa_challenge(&transaction, token, user_id)?,
+        af_db::consume_mfa_challenge_with_epoch(&transaction, token, user_id, challenge_ver)?,
         "Challenge already consumed"
     );
+    let session_token = if let Some(headers) = session_headers {
+        let (jwt, _) = create_session_jwt_in_conn(
+            &transaction,
+            user.id,
+            headers,
+            Utc::now().timestamp(),
+            None,
+            challenge_ver,
+        )?;
+        if table_exists(&transaction, "login_history").unwrap_or(false) {
+            let _ = transaction.execute(
+                "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+                params![
+                    user.id,
+                    extract_client_ip(headers),
+                    headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                ],
+            );
+        }
+        Some(jwt)
+    } else {
+        None
+    };
     transaction.commit()?;
-    Ok(Some(user))
+    Ok(MfaVerifyOutcome::Verified(user, session_token))
+}
+
+#[cfg(test)]
+fn verify_mfa_factor_outcome(
+    conn: &rusqlite::Connection,
+    token: &str,
+    code: &str,
+) -> anyhow::Result<MfaVerifyOutcome> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    redeem_mfa_challenge_in_tx(transaction, token, code, None)
+}
+
+#[cfg(test)]
+fn verify_mfa_factor(
+    conn: &rusqlite::Connection,
+    token: &str,
+    code: &str,
+) -> anyhow::Result<Option<User>> {
+    match verify_mfa_factor_outcome(conn, token, code)? {
+        MfaVerifyOutcome::Verified(user, _) => Ok(Some(user)),
+        MfaVerifyOutcome::Invalid | MfaVerifyOutcome::Suspended => Ok(None),
+    }
 }
 
 fn mfa_login_verify_blocking(headers: HeaderMap, req: MfaVerifyRequest) -> Response {
-    let result =
-        af_db::get_conn().and_then(|conn| verify_mfa_factor(&conn, &req.mfa_token, &req.code));
-    let user = match result {
-        Ok(Some(user)) => user,
-        Ok(None) => {
+    let result = (|| -> anyhow::Result<MfaVerifyOutcome> {
+        let mut conn = af_db::get_conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        redeem_mfa_challenge_in_tx(tx, &req.mfa_token, &req.code, Some(&headers))
+    })();
+    let (user, token_opt) = match result {
+        Ok(MfaVerifyOutcome::Verified(user, token_opt)) => (user, token_opt),
+        Ok(MfaVerifyOutcome::Suspended) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_SUSPENDED",
+                "Account is suspended",
+            )
+        }
+        Ok(MfaVerifyOutcome::Invalid) => {
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "INVALID_2FA_CODE",
@@ -1832,34 +3258,17 @@ fn mfa_login_verify_blocking(headers: HeaderMap, req: MfaVerifyRequest) -> Respo
             )
         }
     };
-    let Ok((token, _)) = create_standard_jwt(user.id, &headers) else {
+    let Some(token) = token_opt else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to create session",
         );
     };
-    record_login(user.id, &headers);
     let mut resp =
         Json(serde_json::json!({ "message": "Login successful", "user": user })).into_response();
     set_session_cookie(&mut resp, &token);
     resp
-}
-
-pub(crate) fn record_login(user_id: i64, headers: &HeaderMap) {
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
-            params![
-                user_id,
-                extract_client_ip(headers),
-                headers
-                    .get(header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-            ],
-        );
-    }
 }
 
 pub(crate) fn set_session_cookie(response: &mut Response, token: &str) {
@@ -1882,9 +3291,9 @@ mod tests {
 
     fn mfa_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, avatar_url TEXT, role TEXT, google_id TEXT, totp_secret TEXT, totp_enabled INTEGER, last_totp_step INTEGER DEFAULT -1);
-            INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1);
-            CREATE TABLE mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER, attempts INTEGER DEFAULT 0, expires_at INTEGER);
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, avatar_url TEXT, role TEXT, google_id TEXT, totp_secret TEXT, totp_enabled INTEGER, last_totp_step INTEGER DEFAULT -1, sessions_revoked_after INTEGER DEFAULT 0);
+            INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1, 0);
+            CREATE TABLE mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER, credential_ver INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, expires_at INTEGER);
             CREATE TABLE recovery_codes (id INTEGER PRIMARY KEY, user_id INTEGER, code_hash TEXT, used INTEGER DEFAULT 0);").unwrap();
         conn
     }
@@ -1967,7 +3376,7 @@ mod tests {
         for sql in schema {
             conn.execute_batch(&sql).unwrap();
         }
-        conn.execute("INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1)", []).unwrap();
+        conn.execute("INSERT INTO users VALUES (1, 'mfa-user', '', '', 'admin', '', 'JBSWY3DPEHPK3PXP', 1, -1, 0)", []).unwrap();
         add_challenge(&conn, "shared");
         add_challenge(&conn, "later");
         drop(conn);
@@ -2013,6 +3422,7 @@ mod tests {
             exp: now + 900,
             jti: Uuid::new_v4().to_string(),
             cfp: String::new(),
+            ver: 0,
             plugin_id: String::new(),
             plugin_scopes: Vec::new(),
         };
@@ -2252,8 +3662,12 @@ mod tests {
             failure_claims.jti.clone(),
             RotatedTokenGraceEntry {
                 user_id: 988,
+                family_id: failure_claims.jti.clone(),
+                successor_jti: claims.jti.clone(),
                 new_token: new_token.into(),
-                expires_at: Instant::now() + Duration::from_secs(15),
+                successor_exp: claims.exp,
+                strict_fp: String::new(),
+                expires_at: Instant::now() + ROTATED_TOKEN_GRACE_WINDOW,
             },
         );
         let failure_token = encode(
@@ -2290,6 +3704,14 @@ mod tests {
         let conn = recovery_database();
         let codes = generate_recovery_codes();
         assert_eq!(codes.len(), 8);
+        for code in &codes {
+            let compact: String = code.chars().filter(|c| *c != '-').collect();
+            assert_eq!(
+                compact.len(),
+                28,
+                "recovery codes must carry 140 bits of entropy"
+            );
+        }
         let transaction = conn.unchecked_transaction().unwrap();
         store_recovery_codes(&transaction, 1, &codes).unwrap();
         transaction.commit().unwrap();
@@ -2306,7 +3728,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert!(hash.starts_with("sha256:v1:"));
+        assert!(
+            hash.starts_with("$2b$") || hash.starts_with("$2a$"),
+            "stored recovery code hash must use bcrypt KDF, got {hash}"
+        );
         assert!(!codes.contains(&hash));
         assert!(!validate_recovery_code(&conn, 2, &codes[0]));
         assert!(validate_recovery_code(
@@ -2336,10 +3761,26 @@ mod tests {
         assert_eq!(hash, "old-hash");
         conn.execute_batch("DROP TRIGGER reject_insert; DELETE FROM recovery_codes;")
             .unwrap();
-        let legacy_hash = hex::encode(Sha256::digest(b"ABCD-EFGH"));
+        let unsalted_sha = hex::encode(Sha256::digest(b"ABCD-EFGH"));
         conn.execute(
             "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
-            params![legacy_hash],
+            params![unsalted_sha],
+        )
+        .unwrap();
+        assert!(
+            !validate_recovery_code(&conn, 1, "abcdefgh"),
+            "unsalted 64-hex SHA-256 recovery hashes must be rejected"
+        );
+        conn.execute("DELETE FROM recovery_codes", []).unwrap();
+        let salt = [0x42u8; 16];
+        let salted_hash = format!(
+            "sha256:v1:{}:{}",
+            hex::encode(salt),
+            recovery_hash(&salt, "ABCDEFGH")
+        );
+        conn.execute(
+            "INSERT INTO recovery_codes (user_id, code_hash) VALUES (1, ?1)",
+            params![salted_hash],
         )
         .unwrap();
         conn.execute_batch("CREATE TRIGGER reject_consume BEFORE UPDATE ON recovery_codes BEGIN SELECT RAISE(IGNORE); END;").unwrap();
@@ -2385,6 +3826,19 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_auth_rejects_revocation_and_fingerprint_mismatch() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO users (id, username, password_hash, role) VALUES (1, 'proxy-test-user', 'hash', 'user')",
+                [],
+            )
+            .unwrap();
+        }
         for revoked in [false, true] {
             let now = Utc::now().timestamp();
             let claims = SessionClaims {
@@ -2396,6 +3850,7 @@ mod tests {
                 exp: now + 900,
                 jti: Uuid::new_v4().to_string(),
                 cfp: client_fingerprint("original-agent"),
+                ver: 0,
                 plugin_id: String::new(),
                 plugin_scopes: Vec::new(),
             };
@@ -2419,7 +3874,7 @@ mod tests {
                 }),
             );
             if revoked {
-                af_db::revoke_token(&claims.jti, Duration::from_secs(900));
+                af_db::revoke_token(&claims.jti, MIN_REVOCATION_TTL).unwrap();
             }
             assert_eq!(
                 verify_proxy_auth(headers).await.status(),
@@ -2476,6 +3931,7 @@ mod tests {
                 exp: now + 600,
                 jti: Uuid::new_v4().to_string(),
                 cfp: String::new(),
+                ver: 0,
                 plugin_id: "fixture".into(),
                 plugin_scopes: vec![path.into()],
             };
@@ -2556,5 +4012,567 @@ mod tests {
         assert!(lookup("abcdefgh").is_err());
         assert!(lookup("abcdefgi").is_err());
         assert_eq!(lookup("abcdefgh-1").unwrap(), "abcdefgh-1");
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_is_single_winner_and_replay_after_grace_revokes_family() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role) VALUES (991, 'refresh-race', 'user')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("race-agent"));
+        let (seed_token, seed_claims) = create_standard_jwt(991, &headers).unwrap();
+        headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={seed_token}").parse().unwrap(),
+        );
+
+        let (r1, r2) = tokio::join!(refresh_session(headers.clone()), refresh_session(headers));
+        assert_eq!(r1.status(), StatusCode::OK);
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), 8192).await.unwrap();
+        let b2 = axum::body::to_bytes(r2.into_body(), 8192).await.unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        let rotated_token = v1["token"].as_str().unwrap().to_string();
+        assert_eq!(rotated_token, v2["token"].as_str().unwrap());
+
+        let rotated_claims = decode_session_claims(&rotated_token, false).unwrap();
+        {
+            let conn = af_db::get_read_conn().unwrap();
+            let active_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM active_sessions WHERE user_id = 991",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(active_count, 1);
+        }
+
+        // Expire grace and replay the already-consumed seed token: family must be wiped.
+        ROTATED_TOKEN_GRACE.lock().unwrap().remove(&seed_claims.jti);
+        let mut replay_headers = HeaderMap::new();
+        replay_headers.insert(header::USER_AGENT, HeaderValue::from_static("race-agent"));
+        replay_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={seed_token}").parse().unwrap(),
+        );
+        assert_eq!(
+            refresh_session(replay_headers).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(af_db::is_token_revoked(&rotated_claims.jti));
+        let conn = af_db::get_read_conn().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM active_sessions WHERE user_id = 991",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn disable_2fa_and_logout_revoke_concurrent_credentials_and_rotate_epoch() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("correct-horse-battery", 4).unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, totp_enabled, totp_secret) \
+                 VALUES (992, 'epoch-user', ?1, 'admin', 1, 'JBSWY3DPEHPK3PXP')",
+                params![pw_hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oidc_clients (id, name, client_secret_hash, redirect_uris) VALUES ('c1', 'App', 'h', '[]')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at, revoked, family_id) \
+                 VALUES ('rt-epoch-1', 'c1', 992, 'openid', '2099-01-01T00:00:00Z', 0, 'fam-1')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("epoch-agent"));
+        let (other_session, other_claims) = create_standard_jwt(992, &headers).unwrap();
+        let (_, caller_claims) = create_standard_jwt(992, &headers).unwrap();
+
+        let mut pw_only_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/2fa/disable")
+            .header(header::USER_AGENT, "epoch-agent")
+            .body(axum::body::Body::from(
+                r#"{"password":"correct-horse-battery"}"#,
+            ))
+            .unwrap();
+        pw_only_req.extensions_mut().insert(AuthUser {
+            user_id: 992,
+            username: "epoch-user".into(),
+            role: "admin".into(),
+            jti: caller_claims.jti.clone(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        assert_eq!(
+            disable_2fa(pw_only_req).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/2fa/disable")
+            .header(header::USER_AGENT, "epoch-agent")
+            .body(axum::body::Body::from(format!(
+                r#"{{"password":"correct-horse-battery","code":"{}"}}"#,
+                totp_now()
+            )))
+            .unwrap();
+        req.extensions_mut().insert(AuthUser {
+            user_id: 992,
+            username: "epoch-user".into(),
+            role: "admin".into(),
+            jti: caller_claims.jti.clone(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        let resp = disable_2fa(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        let replacement = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("aetherflow_session=")
+            .unwrap();
+        let replacement_claims = decode_session_claims(replacement, false).unwrap();
+        assert_eq!(replacement_claims.ver, 1);
+        assert!(af_db::is_token_revoked(&other_claims.jti));
+
+        // Concurrent old token fails auth_middleware even if forged without JTI blacklist hit.
+        let mut old_headers = HeaderMap::new();
+        old_headers.insert(header::USER_AGENT, HeaderValue::from_static("epoch-agent"));
+        old_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={other_session}")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            refresh_session(old_headers).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let conn = af_db::get_read_conn().unwrap();
+        let rt_revoked: i64 = conn
+            .query_row(
+                "SELECT revoked FROM oidc_refresh_tokens WHERE token = 'rt-epoch-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rt_revoked, 1);
+    }
+
+    #[tokio::test]
+    async fn suspended_accounts_return_forbidden_across_auth_surfaces() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use axum::{middleware, routing::get, Router};
+        use tower::ServiceExt;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("suspended-pass", 4).unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, totp_enabled, totp_secret) \
+                 VALUES (993, 'suspended-user', ?1, 'user', 1, 'JBSWY3DPEHPK3PXP')",
+                params![pw_hash],
+            )
+            .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("susp-agent"));
+        let (session_tok, _) = create_standard_jwt(993, &headers).unwrap();
+        af_db::store_mfa_challenge("susp-mfa", 993, Duration::from_secs(300)).unwrap();
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO user_quotas (user_id, username, status) VALUES (993, 'suspended-user', 'suspended')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 1. local_login -> 403 FORBIDDEN
+        let login_resp = local_login(
+            headers.clone(),
+            Json(CredentialsRequest {
+                username: "suspended-user".into(),
+                password: "suspended-pass".into(),
+            }),
+        )
+        .await;
+        assert_eq!(login_resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. auth_middleware -> 403 FORBIDDEN
+        let app = Router::new()
+            .route("/protected", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(auth_middleware));
+        let mw_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(header::USER_AGENT, "susp-agent")
+                    .header(header::COOKIE, format!("aetherflow_session={session_tok}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mw_resp.status(), StatusCode::FORBIDDEN);
+
+        // 3. refresh_session -> 403 FORBIDDEN
+        let mut ref_headers = headers.clone();
+        ref_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={session_tok}").parse().unwrap(),
+        );
+        assert_eq!(
+            refresh_session(ref_headers).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // 4. mfa_login_verify -> 403 FORBIDDEN
+        let mfa_resp = mfa_login_verify(
+            headers,
+            Json(MfaVerifyRequest {
+                mfa_token: "susp-mfa".into(),
+                code: totp_now(),
+            }),
+        )
+        .await;
+        assert_eq!(mfa_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn round3_disable_2fa_requires_second_factor_and_mfa_epoch_invalidation() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("r3-strong-pass", 4).unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, totp_enabled, totp_secret, sessions_revoked_after) \
+                 VALUES (994, 'r3-mfa-user', ?1, 'user', 1, 'JBSWY3DPEHPK3PXP', 50)",
+                params![pw_hash],
+            )
+            .unwrap();
+        }
+
+        // 1. disable_2fa with password only (no second-factor `code`) MUST return 400 BAD_REQUEST
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/2fa/disable")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"password":"r3-strong-pass"}"#))
+            .unwrap();
+        req.extensions_mut().insert(AuthUser {
+            user_id: 994,
+            username: "r3-mfa-user".into(),
+            role: "user".into(),
+            jti: "jti-994".into(),
+            plugin_id: None,
+            plugin_scopes: vec![],
+        });
+        let disable_resp = disable_2fa(req).await;
+        assert_eq!(disable_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 2. Pending MFA challenge issued at epoch 50 MUST fail after sessions_revoked_after advances to 60
+        {
+            let conn = af_db::get_conn().unwrap();
+            af_db::store_mfa_challenge_in_tx(
+                &conn,
+                "r3-epoch-mfa",
+                994,
+                50,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE users SET sessions_revoked_after = 60 WHERE id = 994",
+                [],
+            )
+            .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("r3-agent"));
+        let epoch_resp = mfa_login_verify(
+            headers,
+            Json(MfaVerifyRequest {
+                mfa_token: "r3-epoch-mfa".into(),
+                code: totp_now(),
+            }),
+        )
+        .await;
+        assert_eq!(epoch_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn round6_chained_normal_rotation_preserves_grace_and_post_grace_replay_wipes_family() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, sessions_revoked_after) \
+                 VALUES (996, 'r6-chain-user', 'hash', 'user', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut base_headers = HeaderMap::new();
+        base_headers.insert(header::USER_AGENT, HeaderValue::from_static("r6-chain-ua"));
+        let (s0, s0_claims) = create_standard_jwt(996, &base_headers).unwrap();
+
+        let do_refresh = |tok: String| async move {
+            let mut h = HeaderMap::new();
+            h.insert(header::USER_AGENT, HeaderValue::from_static("r6-chain-ua"));
+            h.insert(
+                header::COOKIE,
+                format!("aetherflow_session={tok}").parse().unwrap(),
+            );
+            let resp = refresh_session(h).await;
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let next_tok = val["token"].as_str().unwrap_or("").to_string();
+            (status, next_tok)
+        };
+
+        let (st1, s1) = do_refresh(s0.clone()).await;
+        assert_eq!(st1, StatusCode::OK);
+        assert!(!s1.is_empty());
+
+        let (st2, s2) = do_refresh(s1.clone()).await;
+        assert_eq!(st2, StatusCode::OK);
+        assert!(!s2.is_empty());
+        let s2_claims = decode_session_claims(&s2, false).unwrap();
+
+        // In-flight refresh using ancestor s0 within 15s grace MUST return active leaf s2 (not wipe family)
+        let (st_grace, s_grace) = do_refresh(s0.clone()).await;
+        assert_eq!(st_grace, StatusCode::OK);
+        assert_eq!(s_grace, s2);
+        assert!(!is_session_token_revoked_beyond_grace(&s0_claims.jti, 996));
+        assert!(!af_db::is_token_revoked(&s2_claims.jti));
+
+        // Simulate restart / expired grace: replaying s0 MUST return 401 and wipe leaf s2
+        ROTATED_TOKEN_GRACE.lock().unwrap().clear();
+        ROTATED_SESSION_SUCCESSOR.lock().unwrap().clear();
+        let (st_replay, _) = do_refresh(s0).await;
+        assert_eq!(st_replay, StatusCode::UNAUTHORIZED);
+        assert!(af_db::is_token_revoked(&s2_claims.jti));
+    }
+
+    #[tokio::test]
+    async fn round8_verify_2fa_conflict_and_refresh_grace_strict_fingerprint_enforcement() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, totp_enabled, totp_secret, sessions_revoked_after) \
+                 VALUES (997, 'r8-auth-user', 'hash', 'user', 1, 'JBSWY3DPEHPK3PXP', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 1. verify_2fa MUST return 409 CONFLICT when totp_enabled == 1
+        let code = totp_now();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/user/2fa/verify")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(format!(r#"{{"code":"{code}"}}"#)))
+            .unwrap();
+        req.extensions_mut().insert(AuthUser {
+            user_id: 997,
+            username: "r8-auth-user".into(),
+            role: "user".into(),
+            jti: "jti-997".into(),
+            plugin_id: None,
+            plugin_scopes: vec![],
+        });
+        assert_eq!(verify_2fa(req).await.status(), StatusCode::CONFLICT);
+
+        // 2. Within 10s grace, replaying rotated s0 from a DIFFERENT User-Agent MUST reject with 401
+        //    and wipe the session family (`s1`).
+        let mut h1 = HeaderMap::new();
+        h1.insert(header::USER_AGENT, HeaderValue::from_static("r8-legit-ua"));
+        let (s0, _) = create_standard_jwt(997, &h1).unwrap();
+        h1.insert(
+            header::COOKIE,
+            format!("aetherflow_session={s0}").parse().unwrap(),
+        );
+        let resp1 = refresh_session(h1).await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(resp1.into_body(), 16384)
+            .await
+            .unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let s1 = v1["token"].as_str().unwrap().to_string();
+        let s1_claims = decode_session_claims(&s1, false).unwrap();
+
+        let mut h_mismatch = HeaderMap::new();
+        h_mismatch.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("r8-different-ua"),
+        );
+        h_mismatch.insert(
+            header::COOKIE,
+            format!("aetherflow_session={s0}").parse().unwrap(),
+        );
+        let resp_mismatch = refresh_session(h_mismatch).await;
+        assert_eq!(resp_mismatch.status(), StatusCode::UNAUTHORIZED);
+        assert!(af_db::is_token_revoked(&s1_claims.jti));
+    }
+
+    #[tokio::test]
+    async fn expired_within_grace_logout_revokes_family_and_authoritative_bearer_blocks_cookie_fallback(
+    ) {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use axum::{routing::post, Router};
+        use tower::ServiceExt;
+
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO users (id, username, password_hash, role, totp_enabled, sessions_revoked_after) \
+                 VALUES (998, 'grace-logout-user', 'hash', 'admin', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut base_headers = HeaderMap::new();
+        base_headers.insert(header::USER_AGENT, HeaderValue::from_static("grace-ua"));
+
+        // 1. Authoritative Authorization header never falls back to aetherflow_session cookie
+        let (valid_cookie_tok, _) = create_standard_jwt(998, &base_headers).unwrap();
+        let mut mixed_headers = HeaderMap::new();
+        mixed_headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer   "));
+        mixed_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={valid_cookie_tok}")
+                .parse()
+                .unwrap(),
+        );
+        assert!(resolve_raw_token(&mixed_headers).is_none());
+
+        // 2. Access JWT expired 10 minutes ago (within 2h refresh grace window) MUST be accepted
+        //    by auth_middleware + csrf_middleware + logout, revoking the family so subsequent
+        //    refresh fails with 401.
+        let now = Utc::now().timestamp();
+        let expired_jti = format!("grace-exp-jti-{}", uuid::Uuid::new_v4());
+        let ip = extract_client_ip(&base_headers);
+        let expired_claims = SessionClaims {
+            user_id: 998,
+            sub: "998".to_string(),
+            jti: expired_jti.clone(),
+            cfp: client_fingerprint("grace-ua"),
+            iss: "aetherflow".to_string(),
+            iat: now - 2400,
+            auth_time: now - 2400,
+            exp: now - 600,
+            ver: 0,
+            plugin_id: String::new(),
+            plugin_scopes: Vec::new(),
+        };
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO active_sessions (jti, family_id, user_id, ip_address, user_agent, expires_at, last_active) \
+                 VALUES (?1, ?1, 998, ?2, 'grace-ua', ?3, ?4)",
+                params![
+                    expired_jti,
+                    ip,
+                    (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+        let expired_jwt = encode(
+            &Header::new(Algorithm::HS256),
+            &expired_claims,
+            &EncodingKey::from_secret(&jwt_secret_bytes()),
+        )
+        .unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/auth/logout", post(logout))
+            .layer(axum::middleware::from_fn(csrf_middleware))
+            .layer(axum::middleware::from_fn(auth_middleware));
+
+        let logout_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/logout")
+            .header(header::USER_AGENT, "grace-ua")
+            .header(
+                header::COOKIE,
+                format!("aetherflow_session={expired_jwt}; csrf_token=csrf-grace"),
+            )
+            .header("X-CSRF-Token", "csrf-grace")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let logout_resp = app.oneshot(logout_req).await.unwrap();
+        assert_eq!(logout_resp.status(), StatusCode::OK);
+        assert!(af_db::is_token_revoked(&expired_jti));
+
+        let mut refresh_headers = HeaderMap::new();
+        refresh_headers.insert(header::USER_AGENT, HeaderValue::from_static("grace-ua"));
+        refresh_headers.insert(
+            header::COOKIE,
+            format!("aetherflow_session={expired_jwt}").parse().unwrap(),
+        );
+        let refresh_resp = refresh_session(refresh_headers).await;
+        assert_eq!(refresh_resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

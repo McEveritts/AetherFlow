@@ -126,6 +126,43 @@ fn delete_account_with_conn(
             "Cannot delete the last remaining admin.",
         )?;
     }
+    let mut revoked_jtis = Vec::new();
+    let has_active_sessions: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'active_sessions')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    let has_session_jti = has_active_sessions
+        && crate::auth::column_exists(&transaction, "active_sessions", "jti").unwrap_or(false);
+    if has_session_jti {
+        let mut stmt = transaction
+            .prepare("SELECT jti FROM active_sessions WHERE user_id = ?1")
+            .map_err(database_error)?;
+        let rows = stmt
+            .query_map([target_user_id], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        for row in rows {
+            revoked_jtis.push(row.map_err(database_error)?);
+        }
+        drop(stmt);
+        let has_revoked_tokens: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'revoked_tokens')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if has_revoked_tokens {
+            for jti in &revoked_jtis {
+                af_db::revoke_token_in_tx(&transaction, jti, std::time::Duration::from_secs(8160))
+                    .map_err(|_| {
+                        McBrowserError::Internal("Failed to revoke active user sessions".to_owned())
+                    })?;
+            }
+        }
+    }
     for (table, owner_column) in ACCOUNT_TABLES {
         let exists: bool = transaction
             .query_row(
@@ -146,7 +183,9 @@ fn delete_account_with_conn(
     transaction
         .execute("DELETE FROM users WHERE id = ?1", [target_user_id])
         .map_err(database_error)?;
-    transaction.commit().map_err(database_error)
+    transaction.commit().map_err(database_error)?;
+    crate::auth::finalize_user_credential_revocation(target_user_id, &revoked_jtis);
+    Ok(())
 }
 
 fn update_account_role_with_conn(
@@ -171,7 +210,8 @@ fn update_account_role_with_conn(
         .map_err(database_error)?;
     let current_role =
         current_role.ok_or_else(|| McBrowserError::NotFound("User not found".to_owned()))?;
-    if current_role.eq_ignore_ascii_case("admin") && role != "admin" {
+    let demoting_admin = current_role.eq_ignore_ascii_case("admin") && role != "admin";
+    if demoting_admin {
         require_other_usable_admin(
             &transaction,
             target_user_id,
@@ -184,7 +224,22 @@ fn update_account_role_with_conn(
             rusqlite::params![role, target_user_id],
         )
         .map_err(database_error)?;
-    transaction.commit().map_err(database_error)
+    let mut revoked_jtis = Vec::new();
+    if demoting_admin {
+        let (_, jtis) = crate::auth::revoke_all_user_credentials_in_tx(
+            &transaction,
+            target_user_id,
+        )
+        .map_err(|_| {
+            McBrowserError::Internal("Failed to revoke demoted admin credentials".to_owned())
+        })?;
+        revoked_jtis = jtis;
+    }
+    transaction.commit().map_err(database_error)?;
+    if demoting_admin {
+        crate::auth::finalize_user_credential_revocation(target_user_id, &revoked_jtis);
+    }
+    Ok(())
 }
 
 pub(crate) async fn update_account_role(

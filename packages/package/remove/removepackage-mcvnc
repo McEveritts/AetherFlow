@@ -15,6 +15,14 @@ fi
 
 require_root
 export LOGFILE="/var/log/aetherflow/remove-mcvnc.log"
+if declare -F af_prepare_logfile_path >/dev/null 2>&1; then
+    af_prepare_logfile_path "$LOGFILE"
+elif [[ -L "${LOGFILE%/*}" || -L "$LOGFILE" || ( -e "$LOGFILE" && ! -f "$LOGFILE" ) ]]; then
+    echo "ERROR: Unsafe logfile path: $LOGFILE" >&2
+    exit 1
+else
+    mkdir -p -m 0750 "${LOGFILE%/*}"
+fi
 trap 'print_error "McVNC removal failed; see ${LOGFILE}."' ERR
 report_progress 20 "Stopping McVNC..."
 purge_systemd_unit af-mcvnc.service

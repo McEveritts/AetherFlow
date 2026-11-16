@@ -1,6 +1,6 @@
 # {{PLUGIN_NAME}} (Rust Plugin SDK Template)
 
-Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`).
+Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`), the sole supported first-party AetherFlow plugin SDK.
 
 ## Security & Runtime Architecture (`backend-rs` v4.0.0)
 
@@ -50,18 +50,20 @@ Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`).
 
 ## Development & Verification Flow
 
-1. Generate a Rust plugin scaffold:
+1. Generate a Rust plugin scaffold (defaults to `rust`):
    ```bash
-   bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin rust
+   bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin
    ```
 2. Run unit and contract tests in `backend/`:
    ```bash
    cd plugins/my-plugin/backend
    cargo test
    ```
-3. Build the release binary so the AetherFlow plugin manager can supervise it:
+3. Build and stage the release binary so the AetherFlow plugin manager can supervise it directly:
    ```bash
    cd plugins/my-plugin/backend
    cargo build --release
+   mkdir -p ../bin
+   cp target/release/aetherflow-plugin-my-plugin ../bin/
    ```
 4. Enable and start the plugin from **Marketplace -> Installed Plugins & Runtime Extensions** (or `POST /api/v1/admin/plugins/my-plugin/control` with `{"action":"start"}`).

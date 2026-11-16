@@ -87,8 +87,8 @@ python scripts/v4_vm_matrix.py build-baseline-artifact `
 
 `build-baseline-artifact` enforces the following build and resource guarantees inside the isolated `ubuntu-22.04` guest:
 1. **Unconditional Frontend Static Export & Embedded Asset Verification**:
-   - Never skips the frontend build merely because placeholder `web/dist` or `backend/web/dist` directories (with `.keep`) exist in the repository.
-   - Removes `web/dist`, `backend/web/dist`, and `frontend/out`, runs `npm ci --no-fund --no-audit` and `NEXT_STATIC_EXPORT=1 npm run build --workspace frontend` using the isolated guest Node 24 toolchain, copies `frontend/out/.` into both `web/dist/` and `backend/web/dist/`, and verifies `test -s web/dist/index.html`, `test -d web/dist/_next`, and `test -s backend/web/dist/index.html` before compiling Rust so `rust-embed` (`af-api/src/embed.rs`) embeds the real UI assets.
+   - Never skips the frontend build merely because a placeholder `web/dist` directory (with `.keep`) exists in the repository.
+   - Removes `web/dist` and `frontend/out`, runs `npm ci --no-fund --no-audit` and `NEXT_STATIC_EXPORT=1 npm run build --workspace frontend` using the isolated guest Node 24 toolchain, copies `frontend/out/.` into `web/dist/`, and verifies `test -s web/dist/index.html` and `test -d web/dist/_next` before compiling Rust so `rust-embed` (`af-api/src/embed.rs`) embeds the real UI assets.
 2. **Locked Dependency Prefetch + Offline Rust Compilation (`--locked` + `CARGO_NET_OFFLINE=true`)**:
    - Requires a non-empty `backend-rs/Cargo.lock` (`test -s backend-rs/Cargo.lock`).
    - Runs `cargo fetch --locked` first, then invokes `scripts/build_gold.sh` with `CARGO_LOCKED=1`, `CARGO_NET_OFFLINE=true`, and `CARGO_BUILD_JOBS=2`.

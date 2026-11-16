@@ -679,7 +679,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         const optional = role === 'optional' || role === 'optional-mount' || (!role && (unit === 'rclone-vfs' || unit === 'rclone-vfs.service'));
         if (optional && component.configured !== true) return true;
         const oneshot = role === 'oneshot' || role === 'scheduled-job' || (!role && (unit === 'recyclarr' || unit === 'recyclarr.service' || unit === 'scrutiny-collector' || unit === 'scrutiny-collector.service'));
-        if (oneshot) return status === 'stopped' || status === 'inactive' || status === 'completed' || status === 'success';
+        if (oneshot) return status === 'idle' || status === 'stopped' || status === 'inactive' || status === 'completed' || status === 'success';
         return false;
     };
 

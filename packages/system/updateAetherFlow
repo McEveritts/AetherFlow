@@ -1,423 +1,207 @@
 #!/bin/bash
-source /opt/AetherFlow/packages/common.sh
 set -euo pipefail
-#
-# [AetherFlow :: Ecosystem Update Script]
-#
-# AetherFlow:   https://github.com/McEveritts/AetherFlow
-# Local   :   /opt/AetherFlow/packages
-# Author  :   McEveritts
-# URL     :   https://github.com/McEveritts/AetherFlow
-#
-# AetherFlow Copyright (C) 2026 McEveritts
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-#################################################################################
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
-#################################################################################
 
-function _oscheck() {
-  if [[ ! -f /bin/systemd ]]; then
-    echo "Oh drats! Your system does not support systemd" | tee -a ${OUTTO}
-    echo "AetherFlow requires systemd"  | tee -a ${OUTTO}
-    echo 'Exiting...'  | tee -a ${OUTTO}
-    exit 1
-  fi
-}
-
-function _logcheck() {
-  OUTTO=$LOGFILE
-}
-
-function _directorycheck() {
-  if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /opt/AetherFlow ]]; then
-      cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git stash --include-untracked -m "update-$(date +%s)" >>"${OUTTO}" 2>&1 || true
-      git checkout master >>"${OUTTO}" 2>&1
-      if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
-        echo "[WARN] Fast-forward failed, attempting rebase..." >>"${OUTTO}" 2>&1
-        if ! git pull --rebase >>"${OUTTO}" 2>&1; then
-          echo "[ERROR] Rebase failed. Aborting." >>"${OUTTO}" 2>&1
-          git rebase --abort >>"${OUTTO}" 2>&1
-          return 1
-        fi
-      fi
-    else
-      git clone https://github.com/McEveritts/AetherFlow /opt/AetherFlow
+# AetherFlow v4 update compatibility shim delegating to `af release` / `release-manager.sh`.
+AF_ROOT="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
+AF_ROOT_REAL=""
+if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+    if [[ "${AF_ROOT}" != /* ]]; then
+        echo "[ERROR] AF_INSTALL_ROOT must be an absolute path: ${AF_ROOT}" >&2
+        exit 1
     fi
-  else
-    if [[ -d /opt/AetherFlow ]]; then
-      cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git stash --include-untracked -m "update-dev-$(date +%s)" >>"${OUTTO}" 2>&1 || true
-      if git rev-parse --verify origin/development >>"${OUTTO}" 2>&1; then
-        git checkout development >>"${OUTTO}" 2>&1
-        if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
-          echo "[WARN] Fast-forward failed, attempting rebase..." >>"${OUTTO}" 2>&1
-          if ! git pull --rebase >>"${OUTTO}" 2>&1; then
-            echo "[ERROR] Rebase failed. Aborting." >>"${OUTTO}" 2>&1
-            git rebase --abort >>"${OUTTO}" 2>&1
-            return 1
-          fi
-        fi
-      else
-        echo "[WARN] development branch not found on remote, falling back to master" >>"${OUTTO}" 2>&1;
-        git checkout master >>"${OUTTO}" 2>&1
-        if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
-          git pull --rebase >>"${OUTTO}" 2>&1 || { git rebase --abort >>"${OUTTO}" 2>&1; return 1; }
-        fi
-      fi
-    else
-      git clone --branch "development" https://github.com/McEveritts/AetherFlow /opt/AetherFlow 2>>"${OUTTO}" || \
-        git clone https://github.com/McEveritts/AetherFlow /opt/AetherFlow
-    fi
-  fi
-}
-
-function _downloadrepos() {
-if [[ ! -f /install/.developer.lock ]]; then
-  echo >>"${OUTTO}" 2>&1;
-  cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-  git checkout master >>"${OUTTO}" 2>&1;
-  git pull >>"${OUTTO}" 2>&1;
-  echo
-
-else
-
-  echo >>"${OUTTO}" 2>&1;
-  cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-  if git rev-parse --verify origin/development >>"${OUTTO}" 2>&1; then
-    git checkout development >>"${OUTTO}" 2>&1;
-    git pull >>"${OUTTO}" 2>&1;
-  else
-    echo "[WARN] development branch not found, using master" >>"${OUTTO}" 2>&1;
-    git checkout master >>"${OUTTO}" 2>&1;
-    git pull >>"${OUTTO}" 2>&1;
-  fi
-  echo
-
+    AF_ROOT_REAL="$(readlink -f -- "${AF_ROOT}" 2>/dev/null || realpath -m -- "${AF_ROOT}")"
+    AF_ROOT="${AF_ROOT_REAL}"
 fi
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CHANNEL="" CHECK_ONLY=false DRY_RUN=false OFFLINE=false
+
+usage() {
+    cat <<'EOF'
+Usage: updateAetherFlow [--channel <stable|nightly|experimental>] [--check] [--dry-run] [--offline] [--help]
+EOF
 }
 
-function _bashrc() {
-  cp -a ${local_setup}templates/bashrc.template /root/.bashrc
-  cp -a ${local_setup}templates/profile.template /root/.profile
-}
-
-function _updatequota(){
-  sed -i 's/usrquota,errors=remount-ro/usrjquota=aquota.user,jqfmt=vfsv1,errors=remount-ro/g' /etc/fstab
-  service quota restart
-}
-
-function _checklocks() {
-  if [[ -f /usr/sbin/repquota ]] && [[ ! -f /install/.quota.lock ]]; then
-    touch /install/.quota.lock
-  fi
-  if [[ ! -f /etc/systemd/system/rtorrent@.service ]]; then
-    touch /install/.cron.lock
-  fi
-}
-
-function _updated() {
-  if [[ -f /install/.cron.lock ]]; then
-    bash ${local_packages}package/remove/removepackage-cron
-  fi
-}
-
-function _updatesyscommands() {
-  cd ${usrbin}
-  \cp -rf ${local_packages}. ${usrbin}AetherFlow
-  if [[ -f ${usrbin}AetherFlow/system/changeUserpass ]]; then
-    rm -rf ${usrbin}AetherFlow/system/changeUserpass
-  fi
-}
-
-function _updateskel() {
-  if [[ ! -d /etc/skel ]]; then
-    mkdir /etc/skel
-  fi
-  rsync -aP ${local_setup}templates/skel/. /etc/skel/
-}
-
-function _updatemktorrent() {
-  if [[ ! -f /usr/local/bin/mktorrent ]]; then
-    if [[ -d /root/tmp ]]; then rm -r tmp;fi
-    mkdir /root/tmp && cd /root/tmp
-    mktorrent_version=1.1
-    wget --quiet https://github.com/Rudde/mktorrent/archive/v$mktorrent_version.zip -O mktorrent.zip  >>"${OUTTO}" 2>&1
-    unzip -o mktorrent.zip >>"${OUTTO}" 2>&1
-    cd mktorrent-1.1
-    make >>"${OUTTO}" 2>&1
-    make install >>"${OUTTO}" 2>&1
-    cd ..
-    rm -rf mktorrent-1.1 && rm -f mktorrent.zip
-  fi
-}
-
-function _updateapachealias() {
-  users=($(cat /etc/htpasswd | cut -d ":" -f 1))
-  cd /etc/apache2/sites-enabled
-  if [[ -f aliases-seedbox.conf.orig ]]; then
-    rm -r aliases-seedbox.conf.orig
-  fi
-  mv aliases-seedbox.conf aliases-seedbox.conf.orig
-  cp -r ${local_setup}templates/aliases-seedbox.conf.template /etc/apache2/sites-enabled/aliases-seedbox.conf
-  sed -i "s/USERNAME/${A1}/g" /etc/apache2/sites-enabled/aliases-seedbox.conf
-  for i in "${users[@]}"; do
-    if [[ ! $i == $A1 ]]; then
-cat >/etc/apache2/sites-enabled/alias.${i}.download.conf<<AS
-Alias /${i}.rtorrent.downloads "/home/${i}/torrents/rtorrent"
-<Directory "/home/${i}/torrents/rtorrent">
- Options Indexes FollowSymLinks MultiViews
-  AllowOverride None
-#        AuthType Digest
-#        AuthName "rutorrent"
-#        AuthUserFile '/etc/htpasswd'
-        Require user ${i}
-  Order allow,deny
-  Allow from all
-  php_admin_value engine Off
-</Directory>
-Alias /${i}.deluge.downloads "/home/${i}/torrents/deluge"
-<Directory "/home/${i}/torrents/deluge">
-  Options Indexes FollowSymLinks MultiViews
-  AllowOverride None
-#        AuthType Digest
-#        AuthName "rutorrent"
-#        AuthUserFile '/etc/htpasswd'
-        Require user ${i}
-  Order allow,deny
-  Allow from all
-  php_admin_value engine Off
-</Directory>
-<Location "/${i}">
-#        AuthType Digest
-#        AuthName "rutorrent"
-#        AuthUserFile "/etc/htpasswd"
-    Require user ${i}
-</Location>
-AS
-  fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --channel) [[ $# -ge 2 ]] || { echo "[ERROR] --channel requires stable, nightly, or experimental" >&2; exit 1; }; CHANNEL="$2"; shift 2 ;;
+        --channel=*) CHANNEL="${1#--channel=}"; shift ;;
+        --check) CHECK_ONLY=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --offline) OFFLINE=true; shift ;;
+        *) echo "[ERROR] Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    esac
 done
 
+[[ "${CHANNEL}" == "experimental" ]] && CHANNEL="nightly"
 
-  #if [[ -f /install/.plex.lock ]] && [[ -s /etc/apache2/sites-enabled/plex.conf ]]; then
-  #  PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-  #  cp ${local_setup}templates/plex.conf.template /etc/apache2/sites-enabled/plex.conf
-  #  chown www-data: /etc/apache2/sites-enabled/plex.conf
-  #  a2enmod proxy >/dev/null 2>&1
-  #  sed -i "s/PUBLICIP/${PUBLICIP}/g" /etc/apache2/sites-enabled/plex.conf
-  #fi
+if [[ -n "${CHANNEL}" && "${CHANNEL}" != "stable" && "${CHANNEL}" != "nightly" ]]; then
+    echo "[ERROR] Unsupported channel '${CHANNEL}' (expected stable, nightly, or experimental)" >&2
+    exit 1
+fi
 
-  service apache2 reload  >> /dev/null 2>&1
+if [[ "${OFFLINE}" == "true" && "${DRY_RUN}" != "true" ]]; then
+    echo "[ERROR] --offline requires --dry-run (live offline self-update is unsupported)" >&2
+    exit 1
+fi
+
+if [[ "${DRY_RUN}" != "true" && "${CHECK_ONLY}" != "true" && "${EUID}" -ne 0 ]]; then
+    echo "[ERROR] updateAetherFlow must run as root (re-run with sudo, or pass --check / --help / --dry-run)." >&2
+    exit 1
+fi
+
+is_confined_to_install_root() {
+    local target_real="$1"
+    [[ -n "${target_real}" ]] || return 1
+    if [[ -z "${AF_INSTALL_ROOT:-}" ]]; then
+        return 0
+    fi
+    if [[ "${AF_ROOT_REAL}" == "/" ]]; then
+        [[ "${target_real}" == /* ]]
+    else
+        [[ "${target_real}" == "${AF_ROOT_REAL}" || "${target_real}" == "${AF_ROOT_REAL}/"* ]]
+    fi
 }
 
-# LEGACY: rutorrent update functions removed — AetherFlow no longer uses rutorrent
-function _updaterutorrent() { :; }
-function _updaterutorrent-plugins() { :; }
+is_known_shell_shim() {
+    local target_file="$1"
+    grep -qE 'AetherFlow v4 update compatibility shim|AetherFlow Package Manager Batch CLI Installer|/usr/local/bin/AetherFlow/system/af' "${target_file}" 2>/dev/null
+}
 
-function _updatedeluge() {
-  if [[ -f /install/.deluge.lock ]]; then
-    users=($(cat /etc/htpasswd | cut -d ":" -f 1))
-    if [[ ! -f /etc/skel/.config/deluge/plugins/ltConfig-0.2.5.0-py2.7.egg ]]; then
-      mkdir -p /etc/skel/.config/deluge/plugins/
-      cd /etc/skel/.config/deluge/plugins/
-      wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.2.5.0/ltConfig-0.2.5.0-py2.7.egg
+resolve_af_bin() {
+    local path_af cand self_real cand_real magic
+    local -a candidates=()
+    self_real="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+    if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates=(
+            "${AF_ROOT}/current/bin/af"
+            "${AF_ROOT}/current/af"
+            "${AF_ROOT}/opt/AetherFlow/current/bin/af"
+            "${AF_ROOT}/opt/AetherFlow/current/af"
+            "${AF_ROOT}/usr/local/bin/af"
+        )
+    else
+        path_af="$(command -v af 2>/dev/null || true)"
+        candidates=(
+            "${AF_ROOT}/current/bin/af"
+            "${AF_ROOT}/current/af"
+            "/usr/local/bin/af"
+            "${path_af}"
+        )
     fi
-    for u in "${users[@]}"; do
-      if [[ ! -f /home/$u/.config/deluge/plugins/ltConfig-0.2.5.0-py2.7.egg ]]; then
-        cd /home/$u/.config/deluge/plugins/
-        wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.2.5.0/ltConfig-0.2.5.0-py2.7.egg
-        chown $u: ltConfig-0.2.5.0-py2.7.egg
-        chmod +x ltConfig-0.2.5.0-py2.7.egg
-      fi
-      ltstatus=$(cat /home/$u/.config/deluge/core.conf | grep -i ltconfig)
-      if [[ -z $ltstatus ]]; then
-        systemctl stop deluged@$u
-        enabledplugins=$(cat /home/$u/.config/deluge/core.conf | grep '"enabled_plugins": \[\],')
-        if [[ -z $enabledplugins ]]; then
-          sed -i '/enabled_plugins/a \ \ \ \ "ltConfig",' /home/$u/.config/deluge/core.conf
-        else
-          sed -i '/enabled_plugins/a \ \ \ \ "ltConfig"\n],' /home/$u/.config/deluge/core.conf
-          sed -i 's/"enabled_plugins": \[\],/"enabled_plugins": \[/g' /home/$u/.config/deluge/core.conf
+    for cand in "${candidates[@]}"; do
+        [[ -n "${cand}" && -x "${cand}" && ! -d "${cand}" ]] || continue
+        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+        [[ -n "${cand_real}" && -x "${cand_real}" && ! -d "${cand_real}" ]] || continue
+        [[ "${cand_real}" == "${self_real}" ]] && continue
+        is_confined_to_install_root "${cand_real}" || continue
+        magic="$(LC_ALL=C head -c 2 -- "${cand_real}" 2>/dev/null || true)"
+        if [[ "${magic}" == "#!" ]] && is_known_shell_shim "${cand_real}"; then
+            continue
         fi
-        systemctl start deluged@$u
-      fi
+        printf '%s\n' "${cand}"; return 0
     done
-  fi
+    return 1
 }
 
-function _updateznc() {
-  if [[ -f /install/.znc.lock ]]; then
-    bin=$(crontab -u znc -l 2>/dev/null | grep /usr/local/bin || true)
-    if [[ -n $bin ]]; then
-      printf "*/10 * * * * /usr/bin/znc >/dev/null 2>&1\n@reboot /usr/bin/znc >/dev/null 2>&1\n" | crontab -u znc - > /dev/null 2>&1 || true
+resolve_release_manager() {
+    local cand cand_real
+    local -a candidates=(
+        "${AF_ROOT}/current/deploy/release-manager.sh"
+        "${AF_ROOT}/deploy/release-manager.sh"
+        "${AF_ROOT}/opt/AetherFlow/current/deploy/release-manager.sh"
+        "${AF_ROOT}/opt/AetherFlow/deploy/release-manager.sh"
+    )
+    if [[ -z "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates+=("${REPO_ROOT}/deploy/release-manager.sh")
     fi
-  fi
+    for cand in "${candidates[@]}"; do
+        [[ -f "${cand}" ]] || continue
+        cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+        [[ -n "${cand_real}" && -f "${cand_real}" ]] || continue
+        is_confined_to_install_root "${cand_real}" || continue
+        printf '%s\n' "${cand}"; return 0
+    done
+    return 1
 }
 
-# LEGACY: dashboard and theme functions removed — AetherFlow uses Next.js frontend
-function _updatedashboard() { :; }
-function _updaterttheme() { :; }
-
-
-function _updatesudo() {
-  if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
-    cp -a /etc/sudoers /etc/sudoers.BAK 2>/dev/null || true
-    install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
-  fi
-}
-
-function _updateappsproxy() {
-  bash /usr/local/bin/AetherFlow/system/revproxy.sh
-}
-
-# adjust permissions function (modernized — no rutorrent paths)
-function _perms() {
-  chmod +x /etc/cron.d/set_interface 2>/dev/null || true
-  find /home/*/.config/deluge -name "auth" -exec chmod 600 {} \; 2>/dev/null || true
-  find /usr/local/bin/AetherFlow -type f -exec chmod 755 {} \; 2>/dev/null || true
-  chmod +x $(find /usr/local/bin/AetherFlow -type f) >/dev/null 2>&1 || true
-}
-
-function _buildmodernstack() {
-    export PATH="/usr/local/nodejs/bin:/usr/local/go/bin:$PATH"
-    export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
-
-    # 1. Build Next.js Frontend (static export for single-binary embed)
-    if [ -d "/opt/AetherFlow/frontend" ]; then
-        cd /opt/AetherFlow/frontend
-        npm install --legacy-peer-deps --no-fund --no-audit >>"${OUTTO}" 2>&1 || npm install --no-fund --no-audit >>"${OUTTO}" 2>&1
-        NEXT_STATIC_EXPORT=1 npm run build >>"${OUTTO}" 2>&1
-        if [ -d "/opt/AetherFlow/frontend/out" ] && [ -d "/opt/AetherFlow/backend" ]; then
-            mkdir -p /opt/AetherFlow/backend/web/dist
-            find /opt/AetherFlow/backend/web/dist -mindepth 1 ! -name '.gitkeep' -delete 2>/dev/null || true
-            cp -r /opt/AetherFlow/frontend/out/. /opt/AetherFlow/backend/web/dist/
-        fi
+AF_BIN="$(resolve_af_bin || true)"
+RM_SCRIPT="$(resolve_release_manager || true)"
+AF_GLOBAL_ARGS=()
+RM_GLOBAL_ARGS=()
+if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+    if [[ "${AF_ROOT_REAL}" == "/opt/AetherFlow" ]]; then
+        # Explicit live-host default application directory: clear any external sysroot override
+        # so neither `af` nor `release-manager.sh` doubles `/opt/AetherFlow/opt/AetherFlow`.
+        unset AETHERFLOW_RELEASE_ROOT
+    elif [[ -d "${AF_ROOT_REAL}/opt/AetherFlow" ]]; then
+        # Filesystem sysroot layout (`<sysroot>/opt/AetherFlow/...`).
+        AF_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_ROOT_REAL}"
+        RM_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+    elif [[ "${AF_ROOT_REAL}" == */opt/AetherFlow ]] && {
+        AF_SYSROOT_CAND="${AF_ROOT_REAL%/opt/AetherFlow}"
+        [[ -n "${AF_SYSROOT_CAND}" && -d "${AF_SYSROOT_CAND}" ]] && (( (0$(stat -c '%a' "${AF_SYSROOT_CAND}" 2>/dev/null || echo 2) & 0002) == 0 ))
+    }; then
+        # Application directory inside a non-world-writable filesystem sysroot (`<sysroot>/opt/AetherFlow`).
+        AF_SYSROOT="${AF_ROOT_REAL%/opt/AetherFlow}"
+        AF_GLOBAL_ARGS+=(--root "${AF_SYSROOT}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_SYSROOT}"
+        RM_GLOBAL_ARGS+=(--root "${AF_SYSROOT}")
+    else
+        # Standalone custom application directory (`<app_root>/{current,releases,deploy}`):
+        # keep isolated-root confinement active at `<app_root>` while binding release paths directly
+        # to `<app_root>` so `af` and `release-manager.sh` do not append a redundant `opt/AetherFlow`.
+        AF_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export AETHERFLOW_RELEASE_ROOT="${AF_ROOT_REAL}"
+        RM_GLOBAL_ARGS+=(--root "${AF_ROOT_REAL}")
+        export RELEASES_DIR="${AF_ROOT_REAL}/releases"
+        export CURRENT_LINK="${AF_ROOT_REAL}/current"
+        export REPO_DIR="${AF_ROOT_REAL}"
+        export LEGACY_OPT_ROOT="${AF_ROOT_REAL}"
+        export SYSTEMD_UNITS_SRC="${AF_ROOT_REAL}/deploy/systemd"
     fi
+fi
 
-    # 2. Compile Go Control Plane Single Binary
-    if [ -d "/opt/AetherFlow/backend" ]; then
-        cd /opt/AetherFlow/backend
-        export GOOS=linux
-        export GOARCH=amd64
-        export CGO_ENABLED=1
-        if go build -tags "fts5" -o aetherflow-api.tmp . >>"${OUTTO}" 2>&1; then
-            chmod 755 /opt/AetherFlow/backend/aetherflow-api.tmp
-            mv -f /opt/AetherFlow/backend/aetherflow-api.tmp /opt/AetherFlow/backend/aetherflow-api
-        fi
+read_confined_version_file() {
+    local cand="$1" cand_real
+    [[ ! -L "${cand}" && -f "${cand}" ]] || return 1
+    cand_real="$(readlink -f -- "${cand}" 2>/dev/null || true)"
+    [[ -n "${cand_real}" && -f "${cand_real}" ]] || return 1
+    is_confined_to_install_root "${cand_real}" || return 1
+    head -n 1 -- "${cand_real}"
+}
 
-        # Purge legacy frontend unit if present and restart control plane services
-        rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
-        systemctl daemon-reload >>"${OUTTO}" 2>&1 || true
-        systemctl restart aetherflow-runner >>"${OUTTO}" 2>&1 || true
-        systemctl restart aetherflow-api >>"${OUTTO}" 2>&1 || true
+if [[ "${CHECK_ONLY}" == "true" ]]; then
+    [[ "${DRY_RUN}" == "true" ]] && { echo "[DRY-RUN] Would check release status under ${AF_ROOT}"; exit 0; }
+    [[ -n "${AF_BIN}" ]] && exec "${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release status
+    if ver_out="$(read_confined_version_file "${AF_ROOT}/current/.version")"; then
+        printf 'current_version=%s\n' "${ver_out}"; exit 0
+    elif ver_out="$(read_confined_version_file "${AF_ROOT}/opt/AetherFlow/current/.version")"; then
+        printf 'current_version=%s\n' "${ver_out}"; exit 0
     fi
-}
+    echo "[ERROR] No native af CLI or active release slot found under ${AF_ROOT}" >&2
+    exit 1
+fi
 
-function _fin() {
-  service apache2 reload >/dev/null 2>&1
-  source ~/.profile
-  source ~/.bashrc
-  echo
-  echo "[AetherFlow] Seedbox & GUI Update Completed ! " >>"${OUTTO}" 2>&1;
-  sleep 5
+CMD_ARGS=()
+[[ -n "${CHANNEL}" ]] && CMD_ARGS+=(--channel "${CHANNEL}")
+[[ "${OFFLINE}" == "true" ]] && CMD_ARGS+=(--offline)
 
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
+if [[ -n "${AF_BIN}" ]]; then
+    if [[ "${DRY_RUN}" == "true" && "${OFFLINE}" == "true" ]]; then
+        exec "${AF_BIN}" --dry-run ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
+    fi
+    CMD=("${AF_BIN}" ${AF_GLOBAL_ARGS[@]+"${AF_GLOBAL_ARGS[@]}"} release deploy --local ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
+elif [[ -n "${RM_SCRIPT}" ]]; then
+    if [[ "${DRY_RUN}" == "true" && "${OFFLINE}" == "true" ]]; then
+        exec bash "${RM_SCRIPT}" deploy ${RM_GLOBAL_ARGS[@]+"${RM_GLOBAL_ARGS[@]}"} --dry-run ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
+    fi
+    CMD=(bash "${RM_SCRIPT}" deploy ${RM_GLOBAL_ARGS[@]+"${RM_GLOBAL_ARGS[@]}"} ${CMD_ARGS[@]+"${CMD_ARGS[@]}"})
+else
+    echo "[ERROR] Neither native af CLI nor release-manager.sh found under ${AF_ROOT}" >&2
+    exit 1
+fi
 
-  exit
-}
-
-################################################################################
-#    BEGIN RETIRED FUNCTION
-################################################################################
-function _updateuserhome() {
-  cd /home/"${A1}"/torrents
-  if [[ -d rtorrent ]]; then
-    cd
-  else
-    mv deluge /home/"${A1}"/deluge
-    cd ..
-    mv torrents rtorrent
-    rm -rf torrents
-    mkdir -p torrents
-    mv deluge torrents/deluge
-    mv rtorrent torrents/rtorrent
-    sed -i "s/directory = \/home\/${A1}\/torrents\//directory = \/home\/${A1}\/torrents\/rtorrent/g" /home/"${A1}"/.rtorrent.rc
-    chown -R ${A1}:${A1} /home/${A1}
-  fi
-  systemctl restart rtorrent@"${A1}".service
-}
-
-function _updateplex() {
-  OUTTO=$LOGFILE
-  HOSTNAME1=$(hostname -s)
-  PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-  local_setup=/opt/AetherFlow/setup/
-  if [[ -f /etc/init.d/plexmediaserver ]]; then
-    mv /etc/init.d/plexmediaserver /etc/init.d/plexmediaserver.BAK
-    cp ${local_setup}templates/sysd/plexmediaserver.template /lib/systemd/system/plexmediaserver.service
-
-    mkdir -p /usr/share/keyrings
-    curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor --yes -o /usr/share/keyrings/plex.gpg
-    echo "deb [signed-by=/usr/share/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
-    apt-get -y update >/dev/null 2>&1
-
-    systemctl daemon-reload >/dev/null 2>&1
-    update-rc.d plexmediaserver remove
-    service plexmediaserver stop
-    systemctl enable plexmediaserver.service >/dev/null 2>&1
-    systemctl stop plexmediaserver.service >/dev/null 2>&1
-    systemctl start plexmediaserver.service >/dev/null 2>&1
-  fi
-
-}
-
-function _updatecronfile() {
-  # We'll disable this function unless a new packages
-  # is included or startup requires a fix.
-  cp ${local_setup}templates/startup.template /home/"${A1}"/.startup
-}
-################################################################################
-#    END RETIRED FUNCTION
-################################################################################
-
-
-local_setup=/opt/AetherFlow/setup/
-local_packages=/opt/AetherFlow/packages/
-local_themes=/opt/AetherFlow/themes/
-
-IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g' || true);
-A1="${AETHERFLOW_USER:-$(cat /etc/apache2/master.txt 2>/dev/null || cut -d: -f1 /etc/htpasswd 2>/dev/null | head -n1 || true)}"
-A1="${A1:-admin}"
-export AETHERFLOW_USER="${A1}"
-usrbin=/usr/local/bin/
-
-# AetherFlow Update STRUCTURE
-_logcheck
-_oscheck
-_directorycheck
-#echo -n "Pulling AetherFlow Ecosystem ... " >>"${OUTTO}" 2>&1;_downloadrepos;echo
-_bashrc
-echo "Checking locks and adding if necessary ... " >>"${OUTTO}" 2>&1;_checklocks;echo
-echo "Checking if cron services should be uninstalled and taking appropriate action ... " >>"${OUTTO}" 2>&1;_updated;echo
-echo "Updating AetherFlow System Commands & Packages ... " >>"${OUTTO}" 2>&1;_updatesyscommands;echo
-echo "Updating the useradd skeleton directories ... " >>"${OUTTO}" 2>&1;_updateskel;echo
-echo "Updating mktorrent if necessary ... " >>"${OUTTO}" 2>&1;_updatemktorrent;echo
-echo "Checking apache aliases ... " >>"${OUTTO}" 2>&1;_updateapachealias;echo
-echo "Building the Modern Go API and Next.js Frontend ... " >>"${OUTTO}" 2>&1;_buildmodernstack;echo
-echo "Updating the AetherFlow Sudoers template ... " >>"${OUTTO}" 2>&1;_updatesudo;echo
-_updateznc
-#_updateplex
-_updateappsproxy
-#echo "Updating ${A1}'s .startup cronfile... " >>"${OUTTO}" 2>&1;_updatecronfile;echo
-echo "Adjusting permissions ... " >>"${OUTTO}" 2>&1;_perms;echo
-_fin
-
+[[ "${DRY_RUN}" == "true" ]] && { printf '[DRY-RUN] Would execute:'; printf ' %q' "${CMD[@]}"; printf '\n'; exit 0; }
+exec "${CMD[@]}"

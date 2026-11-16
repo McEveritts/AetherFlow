@@ -299,10 +299,21 @@ elif command == "curl":
 elif command == "systemctl":
     action = arguments[0]
     if action == "show":
-        print("maintainerr")
+        if "-P" in arguments and "User" in arguments:
+            print("maintainerr")
+        else:
+            is_up = running.exists()
+            is_loaded = unit.exists() or is_up
+            print("LoadState=" + ("loaded" if is_loaded else "not-found"))
+            print("ActiveState=" + ("active" if is_up else "inactive"))
+            print("MainPID=" + ("1234" if is_up else "0"))
+            print("UnitFileState=" + ("enabled" if unit.exists() else "disabled"))
         sys.exit(0)
     elif action == "is-active":
-        sys.exit(0 if running.exists() else 3)
+        is_up = running.exists()
+        if "--quiet" not in arguments and "-q" not in arguments:
+            print("active" if is_up else "inactive")
+        sys.exit(0 if is_up else 3)
     elif action == "stop":
         if not unit.exists() and not running.exists():
             sys.exit(5)
@@ -394,9 +405,10 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
         self.remover = self.rewrite_script(REMOVER, "remover")
 
     def rewrite_script(self, path, filename):
-        source = path.read_text()
-        for prefix in ("/opt/", "/var/", "/etc/", "/run/", "/install"):
-            source = source.replace(prefix, str(self.root) + prefix)
+        source = replace_paths_once(
+            path.read_text(),
+            [(prefix, str(self.root) + prefix) for prefix in ("/opt/", "/var/", "/etc/", "/run/", "/install")],
+        )
         target = self.root / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)
@@ -979,8 +991,8 @@ purge_system_user() { touch "$TEST_ROOT/user-removed"; }
                 "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\nfi",
                 "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    pkill -KILL -u \"$BUILD_USER\" >/dev/null 2>&1 || true\nfi",
             ).replace(
-                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\n    if ! userdel",
-                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    if ! userdel",
+                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    quiesce_builder_processes\n    if ! af_logged userdel",
+                "if [[ \"$BUILD_USER_CREATED\" -eq 1 ]]; then\n    if ! af_logged userdel",
             )
         )
         self.clear_builder_state()

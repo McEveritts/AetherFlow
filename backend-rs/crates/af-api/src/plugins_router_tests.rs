@@ -1,5 +1,5 @@
-use crate::plugins::*;
 use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess, test_env_lock};
+use crate::plugins::*;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Json};
@@ -214,13 +214,24 @@ async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping
     });
 
     let (manifests, rejected) = discover_plugins_in_dir(&plugins_root);
-    assert!(rejected.is_empty(), "unexpected rejected manifests: {:?}", rejected);
+    assert!(
+        rejected.is_empty(),
+        "unexpected rejected manifests: {:?}",
+        rejected
+    );
     let manifest = manifests
         .into_iter()
         .find(|m| m.id == "telemetry-inspector")
         .expect("discovered telemetry-inspector");
 
-    let _ = update_registry_state("telemetry-inspector", true, plugin_port, "running", "", false);
+    let _ = update_registry_state(
+        "telemetry-inspector",
+        true,
+        plugin_port,
+        "running",
+        "",
+        false,
+    );
     let (plugin_token, claims) = mint_scoped_plugin_token(&manifest, Some(300)).unwrap();
     assert_eq!(claims.typ, "plugin");
     assert_eq!(claims.aud, PLUGIN_TOKEN_AUDIENCE);
@@ -261,8 +272,16 @@ async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping
     assert_eq!(resp_admin.status(), StatusCode::FORBIDDEN);
 
     // 4. Default-denied session & refresh endpoints reject plugin token
-    for denied_uri in ["/api/v1/auth/session", "/api/v1/auth/refresh", "/api/v1/public/auth/refresh"] {
-        let method = if denied_uri.ends_with("/refresh") { "POST" } else { "GET" };
+    for denied_uri in [
+        "/api/v1/auth/session",
+        "/api/v1/auth/refresh",
+        "/api/v1/public/auth/refresh",
+    ] {
+        let method = if denied_uri.ends_with("/refresh") {
+            "POST"
+        } else {
+            "GET"
+        };
         let req_den = Request::builder()
             .method(method)
             .uri(denied_uri)
@@ -272,7 +291,8 @@ async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping
             .unwrap();
         let resp_den = router.clone().oneshot(req_den).await.unwrap();
         assert!(
-            resp_den.status() == StatusCode::FORBIDDEN || resp_den.status() == StatusCode::UNAUTHORIZED,
+            resp_den.status() == StatusCode::FORBIDDEN
+                || resp_den.status() == StatusCode::UNAUTHORIZED,
             "expected 401/403 for {}, got {}",
             denied_uri,
             resp_den.status()
@@ -300,7 +320,10 @@ async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping
         .uri("/api/v1/auth/plugins/telemetry-inspector/proxy/echo")
         .header("Host", "localhost")
         .header("User-Agent", "test-agent")
-        .header("Cookie", format!("aetherflow_session={}; other=secret", viewer_jwt))
+        .header(
+            "Cookie",
+            format!("aetherflow_session={}; other=secret", viewer_jwt),
+        )
         .header("Authorization", format!("Bearer {}", viewer_jwt))
         .body(Body::empty())
         .unwrap();

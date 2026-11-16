@@ -181,7 +181,7 @@ class VersionReceiptSafetyTests(unittest.TestCase):
 
     def test_receipt_swapped_to_fifo_before_open_fails_without_blocking(self):
         self.version.write_text("2.1.0\n")
-        program = common_functions("write_app_version").split("<<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+        program = common_functions("write_app_version").split("write_app_version() {\n", 1)[1].split("<<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
         probe = '''import os, sys
 from unittest.mock import patch
 program = sys.argv.pop(1)

@@ -156,16 +156,21 @@ class PendingArtifactContract:
         "aetherflow-api",
         "af",
         "bin/af",
+        "speedtest-backend",
+        "bin/speedtest-backend",
         ".version",
         "deploy/release-manager.sh",
         "deploy/release-manager.conf",
         "config/packages.json",
         "config/package_automation.json",
+        "config/openapi-v1.yaml",
     )
     required_executable_entries: Tuple[str, ...] = (
         "aetherflow-api",
         "af",
         "bin/af",
+        "speedtest-backend",
+        "bin/speedtest-backend",
         "deploy/release-manager.sh",
     )
     max_glibc_version: str = "2.35"
@@ -631,7 +636,13 @@ def verify_release_artifact_contract(
                             details["version_stamp"] = (
                                 extracted.read().decode("utf-8", errors="replace").strip()
                             )
-                    elif norm_name in ("aetherflow-api", "af", "bin/af"):
+                    elif norm_name in (
+                        "aetherflow-api",
+                        "af",
+                        "bin/af",
+                        "speedtest-backend",
+                        "bin/speedtest-backend",
+                    ):
                         if member.size == 0:
                             errors.append(f"{norm_name} binary in archive is 0 bytes")
                         else:
@@ -660,6 +671,12 @@ def verify_release_artifact_contract(
     if "af" in release_binary_bytes and "bin/af" in release_binary_bytes:
         if release_binary_bytes["af"] != release_binary_bytes["bin/af"]:
             errors.append("af and bin/af must contain identical CLI bytes")
+    if (
+        "speedtest-backend" in release_binary_bytes
+        and "bin/speedtest-backend" in release_binary_bytes
+        and release_binary_bytes["speedtest-backend"] != release_binary_bytes["bin/speedtest-backend"]
+    ):
+        errors.append("speedtest-backend and bin/speedtest-backend must contain identical binary bytes")
     if readelf_symbol_Inspector is not None:
         compatibility = []
         for binary_name, binary_bytes in release_binary_bytes.items():
@@ -1038,7 +1055,7 @@ def render_baseline_guest_build_script(*, jobs: int = 2) -> str:
     Renders the in-guest build script for `build-baseline-artifact` inside Ubuntu 22.04 (GLIBC 2.35).
     Enforces:
       1. Real Next.js static export build (`NEXT_STATIC_EXPORT=1 npm run build --workspace frontend`)
-         even when placeholder `web/dist` or `backend/web/dist` directories already exist in the repo.
+         even when placeholder `web/dist` directories already exist in the repo.
       2. Verifies `web/dist/index.html` and `web/dist/_next` exist and are non-empty before Rust compile.
       3. Requires `backend-rs/Cargo.lock` to exist and runs `cargo fetch --locked` first, followed by
          offline (`CARGO_NET_OFFLINE=true`), locked (`CARGO_LOCKED=1` / `--locked`) compilation.
@@ -1068,18 +1085,15 @@ if [[ ! -d frontend ]]; then
     echo "ERROR: frontend directory missing from source snapshot" >&2
     exit 1
 fi
-rm -rf web/dist backend/web/dist frontend/out
+rm -rf web/dist frontend/out
 nice -n 10 ionice -c 2 -n 7 npm ci --no-fund --no-audit
 NEXT_STATIC_EXPORT=1 nice -n 10 ionice -c 2 -n 7 npm run build --workspace frontend
 test -s frontend/out/index.html
 test -d frontend/out/_next
-mkdir -p web/dist backend/web/dist
+mkdir -p web/dist
 cp -R frontend/out/. web/dist/
-cp -R frontend/out/. backend/web/dist/
 test -s web/dist/index.html
 test -d web/dist/_next
-test -s backend/web/dist/index.html
-test -d backend/web/dist/_next
 
 # 2. Require final committed Cargo.lock, prefetch crates explicitly, then compile offline with --locked and 2 jobs
 test -s backend-rs/Cargo.lock
@@ -1090,7 +1104,11 @@ test -s backend-rs/Cargo.lock
 CARGO_LOCKED=1 CARGO_NET_OFFLINE=true CARGO_BUILD_JOBS={jobs} BUILD_FRONTEND=0 RUN_TESTS=0 OUTPUT_DIR=/var/tmp/af-build/out \\
     nice -n 10 ionice -c 2 -n 7 bash scripts/build_gold.sh
 
-readelf --version-info /var/tmp/af-build/out/linux-amd64/aetherflow-api | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' | sort -V | tail -n 1 > /var/tmp/af-build/out/MAX_GLIBC.txt || true
+readelf --version-info \\
+    /var/tmp/af-build/out/linux-amd64/aetherflow-api \\
+    /var/tmp/af-build/out/linux-amd64/af \\
+    /var/tmp/af-build/out/linux-amd64/speedtest-backend \\
+    | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' | sort -V | tail -n 1 > /var/tmp/af-build/out/MAX_GLIBC.txt || true
 """
 
 
@@ -1343,7 +1361,13 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
                             ex = tf.extractfile(member)
                             if ex is not None:
                                 details["version_stamp"] = ex.read().decode("utf-8", errors="replace").strip()
-                        elif norm_name in ("aetherflow-api", "af", "bin/af"):
+                        elif norm_name in (
+                            "aetherflow-api",
+                            "af",
+                            "bin/af",
+                            "speedtest-backend",
+                            "bin/speedtest-backend",
+                        ):
                             if member.size == 0:
                                 errors.append(f"{norm_name} binary in archive is 0 bytes")
                             else:
@@ -1375,6 +1399,12 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
 
     if "af" in binary_hashes and "bin/af" in binary_hashes and binary_hashes["af"] != binary_hashes["bin/af"]:
         errors.append("af and bin/af must contain identical CLI bytes")
+    if (
+        "speedtest-backend" in binary_hashes
+        and "bin/speedtest-backend" in binary_hashes
+        and binary_hashes["speedtest-backend"] != binary_hashes["bin/speedtest-backend"]
+    ):
+        errors.append("speedtest-backend and bin/speedtest-backend must contain identical binary bytes")
     versions = details["binary_glibc_versions"]
     known_versions = [version for version in versions.values() if version is not None]
     version_key = lambda version: tuple(int(part) for part in version.split("."))

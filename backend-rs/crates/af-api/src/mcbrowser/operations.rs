@@ -157,20 +157,9 @@ pub fn resolve_operation_conflict_policy(
     };
 
     match (conflict, flag_derived) {
-        (Some(explicit), Some(derived)) if explicit != derived => {
-            if explicit != OperationConflictPolicy::Error
-                && overwrite_flag != Some(true)
-                && rename_flag != Some(true)
-            {
-                Err(McBrowserError::BadRequest(
-                    "Conflicting conflict policy and boolean override/rename flags".to_string(),
-                ))
-            } else {
-                Err(McBrowserError::BadRequest(
-                    "Conflicting conflict policy and boolean override/rename flags".to_string(),
-                ))
-            }
-        }
+        (Some(explicit), Some(derived)) if explicit != derived => Err(McBrowserError::BadRequest(
+            "Conflicting conflict policy and boolean override/rename flags".to_string(),
+        )),
         (Some(explicit), _) => Ok(explicit),
         (None, Some(derived)) => Ok(derived),
         (None, None) => Ok(OperationConflictPolicy::Error),
@@ -589,11 +578,8 @@ impl Read for ArchiveSourceReader {
         if maximum == 0 {
             return Ok(0);
         }
-        let count = std::os::unix::fs::FileExt::read_at(
-            &*self.file,
-            &mut buffer[..maximum],
-            self.offset,
-        )?;
+        let count =
+            std::os::unix::fs::FileExt::read_at(&*self.file, &mut buffer[..maximum], self.offset)?;
         if count == 0 {
             return Err(io::Error::new(
                 ErrorKind::UnexpectedEof,
@@ -628,10 +614,14 @@ impl ArchivePlanningControl {
 
     fn check(&self) -> Result<(), McBrowserError> {
         if self.cancelled.load(Ordering::Acquire) {
-            return Err(McBrowserError::RequestTimeout("Archive request cancelled".to_string()));
+            return Err(McBrowserError::RequestTimeout(
+                "Archive request cancelled".to_string(),
+            ));
         }
         if Instant::now() >= self.deadline {
-            return Err(McBrowserError::RequestTimeout("Archive planning deadline exceeded".to_string()));
+            return Err(McBrowserError::RequestTimeout(
+                "Archive planning deadline exceeded".to_string(),
+            ));
         }
         Ok(())
     }
@@ -755,10 +745,43 @@ pub struct FlowAiSearchPlan {
 }
 
 const NL_FILLER_WORDS: &[&str] = &[
-    "find", "search", "for", "show", "me", "all", "files", "file", "folders", "folder",
-    "directories", "directory", "about", "related", "to", "in", "from", "with", "named",
-    "called", "looking", "where", "is", "are", "my", "our", "please", "can", "you",
-    "locate", "list", "get", "matching", "containing", "that", "have", "has",
+    "find",
+    "search",
+    "for",
+    "show",
+    "me",
+    "all",
+    "files",
+    "file",
+    "folders",
+    "folder",
+    "directories",
+    "directory",
+    "about",
+    "related",
+    "to",
+    "in",
+    "from",
+    "with",
+    "named",
+    "called",
+    "looking",
+    "where",
+    "is",
+    "are",
+    "my",
+    "our",
+    "please",
+    "can",
+    "you",
+    "locate",
+    "list",
+    "get",
+    "matching",
+    "containing",
+    "that",
+    "have",
+    "has",
 ];
 
 const STOPWORD_ARTICLES: &[&str] = &["the", "a", "an", "of", "and", "or", "on", "at", "by"];
@@ -970,7 +993,10 @@ pub fn build_deterministic_nl_plan(raw_query: &str) -> FlowAiSearchPlan {
     }
 
     let interpretation = if summary_parts.is_empty() {
-        format!("FlowAI natural-language search for \"{}\"", raw_query.trim())
+        format!(
+            "FlowAI natural-language search for \"{}\"",
+            raw_query.trim()
+        )
     } else {
         format!("FlowAI smart search: {}", summary_parts.join(" · "))
     };
@@ -1159,7 +1185,10 @@ pub fn filter_and_rank_entries_with_flowai(
     }
 }
 
-async fn enrich_nl_plan_with_flowai_llm(raw_query: &str, base: FlowAiSearchPlan) -> FlowAiSearchPlan {
+async fn enrich_nl_plan_with_flowai_llm(
+    raw_query: &str,
+    base: FlowAiSearchPlan,
+) -> FlowAiSearchPlan {
     // Only invoke external LLM when query looks like a multi-word natural language prompt (>= 3 words)
     let word_count = raw_query.split_whitespace().count();
     if word_count < 3 {
@@ -1474,7 +1503,12 @@ pub fn collect_archive_plan_with_auth<F>(
 where
     F: FnMut(&str) -> Result<(), McBrowserError>,
 {
-    collect_archive_plan_with_control(bfs, selected_paths, &ArchivePlanningControl::new(), authorize_download)
+    collect_archive_plan_with_control(
+        bfs,
+        selected_paths,
+        &ArchivePlanningControl::new(),
+        authorize_download,
+    )
 }
 
 fn collect_archive_plan_with_control<F>(
@@ -1516,11 +1550,9 @@ where
         let resolved = bfs
             .metadata_resolving_internal_links(&path)
             .map_err(|error| map_fs_io_error(error, "Failed to inspect archive source"))?;
-        for authorized_path in archive_authorization_paths(
-            &path,
-            &resolved.resolution_paths,
-            &resolved.resolved_path,
-        ) {
+        for authorized_path in
+            archive_authorization_paths(&path, &resolved.resolution_paths, &resolved.resolved_path)
+        {
             authorize_download(&authorized_path)?;
         }
         let archive_path = validate_archive_entry_name(&path)?;
@@ -1653,7 +1685,13 @@ pub fn collect_archive_plan_for_user_with_conn(
     auth_user: &AuthUser,
     selected_paths: &[String],
 ) -> Result<Vec<ArchivePlanItem>, McBrowserError> {
-    collect_archive_plan_for_user_with_control_conn(conn, bfs, auth_user, selected_paths, &ArchivePlanningControl::new())
+    collect_archive_plan_for_user_with_control_conn(
+        conn,
+        bfs,
+        auth_user,
+        selected_paths,
+        &ArchivePlanningControl::new(),
+    )
 }
 
 fn collect_archive_plan_for_user_with_control_conn(
@@ -1665,12 +1703,7 @@ fn collect_archive_plan_for_user_with_control_conn(
 ) -> Result<Vec<ArchivePlanItem>, McBrowserError> {
     collect_archive_plan_with_control(bfs, selected_paths, control, |path| {
         control.check()?;
-        super::policy::authorize_with_conn(
-            conn,
-            auth_user,
-            super::policy::Permission::Read,
-            path,
-        )?;
+        super::policy::authorize_with_conn(conn, auth_user, super::policy::Permission::Read, path)?;
         super::policy::authorize_with_conn(
             conn,
             auth_user,
@@ -2257,6 +2290,7 @@ pub fn execute_create_file_conn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_put_content_with_loaded_target_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2341,6 +2375,7 @@ fn execute_put_content_with_loaded_target_conn(
     ))
 }
 
+#[allow(dead_code)]
 fn execute_put_content_for_pinned_target_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2373,6 +2408,7 @@ fn execute_put_content_for_pinned_target_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_put_content_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2462,6 +2498,7 @@ fn open_authorized_file_for_put_content_with_conn(
     }
 }
 
+#[allow(dead_code)]
 pub fn execute_put_content_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -2804,7 +2841,9 @@ fn authorize_copy_permission_if_user(
     Ok(())
 }
 
-fn verify_pinned_copy_source_metadata(source_file: &File) -> Result<std::fs::Metadata, McBrowserError> {
+fn verify_pinned_copy_source_metadata(
+    source_file: &File,
+) -> Result<std::fs::Metadata, McBrowserError> {
     let source_meta = source_file
         .metadata()
         .map_err(|error| map_fs_io_error(error, "Failed to inspect source file for copy"))?;
@@ -3007,12 +3046,10 @@ fn copy_planned_directory_new_with_quota(
     user_id: i64,
     accounting_complete: &mut bool,
 ) -> Result<(), McBrowserError> {
-    let expected_bytes: u64 = descendants
-        .iter()
-        .fold(0u64, |acc, item| match item {
-            PlannedCopyDescendant::Directory { .. } => acc,
-            PlannedCopyDescendant::File { size, .. } => acc.saturating_add(*size),
-        });
+    let expected_bytes: u64 = descendants.iter().fold(0u64, |acc, item| match item {
+        PlannedCopyDescendant::Directory { .. } => acc,
+        PlannedCopyDescendant::File { size, .. } => acc.saturating_add(*size),
+    });
 
     load_active_quota_conn(conn, user_id, expected_bytes)?;
     if expected_bytes > 0 {
@@ -3074,6 +3111,7 @@ fn copy_planned_directory_new_with_quota(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_copy_directory_descendants(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3193,7 +3231,10 @@ fn collect_copy_directory_descendants(
                     Ok(resolved_file) => resolved_file,
                     Err(error) => {
                         active_resolved_dirs.pop();
-                        return Err(map_fs_io_error(error, "Failed to open source file for copy"));
+                        return Err(map_fs_io_error(
+                            error,
+                            "Failed to open source file for copy",
+                        ));
                     }
                 };
                 for hop in &opened.resolution_paths {
@@ -3247,46 +3288,44 @@ fn collect_copy_directory_descendants(
                     return Err(sub_err);
                 }
             }
-            "symlink" => {
-                match bfs.open_file_resolving_internal_links(&child_alias_path) {
-                    Ok(opened) => {
-                        for hop in &opened.resolution_paths {
-                            if let Err(auth_err) = authorize_copy_permission_if_user(
-                                conn,
-                                auth_user,
-                                super::policy::Permission::Read,
-                                hop,
-                            ) {
-                                active_resolved_dirs.pop();
-                                return Err(auth_err);
-                            }
-                        }
+            "symlink" => match bfs.open_file_resolving_internal_links(&child_alias_path) {
+                Ok(opened) => {
+                    for hop in &opened.resolution_paths {
                         if let Err(auth_err) = authorize_copy_permission_if_user(
                             conn,
                             auth_user,
                             super::policy::Permission::Read,
-                            &opened.resolved_path,
+                            hop,
                         ) {
                             active_resolved_dirs.pop();
                             return Err(auth_err);
                         }
-                        let file_meta = match verify_pinned_copy_source_metadata(&opened.file) {
-                            Ok(meta) => meta,
-                            Err(error) => {
-                                active_resolved_dirs.pop();
-                                return Err(error);
-                            }
-                        };
-                        descendants.push(PlannedCopyDescendant::File {
-                            rel_suffix,
-                            file: opened.file,
-                            size: file_meta.len(),
-                        });
                     }
-                    Err(open_err) => {
-                        let resolved_child = match bfs
-                            .metadata_resolving_internal_links(&child_alias_path)
-                        {
+                    if let Err(auth_err) = authorize_copy_permission_if_user(
+                        conn,
+                        auth_user,
+                        super::policy::Permission::Read,
+                        &opened.resolved_path,
+                    ) {
+                        active_resolved_dirs.pop();
+                        return Err(auth_err);
+                    }
+                    let file_meta = match verify_pinned_copy_source_metadata(&opened.file) {
+                        Ok(meta) => meta,
+                        Err(error) => {
+                            active_resolved_dirs.pop();
+                            return Err(error);
+                        }
+                    };
+                    descendants.push(PlannedCopyDescendant::File {
+                        rel_suffix,
+                        file: opened.file,
+                        size: file_meta.len(),
+                    });
+                }
+                Err(open_err) => {
+                    let resolved_child =
+                        match bfs.metadata_resolving_internal_links(&child_alias_path) {
                             Ok(resolved) if resolved.entry.kind == "directory" => resolved,
                             Ok(resolved) => {
                                 for hop in &resolved.resolution_paths {
@@ -3325,57 +3364,53 @@ fn collect_copy_directory_descendants(
                                 ));
                             }
                         };
-                        for hop in &resolved_child.resolution_paths {
-                            if let Err(auth_err) = authorize_copy_permission_if_user(
-                                conn,
-                                auth_user,
-                                super::policy::Permission::Read,
-                                hop,
-                            ) {
-                                active_resolved_dirs.pop();
-                                return Err(auth_err);
-                            }
-                        }
-                        if !resolved_child.resolved_path.is_empty() {
-                            if let Err(auth_err) = authorize_copy_permission_if_user(
-                                conn,
-                                auth_user,
-                                super::policy::Permission::Read,
-                                &resolved_child.resolved_path,
-                            ) {
-                                active_resolved_dirs.pop();
-                                return Err(auth_err);
-                            }
-                        }
-                        descendants.push(PlannedCopyDescendant::Directory { rel_suffix });
-                        let mut symlink_dir_hops = child_hops;
-                        for hop in &resolved_child.resolution_paths {
-                            push_unique_copy_hop(&mut symlink_dir_hops, hop);
-                        }
-                        if !resolved_child.resolved_path.is_empty() {
-                            push_unique_copy_hop(
-                                &mut symlink_dir_hops,
-                                &resolved_child.resolved_path,
-                            );
-                        }
-                        if let Err(sub_err) = collect_copy_directory_descendants(
+                    for hop in &resolved_child.resolution_paths {
+                        if let Err(auth_err) = authorize_copy_permission_if_user(
                             conn,
-                            bfs,
                             auth_user,
-                            from_prefix,
-                            &child_alias_path,
-                            &symlink_dir_hops,
-                            depth + 1,
-                            active_resolved_dirs,
-                            resolved_directory_paths,
-                            descendants,
+                            super::policy::Permission::Read,
+                            hop,
                         ) {
                             active_resolved_dirs.pop();
-                            return Err(sub_err);
+                            return Err(auth_err);
                         }
                     }
+                    if !resolved_child.resolved_path.is_empty() {
+                        if let Err(auth_err) = authorize_copy_permission_if_user(
+                            conn,
+                            auth_user,
+                            super::policy::Permission::Read,
+                            &resolved_child.resolved_path,
+                        ) {
+                            active_resolved_dirs.pop();
+                            return Err(auth_err);
+                        }
+                    }
+                    descendants.push(PlannedCopyDescendant::Directory { rel_suffix });
+                    let mut symlink_dir_hops = child_hops;
+                    for hop in &resolved_child.resolution_paths {
+                        push_unique_copy_hop(&mut symlink_dir_hops, hop);
+                    }
+                    if !resolved_child.resolved_path.is_empty() {
+                        push_unique_copy_hop(&mut symlink_dir_hops, &resolved_child.resolved_path);
+                    }
+                    if let Err(sub_err) = collect_copy_directory_descendants(
+                        conn,
+                        bfs,
+                        auth_user,
+                        from_prefix,
+                        &child_alias_path,
+                        &symlink_dir_hops,
+                        depth + 1,
+                        active_resolved_dirs,
+                        resolved_directory_paths,
+                        descendants,
+                    ) {
+                        active_resolved_dirs.pop();
+                        return Err(sub_err);
+                    }
                 }
-            }
+            },
             _ => {
                 active_resolved_dirs.pop();
                 return Err(McBrowserError::Forbidden(
@@ -3396,12 +3431,7 @@ fn prepare_copy_source_plan(
     from_prefix: &str,
     auth_user: Option<&AuthUser>,
 ) -> Result<CopySourcePlan, McBrowserError> {
-    authorize_copy_permission_if_user(
-        conn,
-        auth_user,
-        super::policy::Permission::Read,
-        from_path,
-    )?;
+    authorize_copy_permission_if_user(conn, auth_user, super::policy::Permission::Read, from_path)?;
 
     match bfs.open_file_resolving_internal_links(from_path) {
         Ok(opened) => {
@@ -3596,6 +3626,7 @@ fn authorize_destination_tree_for_copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_copy_core_with_accounting_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3607,9 +3638,13 @@ fn execute_copy_core_with_accounting_conn(
     auth_user: Option<&AuthUser>,
 ) -> Result<String, McBrowserError> {
     let from_prefix = validate_conflict_destination(from_path, to_path, "copy", conflict_policy)?;
-    let mut source_plan =
-        prepare_copy_source_plan(conn, bfs, from_path, &from_prefix, auth_user)?;
-    validate_resolved_source_against_destination(&source_plan, from_path, to_path, conflict_policy)?;
+    let mut source_plan = prepare_copy_source_plan(conn, bfs, from_path, &from_prefix, auth_user)?;
+    validate_resolved_source_against_destination(
+        &source_plan,
+        from_path,
+        to_path,
+        conflict_policy,
+    )?;
 
     let dst_meta_opt = match bfs.metadata(to_path) {
         Ok(entry) => Some(entry),
@@ -3720,14 +3755,7 @@ fn execute_copy_core_with_accounting_conn(
             ))
         }
         (OperationConflictPolicy::Overwrite, Some(dst_meta)) => {
-            authorize_destination_tree_for_copy(
-                conn,
-                bfs,
-                auth_user,
-                &source_plan,
-                to_path,
-                true,
-            )?;
+            authorize_destination_tree_for_copy(conn, bfs, auth_user, &source_plan, to_path, true)?;
 
             if dst_meta.kind != "file" && dst_meta.kind != "directory" {
                 return Err(McBrowserError::Forbidden(
@@ -3873,6 +3901,7 @@ fn execute_copy_core_with_accounting_conn(
     }
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3891,6 +3920,7 @@ pub fn execute_copy_conn(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_with_policy_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3910,6 +3940,7 @@ pub fn execute_copy_with_policy_conn(
     )
 }
 
+#[allow(dead_code)]
 fn execute_copy_with_accounting_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3931,6 +3962,7 @@ fn execute_copy_with_accounting_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_copy_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -3974,6 +4006,7 @@ fn execute_copy_for_user_with_accounting_conn(
     )
 }
 
+#[allow(dead_code)]
 pub fn execute_rename_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4255,6 +4288,7 @@ fn authorize_symlink_target_if_internal(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn execute_rename_for_user_with_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4369,15 +4403,16 @@ fn execute_rename_for_user_with_accounting_conn(
             super::policy::Permission::Rename,
             &dst_descendant,
         )?;
-        if conflict_policy == OperationConflictPolicy::Overwrite && dst_exists {
-            if bfs.metadata(&dst_descendant).is_ok() {
-                super::policy::authorize_with_conn(
-                    conn,
-                    auth_user,
-                    super::policy::Permission::Modify,
-                    &dst_descendant,
-                )?;
-            }
+        if conflict_policy == OperationConflictPolicy::Overwrite
+            && dst_exists
+            && bfs.metadata(&dst_descendant).is_ok()
+        {
+            super::policy::authorize_with_conn(
+                conn,
+                auth_user,
+                super::policy::Permission::Modify,
+                &dst_descendant,
+            )?;
         }
     }
 
@@ -4509,6 +4544,7 @@ pub struct DeleteRecursiveOutcome {
     pub accounting_pending: bool,
 }
 
+#[allow(dead_code)]
 pub fn execute_delete_recursive_conn(
     conn: &rusqlite::Connection,
     bfs: &BrowserFs,
@@ -4718,11 +4754,16 @@ async fn search_entries(
             .map_err(|err| map_fs_io_error(err, "Failed to search directory"))?;
 
         let mut resp = if let Some(plan) = &nl_plan {
-            let mut ai_resp =
-                filter_and_rank_entries_with_flowai(walked.clone(), plan, kind_filter, MAX_SEARCH_ENTRIES);
+            let mut ai_resp = filter_and_rank_entries_with_flowai(
+                walked.clone(),
+                plan,
+                kind_filter,
+                MAX_SEARCH_ENTRIES,
+            );
             if ai_resp.entries.is_empty() && !search_q.trim().is_empty() {
                 // Fallback to literal/standard query if strict NL token filter returned 0 results
-                let fallback = filter_walked_entries(walked, &search_q, kind_filter, MAX_SEARCH_ENTRIES);
+                let fallback =
+                    filter_walked_entries(walked, &search_q, kind_filter, MAX_SEARCH_ENTRIES);
                 if !fallback.entries.is_empty() {
                     ai_resp.entries = fallback.entries;
                     ai_resp.truncated = fallback.truncated;
@@ -5213,7 +5254,8 @@ async fn create_archive_ticket(
     };
 
     let Ok(permit) = Arc::clone(&ARCHIVE_SEMAPHORE).acquire_owned().await else {
-        return McBrowserError::Internal("Archive concurrency limiter closed".to_string()).into_response();
+        return McBrowserError::Internal("Archive concurrency limiter closed".to_string())
+            .into_response();
     };
     let control = ArchivePlanningControl::new();
     let _guard = ArchivePlanningGuard(control.clone());
@@ -5445,6 +5487,7 @@ struct OpenSslEvpApi {
         unsafe extern "C" fn(*mut libc::c_void, *mut u8, *mut libc::c_uint) -> libc::c_int,
 }
 
+#[allow(clippy::missing_transmute_annotations)]
 static OPENSSL_EVP_API: Lazy<OpenSslEvpApi> = Lazy::new(|| unsafe {
     let libs = [c"libcrypto.so.3", c"libcrypto.so"];
     OpenSslEvpApi {

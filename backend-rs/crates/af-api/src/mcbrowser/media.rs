@@ -630,7 +630,7 @@ fn parse_tiff_ifd1_jpeg_thumbnail(tiff: &[u8]) -> Option<Vec<u8>> {
 
     let offset = thumb_offset?;
     let length = thumb_len?;
-    if length < 4 || length > 4 * 1024 * 1024 {
+    if !(4..=4 * 1024 * 1024).contains(&length) {
         return None;
     }
     let slice = tiff.get(offset..offset.checked_add(length)?)?;

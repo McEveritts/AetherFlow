@@ -88,7 +88,7 @@ af_usage() {
     echo "  bash AetherFlow-Setup --channel nightly"
     echo "  bash AetherFlow-Setup --resume"
     echo "  bash AetherFlow-Setup --repair build_modern"
-    echo "  bash AetherFlow-Setup --from-source --repair install_go install_node build_modern"
+    echo "  bash AetherFlow-Setup --from-source --repair install_node build_modern"
     echo "  bash AetherFlow-Setup --unattended --username admin --password secret --domain aether.local"
     echo "  bash AetherFlow-Setup --env-seed /root/.env.seed --unattended"
     echo ""
@@ -820,12 +820,11 @@ if [[ ${ffmpeg} == "yes" ]]; then
 	_run_step "ffmpeg" "Building ffmpeg from source for screenshots" _ffmpeg
 fi
 
-_run_step_fg "apachesudo" "Configuring Apache sudo" _apachesudo
+_run_step_fg "apachesudo" "Purging legacy sudoers grants" _apachesudo
 
 # NOTE: Torrent client installation (rTorrent, qBittorrent, Transmission, Deluge, AutoDL-irssi)
 #       removed from bootstrap — deferred to AetherFlow Marketplace.
-# NOTE: Legacy PHP dashboard removed — Next.js frontend is the sole UI
-_run_step "install_go" "Checking Go toolchain (source-build fallback only)" _install_go
+# NOTE: Legacy PHP dashboard and Go backend removed — Next.js + Rust backend-rs are the sole stack
 _run_step "install_node" "Checking Node.js toolchain (source-build fallback only)" _install_node
 _run_step "build_modern" "Deploying AetherFlow v4 Control Plane" _build_modern_stack
 

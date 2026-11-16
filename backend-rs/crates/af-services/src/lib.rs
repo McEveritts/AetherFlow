@@ -2,17 +2,17 @@ pub mod cluster_daemon;
 pub mod lifecycle_cache;
 pub mod mutators;
 pub mod plugins;
-pub mod workers;
 mod service_observations;
+pub mod workers;
 
-#[cfg(all(test, unix))]
-mod inventory_regressions;
 #[cfg(all(test, unix))]
 mod http_lifecycle_regressions;
 #[cfg(all(test, unix))]
-mod readiness_regressions;
+mod inventory_regressions;
 #[cfg(all(test, unix))]
 mod native_metadata_regressions;
+#[cfg(all(test, unix))]
+mod readiness_regressions;
 
 use af_models::{Package, PackageAutomation};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Package Catalog, Automation & Marketplace Orchestration (`package_service.go`)
+// Package Catalog, Automation & Marketplace Orchestration
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
@@ -73,7 +73,14 @@ pub fn resolve_owning_package_id(target: &str) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
-pub const CORE_SERVICE_IDS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
+pub const CORE_SERVICE_IDS: [&str; 4] = [
+    "aetherflow-api",
+    "aetherflow-runner",
+    "aetherflow-frontend",
+    "apache2",
+];
+
+const INVENTORY_CORE_UNITS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
 
 /// Validates a Services control request and returns the exact control target.
 ///
@@ -150,14 +157,12 @@ pub fn authorize_service_control_target(
 }
 
 fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::metadata(path)?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "catalog is not a regular file: {}",
-        path.display()
-    );
-    fs::read_to_string(path)
+    af_runner::open_and_read_regular_config(path)
         .map_err(|error| anyhow::anyhow!("cannot read catalog {}: {error}", path.display()))
+}
+
+fn config_search_candidates(filename: &str) -> Vec<PathBuf> {
+    af_runner::canonical_config_candidates(filename)
 }
 
 fn load_config_file_or_embedded(
@@ -170,27 +175,16 @@ fn load_config_file_or_embedded(
             return read_catalog_file(Path::new(explicit.trim()));
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("config").join(filename),
-        PathBuf::from("../config").join(filename),
-        PathBuf::from("../../config").join(filename),
-        PathBuf::from("backend/config").join(filename),
-        PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.insert(5, exe_dir.join("config").join(filename));
-        }
-    }
-    for c in candidates {
-        match fs::symlink_metadata(&c) {
-            Ok(_) => return read_catalog_file(&c),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    for c in config_search_candidates(filename) {
+        match af_runner::open_and_read_regular_config(&c) {
+            Ok(contents) => return Ok(contents),
+            Err(error) if af_runner::is_missing_config_candidate(&error) => continue,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot read catalog {}: {error}",
+                    c.display()
+                ))
+            }
         }
     }
     Ok(embedded.to_string())
@@ -326,9 +320,8 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
     let Ok(conn) = af_db::get_conn() else {
         return map;
     };
-    let _ = conn.execute_batch(
-        "ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';",
-    );
+    let _ = conn
+        .execute_batch("ALTER TABLE app_updates ADD COLUMN source_key TEXT NOT NULL DEFAULT '';");
     let Ok(mut stmt) = conn.prepare(
         "SELECT package_name, installed_version, latest_version, update_available, update_url, COALESCE(CAST(checked_at AS TEXT), ''), last_error, COALESCE(source_key, '') FROM app_updates",
     ) else {
@@ -354,7 +347,7 @@ pub fn get_package_update_map() -> HashMap<String, AppUpdateRecord> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App Blueprints & Port / Domain Resolution (`app_catalog.go` & `blueprint_lifecycle.go`)
+// App Blueprints & Port / Domain Resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,8 +471,8 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     let pkgs = get_package_catalog().ok()?;
     let p = pkgs.into_iter().find(|x| x.name == app_name)?;
     let (mutator_type, config_file_path, port_config_key) = default_blueprint_mutator_meta(&p.name);
-    let supports_dynamic_port = p.default_port > 0
-        && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
+    let supports_dynamic_port =
+        p.default_port > 0 && !matches!(p.name.as_str(), "plex" | "calibreweb" | "calibre-web");
     Some(AppBlueprint {
         app_name: p.name.clone(),
         service_name: if p.service_name.is_empty() {
@@ -684,7 +677,7 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Service Manager (`service_manager.go` & `systemctl.go`)
+// Service Manager
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -1024,10 +1017,8 @@ pub fn aggregate_component_statuses(
                     configured_optional_failed = true;
                 }
             }
-            "oneshot" => {
-                if comp.status == "failed" {
-                    oneshot_failed = true;
-                }
+            "oneshot" if comp.status == "failed" => {
+                oneshot_failed = true;
             }
             _ => {}
         }
@@ -1060,7 +1051,7 @@ pub fn aggregate_component_statuses(
     (status.to_string(), primary_unit)
 }
 
-/// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
+/// Resolves a logical package or service name into its concrete systemd unit names.
 pub fn resolve_service_units(target: &str) -> Vec<String> {
     resolve_service_units_with_catalog(target, &get_package_catalog().unwrap_or_default())
 }
@@ -1177,7 +1168,7 @@ pub fn format_uptime_duration(dur: chrono::Duration) -> String {
     }
 }
 
-/// Formats systemd's `ActiveEnterTimestamp` string into a concise human-readable uptime (`service_manager.go`).
+/// Formats systemd's `ActiveEnterTimestamp` string into a concise human-readable uptime.
 pub fn format_uptime(enter_timestamp: &str) -> String {
     let raw = enter_timestamp.trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("n/a") {
@@ -1192,7 +1183,8 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 
     // systemd format: "Mon 2026-03-30 12:34:56 UTC" or "2026-03-30 12:34:56 UTC"
     let tokens: Vec<&str> = raw.split_whitespace().collect();
-    let date_time_pair = if tokens.len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic()) {
+    let date_time_pair = if tokens.len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic())
+    {
         Some(format!("{} {}", tokens[1], tokens[2]))
     } else if tokens.len() >= 2 {
         Some(format!("{} {}", tokens[0], tokens[1]))
@@ -1213,7 +1205,7 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 }
 
 /// Queries `systemctl show <unit> --property=ActiveState,SubState,ActiveEnterTimestamp`
-/// with a short in-memory cache and graceful fallback on non-systemd platforms (`service_manager.go`).
+/// with a short in-memory cache and graceful fallback on non-systemd platforms.
 pub fn get_service_info(service_name: &str) -> (String, String, String) {
     let (status, uptime, primary_unit, _components) = get_service_info_detailed(service_name);
     (status, uptime, primary_unit)
@@ -1583,7 +1575,7 @@ pub fn get_active_services_with_jobs(
                 .is_some_and(|outcome| outcome.status != "completed")
     };
     let mut policies = policies_for_units(
-        CORE_SERVICE_IDS
+        INVENTORY_CORE_UNITS
             .iter()
             .map(|unit| unit.to_string())
             .collect(),
@@ -1616,7 +1608,7 @@ pub fn get_active_services_with_jobs(
         (status, uptime, process)
     };
 
-    // 1. Core Systemd Services (`service_manager.go`: AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
+    // 1. Core Systemd Services (AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
     let (_api_st, api_up, _api_unit) = core_info("aetherflow-api");
     map.insert(
         "AetherFlow API".to_string(),
@@ -1782,9 +1774,7 @@ pub fn get_active_services_with_jobs(
 
         let internal_domain = format!("{}.aether.local", p.name.trim().to_lowercase());
 
-        let mut public_domain = ing
-            .map(|c| c.public_domain.clone())
-            .unwrap_or_default();
+        let mut public_domain = ing.map(|c| c.public_domain.clone()).unwrap_or_default();
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = format_app_public_domain(&p.name, &base_domain);
         }
@@ -2176,7 +2166,7 @@ pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Streaming Telemetry Monitor (`backend/services/streaming_monitor.go`)
+// Streaming Telemetry Monitor
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2474,7 +2464,10 @@ pub fn set_streaming_demo_mode(enabled: bool) {
 }
 
 pub fn is_streaming_demo_mode() -> bool {
-    DEMO_STREAMING_MODE.lock().map(|guard| *guard).unwrap_or(false)
+    DEMO_STREAMING_MODE
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(false)
 }
 
 pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDashboardResponse {
@@ -2523,7 +2516,11 @@ pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDas
             jellyfin_server.server_id = srv_id;
             jellyfin_server.version = srv_ver;
             jellyfin_server.last_connected_at = last_conn;
-            let decrypted = af_db::decrypt_key(&api_key).unwrap_or(api_key);
+            let decrypted = if api_key.is_empty() {
+                String::new()
+            } else {
+                af_db::decrypt_key(&api_key).unwrap_or_default()
+            };
             if !decrypted.is_empty() {
                 jellyfin_server.configured = true;
                 if is_admin {
@@ -2593,7 +2590,10 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL host is required"))?
         .to_lowercase();
-    if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(forbidden_streaming_ip)
+    if host
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(forbidden_streaming_ip)
         || host == "metadata.google.internal"
         || host.ends_with(".metadata.google.internal")
         || host == "metadata.goog"
@@ -2606,13 +2606,45 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
 
 pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
     match address {
-        std::net::IpAddr::V4(address) => address.is_unspecified() || address.is_link_local(),
-        std::net::IpAddr::V6(address) => {
-            address.to_ipv4_mapped().map(|mapped| forbidden_streaming_ip(mapped.into())).unwrap_or_else(|| {
-                address.is_unspecified() || address.is_unicast_link_local()
-                    || address.segments()[..2] == [0xfd00, 0x0ec2]
-            })
+        std::net::IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_unspecified()
+                || address.is_link_local()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+                || octets == [168, 63, 129, 16]
+                || (octets[0] == 192
+                    && ((octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                        || (octets[1] == 88 && octets[2] == 99)))
+                || (octets[0] == 198 && (octets[1] & 0xfe) == 18)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || octets[0] >= 224
         }
+        std::net::IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(|mapped| forbidden_streaming_ip(mapped.into()))
+            .unwrap_or_else(|| {
+                if address.is_loopback() {
+                    return false;
+                }
+                if address.is_unspecified()
+                    || address.is_multicast()
+                    || address.is_unicast_link_local()
+                {
+                    return true;
+                }
+                let segments = address.segments();
+                if (segments[0] & 0xfe00) == 0xfc00 {
+                    return segments[..2] == [0xfd00, 0x0ec2];
+                }
+                if (segments[0] & 0xe000) != 0x2000 {
+                    return true;
+                }
+                (segments[0] == 0x2001 && (segments[1] < 0x0200 || segments[1] == 0x0db8))
+                    || segments[0] == 0x2002
+                    || (segments[0] == 0x3fff && segments[1] < 0x1000)
+            }),
     }
 }
 
@@ -2622,9 +2654,19 @@ impl reqwest::dns::Resolve for StreamingResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let hostname = name.as_str().to_string();
         Box::pin(async move {
-            let addresses: Vec<_> = tokio::net::lookup_host((hostname.as_str(), 0)).await?.collect();
-            if addresses.is_empty() || addresses.iter().any(|address| forbidden_streaming_ip(address.ip())) {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Disallowed resolved media-server address").into());
+            let addresses: Vec<_> = tokio::net::lookup_host((hostname.as_str(), 0))
+                .await?
+                .collect();
+            if addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|address| forbidden_streaming_ip(address.ip()))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Disallowed resolved media-server address",
+                )
+                .into());
             }
             Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
         })
@@ -2639,7 +2681,7 @@ pub fn streaming_http_client_builder() -> reqwest::ClientBuilder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Notifications & Rules (`backend/services/notifications.go`)
+// Notifications & Rules
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2806,7 +2848,10 @@ mod tests {
     #[test]
     fn test_internal_domains_are_derived_from_blueprints() {
         let blueprint = get_blueprint("jellyfin").unwrap();
-        assert_eq!(resolve_app_internal_domain("jellyfin"), blueprint.internal_domain);
+        assert_eq!(
+            resolve_app_internal_domain("jellyfin"),
+            blueprint.internal_domain
+        );
         assert_eq!(
             resolve_app_internal_domain("unknown-audit-app"),
             "unknown-audit-app.aether.local"
@@ -2903,7 +2948,10 @@ mod tests {
                 tracking.version_command,
                 vec!["cat".to_string(), format!("/opt/{app}/.af-version")]
             );
-            assert!(!tracking.version_command.iter().any(|arg| arg.contains(".af-version")));
+            assert!(!tracking
+                .version_command
+                .iter()
+                .any(|arg| arg.contains(".af-version")));
             if app == "piped" {
                 assert_eq!(
                     tracking.version_command,
@@ -2931,6 +2979,11 @@ mod tests {
     fn test_validate_server_url_blocks_ssrf() {
         assert!(validate_server_url("http://127.0.0.1:8096").is_ok());
         assert!(validate_server_url("http://169.254.169.254/latest/meta-data").is_err());
+        assert!(validate_server_url("http://168.63.129.16/machine").is_err());
+        assert!(validate_server_url("http://[64:ff9b::a9fe:a9fe]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[64:ff9b:1::a9fe:a9fe]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[2002:a9fe:a9fe::1]/latest/meta-data").is_err());
+        assert!(validate_server_url("http://[100::1]:8096").is_err());
         assert!(validate_server_url("http://metadata.google.internal").is_err());
     }
 
@@ -3304,5 +3357,63 @@ mod tests {
         );
         assert_eq!(resolve_owning_package_id("sshd"), None);
         assert_eq!(resolve_owning_package_id("aetherflow-api"), None);
+    }
+
+    #[test]
+    fn config_search_candidates_prioritize_canonical_config_over_legacy_fallback() {
+        let candidates = config_search_candidates("packages.json");
+        let strings: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(strings[0], "config/packages.json");
+        assert_eq!(strings[1], "../config/packages.json");
+        assert_eq!(strings[2], "../../config/packages.json");
+        assert!(
+            !strings
+                .iter()
+                .any(|s| s == "backend/config/packages.json"
+                    || s == "../backend/config/packages.json"),
+            "dead relative backend/config paths must be removed: {strings:?}"
+        );
+        let opt_canonical_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/config/packages.json")
+            .unwrap();
+        let opt_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/config/packages.json")
+            .unwrap();
+        let legacy_curr_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/current/backend/config/packages.json")
+            .unwrap();
+        let legacy_root_idx = strings
+            .iter()
+            .position(|s| s == "/opt/AetherFlow/backend/config/packages.json")
+            .unwrap();
+        assert!(opt_canonical_idx < opt_root_idx);
+        assert!(opt_root_idx < legacy_curr_idx);
+        assert!(legacy_curr_idx < legacy_root_idx);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_reader_rejects_leaf_symlinks_and_directories() {
+        let dir = std::env::temp_dir().join(format!("af-cat-sym-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_file = dir.join("real.json");
+        std::fs::write(&real_file, "[]").unwrap();
+        let sym_file = dir.join("sym.json");
+        std::os::unix::fs::symlink(&real_file, &sym_file).unwrap();
+
+        assert_eq!(read_catalog_file(&real_file).unwrap(), "[]");
+        assert!(read_catalog_file(&sym_file).is_err());
+        assert!(read_catalog_file(&dir).is_err());
+        assert!(af_runner::open_and_read_regular_config(&sym_file).is_err());
+        assert!(af_runner::open_and_read_regular_config(&dir).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
