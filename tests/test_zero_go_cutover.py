@@ -1493,12 +1493,18 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
                 text=True,
             )
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-            import tomllib
-            parsed = tomllib.loads(cfg.read_text(encoding="utf-8"))
-            self.assertEqual(parsed["listen_port"], 18989)
-            self.assertEqual(parsed["statistics_password"], multiline_pw)
-            self.assertEqual(parsed["database_type"], "sqlite")
-            self.assertEqual(parsed["database_file"], f"{state_dir}/speedtest.db")
+            updated_cfg = cfg.read_text(encoding="utf-8")
+            if tomllib is not None:
+                parsed = tomllib.loads(updated_cfg)
+                self.assertEqual(parsed["listen_port"], 18989)
+                self.assertEqual(parsed["statistics_password"], multiline_pw)
+                self.assertEqual(parsed["database_type"], "sqlite")
+                self.assertEqual(parsed["database_file"], f"{state_dir}/speedtest.db")
+            else:
+                self.assertIn("listen_port=18989\n", updated_cfg)
+                self.assertIn(f'statistics_password="""\n{multiline_pw}"""\n', updated_cfg)
+                self.assertIn('database_type="sqlite"\n', updated_cfg)
+                self.assertIn(f'database_file="{state_dir}/speedtest.db"\n', updated_cfg)
 
             # Verify common.sh load_master_credentials under AETHERFLOW_SKIP_ENV_FILES=1 ignores host username files
             creds_file = Path(tmp) / ".master.creds"
