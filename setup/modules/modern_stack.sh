@@ -49,78 +49,6 @@ _af_is_v4_release_tag() {
     [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
-
-_install_node() {
-    if ! _af_modern_from_source_enabled; then
-        echo "Prebuilt v4 Rust release mode active; skipping Node.js compiler installation."
-        return 0
-    fi
-
-    local node_install_dir="/usr/local/node-v${AF_NODE_VERSION}-linux-x64"
-    local min_node_major=24
-
-    # Enforce Node.js >= 24 for source builds (undici/eslint/Piped compatibility).
-    local system_node=""
-    local system_node_ver=""
-
-    for candidate in /usr/bin/node /usr/local/bin/node; do
-        if [[ -x "${candidate}" ]]; then
-            local ver
-            ver="$("${candidate}" --version 2>/dev/null | sed 's/^v//')"
-            local major="${ver%%.*}"
-            if [[ -n "${major}" ]] && [[ "${major}" -ge "${min_node_major}" ]]; then
-                system_node="${candidate}"
-                system_node_ver="${ver}"
-                break
-            fi
-        fi
-    done
-
-    if [[ -n "${system_node}" ]]; then
-        echo "System Node.js ${system_node_ver} at ${system_node} meets >= ${min_node_major} requirement."
-        if [[ "${system_node}" != "/usr/local/bin/node" ]]; then
-            ln -sfn "${system_node}" /usr/local/bin/node
-            local bin_dir
-            bin_dir="$(dirname "${system_node}")"
-            [[ -x "${bin_dir}/npm" ]] && ln -sfn "${bin_dir}/npm" /usr/local/bin/npm
-            [[ -x "${bin_dir}/npx" ]] && ln -sfn "${bin_dir}/npx" /usr/local/bin/npx
-        fi
-    elif ! command -v node >/dev/null 2>&1; then
-        if [[ ! -s "${AF_NODE_ARCHIVE}" ]]; then
-            _af_prefetch_runtime_archives || return 1
-        fi
-
-        rm -rf "${node_install_dir}" /usr/local/nodejs
-        tar -xJf "${AF_NODE_ARCHIVE}" -C /usr/local || return 1
-        ln -sfn "${node_install_dir}" /usr/local/nodejs
-        ln -sfn /usr/local/nodejs/bin/node /usr/local/bin/node
-        ln -sfn /usr/local/nodejs/bin/npm /usr/local/bin/npm
-        ln -sfn /usr/local/nodejs/bin/npx /usr/local/bin/npx
-        rm -f "${AF_NODE_ARCHIVE}"
-    else
-        local current_ver
-        current_ver="$(node --version 2>/dev/null | sed 's/^v//')"
-        local current_major="${current_ver%%.*}"
-        if [[ -z "${current_major}" ]] || [[ "${current_major}" -lt "${min_node_major}" ]]; then
-            echo "Installed Node.js v${current_ver} is below minimum v${min_node_major}. Upgrading..."
-            if [[ ! -s "${AF_NODE_ARCHIVE}" ]]; then
-                _af_prefetch_runtime_archives || return 1
-            fi
-            rm -rf "${node_install_dir}" /usr/local/nodejs
-            tar -xJf "${AF_NODE_ARCHIVE}" -C /usr/local || return 1
-            ln -sfn "${node_install_dir}" /usr/local/nodejs
-            ln -sfn /usr/local/nodejs/bin/node /usr/local/bin/node
-            ln -sfn /usr/local/nodejs/bin/npm /usr/local/bin/npm
-            ln -sfn /usr/local/nodejs/bin/npx /usr/local/bin/npx
-            rm -f "${AF_NODE_ARCHIVE}"
-        fi
-    fi
-
-    _af_ensure_path_entry "/usr/local/nodejs/bin" 'export PATH=/usr/local/nodejs/bin:$PATH'
-
-    _af_cleanup_runtime_cache
-}
-
 _validate_prebuilt_tarball() {
     local archive_path="$1"
     if command -v python3 >/dev/null 2>&1; then
@@ -253,6 +181,11 @@ _stage_prebuilt_release_archive() {
         rm -rf "${release_dir}"
         return 1
     fi
+    if [[ ! -f "${release_dir}/web/dist/index.html" || ! -s "${release_dir}/web/dist/index.html" ]] || [[ -z "$(find "${release_dir}/web/dist" -type f -name '*.wasm' -size +0c -print -quit 2>/dev/null)" ]]; then
+        echo "[ERROR] Extracted release is missing external frontend assets (web/dist/index.html and a non-empty .wasm file)." >&2
+        rm -rf "${release_dir}"
+        return 1
+    fi
 
     chmod 0755 "${release_dir}/aetherflow-api"
     local companion_bin
@@ -331,8 +264,15 @@ _stage_prebuilt_release_archive() {
     fi
 
     local tmp_link="${current_link}.tmp.${epoch}"
-    ln -s "${release_dir}" "${tmp_link}"
-    mv -Tf "${tmp_link}" "${current_link}"
+    if ! ln -s "${release_dir}" "${tmp_link}"; then
+        rm -rf "${release_dir}"
+        return 1
+    fi
+    if ! mv -Tf "${tmp_link}" "${current_link}"; then
+        rm -f "${tmp_link}"
+        rm -rf "${release_dir}"
+        return 1
+    fi
 
     # Maintain legacy path compatibility symlink for callers expecting /opt/AetherFlow/backend/aetherflow-api
     mkdir -p "${af_root}/backend"
@@ -481,53 +421,10 @@ except Exception:
 
 _build_modern_stack_from_source() {
     local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
-    local have_backend=false
-
-    # ── Build Frontend with Static Export ─────────────────────────────────
-    if [ -d "${af_root}/frontend" ]; then
-        local frontend_build_log="${TMPDIR:-/var/tmp}/aetherflow-frontend-build.log"
-        (
-            cd "${af_root}/frontend" || exit 1
-            export PATH="/usr/local/nodejs/bin:${PATH}"
-            export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
-            export NEXT_STATIC_EXPORT=1
-
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm install ..." >> "${frontend_build_log}" 2>&1
-            if ! npm install --no-fund --no-audit >> "${frontend_build_log}" 2>&1; then
-                echo "[FAIL] npm install failed. See ${frontend_build_log}" >&2
-                exit 1
-            fi
-
-            chmod 755 "${af_root}"/node_modules/.bin/* "${af_root}"/frontend/node_modules/.bin/* 2>/dev/null || true
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Next.js static export build ..." >> "${frontend_build_log}" 2>&1
-            if ! NEXT_STATIC_EXPORT=1 npm run build >> "${frontend_build_log}" 2>&1; then
-                echo "[FAIL] npm run build failed. See ${frontend_build_log}" >&2
-                exit 1
-            fi
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Frontend build completed successfully." >> "${frontend_build_log}" 2>&1
-        ) || {
-            echo ""
-            echo "══════════════════════════════════════════════════════════"
-            echo "  Frontend build failed. Dumping last 50 lines of log:"
-            echo "══════════════════════════════════════════════════════════"
-            tail -n 50 "${frontend_build_log}" 2>/dev/null || true
-            echo "══════════════════════════════════════════════════════════"
-            return 1
-        }
-
-        # Populate web/dist for single-binary rust-embed asset embedding
-        mkdir -p "${af_root}/web/dist"
-        rm -rf "${af_root}/web/dist/"*
-        if [ -d "${af_root}/frontend/out" ]; then
-            cp -r "${af_root}/frontend/out/"* "${af_root}/web/dist/"
-        fi
+    if [[ ! -f "${af_root}/frontend-rs/Cargo.toml" ]]; then
+        echo "[ERROR] Missing Rust WASM frontend manifest: ${af_root}/frontend-rs/Cargo.toml" >&2
+        return 1
     fi
-
-    # ── Compile Single Binary with Embedded UI Assets (Rust backend-rs only) ──
-    local epoch
-    epoch="$(date +%s)"
-    local release_dir="${af_root}/releases/${epoch}"
-    mkdir -p "${release_dir}"
 
     export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:/usr/local/cargo/bin:${PATH}"
     local need_rust_bootstrap=0
@@ -609,79 +506,117 @@ _build_modern_stack_from_source() {
         fi
     fi
 
-    if [ -d "${af_root}/backend-rs" ] && command -v cargo >/dev/null 2>&1; then
-        have_backend=true
-        (
-            cd "${af_root}/backend-rs" || exit 1
-            if ! command -v mold >/dev/null 2>&1; then
-                export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
-            fi
-            local -a locked_args=(--locked)
-            if [[ ! -f "${af_root}/backend-rs/Cargo.lock" ]]; then
-                if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
-                    locked_args=()
-                else
-                    echo "[ERROR] Missing ${af_root}/backend-rs/Cargo.lock. Refusing unlocked source build." >&2
-                    exit 1
-                fi
-            fi
-            local af_build_ver="source-${epoch}"
-            if [[ -f "${af_root}/.version" ]]; then
-                af_build_ver="$(tr -d '\r\n' < "${af_root}/.version")"
-            fi
-            local -a bin_args=(--bin aetherflow-api --bin af)
-            if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
-                bin_args+=(--bin speedtest-backend)
-            fi
-            AF_BUILD_VERSION="${af_build_ver}" AETHERFLOW_VERSION="${af_build_ver}" \
-                cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
-            local cargo_target_dir="${CARGO_TARGET_DIR:-${af_root}/backend-rs/target}"
-            cp -f "${cargo_target_dir}/release/aetherflow-api" "${release_dir}/aetherflow-api"
-            local built_bin
-            for built_bin in af speedtest-backend; do
-                if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
-                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/${built_bin}"
-                    mkdir -p "${release_dir}/bin"
-                    cp -f "${cargo_target_dir}/release/${built_bin}" "${release_dir}/bin/${built_bin}"
-                fi
-            done
-        ) || {
-            rm -rf "${release_dir}"
-            echo "Rust backend compilation failed." >&2
-            return 1
-        }
+    local wasm_tool_dir="${WASM_TOOL_DIR:-/usr/local/lib/aetherflow-wasm-tools}"
+    export PATH="${wasm_tool_dir}/bin:${HOME}/.cargo/bin:${PATH}"
+    export TRUNK_TOOLS_WASM_OPT=version_133
+    (
+        cd "${af_root}" || exit 1
+        WASM_TOOL_DIR="${wasm_tool_dir}" bash "${af_root}/scripts/install_wasm_build_tools.sh" --ensure
+    ) || return 1
+    FRONTEND_DIST_DIR="${af_root}/web/dist" bash "${af_root}/scripts/build_wasm_frontend.sh" --stage || return 1
+    if [[ ! -f "${af_root}/web/dist/index.html" || ! -s "${af_root}/web/dist/index.html" ]] || [[ -z "$(find "${af_root}/web/dist" -type f -name '*.wasm' -size +0c -print -quit 2>/dev/null)" ]]; then
+        echo "[ERROR] Rust WASM frontend staging missing non-empty index.html or .wasm file in web/dist." >&2
+        return 1
     fi
 
-    if [[ "${have_backend}" != "true" ]]; then
-        rm -rf "${release_dir}"
+    if [[ ! -d "${af_root}/backend-rs" ]] || ! command -v cargo &>/dev/null; then
         echo "[ERROR] Rust backend source (${af_root}/backend-rs) and cargo toolchain are required for --from-source builds." >&2
         return 1
     fi
 
-    [[ -d "${af_root}/config" ]] && cp -R "${af_root}/config" "${release_dir}/config"
-    [[ -d "${af_root}/packages" ]] && cp -R "${af_root}/packages" "${release_dir}/packages"
-    [[ -d "${af_root}/deploy" ]] && cp -R "${af_root}/deploy" "${release_dir}/deploy"
-    printf 'source-%s\n' "${epoch}" > "${release_dir}/.version"
-
-    find "${release_dir}" -type d -exec chmod 0755 {} +
-    find "${release_dir}" -type f -exec chmod a+r,go-w {} +
-    chmod 0755 "${release_dir}/aetherflow-api"
-    local companion_chmod
-    for companion_chmod in af speedtest-backend; do
-        [[ -f "${release_dir}/${companion_chmod}" ]] && chmod 0755 "${release_dir}/${companion_chmod}"
-        [[ -f "${release_dir}/bin/${companion_chmod}" ]] && chmod 0755 "${release_dir}/bin/${companion_chmod}"
+    local releases_dir="${af_root}/releases"
+    local epoch release_dir
+    epoch="$(date +%s)"
+    release_dir="${releases_dir}/${epoch}"
+    mkdir -p "${releases_dir}" || return 1
+    while ! mkdir "${release_dir}" 2>/dev/null; do
+        [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+        epoch=$((epoch + 1))
+        release_dir="${releases_dir}/${epoch}"
     done
 
-    local releases_dir="${af_root}/releases"
+    (
+        cd "${af_root}/backend-rs" || exit 1
+        if ! command -v mold >/dev/null 2>&1; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-Wl,--as-needed}"
+        fi
+        local -a locked_args=(--locked)
+        if [[ ! -f "${af_root}/backend-rs/Cargo.lock" ]]; then
+            if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
+                locked_args=()
+            else
+                echo "[ERROR] Missing ${af_root}/backend-rs/Cargo.lock. Refusing unlocked source build." >&2
+                exit 1
+            fi
+        fi
+        local af_build_ver="source-${epoch}"
+        if [[ -f "${af_root}/.version" ]]; then
+            af_build_ver="$(tr -d '\r\n' < "${af_root}/.version")"
+        fi
+        local -a companion_bins=(af)
+        if [[ -f "${af_root}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
+            companion_bins+=(speedtest-backend)
+        fi
+        local -a bin_args=(--bin aetherflow-api)
+        local built_bin
+        for built_bin in "${companion_bins[@]}"; do
+            bin_args+=(--bin "${built_bin}")
+        done
+        AF_BUILD_VERSION="${af_build_ver}" AETHERFLOW_VERSION="${af_build_ver}" \
+            cargo build --release "${locked_args[@]}" "${bin_args[@]}" || exit 1
+        local cargo_target_dir="${CARGO_TARGET_DIR:-${af_root}/backend-rs/target}"
+        [[ "${cargo_target_dir}" == /* ]] || cargo_target_dir="${af_root}/backend-rs/${cargo_target_dir}"
+        install -m 0755 "${cargo_target_dir}/release/aetherflow-api" "${release_dir}/aetherflow-api" || exit 1
+        mkdir -p "${release_dir}/bin" || exit 1
+        for built_bin in "${companion_bins[@]}"; do
+            install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${release_dir}/${built_bin}" || exit 1
+            install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${release_dir}/bin/${built_bin}" || exit 1
+        done
+    ) || {
+        rm -rf "${release_dir}"
+        echo "Rust backend compilation failed." >&2
+        return 1
+    }
+
+    (
+        mkdir -p "${release_dir}/web/dist" || exit 1
+        cp -a "${af_root}/web/dist/." "${release_dir}/web/dist/" || exit 1
+        local runtime_dir
+        for runtime_dir in config packages deploy; do
+            if [[ -d "${af_root}/${runtime_dir}" ]]; then
+                cp -R "${af_root}/${runtime_dir}" "${release_dir}/${runtime_dir}" || exit 1
+            fi
+        done
+        printf 'source-%s\n' "${epoch}" > "${release_dir}/.version" || exit 1
+        find "${release_dir}" -type d -exec chmod 0755 {} + || exit 1
+        find "${release_dir}" -type f -exec chmod a+r,go-w {} + || exit 1
+        local runtime_script
+        for runtime_script in release-manager.sh verify-provenance.py log-retention.py; do
+            if [[ -f "${release_dir}/deploy/${runtime_script}" ]]; then
+                chmod 0755 "${release_dir}/deploy/${runtime_script}" || exit 1
+            fi
+        done
+    ) || {
+        rm -rf "${release_dir}"
+        return 1
+    }
+
     local current_link="${af_root}/current"
     if [[ -L "${current_link}" ]]; then
         readlink -f "${current_link}" > "${releases_dir}/.previous_release" 2>/dev/null || true
     fi
 
     local tmp_link="${current_link}.tmp.${epoch}"
-    ln -s "${release_dir}" "${tmp_link}"
-    mv -Tf "${tmp_link}" "${current_link}"
+    if ! ln -s "${release_dir}" "${tmp_link}"; then
+        rm -rf "${release_dir}"
+        return 1
+    fi
+    if ! mv -Tf "${tmp_link}" "${current_link}"; then
+        rm -f "${tmp_link}"
+        rm -rf "${release_dir}"
+        return 1
+    fi
 
     mkdir -p "${af_root}/backend"
     ln -sfn "${current_link}/aetherflow-api" "${af_root}/backend/aetherflow-api"
@@ -730,6 +665,7 @@ _build_modern_stack() {
     local data_dir="${AF_DATA_DIR:-/var/lib/aetherflow}"
     local sysd_dst="${AF_SYSTEMD_DIR:-/etc/systemd/system}"
     local run_dir="${AF_RUN_DIR:-/run/aetherflow}"
+    local log_dir="${AF_LOG_DIR:-/var/log/aetherflow}"
 
     if _af_modern_from_source_enabled; then
         echo "Explicit --from-source mode enabled: compiling control plane from source..."
@@ -754,11 +690,11 @@ _build_modern_stack() {
     fi
 
     # Ensure FHS data dir, log dir, and legacy backend data dir exist
-    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" /var/log/aetherflow 2>/dev/null || true
+    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" "${log_dir}" 2>/dev/null || true
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
         chown -R aetherflow:aetherflow "${data_dir}" "${af_root}/backend/data" 2>/dev/null || true
-        chown root:aetherflow "${run_dir}" /var/log/aetherflow 2>/dev/null || true
-        chmod 0750 "${run_dir}" /var/log/aetherflow 2>/dev/null || true
+        chown root:aetherflow "${run_dir}" "${log_dir}" 2>/dev/null || true
+        chmod 0750 "${run_dir}" "${log_dir}" 2>/dev/null || true
     fi
     chmod 0700 "${data_dir}" 2>/dev/null || true
 

@@ -1,7 +1,7 @@
 """
 Tier 2: Boundary & Corner Cases (Adversarial Verification)
 Features:
-- B32: Single-Binary Build Pipeline Boundaries
+- B32: Rust API and External WASM Build Pipeline Boundaries
 - B33: Systemd Privilege Boundary Boundaries
 - B34: Sudoers & PM2 Purge Boundaries
 - B35: Shell Script Line Endings & Syntax Boundaries
@@ -12,7 +12,7 @@ Features:
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 # ============================================================================
-# B32: Single-Binary Build Pipeline Boundaries
+# B32: Rust API and External WASM Build Pipeline Boundaries
 # ============================================================================
 class TestB32StaticExportFailureHaltsPipeline(TestCase):
     def __init__(self):
@@ -24,11 +24,37 @@ class TestB32StaticExportFailureHaltsPipeline(TestCase):
 
 class TestB32SpaFallbackRouteHandling(TestCase):
     def __init__(self):
-        super().__init__("T2_B32_02", "F32", 2, "Single binary serves index.html on deep non-asset paths (SPA fallback)")
+        super().__init__("T2_B32_02", "F32", 2, "External WASM SPA serves deep links and returns 404 for missing assets")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        embed = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
-        self.assert_true(bool(embed and "index.html" in embed and "EmbeddedNeutralDist" in embed), "B32: embed.rs must handle SPA client-side routing fallback")
+        if mode != "live":
+            routes = inspector.read_file("backend-rs/crates/af-api/src/routes.rs") or ""
+            embed = inspector.read_file("backend-rs/crates/af-api/src/embed.rs") or ""
+            self.assert_in(".fallback(spa_fallback_handler)", routes, "B32: API must register the SPA fallback")
+            self.assert_in("fn missing_assets_are_404_but_document_routes_use_the_spa(", embed,
+                           "B32: Rust tests must exercise deep links and missing assets")
+            return
+
+        def get(path):
+            status, body, headers = client.request("GET", path, headers={"Accept-Encoding": "identity"})
+            content_type = next((value for name, value in headers.items() if name.lower() == "content-type"), "")
+            return status, body, content_type.split(";", 1)[0]
+
+        for path in ("/", "/settings/display"):
+            status, body, content_type = get(path)
+            self.assert_status_code(status, 200, f"B32: {path} must serve the SPA document")
+            self.assert_equal(content_type, "text/html", f"B32: {path} must serve HTML")
+            if path == "/":
+                index = body.get("raw")
+                self.assert_true(bool(index), "B32: SPA document must not be empty")
+            else:
+                self.assert_true(body.get("raw") == index, f"B32: {path} must serve the same document as /")
+
+        for path in ("/assets/aetherflow-e2e-missing", "/aetherflow-e2e-missing.wasm"):
+            status, body, content_type = get(path)
+            self.assert_status_code(status, 404, f"B32: missing asset {path} must return 404")
+            self.assert_equal(content_type, "application/json", f"B32: missing asset {path} must return JSON")
+            self.assert_equal(body.get("error"), "not_found", f"B32: {path} must return a not_found error")
 
 class TestB32StaticAssetMimeTypesCorrect(TestCase):
     def __init__(self):

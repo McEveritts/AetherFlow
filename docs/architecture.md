@@ -1,13 +1,13 @@
 # Architecture
 
-AetherFlow v4.0.0 is engineered as a high-concurrency, single-binary **Rust** control plane (`backend-rs` -> `aetherflow-api`) for bare-metal Linux systems. It embeds the compiled Next.js 16 static UI directly into the Rust binary (`rust-embed` in `af-api`), isolates privileged host operations behind a root-owned UNIX domain socket daemon (`aetherflow-runner.service`, implemented by `af-runner`), and orchestrates bare-metal workloads via **systemd** and **Apache2** with a strict **Zero-Docker mandate**.
+AetherFlow v4.0.0 runs a Rust control plane (`backend-rs` → `aetherflow-api`) on bare-metal Linux. It serves the Leptos dashboard and workers from `web/dist` next to the executable. A root-owned socket daemon (`aetherflow-runner.service`, implemented by `af-runner`) isolates privileged operations. AetherFlow runs workloads directly with **systemd** and **Apache2**.
 
 ## System Overview
 
 ```mermaid
 graph TD
     User((User)) --> Apache["Apache2 + Subdomain Gateway"]
-    Apache --> API["Single-Binary Rust Control Plane + Embedded Next.js UI (aetherflow-api.service / af-api)"]
+    Apache --> API["Rust Control Plane and WASM Dashboard (aetherflow-api.service / af-api)"]
     API --> Auth["Auth Layer (HS256 JWT + TOTP + OIDC + CSRF + Rate Limiter)"]
     API --> WS["Tokio Broadcast WebSocket Telemetry & Notifications"]
     API --> DB[("/var/lib/aetherflow/aetherflow.sqlite (rusqlite WAL + AES-256-GCM)")]
@@ -25,9 +25,9 @@ graph TD
 
 Twelve workspace crates compile into `aetherflow-api` (serving the unprivileged HTTP/WebSocket control plane, the zero-CDN OpenAPI 3.1 viewer, and the `aetherflow-api runner` root socket daemon), the unified `af` (`af-cli`) administrative CLI binary, the native `speedtest-backend` (`af-librespeed`) LibreSpeed daemon, and the streaming verification harness (`af-streaming-tests`).
 
-### 1. `af-api` (`backend-rs/crates/af-api`) — HTTP/WS Control Plane & Embedded SPA
-- **Zero Production Node.js Runtime**: Next.js 16 compiles to a static export (`NEXT_STATIC_EXPORT=1`) during CI, is staged into `web/dist/`, and is embedded into `aetherflow-api` via `rust-embed` (`backend-rs/crates/af-api/src/embed.rs`).
-- **5-Step Static & RSC Resolution**: `serve_spa_request` resolves exact asset paths, `<route>/index.html`, `<route>.html`, and dynamic Next.js route shells (`/marketplace/[id]` -> `/marketplace/__placeholder__/index.html`, plus RSC `.txt` payload fallback) while serving `/_next/static/*` with `Cache-Control: public, max-age=31536000, immutable`.
+### 1. `af-api` (`backend-rs/crates/af-api`) — HTTP/WS Control Plane and Dashboard
+- **Rust WASM UI**: Trunk builds `frontend-rs/` into static HTML, CSS, JavaScript loaders, and WebAssembly for the app and workers. CI stages these as separate `web/dist` release assets. Serving the dashboard requires no Node.js process.
+- **Static serving**: The API serves existing assets from the selected directory and returns `index.html` for supported client routes. Entry points revalidate; content-addressed assets can be cached for a year.
 - **Security, Plugin RBAC & Gateway Middleware**: Enforces HS256 JWT session validation (`aetherflow_session` cookie or `Authorization: Bearer`), plugin-scoped JWT route-scope verification (`plugin_id` + `plugin_scopes`), SQLite-backed token revocation and active session tracking, TOTP 2FA, OIDC/OAuth2 PKCE, state-changing CSRF origin/token checks, per-IP rate limiting, and streaming subdomain & plugin reverse proxying (`Body::from_stream` without full-body RAM buffering).
 - **Control Plane Subsystems**: Hosts REST and WebSocket endpoints for Marketplace management, Native McBrowser file operations (`af-files`), FlowAI multi-provider intelligence (`intelligence.rs`), canonical Streaming History & reconciliation, MediaFlow transcoding/polling, GitHub release update checking (with 5-minute response cache, `X-RateLimit-Reset` / `Retry-After` backoff, `stable`/`nightly` channel filtering, and branch-head SHA fallback), backup archive chunked uploads/restores, multi-node cluster enrollment, and user storage quotas.
 

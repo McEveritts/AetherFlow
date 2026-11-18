@@ -8,7 +8,7 @@ AetherFlow supports three release channels managed from **Settings → System Up
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |
-| **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified single-binary Rust release bundles (`v4.0.0+`). |
+| **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified Rust release bundles (`v4.0.0+`). |
 | **Nightly (`nightly`)** | `nightly` / versioned GitHub pre-releases | Rolling | Rolling v4 Rust control plane updates, new Marketplace apps, and early validation (`v4.0.0-nightly.<run>.<attempt>`). |
 
 The experimental release track is retired. Existing `experimental` channel settings and CLI arguments migrate to `nightly`; historical tags and releases remain available.
@@ -33,7 +33,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Upgrading from v3.2.x to v4.0.0
 
-v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 12-crate **Rust (`Axum` + `Tokio`)** workspace compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`). The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
+v4.0.0 replaces the legacy Go control plane (Zero-Go codebase) with the 12-crate **Rust (`Axum` + `Tokio`)** workspace compiling `aetherflow-api`, the unified `af` (`af-cli`) binary, and the native Rust `speedtest-backend` (`af-librespeed`). The Leptos dashboard ships as external `web/dist` files. The updater switches the complete release together and preserves the existing HTTP/WebSocket API, `/run/aetherflow/runner.sock` socket, and SQLite data.
 
 ### Live SQLite Database Path Resolution
 Both `af-release` and `deploy/release-manager.sh` resolve the live SQLite database in this exact 4-tier order:
@@ -63,25 +63,22 @@ If the post-swap `/health/ready` readiness probe fails, `current` automatically 
 
 ## Building & Deploying from Source
 
-To compile and package the v4.0.0 single-binary Rust release bundle locally:
+To compile and package the API, CLI, LibreSpeed companion, and matching WASM dashboard locally:
 
 ```bash
-# Build Next.js 16 static export, run Zero-Go Rust workspace tests, and package aetherflow-api + af + speedtest-backend
+# Install the pinned WASM build tools and add the printed tool directory to PATH.
+bash scripts/install_wasm_build_tools.sh --ensure
+# Build WASM, run the Rust workspace tests, and package the release.
 bash scripts/build_gold.sh
 ```
 
 Or step-by-step:
 
 ```bash
-# 1. Build Frontend Static Export
-npm ci
-cd frontend && NEXT_STATIC_EXPORT=1 npm run build && cd ..
-rm -rf web/dist && mkdir -p web/dist
-cp -R frontend/out/. web/dist/
-
-# 2. Build Pure-Rust Control Plane, Admin CLI & Native LibreSpeed Backend
-cd backend-rs
-cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
+# Build and stage the external dashboard first.
+bash scripts/build_wasm_frontend.sh --stage
+# Build and package the native binaries with that staged dashboard.
+BUILD_FRONTEND=0 bash scripts/build_gold.sh
 ```
 
 ---

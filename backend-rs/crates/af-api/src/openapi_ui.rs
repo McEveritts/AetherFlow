@@ -55,6 +55,8 @@ const OPENAPI_VIEWER_HTML: &str = r####"<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AetherFlow API — OpenAPI 3.1 Documentation</title>
+<!-- Prevent an implicit request for /favicon.ico. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http%3A//www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='6'%20fill='%23172554'/%3E%3Cpath%20d='m12%209-7%207%207%207m8-14%207%207-7%207'%20fill='none'%20stroke='%237dd3fc'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg-base: #07090e;

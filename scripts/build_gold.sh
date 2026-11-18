@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
+# Honor an explicitly selected toolchain (including build harnesses); fall back
+# to rustup only when cargo is absent from the caller's PATH.
+if ! command -v cargo >/dev/null 2>&1; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_RS_DIR="${BACKEND_RS_DIR:-${ROOT_DIR}/backend-rs}"
-FRONTEND_DIR="${FRONTEND_DIR:-${ROOT_DIR}/frontend}"
 CONFIG_DIR="${CONFIG_DIR:-${ROOT_DIR}/config}"
-EMBED_DIST_DIR="${EMBED_DIST_DIR:-${ROOT_DIR}/web/dist}"
+FRONTEND_DIST_DIR="${FRONTEND_DIST_DIR:-${EMBED_DIST_DIR:-${ROOT_DIR}/web/dist}}"
 VERSION_FILE="${VERSION_FILE:-${ROOT_DIR}/.version}"
 VERSION="${VERSION:-$(tr -d '\r\n' < "${VERSION_FILE}")}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-Gold}"
@@ -21,17 +26,30 @@ PACKAGE_SPEEDTEST_STANDALONE="${PACKAGE_SPEEDTEST_STANDALONE:-0}"
 CARGO_LOCKED="${CARGO_LOCKED:-1}"
 CARGO_ALLOW_UNLOCKED_DEV="${CARGO_ALLOW_UNLOCKED_DEV:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist/gold/${VERSION}}"
-BUILD_DATE="${BUILD_DATE:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 RUN_TESTS="${RUN_TESTS:-1}"
 BUILD_FRONTEND="${BUILD_FRONTEND:-1}"
+FRONTEND_ENGINE="${FRONTEND_ENGINE:-wasm}"
 PACKAGE_RELEASE="${PACKAGE_RELEASE:-1}"
 TARGETS="${TARGETS:-amd64}"
 
 if command -v git >/dev/null 2>&1; then
   GIT_COMMIT="${GIT_COMMIT:-$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || printf 'unknown')}"
+  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "${ROOT_DIR}" show -s --format=%ct HEAD 2>/dev/null || printf '0')}"
 else
   GIT_COMMIT="${GIT_COMMIT:-unknown}"
+  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 fi
+if [[ ! "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
+  echo "error: SOURCE_DATE_EPOCH must be a non-negative integer" >&2
+  exit 1
+fi
+if [[ -z "${BUILD_DATE:-}" ]]; then
+  BUILD_DATE="$(date -u -d "@${SOURCE_DATE_EPOCH}" +"%Y-%m-%dT%H:%M:%SZ")" || {
+    echo "error: SOURCE_DATE_EPOCH is outside the supported date range" >&2
+    exit 1
+  }
+fi
+export SOURCE_DATE_EPOCH
 
 require_tool() {
   local tool="$1"
@@ -52,7 +70,7 @@ resolve_cargo_locked_args() {
       CARGO_LOCKED_ARGS=(--locked)
       ;;
     0|false|FALSE|no|NO)
-      if [[ "${CARGO_ALLOW_UNLOCKED_DEV}" != "1" ]]; then
+      if [[ "${PACKAGE_RELEASE}" == "1" || "${CARGO_ALLOW_UNLOCKED_DEV}" != "1" ]]; then
         echo "error: CARGO_LOCKED=0 is only permitted for non-release dev builds when CARGO_ALLOW_UNLOCKED_DEV=1" >&2
         exit 1
       fi
@@ -146,7 +164,7 @@ build_target() {
 
   mkdir -p "${target_dir}"
 
-  echo "==> Building single-binary ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
+  echo "==> Building ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
   (
     cd "${BACKEND_RS_DIR}"
     export AETHERFLOW_VERSION="${VERSION}"
@@ -192,6 +210,10 @@ build_target() {
     exit 1
   fi
 
+  # Each invocation publishes a fresh tree, including when rebuilding a version.
+  # Copying directories onto the previous tree nests config/config and packages/packages.
+  rm -rf -- "${target_dir}"
+  mkdir -p "${target_dir}"
   cp "${compiled_bin}" "${artifact}"
   chmod 0755 "${artifact}"
 
@@ -204,31 +226,63 @@ build_target() {
     stage_companion_binary "${compiled_speedtest}" "${target_dir}" "${SPEEDTEST_BINARY_NAME}"
   fi
 
-  cp -R "${cfg_src}" "${target_dir}/config"
-  cp -R "${ROOT_DIR}/packages" "${target_dir}/packages"
-  cp -R "${ROOT_DIR}/deploy" "${target_dir}/deploy"
+  local -a runtime_excludes=(--exclude='node_modules' --exclude='__pycache__' \
+    --exclude='*.pyc' --exclude='*.pyo' --exclude='*.tsbuildinfo' \
+    --exclude='.cache' --exclude='.pytest_cache' --exclude='.mypy_cache' \
+    --exclude='.ruff_cache' --exclude='.tox' --exclude='.venv' --exclude='.turbo' \
+    --exclude='.next' --exclude='target')
+  if frontend_assets_present "${FRONTEND_DIST_DIR}"; then
+    mkdir -p "${target_dir}/web/dist"
+    tar -C "${FRONTEND_DIST_DIR}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/web/dist" -xpf -
+  fi
+  if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! frontend_assets_present "${target_dir}/web/dist"; then
+    echo "error: packaged web/dist requires non-empty index.html and a .wasm file" >&2
+    exit 1
+  fi
+
+  mkdir -p "${target_dir}/config"
+  tar -C "${cfg_src}" "${runtime_excludes[@]}" -cf - . | tar -C "${target_dir}/config" -xpf -
+  tar -C "${ROOT_DIR}" "${runtime_excludes[@]}" --exclude='packages/ui' \
+    -cf - packages deploy | tar -C "${target_dir}" -xpf -
   printf '%s\n' "${VERSION}" > "${target_dir}/.version"
   chmod 0755 "${target_dir}" "${target_dir}/deploy/release-manager.sh"
-
-  if [[ "${PACKAGE_RELEASE}" == "1" ]] && command -v tar >/dev/null 2>&1; then
-    tar --owner=0 --group=0 --numeric-owner -C "${target_dir}" -czf "${archive}" . 2>/dev/null \
-      || tar -C "${target_dir}" -czf "${archive}" .
-    if command -v sha256sum >/dev/null 2>&1; then
-      (cd "${OUTPUT_DIR}" && sha256sum "aetherflow-linux-${arch}.tar.gz" >> SHA256SUMS)
+  for runtime_script in verify-provenance.py log-retention.py; do
+    if [[ -f "${target_dir}/deploy/${runtime_script}" ]]; then
+      chmod 0755 "${target_dir}/deploy/${runtime_script}"
     fi
+  done
+
+  if [[ "${PACKAGE_RELEASE}" == "1" ]]; then
+    package_archive "${target_dir}" "${archive}" .
+    (cd "${OUTPUT_DIR}" && sha256sum "aetherflow-linux-${arch}.tar.gz" >> SHA256SUMS)
     if [[ "${PACKAGE_SPEEDTEST_STANDALONE}" == "1" && -n "${compiled_speedtest}" && -f "${target_dir}/${SPEEDTEST_BINARY_NAME}" ]]; then
       local clean_ver="${VERSION#v}"
       local speedtest_archive_name="speedtest-backend_${clean_ver}_linux_${arch}.tar.gz"
-      tar --owner=0 --group=0 --numeric-owner -C "${target_dir}" -czf "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}" 2>/dev/null \
-        || tar -C "${target_dir}" -czf "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}"
-      if command -v sha256sum >/dev/null 2>&1; then
-        (cd "${OUTPUT_DIR}" && sha256sum "${speedtest_archive_name}" >> SHA256SUMS)
-      fi
+      package_archive "${target_dir}" "${OUTPUT_DIR}/${speedtest_archive_name}" "${SPEEDTEST_BINARY_NAME}"
+      (cd "${OUTPUT_DIR}" && sha256sum "${speedtest_archive_name}" >> SHA256SUMS)
     fi
   fi
 }
 
+package_archive() {
+  local source_dir="$1" archive="$2" entry="$3"
+  # Normalize runtime permissions and metadata for reproducible tarballs.
+  tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+    --mode='a=rX,u+w,a-s,a-t' --format=gnu -C "${source_dir}" -cf - "${entry}" | gzip -n -c > "${archive}"
+}
+
+frontend_assets_present() {
+  local dir="$1"
+  [[ -f "${dir}/index.html" && ! -L "${dir}/index.html" && -s "${dir}/index.html" ]] && \
+    [[ -n "$(find "${dir}" -type f -name '*.wasm' -size +0c -print -quit)" ]]
+}
+
 require_tool cargo
+require_tool tar
+if [[ "${PACKAGE_RELEASE}" == "1" ]]; then
+  require_tool gzip
+  require_tool sha256sum
+fi
 
 if [[ ! -f "${BACKEND_RS_DIR}/Cargo.toml" ]]; then
   echo "error: Rust workspace manifest not found at ${BACKEND_RS_DIR}/Cargo.toml" >&2
@@ -237,22 +291,25 @@ fi
 
 resolve_cargo_locked_args
 
+if [[ "${PACKAGE_RELEASE}" == "1" ]] && { [[ "${BUILD_CLI}" != "1" ]] || [[ ! -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; }; then
+  echo "error: full release requires the af CLI (BUILD_CLI=1 and af-cli manifest)" >&2
+  exit 1
+fi
+
 mkdir -p "${OUTPUT_DIR}"
 rm -f "${OUTPUT_DIR}/SHA256SUMS"
 
 if [[ "${BUILD_FRONTEND}" == "1" ]]; then
-  require_tool npm
-  echo "==> Building Next.js static export (NEXT_STATIC_EXPORT=1)"
-  (
-    cd "${FRONTEND_DIR}"
-    env NEXT_STATIC_EXPORT=1 npm run build
-  )
-  rm -rf "${EMBED_DIST_DIR}"
-  mkdir -p "${EMBED_DIST_DIR}"
-  cp -R "${FRONTEND_DIR}/out/." "${EMBED_DIST_DIR}/"
-else
-  # Ensure web/dist exists so rust-embed in af-api compiles cleanly when BUILD_FRONTEND=0
-  mkdir -p "${EMBED_DIST_DIR}"
+  if [[ "${FRONTEND_ENGINE}" != "wasm" ]]; then
+    echo "error: FRONTEND_ENGINE must be wasm; legacy frontend builds are retired" >&2
+    exit 2
+  fi
+  FRONTEND_DIST_DIR="${FRONTEND_DIST_DIR}" bash "${ROOT_DIR}/scripts/build_wasm_frontend.sh" --stage
+fi
+
+if [[ "${PACKAGE_RELEASE}" == "1" ]] && ! frontend_assets_present "${FRONTEND_DIST_DIR}"; then
+  echo "error: full release requires non-empty index.html and a .wasm file in '${FRONTEND_DIST_DIR}'" >&2
+  exit 1
 fi
 
 if [[ "${RUN_TESTS}" == "1" ]]; then
@@ -270,10 +327,13 @@ if [[ "${RUN_TESTS}" == "1" ]]; then
     fi
     cargo test "${CARGO_LOCKED_ARGS[@]}" --workspace
   )
+  if [[ -f "${ROOT_DIR}/frontend-rs/Cargo.toml" ]]; then
+    cargo test "${CARGO_LOCKED_ARGS[@]}" --manifest-path "${ROOT_DIR}/frontend-rs/Cargo.toml" --workspace
+  fi
 fi
 
 for arch in ${TARGETS}; do
   build_target "${arch}"
 done
 
-echo "==> Single-binary Rust release artifacts and SHA256SUMS ready in ${OUTPUT_DIR}"
+echo "==> Rust release artifacts and external frontend assets ready in ${OUTPUT_DIR}"

@@ -1,3 +1,12 @@
+## Nightly Patch Notes — November 18, 2026 — Rust WASM Dashboard
+
+- Ship the Leptos dashboard and workers as separate `web/dist` files beside the Rust API, `af` CLI, and LibreSpeed `speedtest-backend`. The release uses the Zero-Go layout and canonical `config/` directory.
+- Cancel superseded Network diagnostic reads and public-share directory reads. Leaving Network or switching public-share tokens also releases pending requests.
+- Keep failed FlowAI turns out of retry history and preserve dashboard sessions and drafts when a plugin returns HTTP 401. Public-share previews respect download permissions, cancel stale reads, and enforce size limits while streaming.
+- Improve selected editor text contrast and Network table accessibility. Add browser coverage for the recovery flows, share behavior, and live Users and Notifications persistence.
+
+---
+
 ## Nightly Patch Notes — November 15, 2026 — Zero-Go Cutover, Native Rust LibreSpeed & Neutral Staging
 
 This release completes the **Zero-Go cutover** across AetherFlow's repository layout, CI/release/security pipelines, test suites, and documentation (superseding all legacy Go toolchain/SAST gates referenced in pre-cutover release notes below):

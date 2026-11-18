@@ -1,0 +1,44 @@
+[package]
+name = "af-web-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["ui"]
+ui = ["dep:af-models", "dep:url", "dep:percent-encoding", "dep:qrcode", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:serde-wasm-bindgen", "dep:futures", "dep:gloo-timers", "dep:gloo-events"]
+worker-engine = ["dep:regex", "dep:pulldown-cmark", "dep:pulldown-latex", "dep:ammonia"]
+
+[dependencies]
+af-models = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+regex = { version = "1.11", optional = true, default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl", "unicode-bool"] }
+url = { version = "2.5", optional = true }
+percent-encoding = { version = "2.3", optional = true }
+pulldown-cmark = { version = "0.13", optional = true }
+pulldown-latex = { version = "0.8", optional = true }
+ammonia = { version = "4", optional = true }
+qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
+
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys.workspace = true
+web-sys = { workspace = true, optional = true }
+serde-wasm-bindgen = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+gloo-timers = { workspace = true, optional = true }
+gloo-events = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Compile the engine in unit tests without a self-dependency lockfile change.
+regex = { version = "1.11", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl", "unicode-bool"] }
+pulldown-cmark = "0.13"
+pulldown-latex = "0.8"
+ammonia = "4"
+brotli = "8.0.2"
+
+[[example]]
+name = "compress-assets"
+path = "examples/compress_assets.rs"

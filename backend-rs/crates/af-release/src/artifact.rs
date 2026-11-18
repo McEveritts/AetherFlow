@@ -354,7 +354,7 @@ pub fn verify_artifact_checksum(
 
 /// Safely extracts a `.tar.gz` release archive into `release_dir` with strict Zip-Slip / path-traversal,
 /// ancestor symlink, destination collision, and symlink/device-node rejection, then validates the
-/// extracted `aetherflow-api` binary and `.version` stamp.
+/// extracted `aetherflow-api` binary, `.version` stamp, and external frontend assets.
 pub fn extract_and_validate_release_archive(
     archive_path: &Path,
     release_dir: &Path,
@@ -544,9 +544,73 @@ pub fn extract_and_validate_release_archive(
         )));
     }
 
+    validate_external_frontend_assets(release_dir)?;
     stage_running_release_manager(release_dir, config)?;
     prepare_release_permissions(release_dir)?;
     Ok(())
+}
+
+/// Checks the external UI layout without following links in the required paths.
+/// Archive extraction independently rejects all links and special entries.
+fn validate_external_frontend_assets(release_dir: &Path) -> ReleaseResult<()> {
+    crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
+    for relative in ["web", "web/dist"] {
+        let path = release_dir.join(relative);
+        let is_safe_dir = fs::symlink_metadata(&path)
+            .map(|m| !m.file_type().is_symlink() && m.is_dir())
+            .unwrap_or(false);
+        if !is_safe_dir {
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "Release archive is missing a regular directory {} for external frontend assets.",
+                path.display()
+            )));
+        }
+    }
+
+    let dist = release_dir.join("web/dist");
+    let index = dist.join("index.html");
+    let has_index = fs::symlink_metadata(&index)
+        .map(|m| !m.file_type().is_symlink() && m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if !has_index {
+        return Err(ReleaseError::ArtifactVerification(
+            "Release archive is missing a non-empty regular web/dist/index.html.".to_string(),
+        ));
+    }
+
+    let entries = fs::read_dir(&dist).map_err(|e| {
+        ReleaseError::ArtifactVerification(format!(
+            "Failed to inspect external frontend directory {}: {}",
+            dist.display(),
+            e
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Failed to inspect external frontend directory {}: {}",
+                dist.display(),
+                e
+            ))
+        })?;
+        if !entry.file_name().to_string_lossy().ends_with(".wasm") {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Failed to inspect frontend asset {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        if !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() > 0 {
+            return Ok(());
+        }
+    }
+    Err(ReleaseError::ArtifactVerification(
+        "Release archive is missing a non-empty regular web/dist/*.wasm file.".to_string(),
+    ))
 }
 
 /// Normalizes permissions across an extracted or staged release directory before symlink swap,
@@ -967,27 +1031,44 @@ pub fn stage_running_release_manager(
     Ok(())
 }
 
-/// Simulates an offline single-binary artifact extraction during `--dry-run --offline`,
-/// matching `simulate_offline_artifact` in `deploy/release-manager.sh`.
+/// Simulates the v4 release layout during `--dry-run --offline`.
+/// The generated binaries and frontend files are placeholders, not runnable release assets.
 pub fn simulate_offline_artifact(
     release_dir: &Path,
     config: &ReleaseConfig,
 ) -> ReleaseResult<String> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
-    for sub in ["deploy/systemd", "packages", "config", "bin"] {
+    for sub in ["deploy/systemd", "packages", "config", "bin", "web/dist"] {
         let dir = release_dir.join(sub);
         crate::fs_security::create_dir_all_no_symlinks(&dir, 0o755)?;
     }
-    for rel_bin in [
+    for binary in [
         "aetherflow-api",
         "af",
         "bin/af",
         "speedtest-backend",
         "bin/speedtest-backend",
     ] {
-        let bin_path = release_dir.join(rel_bin);
-        crate::fs_security::atomic_write_bytes_with_mode(&bin_path, b"#!/bin/bash\n", 0o755)?;
+        let bin_path = release_dir.join(binary);
+        crate::fs_security::atomic_write_bytes_with_mode(
+            &bin_path,
+            b"#!/bin/bash\n# Offline dry-run placeholder; not a release binary.\n",
+            0o755,
+        )?;
         set_executable_permission(&bin_path)?;
+    }
+    for (asset, contents) in [
+        (
+            "web/dist/index.html",
+            &b"<!-- Offline dry-run placeholder; not a frontend. -->\n"[..],
+        ),
+        ("web/dist/dry-run-placeholder.wasm", &b""[..]),
+    ] {
+        crate::fs_security::atomic_write_bytes_with_mode(
+            &release_dir.join(asset),
+            contents,
+            0o644,
+        )?;
     }
 
     let version_stamp = "v4.0.0-dryrun";
@@ -1508,6 +1589,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn create_isolated_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "af_release_stage_test_{}_{}_{}",
@@ -1527,6 +1616,53 @@ mod tests {
         };
         fs::create_dir_all(&cfg.releases_dir).expect("create releases_dir");
         cfg
+    }
+
+    #[test]
+    fn external_frontend_validation_rejects_symlinked_components() {
+        let root = create_isolated_root("frontend-symlinks");
+        let _cleanup = Cleanup(root.clone());
+        for component in [
+            "web",
+            "web/dist",
+            "web/dist/index.html",
+            "web/dist/app.wasm",
+        ] {
+            let case = root.join(component.replace('/', "-"));
+            let release = case.join("release");
+            let dist = release.join("web/dist");
+            fs::create_dir_all(&dist).unwrap();
+            fs::write(dist.join("index.html"), b"synthetic index").unwrap();
+            fs::write(dist.join("app.wasm"), b"synthetic wasm").unwrap();
+
+            let link = release.join(component);
+            let target = case.join("synthetic-target");
+            fs::rename(&link, &target).unwrap();
+            symlink(&target, &link).unwrap();
+            let err = validate_external_frontend_assets(&release).expect_err(component);
+            assert!(
+                matches!(&err, ReleaseError::ArtifactVerification(_)),
+                "{component}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn offline_frontend_placeholders_are_not_deployable_assets() {
+        let root = create_isolated_root("offline-frontend-placeholder");
+        let _cleanup = Cleanup(root.clone());
+        let release = root.join("release");
+        let cfg = ReleaseConfig::for_root(&root);
+
+        assert_eq!(
+            simulate_offline_artifact(&release, &cfg).unwrap(),
+            "v4.0.0-dryrun"
+        );
+        let err = validate_external_frontend_assets(&release)
+            .expect_err("dry-run assets must not qualify as a deployable frontend");
+        assert!(
+            matches!(&err, ReleaseError::ArtifactVerification(message) if message.contains("*.wasm"))
+        );
     }
 
     #[test]

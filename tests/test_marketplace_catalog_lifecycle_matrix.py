@@ -833,7 +833,8 @@ class InstallerFixture:
     """Rebase scripts and their real helpers; only fake host commands reach PATH."""
 
     def __init__(self, app):
-        self.temporary = tempfile.TemporaryDirectory(prefix=f"af-catalog-{app}-")
+        # Keep real installer scratch checks enabled on hosts whose /tmp is tmpfs.
+        self.temporary = tempfile.TemporaryDirectory(prefix=f"af-catalog-{app}-", dir="/var/tmp")
         self.root = Path(self.temporary.name)
         self.app = app
         self.metadata = CATALOG[app]

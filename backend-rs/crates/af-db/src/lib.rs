@@ -1845,6 +1845,62 @@ pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<P
     Ok(actions)
 }
 
+pub fn query_pending_actions(
+    status_filter: &str,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<PendingAction>, i64)> {
+    let conn = get_conn()?;
+    query_pending_actions_with_connection(&conn, status_filter, limit, offset)
+}
+
+fn query_pending_actions_with_connection(
+    conn: &Connection,
+    status_filter: &str,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<PendingAction>, i64)> {
+    let limit = if limit <= 0 { 50 } else { limit.clamp(1, 500) };
+    let offset = offset.max(0);
+    let predicate = match status_filter {
+        "all" | "" => "1 = 1",
+        "pending" => "COALESCE(status, 'pending') = 'pending'",
+        "approved_history" => "COALESCE(status, 'pending') IN ('approved', 'executed', 'failed')",
+        "approved" | "rejected" | "executed" | "failed" => "COALESCE(status, 'pending') = ?",
+        _ => anyhow::bail!("Invalid status filter"),
+    };
+    let mut bindings = Vec::<rusqlite::types::Value>::new();
+    if predicate.ends_with("= ?") {
+        bindings.push(status_filter.to_owned().into());
+    }
+    let total = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pending_actions WHERE {predicate}"),
+        rusqlite::params_from_iter(bindings.iter()),
+        |row| row.get::<_, i64>(0),
+    )?;
+    bindings.push(limit.into());
+    bindings.push(offset.into());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
+         FROM pending_actions WHERE {predicate} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+        Ok(PendingAction {
+            id: row.get(0)?,
+            classification: row.get(1)?,
+            source: row.get(2)?,
+            action: row.get(3)?,
+            reason: row.get(4)?,
+            status: row.get(5)?,
+            created_at: row.get(6)?,
+            resolved_at: row.get(7)?,
+            resolved_by: row.get(8)?,
+            execution_log: row.get(9)?,
+        })
+    })?;
+    Ok((rows.collect::<rusqlite::Result<Vec<_>>>()?, total))
+}
+
 pub fn get_pending_action_by_id(action_id: i64) -> anyhow::Result<Option<PendingAction>> {
     let conn = get_conn()?;
     get_pending_action_by_id_with_connection(&conn, action_id)
@@ -2697,5 +2753,115 @@ pub(crate) mod tests {
             Some(v) => env::set_var("AETHERFLOW_SKIP_ENV_FILES", v),
             None => env::remove_var("AETHERFLOW_SKIP_ENV_FILES"),
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_action_query_tests {
+    use super::*;
+
+    fn connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pending_actions (
+                id INTEGER PRIMARY KEY, classification TEXT, source TEXT, action TEXT,
+                reason TEXT, status TEXT, created_at TEXT, resolved_at TEXT,
+                resolved_by TEXT, execution_log TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn status_filter_precedes_pagination_and_counts_all_matching_rows() {
+        let conn = connection();
+        conn.execute(
+            "INSERT INTO pending_actions (id, action, status, created_at) VALUES (1, 'older-pending', 'pending', '2020-01-01')",
+            [],
+        )
+        .unwrap();
+        for id in 2..=506 {
+            conn.execute(
+                "INSERT INTO pending_actions (id, action, status, created_at) VALUES (?1, 'newer-executed', 'executed', '2026-01-01')",
+                params![id],
+            )
+            .unwrap();
+        }
+        let (pending, total) =
+            query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, 1);
+        assert_eq!(pending[0].action, "older-pending");
+        let (history, total) =
+            query_pending_actions_with_connection(&conn, "approved_history", 50, 0).unwrap();
+        assert_eq!(total, 505);
+        assert_eq!(history.len(), 50);
+        assert_eq!(history[0].id, 506);
+        assert_eq!(history[49].id, 457);
+        let (last_page, total) =
+            query_pending_actions_with_connection(&conn, "approved_history", 50, 500).unwrap();
+        assert_eq!(total, 505);
+        assert_eq!(
+            last_page.iter().map(|action| action.id).collect::<Vec<_>>(),
+            vec![6, 5, 4, 3, 2]
+        );
+        for filter in ["all", ""] {
+            let (actions, total) =
+                query_pending_actions_with_connection(&conn, filter, 1000, -1).unwrap();
+            assert_eq!(total, 506);
+            assert_eq!(actions.len(), 500);
+        }
+        assert_eq!(
+            query_pending_actions_with_connection(&conn, "executed", 0, 0)
+                .unwrap()
+                .0
+                .len(),
+            50
+        );
+        assert!(query_pending_actions_with_connection(&conn, "unknown", 50, 0).is_err());
+    }
+
+    #[test]
+    fn null_status_is_pending_and_history_includes_only_approved_outcomes() {
+        let conn = connection();
+        for (id, status) in [
+            None,
+            Some("approved"),
+            Some("rejected"),
+            Some("executed"),
+            Some("failed"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO pending_actions (id, status) VALUES (?1, ?2)",
+                params![id as i64, status],
+            )
+            .unwrap();
+        }
+        let (pending, total) =
+            query_pending_actions_with_connection(&conn, "pending", 50, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(pending[0].status, "pending");
+        let (history, total) =
+            query_pending_actions_with_connection(&conn, "approved_history", 50, 0).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            history.iter().map(|action| action.id).collect::<Vec<_>>(),
+            vec![4, 3, 1]
+        );
+        for filter in ["approved", "rejected", "executed", "failed"] {
+            let (actions, total) =
+                query_pending_actions_with_connection(&conn, filter, 1, 0).unwrap();
+            assert_eq!(total, 1);
+            assert_eq!(actions[0].status, filter);
+        }
+        let (actions, total) =
+            query_pending_actions_with_connection(&conn, "pending", 50, 1).unwrap();
+        assert_eq!(total, 1);
+        assert!(actions.is_empty());
     }
 }

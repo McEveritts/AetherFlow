@@ -75,6 +75,70 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
                     self.assertEqual(outcome.returncode, 0, outcome.stderr)
                     self.assertEqual(outcome.stdout, expected)
 
+    @unittest.skipUnless(os.name == "posix", "Bash package setup requires the remote Linux test environment")
+    def test_package_dependencies_do_not_prefetch_node(self):
+        probe = r"""
+set -euo pipefail
+PATH="$PWD"
+source "$1"
+source "$2"
+mkdir() { command -p mkdir "$@"; }
+dirname() { command -p dirname "$@"; }
+curl() { printf '%s\n' "$@" >> downloads; return 1; }
+wget() { curl "$@"; }
+apt-cache() { return 1; }
+apt-get() { printf '%s\n' "$@" >> apt-args; return "$APT_STATUS"; }
+_depends
+"""
+        for distro, codename in (("Debian", "bookworm"), ("Ubuntu", "jammy")):
+            for from_source, apt_status in (("0", 0), ("1", 0), ("1", 1)):
+                with self.subTest(distro=distro, from_source=from_source, apt_status=apt_status):
+                    with tempfile.TemporaryDirectory() as directory:
+                        scratch = Path(directory)
+                        environment = {
+                            "DISTRO": distro,
+                            "CODENAME": codename,
+                            "PHP_VER": "8.2",
+                            "OUTTO": str(scratch / "setup.log"),
+                            "APT_STATUS": str(apt_status),
+                            "AETHERFLOW_BUILD_FROM_SOURCE": from_source,
+                            "AF_RUNTIME_CACHE_DIR": str(scratch / "runtime-cache"),
+                        }
+                        outcome = subprocess.run(
+                            ["/bin/bash", "-c", probe, "package-fixture",
+                             str(ROOT / "setup/modules/00-core.sh"), str(ROOT / "setup/modules/02-packages.sh")],
+                            env=environment, cwd=scratch, capture_output=True, text=True,
+                        )
+                        downloads = scratch / "downloads"
+                        self.assertFalse(downloads.exists(), downloads.read_text() if downloads.exists() else "")
+                        self.assertFalse((scratch / "runtime-cache").exists())
+                        self.assertEqual(outcome.returncode, apt_status, outcome.stderr)
+                        apt_args = (scratch / "apt-args").read_text().splitlines()
+                        self.assertIn("install", apt_args)
+                        for package in ("build-essential", "curl", "xz-utils"):
+                            self.assertIn(package, apt_args)
+                        self.assertTrue({"node", "nodejs", "npm"}.isdisjoint(apt_args))
+
+    @unittest.skipUnless(os.name == "posix", "Bash state behavior requires the remote Linux test environment")
+    def test_installer_ignores_legacy_node_checkpoint(self):
+        probe = 'set -euo pipefail\nsource "$1"\n_detect_previous_install\n_list_steps\n'
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            state = scratch / "state"
+            legacy_state = "# STATE_VERSION=2\ninstall_node\ndepends\n"
+            state.write_text(legacy_state, encoding="utf-8")
+            outcome = subprocess.run(
+                ["bash", "-c", probe, "state-fixture", str(ROOT / "setup/modules/06-state.sh")],
+                env={"PATH": os.defpath, "STATE_FILE": str(state), "CONFIG_FILE": str(scratch / "config")},
+                cwd=scratch, capture_output=True, text=True,
+            )
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            self.assertRegex(outcome.stdout, r"Progress: 1/\d+ steps completed")
+            self.assertIn(" depends\n", outcome.stdout)
+            self.assertIn("  [ ] build_modern\n", outcome.stdout)
+            self.assertNotIn("install_node", outcome.stdout)
+            self.assertEqual(state.read_text(encoding="utf-8"), legacy_state)
+
     @unittest.skipUnless(os.name == "posix", "Bash retry behavior requires the remote Linux test environment")
     def test_boot_readiness_retry_survives_strict_shell_and_stays_bounded(self):
         source = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
@@ -95,7 +159,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
 
     def test_embedded_harness_owns_process_groups_and_rejects_occupied_listeners(self):
         harness = (ROOT / "scripts/run_embedded_e2e.sh").read_text(encoding="utf-8")
-        self.assertIn('exec setsid "${EXEC_PREFIX[@]}" "${BINARY_PATH}"', harness)
+        self.assertIn('exec setsid "${EXEC_PREFIX[@]}" env -i "${API_ENV[@]}" "${BINARY_PATH}"', harness)
         self.assertIn('kill -TERM -- "-${API_PID}"', harness)
         self.assertIn('kill -TERM -- "-${RUNNER_PID}"', harness)
         self.assertIn("Refusing to reuse occupied E2E listener", harness)
@@ -138,18 +202,22 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn(STRICT_CORE_CLIPPY, sec_job)
         self.assertIn("cargo test --workspace --locked", sec_job)
 
-        # 4. Inside release-build, locked clippy, locked tests, and locked build of both binaries must precede Upload;
+        # 4. Inside release-build, locked clippy and tests precede packaging and runtime verification.
         # inside release-publish, SHA-pinned attest-build-provenance must precede Publish
         clippy_idx = build_job.index(WORKSPACE_CLIPPY)
         strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
-        build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend")
+        stage_idx = build_job.index("bash scripts/build_wasm_frontend.sh --stage")
+        build_idx = build_job.index("bash scripts/build_gold.sh")
+        live_idx = build_job.index("- name: Execute Live E2E Against Extracted Release Artifact")
         upload_idx = build_job.index("- name: Upload Release Bundle Artifact")
 
         self.assertLess(clippy_idx, test_idx)
         self.assertLess(strict_clippy_idx, test_idx)
-        self.assertLess(test_idx, build_idx)
-        self.assertLess(build_idx, upload_idx)
+        self.assertLess(test_idx, stage_idx)
+        self.assertLess(stage_idx, build_idx)
+        self.assertLess(build_idx, live_idx)
+        self.assertLess(live_idx, upload_idx)
 
         attest_idx = pub_job.index("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8")
         publish_idx = pub_job.index("- name: Publish to GitHub Releases")
@@ -158,9 +226,8 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertNotIn("actions/setup-go", sec_job)
         self.assertNotIn("Legacy Go", sec_job)
         self.assertIn('node-version: "24.22.2"', build_job)
-        self.assertIn('cp target/release/af "${STAGE_DIR}/af"', build_job)
-        self.assertIn('cp target/release/af "${STAGE_DIR}/bin/af"', build_job)
-        self.assertIn('cp target/release/speedtest-backend "${STAGE_DIR}/bin/speedtest-backend"', build_job)
+        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", build_job)
+        self.assertIn("aetherflow-api af bin/af speedtest-backend bin/speedtest-backend", build_job)
         self.assertIn("release-dist/SHA256SUMS", build_job)
 
     def test_ci_workflow_runs_locked_rust_build_and_embedded_e2e_and_smoke_gate(self):
@@ -173,7 +240,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
 
         self.assertIn("runs-on: ubuntu-22.04", jobs["backend-rs"])
         self.assertIn("runs-on: ubuntu-22.04", jobs["embedded-e2e"])
-        self.assertIn("needs: backend-rs", jobs["embedded-e2e"])
+        self.assertIn("needs: [backend-rs, frontend-rs]", jobs["embedded-e2e"])
         self.assertIn('node-version: "24.22.2"', ci_yml)
         self.assertIn("bash scripts/smoke_v4_release_lifecycle.sh", jobs["release-lifecycle-smoke"])
         self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", jobs["backend-rs"])
@@ -283,7 +350,6 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
     def test_installer_pulls_prebuilt_v4_by_default_and_forbids_implicit_downgrade(self):
         setup = (ROOT / "setup/AetherFlow-Setup").read_text(encoding="utf-8")
         modern = (ROOT / "setup/modules/modern_stack.sh").read_text(encoding="utf-8")
-        core = (ROOT / "setup/modules/00-core.sh").read_text(encoding="utf-8")
 
         self.assertIn("--from-source", setup)
         self.assertIn("--channel", setup)
@@ -294,8 +360,6 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("Refusing implicit source-build or legacy v3 downgrade", modern)
         self.assertNotIn("_install_go", modern)
         self.assertNotIn("AF_GO_VERSION", modern)
-        self.assertIn('AF_NODE_VERSION="${AF_NODE_VERSION:-24.22.2}"', core)
-        self.assertIn("_af_verify_sha256", core)
 
     def test_systemd_templates_and_packaged_units_share_data_root_without_db_override(self):
         tpl_api = (ROOT / "setup/templates/sysd/aetherflow-api.template").read_text(encoding="utf-8")

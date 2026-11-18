@@ -136,21 +136,19 @@ jobs:
           sudo apt-get install -y -qq mold clang pkg-config libssl-dev
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
         with:
+          toolchain: "1.99.1"
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
 
       - name: Rust Cargo Dependency Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: "backend-rs -> target"
+          workspaces: |
+            backend-rs -> target
+            frontend-rs -> target
           cache-targets: "false"
-
-      - name: Prepare Embedded Frontend Staging Directories
-        working-directory: .
-        run: |
-          mkdir -p web/dist
-          touch web/dist/.keep
 
       - name: Verify Zero-Go Repository Hygiene
         working-directory: .
@@ -166,6 +164,17 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+
+      - name: Verify Rust WASM Frontend
+        working-directory: .
+        run: |
+          cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
+          cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
+          cargo audit --file frontend-rs/Cargo.lock
+          python3 scripts/finalize_wasm_assets.py --self-test
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
@@ -242,38 +251,40 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
         with:
-          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, armv7-unknown-linux-gnueabihf
-          components: clippy
+          toolchain: "1.99.1"
+          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, armv7-unknown-linux-gnueabihf, wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Install mold Fast Linker & ARM Cross Toolchains
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mold clang pkg-config libssl-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          sudo apt-get install -y -qq --no-install-recommends mold clang pkg-config libssl-dev \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
 
       - name: Rust Cargo Dependency Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: "backend-rs -> target"
+          workspaces: |
+            backend-rs -> target
+            frontend-rs -> target
           cache-targets: "false"
 
-      - name: Build Next.js Static Export
-        env:
-          NEXT_STATIC_EXPORT: "1"
+      - name: Typecheck Playwright E2E Suite
         run: |
           npm ci
           cd frontend
-          npm run lint
           ../node_modules/.bin/tsc --noEmit --incremental false
-          npm run test:ci
-          npm run build
 
-      - name: Stage Embedded Frontend Assets (Neutral Staging)
+      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
+        working-directory: .
         run: |
-          rm -rf web/dist
-          mkdir -p web/dist
-          cp -R frontend/out/. web/dist/
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/wasm-tools"
+          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
+          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
+          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
 
       - name: Run Rust Workspace Unit & Contract Tests (--locked)
         working-directory: backend-rs
@@ -295,54 +306,70 @@ jobs:
           test_binary=$(cargo test -p af-runner --lib --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
           sudo "$test_binary" self_update::tests::updater_survives_caller_restart --ignored --exact --nocapture
 
-      - name: Package Single-Binary Release Tarball & SHA-256 Manifest
+      - name: Stage External WASM Frontend Assets
+        run: bash scripts/build_wasm_frontend.sh --stage
+
+      - name: Package Release Tarball & SHA-256 Manifest
         run: |
-          STAGE_DIR="$(mktemp -d)"
-          chmod 0755 "${STAGE_DIR}"
-          echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 \
+            TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
+            bash scripts/build_gold.sh
 
-          cd backend-rs
+      - name: Build and Package Standalone Rust LibreSpeed Archives
+        run: |
+          set -euo pipefail
           export AF_BUILD_VERSION="${RELEASE_TAG#v}"
-          cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="" \
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-            cargo build --release --locked --target aarch64-unknown-linux-gnu -p af-librespeed --bin speedtest-backend
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="" \
-            CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
-            cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
-          cp target/release/aetherflow-api "${STAGE_DIR}/aetherflow-api"
-          cp target/release/af "${STAGE_DIR}/af"
-          cp target/release/speedtest-backend "${STAGE_DIR}/speedtest-backend"
-          mkdir -p "${STAGE_DIR}/bin"
-          cp target/release/af "${STAGE_DIR}/bin/af"
-          cp target/release/speedtest-backend "${STAGE_DIR}/bin/speedtest-backend"
-          cd ..
+          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
+          (
+            cd backend-rs
+            export RUSTFLAGS="-C link-arg=-Wl,--as-needed"
+            CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+              cargo build --release --locked --target aarch64-unknown-linux-gnu -p af-librespeed --bin speedtest-backend
+            CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+              CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+              cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
+          )
 
-          cp -R config "${STAGE_DIR}/config"
-          cp -R packages "${STAGE_DIR}/packages"
-          cp -R deploy "${STAGE_DIR}/deploy"
-          rm -rf "${STAGE_DIR}/deploy/__pycache__"
-          echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/speedtest-backend" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/bin/speedtest-backend" "${STAGE_DIR}/deploy/release-manager.sh" "${STAGE_DIR}/deploy/verify-provenance.py" "${STAGE_DIR}/deploy/log-retention.py"
-
-          mkdir -p release-dist
-          tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
-
-          package_speedtest_arch() {
-            local src_bin="$1"
-            local ls_arch="$2"
-            local stage_sub
-            stage_sub="$(mktemp -d)"
-            cp "${src_bin}" "${stage_sub}/speedtest-backend"
-            chmod 0755 "${stage_sub}/speedtest-backend"
-            tar --owner=0 --group=0 --numeric-owner -C "${stage_sub}" -czf "release-dist/speedtest-backend_${RELEASE_TAG#v}_linux_${ls_arch}.tar.gz" speedtest-backend
-            rm -rf "${stage_sub}"
+          stage="$(mktemp -d)"
+          trap 'rm -rf "${stage}"' EXIT
+          speedtest_archives=()
+          package_speedtest() {
+            local binary="$1" arch="$2"
+            local archive="speedtest-backend_${AF_BUILD_VERSION}_linux_${arch}.tar.gz"
+            install -m 0755 "${binary}" "${stage}/speedtest-backend"
+            tar --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+              -C "${stage}" -cf - speedtest-backend | gzip -n -c > "release-dist/${archive}"
+            speedtest_archives+=("${archive}")
           }
-          package_speedtest_arch "${STAGE_DIR}/speedtest-backend" "amd64"
-          package_speedtest_arch "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" "arm64"
-          package_speedtest_arch "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" "armv7"
+          package_speedtest "release-dist/linux-amd64/speedtest-backend" amd64
+          package_speedtest "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" arm64
+          package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
+          (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz "${speedtest_archives[@]}" > SHA256SUMS)
 
-          (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz speedtest-backend_*_linux_*.tar.gz > SHA256SUMS)
+      - name: Install Playwright Browser Engines for Release Verification
+        run: |
+          cd frontend
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: Execute Live E2E Against Extracted Release Artifact
+        env:
+          CI: "true"
+        run: |
+          RELEASE_E2E_DIR="$(mktemp -d "${RUNNER_TEMP}/aetherflow-release-e2e.XXXXXX")"
+          trap 'rm -rf "${RELEASE_E2E_DIR}"' EXIT
+          (cd release-dist && sha256sum --strict --check SHA256SUMS)
+          tar -xzf release-dist/aetherflow-linux-amd64.tar.gz -C "${RELEASE_E2E_DIR}"
+          for binary in aetherflow-api af bin/af speedtest-backend bin/speedtest-backend; do
+            test -f "${RELEASE_E2E_DIR}/${binary}"
+            test -x "${RELEASE_E2E_DIR}/${binary}"
+          done
+          for asset in packages.json package_automation.json openapi-v1.yaml; do
+            test -f "${RELEASE_E2E_DIR}/config/${asset}"
+            test -s "${RELEASE_E2E_DIR}/config/${asset}"
+          done
+          test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"
+          bash scripts/run_embedded_e2e.sh --binary "${RELEASE_E2E_DIR}/aetherflow-api" --static-dir "${RELEASE_E2E_DIR}/web/dist" --port 18080 --playwright
 
       - name: Upload Release Bundle Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -378,8 +405,19 @@ jobs:
           path: release-dist
 
       - name: Verify Release Archive Integrity
+        env:
+          RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
         run: |
-          (cd release-dist && sha256sum -c SHA256SUMS)
+          set -euo pipefail
+          cd release-dist
+          expected=(aetherflow-linux-amd64.tar.gz)
+          for arch in amd64 arm64 armv7; do
+            expected+=("speedtest-backend_${RELEASE_TAG#v}_linux_${arch}.tar.gz")
+          done
+          for archive in "${expected[@]}"; do
+            test -s "${archive}"
+          done
+          sha256sum "${expected[@]}" | cmp - SHA256SUMS
 
       - name: Attest Build Provenance
         id: attest
@@ -432,11 +470,11 @@ jobs:
           )
           cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json
           RELEASE_ASSETS+=(release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json)
-          for extra_tar in release-dist/speedtest-backend_*_linux_*.tar.gz; do
-            if [[ -f "${extra_tar}" ]]; then
-              cp -f "${ATTEST_BUNDLE_PATH}" "${extra_tar}.sigstore.json"
-              RELEASE_ASSETS+=("${extra_tar}" "${extra_tar}.sigstore.json")
-            fi
+          for arch in amd64 arm64 armv7; do
+            extra_tar="release-dist/speedtest-backend_${RELEASE_TAG#v}_linux_${arch}.tar.gz"
+            test -s "${extra_tar}"
+            cp -f "${ATTEST_BUNDLE_PATH}" "${extra_tar}.sigstore.json"
+            RELEASE_ASSETS+=("${extra_tar}" "${extra_tar}.sigstore.json")
           done
           gh release create "${RELEASE_TAG}" \
             "${RELEASE_ASSETS[@]}" \

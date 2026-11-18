@@ -845,7 +845,7 @@ where
             append_jsonl_log(
                 &cfg.log_file,
                 "INFO",
-                "[DRY-RUN] Offline mode: simulating single-binary artifact verification and extraction.",
+                "[DRY-RUN] Offline mode: simulating release artifact verification and extraction with placeholders.",
             );
             return simulate_offline_artifact(release_dir, cfg);
         }

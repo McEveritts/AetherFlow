@@ -4,100 +4,39 @@ set -euo pipefail
 # This script provisions a Debian WSL environment for building and testing AetherFlow.
 # Usage: ./scripts/setup_wsl_dev.sh
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+export PATH="${HOME}/.cargo/bin:${PATH}"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-${AF_RUST_TOOLCHAIN:-1.99.1}}"
+sudo_command=()
+if [[ "${EUID}" -ne 0 ]]; then
+    sudo_command=(sudo)
+fi
+
 echo "==> Updating APT repositories..."
-sudo apt-get update
+"${sudo_command[@]}" apt-get update
 
 echo "==> Installing build dependencies..."
-sudo apt-get install -y build-essential clang mold curl git bash jq pkg-config libssl-dev sqlite3 xz-utils ca-certificates
+"${sudo_command[@]}" apt-get install -y build-essential clang mold pkg-config libssl-dev libsqlite3-dev curl ca-certificates git bash jq sqlite3 python3
 
-BOOTSTRAP_PARENT="${AF_BOOTSTRAP_TMPDIR:-${AF_RUSTUP_TMPDIR:-${HOME}/.cache/aetherflow-bootstrap}}"
-mkdir -p -m 0700 "${BOOTSTRAP_PARENT}"
-AF_BOOTSTRAP_STAGE="$(mktemp -d "${BOOTSTRAP_PARENT}/af-wsl-stage.XXXXXX")"
-chmod 0700 "${AF_BOOTSTRAP_STAGE}"
-trap 'rm -rf "${AF_BOOTSTRAP_STAGE:-}"' EXIT
-
-echo "==> Installing Rust toolchain (pinned rustup-init + SHA-256 verification, >= 1.95.0)..."
-AF_RUSTUP_VERSION="${AF_RUSTUP_VERSION:-1.28.1}"
-AF_RUST_TOOLCHAIN="${AF_RUST_TOOLCHAIN:-1.99.1}"
-NEED_RUST_INSTALL=0
-if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
-    NEED_RUST_INSTALL=1
-else
-    CURRENT_RUSTC_VER="$(rustc --version 2>/dev/null | awk '{print $2}' | cut -d- -f1 || true)"
-    if [[ "${CURRENT_RUSTC_VER}" =~ ^([0-9]+)\.([0-9]+) ]]; then
-        if (( 10#${BASH_REMATCH[1]} < 1 || (10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 95) )); then
-            NEED_RUST_INSTALL=1
-        fi
-    fi
-fi
-if [[ "${NEED_RUST_INSTALL}" -eq 1 ]]; then
-    if command -v rustup >/dev/null 2>&1; then
-        rustup toolchain install "${AF_RUST_TOOLCHAIN}" --profile minimal
-        rustup default "${AF_RUST_TOOLCHAIN}"
-    else
-        case "$(uname -m)" in
-            x86_64|amd64)
-                RUSTUP_ARCH="x86_64-unknown-linux-gnu"
-                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f}"
-                ;;
-            aarch64|arm64)
-                RUSTUP_ARCH="aarch64-unknown-linux-gnu"
-                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a}"
-                ;;
-            armv7l|armhf)
-                RUSTUP_ARCH="armv7-unknown-linux-gnueabihf"
-                RUSTUP_SHA256="${AF_RUSTUP_SHA256:-62cfed758140f94a75074fb350e287dd26d1b6c9a4d6a18616757fb344720bcb}"
-                ;;
-            *)
-                echo "error: unsupported architecture '$(uname -m)' for automatic rustup bootstrap" >&2
-                exit 1
-                ;;
-        esac
-        RUSTUP_BIN="${AF_BOOTSTRAP_STAGE}/rustup-init"
-        curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-            "https://static.rust-lang.org/rustup/archive/${AF_RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" \
-            -o "${RUSTUP_BIN}"
-        printf '%s  %s\n' "${RUSTUP_SHA256}" "${RUSTUP_BIN}" | sha256sum -c -
-        chmod 0700 "${RUSTUP_BIN}"
-        "${RUSTUP_BIN}" -y --profile minimal --default-toolchain "${AF_RUST_TOOLCHAIN}"
-        rm -f "${RUSTUP_BIN}"
-        export PATH="${HOME}/.cargo/bin:${PATH}"
-    fi
-fi
-
-echo "==> Installing Node.js v24 (official release tarball + SHA-256 verification)..."
-if ! command -v node >/dev/null 2>&1 || ! node -v | grep -q '^v24'; then
-    AF_NODE_VERSION="${AF_NODE_VERSION:-24.22.2}"
-    case "$(uname -m)" in
-        x86_64|amd64)
-            NODE_ARCH="x64"
-            NODE_SHA256="${AF_NODE_SHA256:-48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75}"
-            ;;
-        *)
-            echo "error: set AF_NODE_SHA256 and install official Node.js v${AF_NODE_VERSION} manually on '$(uname -m)'" >&2
-            exit 1
-            ;;
-    esac
-    NODE_TAR="${AF_BOOTSTRAP_STAGE}/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-        "https://nodejs.org/dist/v${AF_NODE_VERSION}/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
-        -o "${NODE_TAR}"
-    printf '%s  %s\n' "${NODE_SHA256}" "${NODE_TAR}" | sha256sum -c -
-    sudo tar -xJf "${NODE_TAR}" -C /usr/local
-    sudo ln -sfn "/usr/local/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}/bin/node" /usr/local/bin/node
-    sudo ln -sfn "/usr/local/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}/bin/npm" /usr/local/bin/npm
-    sudo ln -sfn "/usr/local/node-v${AF_NODE_VERSION}-linux-${NODE_ARCH}/bin/npx" /usr/local/bin/npx
-    rm -f "${NODE_TAR}"
-fi
+echo "==> Ensuring Rust and pinned WASM build tools..."
+bash scripts/install_wasm_build_tools.sh --ensure
 
 echo "==> Environment Provisioned Successfully!"
-echo "Rustc version: $(rustc --version)"
+echo "Rust version: $(rustc --version)"
 echo "Cargo version: $(cargo --version)"
-echo "Node version: $(node -v)"
-echo "NPM version: $(npm -v)"
 echo ""
 echo "To build the project, run:"
 echo "  ./scripts/build_gold.sh"
 echo "Or build manually:"
-echo "  npm ci && NEXT_STATIC_EXPORT=1 npm run build --workspace frontend && rm -rf web/dist && mkdir -p web/dist && cp -R frontend/out/. web/dist/"
-echo "  cd backend-rs && cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend"
+echo "  bash scripts/install_wasm_build_tools.sh --ensure"
+echo '  FRONTEND_DIST_DIR="$PWD/web/dist" bash scripts/build_wasm_frontend.sh --stage'
+echo '  target_dir="${CARGO_TARGET_DIR:-$PWD/backend-rs/target}"'
+echo '  [[ "$target_dir" = /* ]] || target_dir="$PWD/backend-rs/$target_dir"'
+echo '  CARGO_TARGET_DIR="$target_dir" cargo build --release --locked --manifest-path backend-rs/Cargo.toml --bin aetherflow-api --bin af --bin speedtest-backend --config backend-rs/.cargo/config.toml'
+echo '  rm -rf "$target_dir/release/web/dist" "$target_dir/release/config"'
+echo '  mkdir -p "$target_dir/release/web/dist" "$target_dir/release/bin"'
+echo '  cp -a web/dist/. "$target_dir/release/web/dist/"'
+echo '  cp -a config "$target_dir/release/config"'
+echo '  install -m 0755 "$target_dir/release/af" "$target_dir/release/speedtest-backend" "$target_dir/release/bin/"'
+echo '  # Run "$target_dir/release/aetherflow-api"; it serves "$target_dir/release/web/dist".'

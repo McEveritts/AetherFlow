@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/af-web-core", "crates/af-web-worker", "crates/af-web-ui", "crates/af-web-app"]
+
+[workspace.package]
+version = "4.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+af-models = { path = "../backend-rs/crates/af-models", version = "=4.0.0" }
+af-web-core = { path = "crates/af-web-core", version = "=4.0.0", default-features = false }
+af-web-ui = { path = "crates/af-web-ui", version = "=4.0.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "=0.4.80"
+js-sys = "=0.3.107"
+serde-wasm-bindgen = "0.6"
+futures = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-events = "0.2"
+web-sys = { version = "=0.3.107", features = [
+  "Window", "Document", "HtmlDocument", "Location", "History", "Storage", "StorageEvent", "Navigator",
+  "Event", "EventTarget", "CustomEvent", "KeyboardEvent", "MouseEvent", "PointerEvent", "WheelEvent", "InputEvent", "SubmitEvent",
+  "HtmlElement", "Element", "Node", "NodeList", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement",
+  "HtmlDialogElement", "HtmlAnchorElement", "HtmlIFrameElement", "DomRect", "CssStyleDeclaration",
+  "Request", "RequestInit", "RequestCredentials", "RequestCache", "Headers", "Response", "AbortSignal", "AbortController",
+  "ReadableStream", "ReadableStreamDefaultReader",
+  "WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope",
+  "ResizeObserver", "ResizeObserverEntry", "Clipboard", "Blob", "BlobPropertyBag", "Url", "UrlSearchParams",
+  "File", "FileList", "DataTransfer", "DataTransferItem", "DataTransferItemList", "DragEvent", "FormData",
+  "ServiceWorkerContainer", "ServiceWorkerRegistration", "VisibilityState", "BroadcastChannel", "console"
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+# wasm-bindgen reads target feature metadata before wasm-opt and the finalizer
+# remove development sections from the published modules.
+strip = "none"

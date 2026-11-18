@@ -1735,12 +1735,23 @@ fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+// This internal response marker survives the routing and auth layers and cannot
+// be supplied by an upstream plugin as an HTTP header. The outer security-header
+// middleware uses it to isolate every proxied representation as a document.
+#[derive(Clone, Copy)]
+pub(crate) struct ProxiedPluginResponse;
+
+fn mark_plugin_proxy_response(mut response: Response) -> Response {
+    response.extensions_mut().insert(ProxiedPluginResponse);
+    response
+}
+
 pub async fn proxy_plugin_root_handler(
     Path(id): Path<String>,
     Extension(auth_user): Extension<AuthUser>,
     req: Request,
 ) -> Response {
-    proxy_plugin_request_inner(id, String::new(), auth_user, req).await
+    mark_plugin_proxy_response(proxy_plugin_request_inner(id, String::new(), auth_user, req).await)
 }
 
 pub async fn proxy_plugin_wildcard_handler(
@@ -1748,7 +1759,7 @@ pub async fn proxy_plugin_wildcard_handler(
     Extension(auth_user): Extension<AuthUser>,
     req: Request,
 ) -> Response {
-    proxy_plugin_request_inner(id, rest, auth_user, req).await
+    mark_plugin_proxy_response(proxy_plugin_request_inner(id, rest, auth_user, req).await)
 }
 
 #[allow(clippy::result_large_err)]

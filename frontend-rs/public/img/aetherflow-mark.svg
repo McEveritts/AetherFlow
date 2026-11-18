@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="af-mark-title">
+  <title id="af-mark-title">AetherFlow</title>
+  <defs>
+    <!-- Peak gradient: sky → indigo → violet (Obsidian palette) -->
+    <linearGradient id="afm-peak" x1="24" y1="104" x2="104" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.5" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <!-- Flow gradient: fades in from the left, ends in violet -->
+    <linearGradient id="afm-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <clipPath id="afm-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
+    <!-- Flow passes OVER the left leg: cut a gap into the peak -->
+    <mask id="afm-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#afm-left-half)"/>
+    </mask>
+    <!-- Flow passes UNDER the right leg: cut a gap into the flow -->
+    <mask id="afm-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
+    </mask>
+  </defs>
+
+  <!-- The peak (A) -->
+  <path d="M30 100 L64 26 L98 100" fill="none" stroke="url(#afm-peak)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#afm-cut-peak)"/>
+  <!-- The flow (crossbar current) -->
+  <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#afm-flow)" stroke-width="10" stroke-linecap="round" mask="url(#afm-cut-flow)"/>
+  <!-- Terminal node -->
+  <circle cx="116" cy="58" r="11" fill="#c084fc" fill-opacity="0.18"/>
+  <circle cx="116" cy="58" r="6.5" fill="#c084fc"/>
+</svg>

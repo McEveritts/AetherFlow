@@ -1,0 +1,14 @@
+[package]
+name = "af-web-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+af-web-core = { workspace = true, features = ["worker-engine"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+web-sys.workspace = true
+serde-wasm-bindgen.workspace = true

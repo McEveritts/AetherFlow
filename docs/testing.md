@@ -1,14 +1,14 @@
 # Testing AetherFlow
 
-AetherFlow v4.0.0 verification spans four layers: the **12-crate pure-Rust control plane (`backend-rs`)**, the **Next.js 16 (Obsidian V2) frontend (`frontend`)**, the **Python release/marketplace/Zero-Go hygiene regression suites (`tests`)**, and **Playwright E2E browser tests**.
+AetherFlow verification spans the **Rust control plane (`backend-rs`)**, the **Rust WASM dashboard (`frontend-rs`)**, the **Python release, marketplace, and Zero-Go regression suites (`tests`)**, and **Playwright E2E browser tests** retained under `frontend/tests/e2e`.
 
 ---
 
 ## Prerequisites
 
 Ensure your development machine has:
-- **Rust Toolchain (`stable`)**: `cargo` and `rustc` (plus `mold`, `clang`, `pkg-config`, and `libssl-dev` on Linux).
-- **Node.js 22+ & npm**: For building the Next.js 16 static export and running Jest/Playwright tests.
+- **Rust 1.99.1**: Selected by `rust-toolchain.toml`, with `cargo`, `rustc`, Clippy, rustfmt, and the WASM target (plus `mold`, `clang`, `pkg-config`, and `libssl-dev` on Linux).
+- **Node.js >=22.19.0 & npm**: For running the Playwright browser harness. CI uses Node 24. The production dashboard is built with Rust and Trunk.
 - **Python 3.10+**: For running release-manager, installer, and shell hygiene regression tests.
 
 ---
@@ -18,10 +18,7 @@ Ensure your development machine has:
 The 12-crate pure-Rust workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-librespeed`, `af-streaming-tests`) contains comprehensive unit, security, and contract tests.
 
 ```bash
-# Ensure the neutral embedded SPA directory exists if frontend has not been built yet
-mkdir -p web/dist
-touch web/dist/.keep
-
+# Run all tests across the 12-crate Rust control plane
 cd backend-rs
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
@@ -59,18 +56,19 @@ cargo test -p af-streaming-tests
 
 ---
 
-## 2. Frontend Lint, Unit Tests & Static Export (`frontend`)
+## 2. WASM Frontend Checks (`frontend-rs`)
 
 ```bash
-# Install root workspace dependencies
-npm ci
-
-# Run ESLint, Jest unit tests, and build the Next.js static export
-cd frontend
-npm run lint
-npm run test:ci
-NEXT_STATIC_EXPORT=1 npm run build
+bash scripts/install_wasm_build_tools.sh --ensure
+cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
+cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
+cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+python3 scripts/finalize_wasm_assets.py --self-test
+bash scripts/build_wasm_frontend.sh --stage
 ```
+
+Native tests exercise shared algorithms and state policies; they do not establish browser DOM behavior. Run the live and fixture-based browser suites against the built WASM application. The old `frontend/src` remains a reference and does not supply release assets.
 
 ---
 
@@ -98,10 +96,29 @@ python3 tests/run_e2e.py --mode contract
 
 ---
 
-## 4. Full Production Single-Binary Build (`scripts/build_gold.sh`)
+## 4. Production Release Bundle (`scripts/build_gold.sh`)
 
-To execute the complete end-to-end production pipeline locally (Next.js static export $\to$ neutral `web/dist` staging $\to$ Zero-Go hygiene check $\to$ Rust workspace tests $\to$ `aetherflow-api` + `af` + `speedtest-backend` release compilation $\to$ `.tar.gz` + `SHA256SUMS`):
+The production pipeline builds the WASM interface, runs Rust checks, and packages `aetherflow-api`, `af`, and `speedtest-backend` with external `web/dist` files and `SHA256SUMS`:
 
 ```bash
 bash scripts/build_gold.sh
 ```
+
+## 5. Browser Verification Against Runtime Assets
+
+Install the root npm workspace dependencies and the Chromium, Firefox, and WebKit engines with a supported Node.js runtime. Test the release layout with the API binary and its external UI directory:
+
+```sh
+npm ci --ignore-scripts
+npm exec --workspace frontend -- playwright install --with-deps chromium firefox webkit
+bash scripts/run_embedded_e2e.sh \
+  --binary /path/to/release/aetherflow-api \
+  --static-dir /path/to/release/web/dist \
+  --port 18080 --playwright
+```
+
+The historical harness filename is retained for compatibility. The default run uses disposable state and leaves the privileged runner disabled. `embedded.live.spec.ts` exercises real authentication, persistence, and file operations. The parity, login, dashboard, and visual tests use deterministic API fixtures while executing the served WASM application. Run those separately with `E2E_PLAYWRIGHT_SPECS` to preserve that distinction in reports.
+
+The browser configuration requires `PLAYWRIGHT_BASE_URL` pointing to a Rust API with a built WASM bundle. The harness supplies it; there is no automatic Next.js development server. All three engines run functional tests. Screenshot baselines run on Chromium. Fixture tests block service workers to keep network interception deterministic; the separate live cache test enables a real service worker and checks that authenticated responses stay out of CacheStorage. Worker fault tests transfer actual upload buffers, then simulate a crash or timeout and verify every resulting chunk checksum.
+
+The Python compatibility harness includes source inspections as well as HTTP checks; its aggregate count is not a count of live browser tests. Native unit tests, mocked browser contracts, live browser tests, and privileged/VM tests must be reported separately.

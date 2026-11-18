@@ -57,6 +57,71 @@ mod audit_tests {
     use super::*;
 
     #[test]
+    fn encoded_headers_decode_utf8_without_form_encoding_rules() {
+        for (encoded, expected) in [
+            (
+                "%E5%AA%92%E4%BD%93%2F%E7%94%B5%E5%BD%B1.mkv",
+                "媒体/电影.mkv",
+            ),
+            (
+                "%2Fmnt%2Fm%C3%A9dias%2F%C3%A9t%C3%A9.txt",
+                "/mnt/médias/été.txt",
+            ),
+            ("gr%C3%B6%C3%9Fe.txt", "größe.txt"),
+            ("a+b%20c%25.txt", "a+b c%.txt"),
+            ("%2f%6d%6e%74", "/mnt"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                percent_decode_header_utf8(encoded).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                percent_decode_header_utf8(&urlencoding::encode(expected)).as_deref(),
+                Some(expected)
+            );
+        }
+        for invalid in ["%FF", "%C3%28", "%ED%A0%80", "%C0%AF", "%", "%0", "%GG"] {
+            assert_eq!(percent_decode_header_utf8(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn backup_reauth_prefers_json_utf8_then_encoded_then_legacy_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Reauth-Password", HeaderValue::from_static("legacy"));
+        headers.insert(
+            "X-Reauth-Password-Encoded",
+            HeaderValue::from_static("m%C3%A9dias%2Bsecret"),
+        );
+        for password in ["密码 媒体", "été größe blåbær español", "a+% passphrase"] {
+            let body = serde_json::to_vec(&serde_json::json!({"password": password})).unwrap();
+            assert_eq!(
+                backup_reauth_password(&headers, &body).as_deref(),
+                Some(password)
+            );
+        }
+        for body in [b"".as_slice(), b"{}", b"{\"password\":null}"] {
+            assert_eq!(
+                backup_reauth_password(&headers, body).as_deref(),
+                Some("médias+secret")
+            );
+        }
+        headers.insert("X-Reauth-Password-Encoded", HeaderValue::from_static("%FF"));
+        assert_eq!(
+            backup_reauth_password(&headers, b"").as_deref(),
+            Some("legacy")
+        );
+        for password in [String::new(), "x".repeat(1025), "密".repeat(342)] {
+            let body = serde_json::to_vec(&serde_json::json!({"password": password})).unwrap();
+            assert_eq!(backup_reauth_password(&headers, &body), None);
+        }
+        let body = serde_json::to_vec(&serde_json::json!({"password": "x".repeat(1024)})).unwrap();
+        assert_eq!(backup_reauth_password(&headers, &body).unwrap().len(), 1024);
+        assert_eq!(backup_reauth_password(&HeaderMap::new(), b"{}"), None);
+    }
+
+    #[test]
     fn deployment_ingress_uses_canonical_schema_and_private_defaults() {
         let config = deployment_ingress_config("jellyfin", 18096, None);
         assert_eq!(config.app_name, "jellyfin");
@@ -1005,16 +1070,47 @@ fn backup_ticket_cookie(token: &str, max_age: i64) -> String {
     .replace("Path=/;", "Path=/api/v1/admin/backup/download/;")
 }
 
+fn percent_decode_header_utf8(raw: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut bytes = raw.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            decoded.push(((high << 4) | low) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn backup_reauth_password(headers: &HeaderMap, body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|body| body["password"].as_str().map(str::to_owned))
+        .or_else(|| {
+            headers
+                .get("X-Reauth-Password-Encoded")
+                .and_then(|value| value.to_str().ok())
+                .and_then(percent_decode_header_utf8)
+        })
+        .or_else(|| {
+            headers
+                .get("X-Reauth-Password")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        })
+        .filter(|password| !password.is_empty() && password.len() <= 1024)
+}
+
 async fn authorize_backup_password(
     user: &AuthUser,
     session_auth_time: Option<i64>,
     headers: &HeaderMap,
+    body: &[u8],
 ) -> bool {
-    let password = headers
-        .get("X-Reauth-Password")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let password = backup_reauth_password(headers, body).unwrap_or_default();
     let totp_code = headers
         .get("X-Reauth-TOTP")
         .and_then(|value| value.to_str().ok())
@@ -1028,7 +1124,7 @@ async fn authorize_backup_password(
         .trim();
     let oauth_confirm = confirm_header.eq_ignore_ascii_case("oauth")
         || confirm_header.eq_ignore_ascii_case("download-backup");
-    if password.len() > 1024 || totp_code.len() > 128 {
+    if totp_code.len() > 128 {
         return false;
     }
     let uid = user.user_id;
@@ -1109,7 +1205,18 @@ pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request)
         .extensions()
         .get::<crate::auth::SessionAuthTime>()
         .map(|t| t.0);
-    if !authorize_backup_password(&user, session_auth_time, req.headers()).await {
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, 8192).await {
+        Ok(body) => body,
+        Err(_) => {
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "BAD_REQUEST",
+                "Re-authentication body could not be read within the 8192 byte limit",
+            )
+        }
+    };
+    if !authorize_backup_password(&user, session_auth_time, &parts.headers, &body).await {
         return api_error(
             StatusCode::FORBIDDEN,
             "INVALID_CURRENT_PASSWORD",
@@ -1313,7 +1420,7 @@ pub async fn download_backup(
         .get::<crate::auth::SessionAuthTime>()
         .map(|t| t.0);
     if !ticket_authorized
-        && !authorize_backup_password(&user, session_auth_time, req.headers()).await
+        && !authorize_backup_password(&user, session_auth_time, req.headers(), &[]).await
     {
         return api_error(
             StatusCode::FORBIDDEN,
@@ -2396,8 +2503,19 @@ pub async fn upload_file(
             .unwrap_or("")
             .to_string()
     };
-    let header_filename = header_value("X-File-Name");
-    let directory = header_value("X-Target-Path");
+    let encoded_filename = headers
+        .get("X-File-Name-Encoded")
+        .and_then(|value| value.to_str().ok())
+        .and_then(percent_decode_header_utf8)
+        .filter(|name| !name.is_empty());
+    let header_filename = encoded_filename
+        .clone()
+        .unwrap_or_else(|| header_value("X-File-Name"));
+    let directory = headers
+        .get("X-Target-Path-Encoded")
+        .and_then(|value| value.to_str().ok())
+        .and_then(percent_decode_header_utf8)
+        .unwrap_or_else(|| header_value("X-Target-Path"));
     let upload_id = header_value("X-Upload-ID");
     let chunk_index = header_value("X-Chunk-Index");
     let total_chunks = header_value("X-Total-Chunks");
@@ -2427,9 +2545,13 @@ pub async fn upload_file(
         if field.name() != Some("file") {
             continue;
         }
-        let raw_filename = field
-            .file_name()
-            .filter(|name| !name.is_empty() && *name != "blob")
+        let raw_filename = encoded_filename
+            .as_deref()
+            .or_else(|| {
+                field
+                    .file_name()
+                    .filter(|name| !name.is_empty() && *name != "blob")
+            })
             .unwrap_or(&header_filename);
         let filename = match sanitize_filename(raw_filename) {
             Ok(name) => name,
@@ -4586,17 +4708,17 @@ mod updater_tests {
         headers.insert("X-Reauth-Confirm", HeaderValue::from_static("oauth"));
 
         // 1. Fresh authenticated OAuth session (<= 300s) with live active_sessions row succeeds
-        assert!(authorize_backup_password(&admin, Some(now - 60), &headers).await);
+        assert!(authorize_backup_password(&admin, Some(now - 60), &headers, &[]).await);
 
         // 2. Stale authenticated OAuth session (> 300s) fails closed even if refreshed session is active
-        assert!(!authorize_backup_password(&admin, Some(now - 301), &headers).await);
+        assert!(!authorize_backup_password(&admin, Some(now - 301), &headers, &[]).await);
 
         // 3. Revoked/absent active_sessions row fails closed even with fresh auth_time
         let revoked_admin = AuthUser {
             jti: "oauth-jti-missing".to_string(),
             ..admin
         };
-        assert!(!authorize_backup_password(&revoked_admin, Some(now - 10), &headers).await);
+        assert!(!authorize_backup_password(&revoked_admin, Some(now - 10), &headers, &[]).await);
 
         for (k, val) in saved {
             match val {

@@ -121,7 +121,7 @@ jobs:
           python3 tests/check_shell_hygiene.py
 
   frontend:
-    name: Frontend (Next.js Static Export & Tests)
+    name: React Reference Frontend Validation
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -152,22 +152,66 @@ jobs:
       - name: Unit Tests
         run: npm run test:ci
 
-      - name: Static Export Build
-        env:
-          NEXT_STATIC_EXPORT: "1"
-        run: npm run build
+  frontend-rs:
+    name: Frontend (Rust WASM & Tests)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Upload Frontend Artifact
+      - name: Setup Rust WASM Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Cache Rust Frontend Dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "frontend-rs -> target"
+          cache-targets: "false"
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+
+      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/wasm-tools"
+          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
+          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
+          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
+
+      - name: Verify Rust WASM Frontend
+        working-directory: .
+        run: |
+          cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
+          cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
+          cargo audit --file frontend-rs/Cargo.lock
+          python3 scripts/finalize_wasm_assets.py --self-test
+
+      - name: Build Rust WASM Frontend
+        run: bash scripts/build_wasm_frontend.sh --stage
+
+      - name: Upload WASM Frontend Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: frontend-static-export
-          path: frontend/out
+          name: frontend-wasm-dist
+          path: web/dist
           if-no-files-found: error
 
   backend-rs:
-    name: Backend & Single-Binary Bundle (Rust)
+    name: Backend, CLI & LibreSpeed (Rust)
     runs-on: ubuntu-22.04
-    needs: frontend
     defaults:
       run:
         working-directory: backend-rs
@@ -177,25 +221,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Mold Linker
+      - name: Install Rust Build and Zero-Go Test Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold clang pkg-config libssl-dev
+          sudo apt-get install -y mold clang pkg-config libssl-dev python3-yaml
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          components: clippy, rustfmt
 
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "backend-rs -> target"
           cache-targets: "false"
-
-      - name: Download Frontend Static Export (Neutral Staging)
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: frontend-static-export
-          path: web/dist
 
       - name: Verify Zero-Go Repository Hygiene
         working-directory: .
@@ -236,7 +277,7 @@ jobs:
           cargo clippy --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --locked
 
-      - name: Build Embedded Single-Binary & Native CLI (Rust)
+      - name: Build Rust API, CLI & LibreSpeed
         run: |
           cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
 
@@ -245,12 +286,12 @@ jobs:
         env:
           AETHERFLOW_SKIP_ENV_FILES: "1"
         run: |
-          python3 -m unittest tests/test_zero_go_cutover.py -v
+          /usr/bin/python3 -m unittest discover -s tests -p 'test_zero_go_cutover.py' -v
 
-      - name: Upload Rust Single-Binary & CLI Artifact
+      - name: Upload Rust API, CLI & LibreSpeed Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: aetherflow-rs-single-binary
+          name: aetherflow-rs-binaries
           path: |
             backend-rs/target/release/aetherflow-api
             backend-rs/target/release/af
@@ -258,9 +299,9 @@ jobs:
           if-no-files-found: error
 
   embedded-e2e:
-    name: Embedded Rust Single-Binary Full-Stack E2E
+    name: Rust API & External Frontend Full-Stack E2E
     runs-on: ubuntu-22.04
-    needs: backend-rs
+    needs: [backend-rs, frontend-rs]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -274,24 +315,89 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Download Rust Single-Binary & CLI Artifact
+      - name: Download Rust API, CLI & LibreSpeed Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: aetherflow-rs-single-binary
+          name: aetherflow-rs-binaries
           path: backend-rs/target/release
+
+      - name: Download External Frontend Beside API
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: frontend-wasm-dist
+          path: backend-rs/target/release/web/dist
 
       - name: Make Compiled Binaries Executable
         run: |
-          chmod +x backend-rs/target/release/aetherflow-api backend-rs/target/release/af backend-rs/target/release/speedtest-backend
+          chmod +x backend-rs/target/release/{aetherflow-api,af,speedtest-backend}
 
-      - name: Install Playwright Chromium Browser
+      - name: Install Playwright Browser Engines
         run: |
           npm ci
           cd frontend
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium firefox webkit
 
-      - name: Execute Embedded Single-Binary Full-Stack & Playwright E2E
+      - name: Typecheck Playwright E2E Suite
+        run: |
+          cd frontend
+          ../node_modules/.bin/tsc --noEmit --incremental false
+
+      - name: Execute External Frontend Full-Stack & Playwright E2E
         env:
           CI: "true"
         run: |
-          bash scripts/run_embedded_e2e.sh --binary "${PWD}/backend-rs/target/release/aetherflow-api" --port 18080 --playwright
+          bash scripts/run_embedded_e2e.sh --binary "${PWD}/backend-rs/target/release/aetherflow-api" --static-dir "${PWD}/backend-rs/target/release/web/dist" --port 18080 --playwright
+
+      - name: Execute All Playwright Contract Specs Against Isolated API
+        env:
+          CI: "true"
+          AETHERFLOW_SKIP_ENV_FILES: "1"
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          AETHERFLOW_E2E_ISOLATED: "1"
+          PRIVILEGED_RUNNER_ENABLED: "false"
+          BIND_ADDR: 127.0.0.1
+          PORT: "18081"
+          ALLOWED_HOSTS: localhost,localhost:18081,127.0.0.1,127.0.0.1:18081
+          COOKIE_SECURE: "false"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:18081
+          PLAYWRIGHT_SKIP_WEBSERVER: "1"
+        run: |
+          set -euo pipefail
+          contract_root="$(mktemp -d "${RUNNER_TEMP}/api-contracts.XXXXXX")"
+          api_binary="${PWD}/backend-rs/target/release/aetherflow-api"
+          api_pid=""
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if [[ -n "${api_pid}" ]]; then
+              kill "${api_pid}" 2>/dev/null || true
+              wait "${api_pid}" 2>/dev/null || true
+            fi
+            if [[ "${result}" -ne 0 ]]; then
+              cat "${contract_root}/api.log" >&2 || true
+            fi
+            rm -rf "${contract_root}"
+            exit "${result}"
+          }
+          trap cleanup EXIT
+          export STATIC_DIR="${PWD}/backend-rs/target/release/web/dist"
+          export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export AES_MASTER_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export MCBROWSER_ROOT="${contract_root}/files"
+          export AF_MCBROWSER_ROOT="${MCBROWSER_ROOT}"
+          export AETHERFLOW_UPLOAD_DIR="${contract_root}/uploads"
+          export AETHERFLOW_FS_ROOT="${contract_root}/fs-root"
+          export AETHERFLOW_DB_PATH="${contract_root}/aetherflow.sqlite"
+          export DB_PATH="${AETHERFLOW_DB_PATH}"
+          export AF_DB_PATH="${AETHERFLOW_DB_PATH}"
+          export AF_ALLOWED_FS_ROOTS="${AETHERFLOW_FS_ROOT},${MCBROWSER_ROOT}"
+          export AETHERFLOW_PLUGINS_DIR="${contract_root}/plugins"
+          export AETHERFLOW_RUNNER_SOCK="${contract_root}/runner.sock"
+          mkdir -p "${MCBROWSER_ROOT}/user-1" "${AETHERFLOW_UPLOAD_DIR}" "${AETHERFLOW_FS_ROOT}" "${AETHERFLOW_PLUGINS_DIR}"
+          printf "# Workspace\n" > "${MCBROWSER_ROOT}/user-1/README.md"
+          (cd "${contract_root}" && exec "${api_binary}") >"${contract_root}/api.log" 2>&1 &
+          api_pid=$!
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 --retry-max-time 60 "${PLAYWRIGHT_BASE_URL}/health/ready"
+          cd frontend
+          # Discover every contract suite automatically.
+          npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --workers=1

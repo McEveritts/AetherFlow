@@ -105,18 +105,18 @@ class TestComboClusterTelemetryManagement(TestCase):
         self.assert_true(cluster_init and cluster_ui and routes, "Combo 06: Cluster startup, UI tab, and node endpoints must be satisfied")
 
 
-class TestComboSingleBinarySpaAtmosphere(TestCase):
+class TestComboExternalWasmSpaAtmosphere(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_07", "F32+F11+F13+F14", 3, "Single binary build, static export embed, and Obsidian V2 CSS foundation")
+        super().__init__("T3_COMBO_07", "F32+F11+F13+F14", 3, "External Rust WASM deployment and Obsidian V2 CSS foundation")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
         embed = inspector.read_file(EMBED_RS)
-        css = inspector.read_file("frontend/src/app/globals.css")
-        has_export = bool(stack and "NEXT_STATIC_EXPORT" in stack)
-        has_embed = bool(embed and "RustEmbed" in embed and "web/dist" in embed)
+        css = inspector.read_file("frontend-rs/styles/input.css")
+        stages_wasm = bool(stack and "build_wasm_frontend.sh" in stack and "${release_dir}/web/dist" in stack)
+        serves_external = bool(embed and 'join("web/dist")' in embed and "RustEmbed" not in embed)
         has_obsidian = bool(css and "--obs-bg-base:" in css and "var(--obs-bg-base)" in css and "--obs-chromatic-edge-gradient" in css)
-        self.assert_true(has_export and has_embed and has_obsidian, "Combo 07: Single binary, static embed, and Obsidian CSS must be satisfied")
+        self.assert_true(stages_wasm and serves_external and has_obsidian, "Combo 07: WASM staging, external serving, and Obsidian CSS must be satisfied")
 
 
 class TestComboPrivilegeBoundarySandbox(TestCase):
@@ -189,7 +189,7 @@ def get_tier3_tests():
         TestComboQuotasRunner(),
         TestComboNetworkVpnRunner(),
         TestComboClusterTelemetryManagement(),
-        TestComboSingleBinarySpaAtmosphere(),
+        TestComboExternalWasmSpaAtmosphere(),
         TestComboPrivilegeBoundarySandbox(),
         TestComboDebian13AptPackaging(),
         TestComboAiTelemetryPredictions(),

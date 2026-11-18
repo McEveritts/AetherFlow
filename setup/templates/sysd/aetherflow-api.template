@@ -1,5 +1,5 @@
 [Unit]
-Description=AetherFlow Control Plane & Embedded UI (Single-Binary)
+Description=AetherFlow Control Plane and WASM Dashboard
 Documentation=https://github.com/McEveritts/AetherFlow
 After=network-online.target time-sync.target aetherflow-runner.service
 Wants=network-online.target aetherflow-runner.service

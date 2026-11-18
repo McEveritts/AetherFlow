@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#07090e" />
+    <meta name="description" content="AetherFlow — your private infrastructure control plane." />
+    <meta name="af-worker-url" content="/af-web-worker_loader.js" />
+    <title>AetherFlow</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-icon.png" />
+    <link data-trunk rel="css" href="styles/compiled.css" />
+    <link data-trunk rel="copy-dir" href="public" data-target-path="." />
+    <link data-trunk rel="rust" href="crates/af-web-app/Cargo.toml" data-bin="af-web-app" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-reference-types --converge --strip-debug --strip-producers" />
+    <link data-trunk rel="rust" href="crates/af-web-worker/Cargo.toml" data-bin="af-web-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-reference-types --converge --strip-debug --strip-producers" />
+  </head>
+  <body><noscript>AetherFlow requires WebAssembly and JavaScript to connect to your control plane.</noscript></body>
+</html>

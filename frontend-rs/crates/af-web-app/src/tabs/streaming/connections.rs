@@ -1,0 +1,173 @@
+//! Provider connection credentials and server identity checks.
+use super::common::*;
+use super::types::*;
+use crate::state::app;
+use crate::tabs::l10n::{tt, tt_with, Modal};
+use af_web_core::api::ApiClient;
+use af_web_core::draft::FormDraft;
+use leptos::prelude::*;
+use serde_json::json;
+use wasm_bindgen_futures::spawn_local;
+#[component]
+pub(super) fn StreamingServerSettings(
+    open: RwSignal<bool>,
+    server: RwSignal<ProviderStatus>,
+    on_changed: Callback<()>,
+) -> impl IntoView {
+    let context = app();
+    let draft = RwSignal::new(FormDraft::new(
+        json!({"name":"","url":"","apiKey":"","enabled":true}),
+    ));
+    let busy = RwSignal::new(false);
+    let result = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        let server = server.get();
+        draft.set(FormDraft::new(json!({"name":server.name,"url":server.url,"apiKey":"","enabled":server.enabled.unwrap_or(true)})));
+        result.set(None);
+    });
+    let save = Callback::new(move |test: bool| {
+        if busy.get_untracked() || !context.is_admin() {
+            return;
+        }
+        let provider = server.with_untracked(|s| s.provider.clone());
+        let Ok(mut body) = draft.with_untracked(FormDraft::value) else {
+            return;
+        };
+        if body["url"].as_str().is_none_or(|s| s.trim().is_empty()) {
+            result.set(Some("A server URL is required.".into()));
+            return;
+        }
+        let path = if test {
+            body["provider"] = json!(provider.clone());
+            "/api/v1/admin/streaming/servers/test".to_string()
+        } else {
+            format!("/api/v1/admin/streaming/servers/{provider}")
+        };
+        busy.set(true);
+        spawn_local(async move {
+            let response = ApiClient
+                .request(&path, if test { "POST" } else { "PUT" }, Some(&body))
+                .await;
+            if busy.try_get_untracked().is_none() {
+                return;
+            }
+            match response {
+                Ok(data) => {
+                    let failed = data["ok"] == false
+                        || matches!(
+                            data["server"]["status"].as_str(),
+                            Some("unreachable" | "unavailable")
+                        );
+                    let message = data["message"]
+                        .as_str()
+                        .unwrap_or(if test {
+                            "Server identity check completed."
+                        } else {
+                            "Server configuration saved."
+                        })
+                        .to_string();
+                    if !test || !failed {
+                        on_changed.run(());
+                    }
+                    if server.with_untracked(|s| s.provider.clone()) == provider {
+                        result.set(Some(message.clone()));
+                        if !test && !failed {
+                            open.set(false);
+                        }
+                    }
+                    context.toast(tt(context, &message), failed);
+                }
+                Err(e) => result.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    });
+    view! {
+        <Modal open title="Streaming server connection & identity">
+            <div class="space-y-4">
+                <p class="text-sm text-slate-400">
+                    {move || {
+                        tt_with(context, "Provider {provider} · server identity {id} · {status}", &[("provider", &(server.with(|s| s.provider.clone())).to_string()), ("id", &(server.with(|s| display(context, &s.server_id))).to_string()), ("status", &(server.with(|s| tt(context, s.status_key()))).to_string())])
+                    }}
+                </p>
+                {["name", "url", "apiKey"]
+                    .into_iter()
+                    .map(|field| {
+                        view! {
+                            <label class="block text-sm space-y-1">
+                                {move || tt(context, field)}
+                                <input
+                                    class="glass-input p-2 w-full"
+                                    disabled=move || busy.get()
+                                    type=if field == "apiKey" { "password" } else { "text" }
+                                    autocomplete="off"
+                                    prop:value=move || {
+                                        draft
+                                            .with(|d| {
+                                                d.value().map(|v| text(&v, field)).unwrap_or_default()
+                                            })
+                                    }
+                                    on:input=move |e| {
+                                        draft
+                                            .update(|d| {
+                                                let _ = d.edit(field, json!(event_target_value(&e)));
+                                            })
+                                    }
+                                />
+                            </label>
+                        }
+                    })
+                    .collect_view()}
+                <p class="text-xs text-slate-400">
+                    {move || tt(
+                        context,
+                        "Leave the API key blank to preserve the stored credential. Identity is obtained from the upstream server, never guessed from its name.",
+                    )}
+                </p>
+                <label class="text-sm flex gap-2">
+                    <input
+                        type="checkbox"
+                        disabled=move || busy.get()
+                        prop:checked=move || {
+                            draft.with(|d| d.value().is_ok_and(|v| v["enabled"] == true))
+                        }
+                        on:change=move |e| {
+                            draft
+                                .update(|d| {
+                                    let _ = d.edit("enabled", json!(event_target_checked(&e)));
+                                })
+                        }
+                    />
+                    {move || tt(context, "Enable live tracking")}
+                </label>
+                <div class="flex gap-3">
+                    <button
+                        class="glass-button px-4 py-2"
+                        disabled=move || busy.get()
+                        on:click=move |_| save.run(true)
+                    >
+                        {move || tt(context, "Test and verify identity")}
+                    </button>
+                    <button
+                        class="glass-button-primary px-4 py-2"
+                        disabled=move || busy.get()
+                        on:click=move |_| save.run(false)
+                    >
+                        {move || tt(context, "Save connection")}
+                    </button>
+                </div>
+                {move || {
+                    result
+                        .get()
+                        .map(|message| {
+                            view! {
+                                <p role="status" class="text-sm">
+                                    {move || tt(context, &message)}
+                                </p>
+                            }
+                        })
+                }}
+            </div>
+        </Modal>
+    }
+}

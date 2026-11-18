@@ -79,15 +79,8 @@ function _updates() {
 # shellcheck disable=2312
 function _depends() {
 	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
-	local prefetch_pid=""
-	(_af_prefetch_runtime_archives >>"${OUTTO}" 2>&1) &
-	prefetch_pid=$!
-
 	if [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
-			wait "${prefetch_pid}" 2>/dev/null || true
-			return 1
-		}
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
 		for opt_pkg in clang mold dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
 			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
 		done
@@ -96,10 +89,7 @@ function _depends() {
 		if [[ "${CODENAME}" =~ ("noble") ]] || ! apt-cache show dstat >/dev/null 2>&1; then
 			stat_pkg="dool"
 		fi
-		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
-			wait "${prefetch_pid}" 2>/dev/null || true
-			return 1
-		}
+		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || return 1
 		local avail_opt_pkgs=()
 		if apt-cache show default-jre-headless >/dev/null 2>&1; then
 			avail_opt_pkgs+=("default-jre-headless")
@@ -119,8 +109,6 @@ function _depends() {
 			}
 		fi
 	fi
-
-	wait "${prefetch_pid}" || return 1
 }
 
 # build openssl from source to combat recent apt source updates

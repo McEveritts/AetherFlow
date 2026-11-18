@@ -62,7 +62,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 DEFAULT_REMOTE_WORK_ROOT = "/var/tmp/aetherflow-v4-vm-matrix"
 DEFAULT_QEMU_TOOLS_ROOT = "/var/tmp/aetherflow-v4-validation-20261103-052723/tools/qemu-root"
-DEFAULT_NODE_TOOLS_ROOT = "/var/tmp/aetherflow-v4-validation-20261103-052723/tools/node"
 DEFAULT_BASELINE_SOURCE_DIR = "/var/tmp/aetherflow-v4-validation-20261103-052723/source"
 DEFAULT_VM_VCPUS = 2
 DEFAULT_VM_MEMORY_MIB = 3584
@@ -159,6 +158,7 @@ class PendingArtifactContract:
         "speedtest-backend",
         "bin/speedtest-backend",
         ".version",
+        "web/dist/index.html",
         "deploy/release-manager.sh",
         "deploy/release-manager.conf",
         "config/packages.json",
@@ -559,6 +559,7 @@ def verify_release_artifact_contract(
         "binary_glibc_versions": {},
         "binary_max_glibc": None,
         "glibc_compatible_ubuntu_2204": None,
+        "frontend_wasm_entries": [],
     }
 
     if not archive_path.is_file():
@@ -600,6 +601,7 @@ def verify_release_artifact_contract(
                 errors.append(str(exc))
 
     entry_modes: Dict[str, int] = {}
+    entry_sizes: Dict[str, int] = {}
     release_binary_bytes: Dict[str, bytes] = {}
 
     try:
@@ -630,6 +632,7 @@ def verify_release_artifact_contract(
                     continue
                 if member.isfile():
                     entry_modes[norm_name] = member.mode & 0o777
+                    entry_sizes[norm_name] = member.size
                     if norm_name == ".version":
                         extracted = tf.extractfile(member)
                         if extracted is not None:
@@ -659,6 +662,15 @@ def verify_release_artifact_contract(
         if req not in entry_modes:
             details["missing_entries"].append(req)
             errors.append(f"missing required archive entry: {req}")
+
+    if "web/dist/index.html" in entry_sizes and entry_sizes["web/dist/index.html"] == 0:
+        errors.append("web/dist/index.html is empty")
+    details["frontend_wasm_entries"] = sorted(
+        name for name, size in entry_sizes.items()
+        if name.startswith("web/dist/") and name.endswith(".wasm") and size > 0
+    )
+    if not details["frontend_wasm_entries"]:
+        errors.append("missing non-empty .wasm file under web/dist")
 
     for exe in contract.required_executable_entries:
         if exe in entry_modes and (entry_modes[exe] & 0o111) == 0:
@@ -1054,9 +1066,9 @@ def render_baseline_guest_build_script(*, jobs: int = 2) -> str:
     """
     Renders the in-guest build script for `build-baseline-artifact` inside Ubuntu 22.04 (GLIBC 2.35).
     Enforces:
-      1. Real Next.js static export build (`NEXT_STATIC_EXPORT=1 npm run build --workspace frontend`)
+      1. Real Rust WASM build (`bash scripts/build_wasm_frontend.sh --stage`), using pinned tools,
          even when placeholder `web/dist` directories already exist in the repo.
-      2. Verifies `web/dist/index.html` and `web/dist/_next` exist and are non-empty before Rust compile.
+      2. Verifies the external entrypoint and WASM assets before packaging.
       3. Requires `backend-rs/Cargo.lock` to exist and runs `cargo fetch --locked` first, followed by
          offline (`CARGO_NET_OFFLINE=true`), locked (`CARGO_LOCKED=1` / `--locked`) compilation.
       4. Enforces resource discipline inside the guest (`nice -n 10 ionice -c 2 -n 7`, `CARGO_BUILD_JOBS=2`).
@@ -1066,34 +1078,24 @@ def render_baseline_guest_build_script(*, jobs: int = 2) -> str:
     return f"""set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -yqq
-apt-get install -yqq build-essential pkg-config libssl-dev libsqlite3-dev curl ca-certificates git binutils >/dev/null
-tar -xzf /var/tmp/af-build/node.tar.gz -C /usr/local/nodejs
-ln -sfn /usr/local/nodejs/bin/node /usr/local/bin/node
-ln -sfn /usr/local/nodejs/bin/npm /usr/local/bin/npm
-ln -sfn /usr/local/nodejs/bin/npx /usr/local/bin/npx
-if ! command -v cargo >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-fi
-export PATH="/root/.cargo/bin:/usr/local/nodejs/bin:${{PATH}}"
+apt-get install -yqq build-essential pkg-config libssl-dev libsqlite3-dev curl ca-certificates git binutils python3 >/dev/null
+export PATH="/root/.cargo/bin:/var/tmp/af-build/wasm-tools/bin:${{PATH}}"
 export CARGO_BUILD_JOBS={jobs}
 export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
 tar -xzf /var/tmp/af-build/src.tar.gz -C /var/tmp/af-build/src
 cd /var/tmp/af-build/src
 
-# 1. Always build or verify real exported frontend assets (never skip merely because placeholder web/dist directory exists)
-if [[ ! -d frontend ]]; then
-    echo "ERROR: frontend directory missing from source snapshot" >&2
-    exit 1
-fi
-rm -rf web/dist frontend/out
-nice -n 10 ionice -c 2 -n 7 npm ci --no-fund --no-audit
-NEXT_STATIC_EXPORT=1 nice -n 10 ionice -c 2 -n 7 npm run build --workspace frontend
-test -s frontend/out/index.html
-test -d frontend/out/_next
-mkdir -p web/dist
-cp -R frontend/out/. web/dist/
+# 1. Always build real Rust WASM assets, including when placeholder dist directories exist.
+test -s frontend-rs/Cargo.toml
+wasm_tool_dir="/var/tmp/af-build/wasm-tools"
+mkdir -p "${{wasm_tool_dir}}/bin"
+WASM_TOOL_DIR="${{wasm_tool_dir}}" bash scripts/install_wasm_build_tools.sh --ensure
+export TRUNK_TOOLS_WASM_OPT=version_133
+rm -rf web/dist frontend-rs/dist
+# Native backend linker flags must not reach wasm-ld.
+RUSTFLAGS="" nice -n 10 ionice -c 2 -n 7 bash scripts/build_wasm_frontend.sh --stage
 test -s web/dist/index.html
-test -d web/dist/_next
+test -n "$(find web/dist -type f -name '*.wasm' -size +0c -print -quit)"
 
 # 2. Require final committed Cargo.lock, prefetch crates explicitly, then compile offline with --locked and 2 jobs
 test -s backend-rs/Cargo.lock
@@ -1298,7 +1300,7 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
         "binary_glibc_versions": {},
         "binary_max_glibc": None,
         "glibc_compatible_ubuntu_2204": None,
-        "embedded_ui_index_present": False,
+        "frontend_wasm_entries": [],
     }
     if not archive_p.is_file():
         errors.append(f"archive file not found: {archive_p}")
@@ -1328,6 +1330,7 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
         errors.append(str(exc))
 
     entry_modes = {}
+    entry_sizes = {}
     binary_hashes = {}
     try:
         with tempfile.TemporaryDirectory(prefix="af-verify-contract-") as tmpd:
@@ -1357,6 +1360,7 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
                         continue
                     if member.isfile():
                         entry_modes[norm_name] = member.mode & 0o777
+                        entry_sizes[norm_name] = member.size
                         if norm_name == ".version":
                             ex = tf.extractfile(member)
                             if ex is not None:
@@ -1377,8 +1381,6 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
                                     data = ex.read()
                                     binary_hashes[norm_name] = hashlib.sha256(data).hexdigest()
                                     bin_file.write_bytes(data)
-                                    if norm_name == "aetherflow-api":
-                                        details["embedded_ui_index_present"] = (b"index.html" in data and b"_next/" in data)
                                     rc_re, out_re, _, _ = run_bounded(["readelf", "--version-info", str(bin_file)], timeout=20, check=False, label="readelf-glibc")
                                     if rc_re == 0:
                                         matches = re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", out_re)
@@ -1420,6 +1422,14 @@ def inspect_artifact_bundle(archive_path, manifest_path, contract):
         if req not in entry_modes:
             details["missing_entries"].append(req)
             errors.append(f"missing required archive entry: {req}")
+    if "web/dist/index.html" in entry_sizes and entry_sizes["web/dist/index.html"] == 0:
+        errors.append("web/dist/index.html is empty")
+    details["frontend_wasm_entries"] = sorted(
+        name for name, size in entry_sizes.items()
+        if name.startswith("web/dist/") and name.endswith(".wasm") and size > 0
+    )
+    if not details["frontend_wasm_entries"]:
+        errors.append("missing non-empty .wasm file under web/dist")
     for exe in contract.get("required_executable_entries", ()):
         if exe in entry_modes and (entry_modes[exe] & 0o111) == 0:
             details["non_executable_entries"].append(exe)
@@ -1958,6 +1968,15 @@ for i in $(seq 1 20); do
 done
 cat /tmp/health_ready.json
 curl -fsS --max-time 2 http://127.0.0.1:8080/health/ready | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "ready" else 1)'
+curl -fsS --max-time 5 http://127.0.0.1:8080/ -o /tmp/af-ui-index.html
+cmp /opt/AetherFlow/current/web/dist/index.html /tmp/af-ui-index.html
+wasm_file="$(find /opt/AetherFlow/current/web/dist -type f -name '*.wasm' -size +0c -print -quit)"
+test -n "${wasm_file}"
+test -x /opt/AetherFlow/current/speedtest-backend
+test -x /opt/AetherFlow/current/bin/speedtest-backend
+cmp /opt/AetherFlow/current/speedtest-backend /opt/AetherFlow/current/bin/speedtest-backend
+curl -fsS --max-time 10 "http://127.0.0.1:8080/${wasm_file#/opt/AetherFlow/current/web/dist/}" -o /tmp/af-ui.wasm
+cmp "${wasm_file}" /tmp/af-ui.wasm
 echo ""
 readlink -f /opt/AetherFlow/current
 /usr/local/bin/af --version
@@ -1968,7 +1987,7 @@ readlink -f /opt/AetherFlow/current
     drills.append({
         "phase": "bootstrap_install_health_and_cli",
         "status": "passed" if rc1 == 0 else "failed",
-        "summary": "Verified independent SHA256SUMS, tampered-digest rejection, prebuilt v4 Rust control-plane bootstrap, systemd unit activation, /health/ready, and native af CLI checks." if rc1 == 0 else f"Bootstrap drill failed (rc={rc1})",
+        "summary": "Verified checksum, tampered-digest rejection, prebuilt bootstrap, systemd health, external HTML/WASM serving, the LibreSpeed companion, and af CLI checks." if rc1 == 0 else f"Bootstrap drill failed (rc={rc1})",
         "details": {"stdout": out1.strip(), "stderr": err1.strip(), "fixture_only": False},
         "commands": [rec1],
     })
@@ -2511,7 +2530,6 @@ def main():
     if action == "build-baseline-artifact":
         spec = specs[0]
         source_dir = Path(payload["source_dir"])
-        node_root = Path(payload["node_root"])
         output_dir = Path(payload["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
         contract = payload.get("pending_artifact_contract") or {}
@@ -2525,12 +2543,6 @@ def main():
         source_sha256 = compute_digest(src_tar, "sha256")
         source_layout = inspect_source_tarball(src_tar)
 
-        node_tar = work_root / "node-runtime.tar.gz"
-        run_bounded(
-            ["tar", "-C", str(node_root), "-czf", str(node_tar), "."],
-            timeout=120, check=True, label="pack-node-for-vm-build",
-        )
-
         with IsolatedVmSession(
             spec,
             img_ev,
@@ -2540,9 +2552,8 @@ def main():
             memory_mib=int(payload.get("memory_mib", 3584)),
         ) as vm:
             boot_ev = vm.wait_for_ssh_and_systemd(timeout=180)
-            vm.ssh_run("mkdir -p /var/tmp/af-build/src /usr/local/nodejs", timeout=20, check=True, label="mkdir-vm-build")
+            vm.ssh_run("mkdir -p /var/tmp/af-build/src", timeout=20, check=True, label="mkdir-vm-build")
             vm.copy_to_guest(src_tar, "/var/tmp/af-build/src.tar.gz", timeout=180, label="upload-src-tar")
-            vm.copy_to_guest(node_tar, "/var/tmp/af-build/node.tar.gz", timeout=180, label="upload-node-tar")
 
             vm.ssh_run(BASELINE_GUEST_BUILD_SCRIPT, timeout=1800, check=True, label="vm-build-gold")
             vm.copy_from_guest("/var/tmp/af-build/out/aetherflow-linux-amd64.tar.gz", output_dir / "aetherflow-linux-amd64.tar.gz", label="download-built-tarball")
@@ -2681,11 +2692,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_QEMU_TOOLS_ROOT,
         help=f"Extracted QEMU root directory (default: {DEFAULT_QEMU_TOOLS_ROOT})",
     )
-    p.add_argument(
-        "--node-root",
-        default=DEFAULT_NODE_TOOLS_ROOT,
-        help=f"Extracted Node.js 24 directory for guest source builds (default: {DEFAULT_NODE_TOOLS_ROOT})",
-    )
+    p.add_argument("--node-root", help=argparse.SUPPRESS)  # Compatibility with existing invocations.
     p.add_argument(
         "--source-dir",
         default=DEFAULT_BASELINE_SOURCE_DIR,
@@ -2777,7 +2784,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "action": args.action,
         "work_root": args.work_root,
         "qemu_root": args.qemu_root,
-        "node_root": args.node_root,
         "source_dir": args.source_dir,
         "output_dir": args.output_dir,
         "specs": [asdict(s) for s in specs],

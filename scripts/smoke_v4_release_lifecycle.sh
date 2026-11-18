@@ -7,8 +7,8 @@
 #      Debian 11/12/13 (trixie with empty VERSION_ID), and Kali rolling, plus
 #      rejection of unsupported distributions/versions.
 #   2. Fresh installer (`setup/modules/modern_stack.sh`) prebuilt v4 Rust release
-#      pull with SHA-256 verification, zero Go/Node compilation, and packaging of
-#      both `aetherflow-api` and `af` CLI (`_syscommands` dispatch).
+#      pull with SHA-256 verification, external WASM assets, and native API, CLI,
+#      and LibreSpeed companion binaries.
 #   3. Fail-closed verification: corrupted SHA-256 or missing prebuilt release
 #      is rejected with NO implicit source-build or legacy v3 downgrade when
 #      `--from-source` / `AETHERFLOW_BUILD_FROM_SOURCE` is not set.
@@ -53,6 +53,13 @@ pass() {
     echo "[SMOKE-PASS] $*"
 }
 
+check_speedtest_companion() {
+    local current="$1" version="$2"
+    [[ -x "${current}/speedtest-backend" && -x "${current}/bin/speedtest-backend" ]] || fail "Missing executable LibreSpeed companion for ${version}"
+    cmp -s "${current}/speedtest-backend" "${current}/bin/speedtest-backend" || fail "LibreSpeed companion copies differ for ${version}"
+    grep -qF "speedtest-backend ${version}" "${current}/speedtest-backend" || fail "Wrong LibreSpeed companion version in current (expected ${version})"
+}
+
 build_release_tarball() {
     local out_dir="$1"
     local version_tag="$2"
@@ -61,7 +68,9 @@ build_release_tarball() {
 
     local stage="${WORK_DIR}/stage-${version_tag}"
     rm -rf "${stage}" "${out_dir}"
-    mkdir -p "${stage}/deploy/systemd" "${stage}/packages" "${stage}/config" "${stage}/bin" "${out_dir}"
+    mkdir -p "${stage}/deploy/systemd" "${stage}/packages" "${stage}/config" "${stage}/bin" "${stage}/web/dist" "${out_dir}"
+    printf '<!doctype html><title>AetherFlow %s</title>\n' "${version_tag}" > "${stage}/web/dist/index.html"
+    printf '\000asm\001\000\000\000' > "${stage}/web/dist/app-01234567.wasm"
 
     cp -f "${ROOT_DIR}/deploy/release-manager.sh" "${stage}/deploy/release-manager.sh"
     cp -f "${ROOT_DIR}/deploy/verify-provenance.py" "${stage}/deploy/verify-provenance.py"
@@ -95,9 +104,14 @@ EOF
 echo "af-cli ${version_tag} args:\$*"
 EOF
     cp -f "${stage}/af" "${stage}/bin/af"
+    cat > "${stage}/speedtest-backend" <<EOF
+#!/bin/bash
+echo "speedtest-backend ${version_tag}"
+EOF
+    cp -f "${stage}/speedtest-backend" "${stage}/bin/speedtest-backend"
     printf '%s\n' "${version_tag}" > "${stage}/.version"
 
-    chmod 0755 "${stage}/aetherflow-api" "${stage}/af" "${stage}/bin/af" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py"
+    chmod 0755 "${stage}/aetherflow-api" "${stage}/af" "${stage}/bin/af" "${stage}/speedtest-backend" "${stage}/bin/speedtest-backend" "${stage}/deploy/release-manager.sh" "${stage}/deploy/verify-provenance.py"
     find "${stage}" -type d -exec chmod 0755 {} +
 
     local archive="${out_dir}/aetherflow-linux-amd64.tar.gz"
@@ -201,6 +215,8 @@ AF_INSTALL_ROOT="${FRESH_ROOT}/opt/AetherFlow" \
 AF_ENV_DIR="${FRESH_ROOT}/etc/aetherflow" \
 AF_DATA_DIR="${FRESH_ROOT}/var/lib/aetherflow" \
 AF_SYSTEMD_DIR="${FRESH_ROOT}/etc/systemd/system" \
+AF_RUN_DIR="${FRESH_ROOT}/run/aetherflow" \
+AF_LOG_DIR="${FRESH_ROOT}/var/log/aetherflow" \
 AF_SKIP_SYSTEMCTL="1" \
 AF_OFFLINE="1" \
 AETHERFLOW_PREBUILT_TARBALL="${WORK_DIR}/artifacts/v4.0.0/aetherflow-linux-amd64.tar.gz" \
@@ -208,7 +224,6 @@ AETHERFLOW_PREBUILT_SHA256="0000000000000000000000000000000000000000000000000000
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null 2>&1 || BAD_SHA_RC=$?
 
@@ -224,6 +239,8 @@ AF_INSTALL_ROOT="${FRESH_ROOT}/opt/AetherFlow" \
 AF_ENV_DIR="${FRESH_ROOT}/etc/aetherflow" \
 AF_DATA_DIR="${FRESH_ROOT}/var/lib/aetherflow" \
 AF_SYSTEMD_DIR="${FRESH_ROOT}/etc/systemd/system" \
+AF_RUN_DIR="${FRESH_ROOT}/run/aetherflow" \
+AF_LOG_DIR="${FRESH_ROOT}/var/log/aetherflow" \
 AF_SKIP_SYSTEMCTL="1" \
 AF_OFFLINE="1" \
 AETHERFLOW_PREBUILT_TARBALL="${WORK_DIR}/artifacts/v4.0.0/aetherflow-linux-amd64.tar.gz" \
@@ -233,7 +250,6 @@ AETHERFLOW_RELEASE_TAG="v4.0.0" \
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null 2>&1 || UNATTESTED_PREBUILT_RC=$?
 
@@ -247,6 +263,8 @@ AF_INSTALL_ROOT="${FRESH_ROOT}/opt/AetherFlow" \
 AF_ENV_DIR="${FRESH_ROOT}/etc/aetherflow" \
 AF_DATA_DIR="${FRESH_ROOT}/var/lib/aetherflow" \
 AF_SYSTEMD_DIR="${FRESH_ROOT}/etc/systemd/system" \
+AF_RUN_DIR="${FRESH_ROOT}/run/aetherflow" \
+AF_LOG_DIR="${FRESH_ROOT}/var/log/aetherflow" \
 AF_SKIP_SYSTEMCTL="1" \
 AF_OFFLINE="1" \
 AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" \
@@ -256,7 +274,6 @@ AETHERFLOW_RELEASE_TAG="v4.0.0" \
 bash -c '
     source "$1/opt/AetherFlow/setup/modules/00-core.sh"
     source "$1/opt/AetherFlow/setup/modules/modern_stack.sh"
-    _install_node
     _build_modern_stack
 ' _ "${FRESH_ROOT}" >/dev/null
 
@@ -265,9 +282,12 @@ bash -c '
 [[ -x "${FRESH_ROOT}/opt/AetherFlow/current/af" ]] || fail "Fresh install missing executable af CLI"
 [[ -x "${FRESH_ROOT}/opt/AetherFlow/current/bin/af" ]] || fail "Fresh install missing executable bin/af CLI"
 [[ "$(tr -d '[:space:]' < "${FRESH_ROOT}/opt/AetherFlow/current/.version")" == "v4.0.0" ]] || fail "Unexpected .version in fresh install"
+grep -q 'AetherFlow v4.0.0' "${FRESH_ROOT}/opt/AetherFlow/current/web/dist/index.html" || fail "Fresh install missing matching external UI"
+[[ -s "${FRESH_ROOT}/opt/AetherFlow/current/web/dist/app-01234567.wasm" ]] || fail "Fresh install missing external WASM"
 grep -q "DB_PATH=${FRESH_ROOT}/var/lib/aetherflow/aetherflow.sqlite" "${FRESH_ROOT}/etc/aetherflow/aetherflow.env" || fail "aetherflow.env missing FHS DB_PATH"
 grep -q "ExecStart=/opt/AetherFlow/current/aetherflow-api" "${FRESH_ROOT}/etc/systemd/system/aetherflow-api.service" || fail "aetherflow-api.service not pointing to /opt/AetherFlow/current/aetherflow-api"
-pass "Fresh installer staged verified v4.0.0 release (aetherflow-api + af) without Go/Node toolchains"
+check_speedtest_companion "${FRESH_ROOT}/opt/AetherFlow/current" "v4.0.0"
+pass "Fresh installer staged verified v4.0.0 native binaries and external WASM"
 
 # ==============================================================================
 # PHASE 3: Release Manager Upgrade, Failed-Health Auto-Rollback & Manual Rollback
@@ -395,7 +415,8 @@ if [[ "\${url}" == *"/health/ready" ]]; then
     fi
     exit 0
 fi
-exec /usr/bin/curl "\$@"
+printf "Unexpected URL in smoke harness: %s\n" "\${url}" >&2
+exit 1
 EOF
 
 cat > "${RM_ROOT}/bin/id" <<'EOF'
@@ -438,6 +459,8 @@ pass "Fail-closed Sigstore provenance check rejected unattested v4.0.0 archive"
 echo "v4.0.0" > "${SMOKE_STATE_DIR}/release_tag"
 AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Initial deploy did not activate v4.0.0"
+grep -q 'AetherFlow v4.0.0' "${RM_ROOT}/current/web/dist/index.html" || fail "Initial deploy missing matching external UI"
+check_speedtest_companion "${RM_ROOT}/current" "v4.0.0"
 [[ -x "${RM_ROOT}/current/af" ]] || fail "Initial deploy missing af binary"
 pass "Stage 1-3 initial deploy of v4.0.0 succeeded"
 
@@ -446,6 +469,8 @@ sleep 1
 echo "v4.0.1" > "${SMOKE_STATE_DIR}/release_tag"
 AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Upgrade did not activate v4.0.1"
+grep -q 'AetherFlow v4.0.1' "${RM_ROOT}/current/web/dist/index.html" || fail "Upgrade did not activate matching external UI"
+check_speedtest_companion "${RM_ROOT}/current" "v4.0.1"
 [[ -f "${RM_ROOT}/current/data-snapshot/aetherflow.sqlite.bak" ]] || fail "Upgrade did not capture SQLite online backup"
 [[ -f "${RM_ROOT}/current/data-snapshot/MANIFEST.sha256" ]] || fail "Upgrade did not write MANIFEST.sha256"
 pass "Atomic upgrade v4.0.0 -> v4.0.1 succeeded with verified WAL-safe SQLite snapshot"
@@ -457,6 +482,8 @@ BROKEN_RC=0
 AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" deploy --channel stable >/dev/null 2>&1 || BROKEN_RC=$?
 [[ "${BROKEN_RC}" -eq 2 ]] || fail "Expected exit code 2 on failed health probe rollback, got ${BROKEN_RC}"
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.1" ]] || fail "Auto-rollback did not revert symlink to v4.0.1"
+grep -q 'AetherFlow v4.0.1' "${RM_ROOT}/current/web/dist/index.html" || fail "Auto-rollback did not restore matching external UI"
+check_speedtest_companion "${RM_ROOT}/current" "v4.0.1"
 RESTORED_USER="$(sqlite3 "${SMOKE_DB_PATH}" "SELECT username FROM users WHERE username='admin_sentinel';" 2>/dev/null || true)"
 [[ "${RESTORED_USER}" == "admin_sentinel" ]] || fail "Stage 4 rollback did not restore corrupted SQLite database from pre-swap snapshot"
 pass "Broken v4.0.2 release triggered automatic Stage 4 symlink rollback to v4.0.1 and restored corrupted SQLite DB"
@@ -467,6 +494,8 @@ V400_DIR="$(grep -l '^v4\.0\.0$' "${RM_ROOT}/releases/"*/.version | head -n1 | x
 echo "${V400_DIR}" > "${RM_ROOT}/releases/.previous_release"
 AETHERFLOW_SKIP_PROVENANCE_VERIFY="1" PATH="${RM_ROOT}/bin:${PATH}" "${RM_ROOT}/deploy/release-manager.sh" rollback >/dev/null
 [[ "$(tr -d '[:space:]' < "${RM_ROOT}/current/.version")" == "v4.0.0" ]] || fail "Manual rollback did not revert to v4.0.0"
+grep -q 'AetherFlow v4.0.0' "${RM_ROOT}/current/web/dist/index.html" || fail "Manual rollback did not restore matching external UI"
+check_speedtest_companion "${RM_ROOT}/current" "v4.0.0"
 pass "Manual rollback to v4.0.0 verified"
 
 echo "[SMOKE-ALL-PASS] All v4 release, bootstrap, OS matrix, upgrade, auto-rollback, and DB recovery checks passed."

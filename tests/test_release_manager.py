@@ -192,7 +192,7 @@ os.execvp(inner[0], inner)
         )
         return result.stdout.strip()
 
-    def write_artifact(self, version=b"v4.0.0\n"):
+    def write_artifact(self, version=b"v4.0.0\n", index=b"<html>app</html>", wasm=b"wasm"):
         binary = b"#!/bin/bash\necho aetherflow-api\n"
         unit = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nFrom=artifact\n"
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
@@ -206,6 +206,9 @@ os.execvp(inner[0], inner)
             for name, payload, mode in (
                 ("aetherflow-api", binary, 0o755),
                 (".version", version, 0o644),
+                ("web/dist/index.html", index, 0o600),
+                ("speedtest-backend", b"speedtest-fixture", 0o600),
+                ("web/dist/app.wasm", wasm, 0o644),
                 ("deploy/systemd/aetherflow-api.service", unit, 0o644),
                 ("deploy/systemd/aetherflow-runner.service", runner, 0o644),
             ):
@@ -508,7 +511,23 @@ os.execvp(inner[0], inner)
         self.assertIn("systemctl restart aetherflow-api.service", self.commands.read_text())
         self.assertTrue(self.current.is_symlink())
         self.assertNotEqual(self.current.resolve(), previous.resolve())
+        self.assertEqual((self.current / "web/dist/index.html").read_bytes(), b"<html>app</html>")
+        self.assertEqual((self.current / "web/dist/app.wasm").read_bytes(), b"wasm")
+        self.assertEqual((self.current / "web/dist/index.html").stat().st_mode & 0o777, 0o644)
+        for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+            companion = self.current / relpath
+            self.assertEqual(companion.read_bytes(), b"speedtest-fixture")
+            self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
         self.assertEqual(self.marker(self.snapshot()), "env")
+
+    def test_prebuilt_release_without_external_assets_is_rejected_before_swap(self):
+        for index, wasm in ((b"", b"wasm"), (b"<html>", b"")):
+            with self.subTest(index=index, wasm=wasm):
+                self.write_artifact(index=index, wasm=wasm)
+                result = self.run_manager("deploy", "--channel", "stable")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("missing external frontend assets", result.stdout + result.stderr)
+                self.assertFalse(self.current.exists())
 
     def test_archive_permissions_are_normalized_before_swap(self):
         self.prepare_live_units()
@@ -1100,6 +1119,60 @@ os.execvp(inner[0], inner)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.marker(self.data / "aetherflow.sqlite"), "v3-slot-marker")
         self.assertEqual(self.env_file.read_text(), "JWT_SECRET=slot-secret-value\n")
+
+
+class SourceReleaseFrontendTests(unittest.TestCase):
+    def test_source_build_keeps_runtime_ui_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            release = root / "release"
+            for path in (repo / "scripts", repo / "frontend", repo / "backend-rs/crates/af-librespeed", repo / "config", release):
+                path.mkdir(parents=True)
+            (repo / "frontend/source.ts").write_text("legacy source")
+            (repo / "backend-rs/Cargo.lock").write_text("# lock\n")
+            (repo / "backend-rs/crates/af-librespeed/Cargo.toml").touch()
+            (repo / "config/packages.json").write_text("[]\n")
+            (repo / "scripts/install_wasm_build_tools.sh").write_text("exit 0\n")
+            (repo / "scripts/build_wasm_frontend.sh").write_text(
+                'mkdir -p "$FRONTEND_DIST_DIR/locales"\n'
+                'printf "<html>app</html>" > "$FRONTEND_DIST_DIR/index.html"\n'
+                'printf wasm > "$FRONTEND_DIST_DIR/app.wasm"\n'
+                'printf locale > "$FRONTEND_DIST_DIR/locales/en.json.gz"\n'
+            )
+            function = SCRIPT.read_text().split("build_from_source() {", 1)[1].split("\nsimulate_offline_artifact()", 1)[0]
+            harness = '''set -euo pipefail
+log_info() { :; }
+log_error() { printf '%s\\n' "$*" >&2; }
+log_fatal() { log_error "$*"; exit 1; }
+git() { if [[ "$1" == rev-parse ]]; then printf abcdef0; fi; }
+rsync() { cp -a "$REPO_DIR/." "$RELEASE_DIR/"; }
+rustc() { printf 'rustc 1.99.1\n'; }
+cargo() {
+  mkdir -p "$CARGO_TARGET_DIR/release"
+  printf api > "$CARGO_TARGET_DIR/release/aetherflow-api"
+  printf cli > "$CARGO_TARGET_DIR/release/af"
+  case " $* " in
+    *" --bin speedtest-backend "*) printf speedtest > "$CARGO_TARGET_DIR/release/speedtest-backend";;
+  esac
+}
+''' + "build_from_source() {" + function + "\nbuild_from_source\n"
+            env = {**os.environ, "REPO_DIR": str(repo), "RELEASE_DIR": str(release),
+                   "LOG_FILE": str(root / "deploy.log"), "GIT_BRANCH": "master", "GIT_REMOTE": "origin",
+                   "CHANNEL": "stable", "CARGO_TARGET_DIR": "custom-target"}
+            result = subprocess.run(["bash", "-c", harness], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((release / "web/dist/index.html").read_text(), "<html>app</html>")
+            self.assertEqual((release / "web/dist/app.wasm").read_text(), "wasm")
+            self.assertEqual((release / "web/dist/locales/en.json.gz").read_text(), "locale")
+            self.assertEqual((release / "bin/af").read_text(), "cli")
+            self.assertEqual((release / "config/packages.json").read_text(), "[]\n")
+            for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+                companion = release / relpath
+                self.assertEqual(companion.read_text(), "speedtest")
+                self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((release / "frontend").exists())
+            self.assertTrue((repo / "frontend/source.ts").exists())
 
 
 if __name__ == "__main__":

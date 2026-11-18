@@ -1,7 +1,7 @@
 """
 Tier 1: Feature Coverage (Category-Partition & Happy Paths)
 Features:
-- F32: Single-Binary Build Pipeline
+- F32: Rust API and External WASM Build Pipeline
 - F33: Systemd Privilege Boundary Units
 - F34: Sudoers & PM2 Purge
 - F35: Shell Script Line Endings & Syntax
@@ -11,37 +11,45 @@ Features:
 
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
-class TestF32StaticExportBeforeBackendCompile(TestCase):
+class TestF32WasmBuildBeforeBackendCompile(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_01", "F32", 1, "modern_stack.sh builds Next.js static export before compiling Rust backend")
+        super().__init__("T1_F32_01", "F32", 1, "modern_stack.sh builds and stages the Rust WASM interface")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
-        self.assert_true(bool(stack and "NEXT_STATIC_EXPORT" in stack), "F32: modern_stack.sh must build frontend with NEXT_STATIC_EXPORT=1")
+        self.assert_true(bool(stack and "build_wasm_frontend.sh" in stack), "F32: modern_stack.sh must invoke the Rust WASM build")
+        self.assert_true(bool(stack and "NEXT_STATIC_EXPORT" not in stack), "F32: modern_stack.sh must retire the legacy frontend build")
 
-class TestF32DistEmbedDirectoryPopulated(TestCase):
+class TestF32ExternalDistStaged(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_02", "F32", 1, "modern_stack.sh copies frontend build artifacts into web/dist/")
+        super().__init__("T1_F32_02", "F32", 1, "modern_stack.sh retains external web/dist assets in the release")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
-        self.assert_true(bool(stack and ("web/dist" in stack or "dist" in stack)), "F32: modern_stack.sh must copy frontend export into web/dist/")
+        self.assert_true(bool(stack and '${release_dir}/web/dist' in stack and 'web/dist/index.html' in stack), "F32: modern_stack.sh must validate and retain external frontend assets")
 
-class TestF32SingleBinaryOutput(TestCase):
+class TestF32NativeBinaries(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_03", "F32", 1, "Rust backend compiles to single executable 'aetherflow-api'")
+        super().__init__("T1_F32_03", "F32", 1, "Rust backend compiles the API, CLI, and LibreSpeed companion")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
-        self.assert_true(bool(stack and "cargo build --release" in stack and "aetherflow-api" in stack), "F32: modern_stack.sh must compile aetherflow-api via cargo build")
+        self.assert_true(
+            bool(stack and all(token in stack for token in (
+                "cargo build --release", "--bin aetherflow-api", "companion_bins=(af)",
+                "companion_bins+=(speedtest-backend)",
+            ))),
+            "F32: modern_stack.sh must compile the API, CLI, and LibreSpeed companion",
+        )
 
-class TestF32EmbeddedSpaServing(TestCase):
+class TestF32ExternalSpaServing(TestCase):
     def __init__(self):
-        super().__init__("T1_F32_04", "F32", 1, "backend-rs/crates/af-api/src/embed.rs embeds web/dist directory via RustEmbed")
+        super().__init__("T1_F32_04", "F32", 1, "Rust API serves external assets using STATIC_DIR or executable-adjacent web/dist")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         embed_code = inspector.read_file("backend-rs/crates/af-api/src/embed.rs")
-        self.assert_true(bool(embed_code and "RustEmbed" in embed_code and "web/dist" in embed_code), "F32: embed.rs must declare #[derive(RustEmbed)] pointing to web/dist")
+        self.assert_true(bool(embed_code and 'STATIC_DIR' in embed_code and 'web/dist' in embed_code and 'env::current_exe()' in embed_code), "F32: the Rust API must resolve runtime frontend assets")
+        self.assert_true(bool(embed_code and 'RustEmbed' not in embed_code), "F32: the frontend must remain separate from the API executable")
 
 class TestF32OnboardingUrlUsesPort8080(TestCase):
     def __init__(self):
@@ -272,7 +280,7 @@ class TestF37ProgressiveTestabilityVerified(TestCase):
 
 def get_tests():
     return [
-        TestF32StaticExportBeforeBackendCompile(), TestF32DistEmbedDirectoryPopulated(), TestF32SingleBinaryOutput(), TestF32EmbeddedSpaServing(), TestF32OnboardingUrlUsesPort8080(),
+        TestF32WasmBuildBeforeBackendCompile(), TestF32ExternalDistStaged(), TestF32NativeBinaries(), TestF32ExternalSpaServing(), TestF32OnboardingUrlUsesPort8080(),
         TestF33RunnerTemplateInSetup(), TestF33ApiTemplateProtectSystemStrict(), TestF33ApiTemplateNoNewPrivileges(), TestF33ApiTemplateUnprivilegedUser(), TestF33ObsoleteFrontendUnitPurged(),
         TestF34NoSudoersFileCreation(), TestF34NoRootPm2Commands(), TestF34LegacySudoersPurgeLogic(), TestF34PrincipleOfLeastPrivilegeEnforced(), TestF34CleanDaemonManagementViaSystemd(),
         TestF35AllScriptsUseLfLineEndings(), TestF35ValidShebangLines(), TestF35NoSyntaxErrors(), TestF35ErrorHandlingFlagsUsed(), TestF35NoByteOrderMarks(),

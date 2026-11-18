@@ -81,7 +81,8 @@ else:raise RuntimeError(name)
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "Linux Bash is required")
 class NetworkInstallerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="af-vpn-install-")
+        # Exercise the real staging checks on a disk-backed fixture filesystem.
+        self.temp = tempfile.TemporaryDirectory(prefix="af-vpn-install-", dir="/var/tmp")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         for name in ("bin", "opt/AetherFlow/packages", "etc/apt/sources.list.d", "run", "var/log/aetherflow", "install", "tmp"):

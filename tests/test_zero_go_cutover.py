@@ -254,7 +254,7 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
             for stepup_hdr in ("X-Reauth-Password", "X-Reauth-TOTP", "X-Reauth-Confirm"):
                 self.assertIn(stepup_hdr, param_names, f"{method.upper()} missing {stepup_hdr}")
 
-    def test_rust_librespeed_and_neutral_spa_embed_present(self) -> None:
+    def test_rust_librespeed_and_external_wasm_assets_present(self) -> None:
         librespeed_toml = ROOT / "backend-rs/crates/af-librespeed/Cargo.toml"
         self.assertTrue(
             librespeed_toml.is_file(),
@@ -266,6 +266,10 @@ class TestZeroGoCutoverInvariants(unittest.TestCase):
         embed_rs = (ROOT / "backend-rs/crates/af-api/src/embed.rs").read_text(encoding="utf-8")
         self.assertIn("web/dist", embed_rs)
         self.assertNotIn("backend/web/dist", embed_rs)
+        api_manifest = (ROOT / "backend-rs/crates/af-api/Cargo.toml").read_text(encoding="utf-8")
+        self.assertNotIn("rust-embed", api_manifest)
+        stage_script = (ROOT / "scripts/build_wasm_frontend.sh").read_text(encoding="utf-8")
+        self.assertNotIn("LEGACY_EMBED_DIST_DIR", stage_script)
 
     def test_workflows_are_pure_rust_and_enforce_zero_go_hygiene(self) -> None:
         banned = (
@@ -951,7 +955,10 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
 
         wsl_script = (ROOT / "scripts/setup_wsl_dev.sh").read_text(encoding="utf-8")
         self.assertIsNone(re.search(r"curl\b[^\n]*\|\s*(?:sudo\s+(?:-E\s+)?)?(?:ba)?sh\b", wsl_script))
-        self.assertIn("sha256sum -c -", wsl_script)
+        self.assertIn("bash scripts/install_wasm_build_tools.sh --ensure", wsl_script)
+        wasm_tools = (ROOT / "scripts/install_wasm_build_tools.sh").read_text(encoding="utf-8")
+        self.assertIn('"${rustup_sha256}"', wasm_tools)
+        self.assertIn("sha256sum --check --strict", wasm_tools)
 
         common_text = (ROOT / "packages/common.sh").read_text(encoding="utf-8")
         self.assertIn(r"\[::1\]|localhost", common_text)

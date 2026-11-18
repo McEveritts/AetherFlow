@@ -197,7 +197,7 @@ impl ReleaseOptions {
         }
         if self.from_source {
             return Err(ReleaseError::Unsupported(
-                "--from-source is not supported by the native Rust release engine (af-release enforces signed/checksum-verified pre-built single-binary artifacts; use deploy/release-manager.sh --from-source if an emergency source build is required)"
+                "--from-source is not supported by the native Rust release engine (af-release enforces signed/checksum-verified pre-built release artifacts with external frontend assets; use deploy/release-manager.sh --from-source if an emergency source build is required)"
                     .to_string(),
             ));
         }

@@ -143,7 +143,7 @@ mod tests {
             } else if *entry_type == EntryType::Symlink {
                 header.set_size(0);
                 header.set_mode(0o777);
-                tar.append_link(&mut header, *rel_path, "/etc/passwd")
+                tar.append_link(&mut header, *rel_path, "synthetic-target")
                     .unwrap();
             } else {
                 header.set_size(data.len() as u64);
@@ -499,6 +499,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
                     EntryType::Regular,
                 ),
                 (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
                 ("config/packages.json", b"[]", EntryType::Regular),
             ],
         );
@@ -544,6 +554,241 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert!(matches!(nobin_err, ReleaseError::ArtifactVerification(_)));
     }
 
+    #[test]
+    fn release_archive_requires_external_frontend_assets_before_manager_staging() {
+        let sb = TempSandbox::new("external-frontend-contract");
+        let mut cfg = ReleaseConfig::for_root(sb.path());
+        let running_manager = sb.path().join("running-release-manager.sh");
+        fs::write(&running_manager, b"synthetic running manager").unwrap();
+        cfg.stage_script_path = Some(running_manager);
+
+        type ArchiveEntry<'a> = (&'a str, &'a [u8], EntryType);
+        type FrontendCase<'a> = (&'a str, &'a [ArchiveEntry<'a>], &'a str);
+        let cases: &[FrontendCase<'_>] = &[
+            ("missing-dist", &[], "regular directory"),
+            (
+                "dist-is-file",
+                &[("web/dist", b"synthetic non-directory", EntryType::Regular)],
+                "regular directory",
+            ),
+            (
+                "missing-index",
+                &[("web/dist/app.wasm", b"synthetic wasm", EntryType::Regular)],
+                "index.html",
+            ),
+            (
+                "empty-index",
+                &[
+                    ("web/dist/index.html", b"", EntryType::Regular),
+                    ("web/dist/app.wasm", b"synthetic wasm", EntryType::Regular),
+                ],
+                "index.html",
+            ),
+            (
+                "index-directory",
+                &[
+                    ("web/dist/index.html", b"", EntryType::Directory),
+                    ("web/dist/app.wasm", b"synthetic wasm", EntryType::Regular),
+                ],
+                "index.html",
+            ),
+            (
+                "missing-wasm",
+                &[(
+                    "web/dist/index.html",
+                    b"synthetic index",
+                    EntryType::Regular,
+                )],
+                "*.wasm",
+            ),
+            (
+                "empty-wasm",
+                &[
+                    (
+                        "web/dist/index.html",
+                        b"synthetic index",
+                        EntryType::Regular,
+                    ),
+                    ("web/dist/app.wasm", b"", EntryType::Regular),
+                ],
+                "*.wasm",
+            ),
+            (
+                "nested-wasm-only",
+                &[
+                    (
+                        "web/dist/index.html",
+                        b"synthetic index",
+                        EntryType::Regular,
+                    ),
+                    (
+                        "web/dist/nested/app.wasm",
+                        b"synthetic wasm",
+                        EntryType::Regular,
+                    ),
+                ],
+                "*.wasm",
+            ),
+            (
+                "wasm-directory",
+                &[
+                    (
+                        "web/dist/index.html",
+                        b"synthetic index",
+                        EntryType::Regular,
+                    ),
+                    ("web/dist/app.wasm", b"", EntryType::Directory),
+                ],
+                "*.wasm",
+            ),
+        ];
+        for &(label, frontend_entries, expected_error) in cases {
+            let archive = sb.path().join(format!("{label}.tar.gz"));
+            let mut entries: Vec<(&str, &[u8], EntryType)> = vec![
+                ("aetherflow-api", b"synthetic api", EntryType::Regular),
+                (".version", b"v4.0.0\n", EntryType::Regular),
+            ];
+            entries.extend_from_slice(frontend_entries);
+            let (_, manifest) =
+                build_synthetic_release_tarball(&archive, &cfg.artifact_name, &entries);
+            verify_artifact_checksum(&archive, &manifest, &cfg.artifact_name).unwrap();
+            let extracted = sb.path().join(format!("extract-{label}"));
+            let err = extract_and_validate_release_archive(&archive, &extracted, "v4.0.0", &cfg)
+                .expect_err(label);
+            assert!(
+                matches!(&err, ReleaseError::ArtifactVerification(message) if message.contains(expected_error)),
+                "{label}: {err}"
+            );
+            assert!(
+                !extracted.join("deploy/release-manager.sh").exists(),
+                "{label}: manager staged before validation"
+            );
+        }
+
+        // Representative release paths with synthetic contents; these are not production assets.
+        let archive = sb.path().join("valid-layout.tar.gz");
+        let (_, manifest) = build_synthetic_release_tarball(
+            &archive,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"synthetic api", EntryType::Regular),
+                ("af", b"synthetic cli", EntryType::Regular),
+                ("bin/af", b"synthetic cli", EntryType::Regular),
+                (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic index",
+                    EntryType::Regular,
+                ),
+                ("web/dist/empty.wasm", b"", EntryType::Regular),
+                (
+                    "web/dist/af-web-app_bg-1234.wasm",
+                    b"synthetic wasm",
+                    EntryType::Regular,
+                ),
+                (
+                    "deploy/release-manager.sh",
+                    b"synthetic candidate manager",
+                    EntryType::Regular,
+                ),
+            ],
+        );
+        verify_artifact_checksum(&archive, &manifest, &cfg.artifact_name).unwrap();
+        let extracted = sb.path().join("extract-valid-layout");
+        extract_and_validate_release_archive(&archive, &extracted, "v4.0.0", &cfg).unwrap();
+        assert_eq!(
+            fs::read(extracted.join("web/dist/index.html")).unwrap(),
+            b"synthetic index"
+        );
+        assert_eq!(
+            fs::read(extracted.join("web/dist/af-web-app_bg-1234.wasm")).unwrap(),
+            b"synthetic wasm"
+        );
+        assert_eq!(
+            fs::read(extracted.join("deploy/release-manager.sh")).unwrap(),
+            b"synthetic candidate manager"
+        );
+        assert!(extracted.join("af").is_file());
+        assert!(extracted.join("bin/af").is_file());
+    }
+
+    #[test]
+    fn release_archive_rejects_symlinked_frontend_entries() {
+        let sb = TempSandbox::new("frontend-archive-symlinks");
+        let cfg = ReleaseConfig::for_root(sb.path());
+        for link in [
+            "web",
+            "web/dist",
+            "web/dist/index.html",
+            "web/dist/app.wasm",
+        ] {
+            let archive = sb
+                .path()
+                .join(format!("link-{}.tar.gz", link.replace('/', "-")));
+            build_synthetic_release_tarball(
+                &archive,
+                &cfg.artifact_name,
+                &[
+                    ("aetherflow-api", b"synthetic api", EntryType::Regular),
+                    (".version", b"v4.0.0\n", EntryType::Regular),
+                    (link, b"", EntryType::Symlink),
+                ],
+            );
+            let extracted = sb
+                .path()
+                .join(format!("extract-{}", link.replace('/', "-")));
+            let err = extract_and_validate_release_archive(&archive, &extracted, "v4.0.0", &cfg)
+                .expect_err(link);
+            assert!(
+                matches!(&err, ReleaseError::ArchiveExtraction { .. }),
+                "{link}: {err}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_frontend_assets_stop_deploy_before_cutover() {
+        let sb = TempSandbox::new("frontend-no-cutover");
+        let cfg = ReleaseConfig::for_root(sb.path());
+        seed_valid_sqlite_db(&cfg.host_data_dir.join(&cfg.sqlite_db), "synthetic state");
+        let previous = cfg.releases_dir.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        std::os::unix::fs::symlink(&previous, &cfg.current_link).unwrap();
+
+        let archive = sb.path().join("missing-frontend.tar.gz");
+        let (_, manifest) = build_synthetic_release_tarball(
+            &archive,
+            &cfg.artifact_name,
+            &[
+                ("aetherflow-api", b"synthetic api", EntryType::Regular),
+                (".version", b"v4.0.0\n", EntryType::Regular),
+            ],
+        );
+        let provider = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: archive,
+            manifest_content: manifest,
+        };
+        let lifecycle = MockLifecycle::default();
+        let engine = ReleaseEngine::new(
+            cfg.clone(),
+            provider,
+            lifecycle.clone(),
+            MockHealthProber::new(vec![]),
+        );
+        let err = engine.execute(&ReleaseOptions::default()).unwrap_err();
+        assert!(matches!(err, ReleaseError::ArtifactVerification(_)));
+        assert_eq!(fs::read_link(&cfg.current_link).unwrap(), previous);
+        assert!(!lifecycle
+            .recorded_calls()
+            .iter()
+            .any(|call| call == "restart_units"));
+        let recovery = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+        assert_eq!(recovery.phase, ReleasePhase::Failed);
+        assert!(!recovery.candidate_release.unwrap().exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn healthy_old_runtime_triggers_rollback_instead_of_completion() {
@@ -566,6 +811,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &[
                 ("aetherflow-api", b"new", EntryType::Regular),
                 (".version", b"v4.0.0-new", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
             ],
         );
         let provider = MockArtifactProvider {
@@ -640,6 +895,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &[
                 ("aetherflow-api", b"rust-v4-binary", EntryType::Regular),
                 (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
                 (
                     "deploy/systemd/aetherflow-api.service",
                     b"# Packaged API unit\n",
@@ -865,6 +1130,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &[
                 ("aetherflow-api", b"binary", EntryType::Regular),
                 (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
             ],
         );
 
@@ -991,9 +1266,25 @@ AETHERFLOW_DB_PATH=fallback.sqlite
 
         assert!(report.dry_run);
         assert!(report.offline);
+        assert_eq!(report.release_tag, "v4.0.0-dryrun");
         assert_eq!(report.channel, ReleaseChannel::Nightly);
         assert!(report.release_dir.starts_with(&cfg.dry_run_root));
         assert!(report.current_link.starts_with(&cfg.dry_run_root));
+        for path in ["aetherflow-api", "af", "bin/af"] {
+            let contents = fs::read_to_string(report.release_dir.join(path)).unwrap();
+            assert!(contents.contains("Offline dry-run placeholder"), "{path}");
+        }
+        let index = fs::read_to_string(report.release_dir.join("web/dist/index.html")).unwrap();
+        assert!(index.contains("Offline dry-run placeholder"));
+        let wasm =
+            fs::symlink_metadata(report.release_dir.join("web/dist/dry-run-placeholder.wasm"))
+                .unwrap();
+        assert!(wasm.is_file());
+        assert_eq!(
+            wasm.len(),
+            0,
+            "dry-run WASM must not pass release validation"
+        );
         assert!(
             !cfg.current_link.exists(),
             "production current_link must remain untouched"
@@ -1084,6 +1375,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &[
                 ("aetherflow-api", b"binary-content", EntryType::Regular),
                 (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
                 ("config/app.json", b"{\"ok\":true}", EntryType::Regular),
             ],
         );
@@ -1323,6 +1624,16 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             &[
                 ("aetherflow-api", b"binary", EntryType::Regular),
                 (".version", b"v4.0.0\n", EntryType::Regular),
+                (
+                    "web/dist/index.html",
+                    b"synthetic test index",
+                    EntryType::Regular,
+                ),
+                (
+                    "web/dist/app.wasm",
+                    b"synthetic test wasm",
+                    EntryType::Regular,
+                ),
             ],
         );
 

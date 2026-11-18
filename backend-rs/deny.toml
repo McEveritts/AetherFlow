@@ -29,22 +29,42 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
     "CC0-1.0",
-    "MPL-2.0",
     "CDLA-Permissive-2.0",
     "BSL-1.0",
     "0BSD",
-    "OpenSSL",
     "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
+# Exact compatibility versions required by the locked transitive graph.
+# New duplicate crates or versions remain denied. Advisory checks still apply.
+skip = [
+    { crate = "base64@=0.22.1", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "block-buffer@=0.10.4", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "cpufeatures@=0.2.17", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "crypto-common@=0.1.7", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "digest@=0.10.7", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "getrandom@=0.2.17", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "hmac@=0.12.1", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "lock_api@=0.4.14", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "miniz_oxide@=0.8.9", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "parking_lot@=0.12.5", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "parking_lot_core@=0.9.12", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "rand@=0.8.8", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "rand_core@=0.6.4", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "sha2@=0.10.9", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "signature@=2.2.0", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "syn@=2.0.119", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "thiserror@=1.0.69", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "thiserror-impl@=1.0.69", reason = "Locked upstream dependencies require distinct API generations" },
+    { crate = "untrusted@=0.7.1", reason = "Locked upstream dependencies require distinct API generations" },
+]
 
 [sources]
 unknown-registry = "deny"

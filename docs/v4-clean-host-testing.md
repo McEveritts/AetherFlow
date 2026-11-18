@@ -86,16 +86,16 @@ python scripts/v4_vm_matrix.py build-baseline-artifact `
 ```
 
 `build-baseline-artifact` enforces the following build and resource guarantees inside the isolated `ubuntu-22.04` guest:
-1. **Unconditional Frontend Static Export & Embedded Asset Verification**:
+1. **Build and Verify the External WASM Dashboard**:
    - Never skips the frontend build merely because a placeholder `web/dist` directory (with `.keep`) exists in the repository.
-   - Removes `web/dist` and `frontend/out`, runs `npm ci --no-fund --no-audit` and `NEXT_STATIC_EXPORT=1 npm run build --workspace frontend` using the isolated guest Node 24 toolchain, copies `frontend/out/.` into `web/dist/`, and verifies `test -s web/dist/index.html` and `test -d web/dist/_next` before compiling Rust so `rust-embed` (`af-api/src/embed.rs`) embeds the real UI assets.
+   - Installs the pinned WASM tools, clears `web/dist` and `frontend-rs/dist`, and runs `scripts/build_wasm_frontend.sh --stage`. An entry point and at least one nonempty `.wasm` file must be present before packaging.
 2. **Locked Dependency Prefetch + Offline Rust Compilation (`--locked` + `CARGO_NET_OFFLINE=true`)**:
    - Requires a non-empty `backend-rs/Cargo.lock` (`test -s backend-rs/Cargo.lock`).
    - Runs `cargo fetch --locked` first, then invokes `scripts/build_gold.sh` with `CARGO_LOCKED=1`, `CARGO_NET_OFFLINE=true`, and `CARGO_BUILD_JOBS=2`.
 3. **Host-Friendly Resource Limits (`2 jobs` + `nice` / `ionice`)**:
-   - Wraps `npm ci`, `npm run build`, `cargo fetch --locked`, and `scripts/build_gold.sh` with `nice -n 10 ionice -c 2 -n 7` and `CARGO_BUILD_JOBS=2` inside a 2-vCPU, 3584 MiB guest.
+   - Runs the WASM build, `cargo fetch --locked`, and `scripts/build_gold.sh` with `nice -n 10 ionice -c 2 -n 7` and `CARGO_BUILD_JOBS=2` inside a 2-vCPU, 3584 MiB guest.
 4. **Post-Build Contract & GLIBC Verification**:
-   - Inspects the downloaded `aetherflow-linux-amd64.tar.gz` and independent `SHA256SUMS` via `inspect_artifact_bundle`, verifying required files, executable permissions, embedded UI markers (`index.html` and `_next/`), and `GLIBC <= 2.35` via `readelf --version-info`.
+   - Inspects the downloaded `aetherflow-linux-amd64.tar.gz` and independent `SHA256SUMS` via `inspect_artifact_bundle`, verifies required files, executable permissions and external `web/dist` assets, and checks `GLIBC <= 2.35` for the native binaries.
 
 ---
 

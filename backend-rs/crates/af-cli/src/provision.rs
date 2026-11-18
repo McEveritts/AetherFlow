@@ -201,7 +201,7 @@ fn write_file_atomic_exclusive(
     Ok(())
 }
 
-/// Canonical ordered 38 setup step IDs from `setup/modules/06-state.sh` (`ALL_STEPS`).
+/// Canonical ordered setup step IDs from `setup/modules/06-state.sh` (`ALL_STEPS`).
 pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "bashrc",
     "intro",
@@ -228,7 +228,6 @@ pub const CANONICAL_ALL_STEPS: &[&str] = &[
     "lshell",
     "ffmpeg",
     "apachesudo",
-    "install_node",
     "build_modern",
     "apacheconf",
     "fix_cert",
@@ -258,7 +257,7 @@ pub enum ProvisionStepTier {
     RetainedShellBootstrap,
 }
 
-/// Metadata describing one of the 38 canonical provisioning steps.
+/// Metadata describing one of the canonical provisioning steps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvisionStepDescriptor {
     pub index: usize,
@@ -267,7 +266,7 @@ pub struct ProvisionStepDescriptor {
     pub summary: &'static str,
 }
 
-/// Returns the descriptor table for all 38 canonical `ALL_STEPS`.
+/// Returns the descriptor table for all canonical `ALL_STEPS`.
 pub fn canonical_step_catalog() -> Vec<ProvisionStepDescriptor> {
     CANONICAL_ALL_STEPS
         .iter()
@@ -345,7 +344,7 @@ pub fn canonical_step_catalog() -> Vec<ProvisionStepDescriptor> {
         .collect()
 }
 
-/// Returns `true` if `step_id` is in the 38 canonical `ALL_STEPS`.
+/// Returns `true` if `step_id` is in the canonical `ALL_STEPS`.
 pub fn is_canonical_step(step_id: &str) -> bool {
     CANONICAL_ALL_STEPS.contains(&step_id)
 }
@@ -361,7 +360,7 @@ pub fn validate_step_id(step_id: &str) -> CliResult<String> {
     }
     if !is_canonical_step(trimmed) {
         return Err(CliError::Validation(format!(
-            "unknown provisioning step {:?} (run 'af provision list-steps' for the 38 canonical step IDs)",
+            "unknown provisioning step {:?} (run 'af provision list-steps' for the canonical step IDs)",
             trimmed
         )));
     }
@@ -774,7 +773,11 @@ impl ProvisionStateStore {
         let (state_version, raw_completed_steps) = self.read_state()?;
         let version_compatible = state_version == Some(PROVISION_STATE_VERSION);
         let completed_steps = if version_compatible {
+            // Keep historical markers on disk, but count only steps in the current installer.
             raw_completed_steps
+                .into_iter()
+                .filter(|step| is_canonical_step(step))
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };

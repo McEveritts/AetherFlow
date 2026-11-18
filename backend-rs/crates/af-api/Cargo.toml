@@ -46,7 +46,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
 reqwest.workspace = true
-rust-embed.workspace = true
 mime_guess.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true

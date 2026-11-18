@@ -710,6 +710,7 @@ pub struct RunnerResponse {
     pub error: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn normalize_path_for_comparison(path: &std::path::Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
     if raw.len() > 1 {
@@ -719,6 +720,7 @@ fn normalize_path_for_comparison(path: &std::path::Path) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn normalize_lexical_path(
     path: &std::path::Path,
     label: &str,
@@ -758,6 +760,7 @@ pub fn normalize_lexical_path(
     Ok(normalized)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn validate_path_within_isolated_root(
     candidate: &std::path::Path,
     isolated_root: &std::path::Path,
@@ -790,6 +793,7 @@ pub fn validate_path_within_isolated_root(
     Ok(norm_candidate)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unescape_env_file_value(raw_val: &str) -> String {
     let trimmed = raw_val.trim();
     if trimmed.len() >= 2
@@ -828,6 +832,7 @@ fn unescape_env_file_value(raw_val: &str) -> String {
     trimmed.to_string()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_key_value_env_str(contents: &str) -> HashMap<String, String> {
     let mut parsed_map = HashMap::new();
     for raw_line in contents.lines() {
@@ -854,6 +859,7 @@ pub fn parse_key_value_env_str(contents: &str) -> HashMap<String, String> {
     parsed_map
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_authoritative_env_fallback_map<F>(
     isolated_root: Option<&std::path::Path>,
     allow_host_etc_fallback: bool,
@@ -906,6 +912,7 @@ where
     Ok(combined)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_isolated_root_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     mut get_env: F,
@@ -948,6 +955,7 @@ where
     Ok(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_resolve_active_db_path_internal<F>(
     explicit_root: Option<&std::path::Path>,
     default_fallback: &str,
@@ -1064,6 +1072,7 @@ where
     Ok(std::path::PathBuf::from(default_fallback))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_active_db_path_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     default_fallback: &str,
@@ -1075,6 +1084,7 @@ where
     try_resolve_active_db_path_internal(explicit_root, default_fallback, false, get_env)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_active_db_path_from_env(
     explicit_root: Option<&std::path::Path>,
     default_fallback: &str,
@@ -1087,6 +1097,7 @@ pub fn try_resolve_active_db_path_from_env(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_active_db_path_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     default_fallback: &str,
@@ -1113,6 +1124,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_active_db_path_from_env(
     explicit_root: Option<&std::path::Path>,
     default_fallback: &str,
@@ -1125,6 +1137,7 @@ pub fn resolve_active_db_path_from_env(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_resolve_active_backup_dir_internal<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1209,6 +1222,7 @@ where
     Ok(std::path::PathBuf::from(default_fallback))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_active_backup_dir_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1227,6 +1241,7 @@ where
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_active_backup_dir_from_env(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1244,6 +1259,7 @@ pub fn try_resolve_active_backup_dir_from_env(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_active_backup_dir_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1276,6 +1292,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_active_backup_dir_from_env(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1292,6 +1309,7 @@ pub fn resolve_active_backup_dir_from_env(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn map_default_lock_parent_to_shared_runtime_anchor(
     candidate_parent: &std::path::Path,
     isolated_root: Option<&std::path::Path>,
@@ -1325,6 +1343,7 @@ fn map_default_lock_parent_to_shared_runtime_anchor(
     candidate_parent.join(".snapshot.lock")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_resolve_canonical_maintenance_lock_path_internal<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1444,6 +1463,7 @@ where
     Ok(std::path::PathBuf::from("/run/aetherflow/.snapshot.lock"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_trusted_sqlite_ids_from_env(
     explicit_root: Option<&std::path::Path>,
 ) -> Result<(Option<u32>, Option<u32>), String> {
@@ -1485,12 +1505,14 @@ pub fn try_resolve_trusted_sqlite_ids_from_env(
     Ok((uid_opt, gid_opt))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_trusted_sqlite_ids_from_env(
     explicit_root: Option<&std::path::Path>,
 ) -> (Option<u32>, Option<u32>) {
     try_resolve_trusted_sqlite_ids_from_env(explicit_root).unwrap_or((None, None))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_canonical_maintenance_lock_path_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1509,6 +1531,7 @@ where
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn try_resolve_canonical_maintenance_lock_path_from_env(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1526,6 +1549,7 @@ pub fn try_resolve_canonical_maintenance_lock_path_from_env(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_canonical_maintenance_lock_path_with_env<F>(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1566,6 +1590,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_canonical_maintenance_lock_path_from_env(
     explicit_root: Option<&std::path::Path>,
     active_db_path: Option<&std::path::Path>,
@@ -1586,6 +1611,7 @@ pub fn resolve_canonical_maintenance_lock_path_from_env(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn derive_sqlite_target_rel_path(
     target_root: &std::path::Path,
     configured_db_path: &std::path::Path,
@@ -1628,6 +1654,7 @@ pub fn derive_sqlite_target_rel_path(
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_contained_sqlite_restore_override(
     target_root: &std::path::Path,
     configured_db_path: Option<&std::path::Path>,

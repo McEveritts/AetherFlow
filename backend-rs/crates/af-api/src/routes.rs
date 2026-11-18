@@ -36,6 +36,7 @@ use crate::oidc::{
 use crate::plugins::{
     control_plugin_handler, list_plugins_handler, mint_plugin_token_handler,
     proxy_plugin_root_handler, proxy_plugin_wildcard_handler, serve_plugin_ui_handler,
+    ProxiedPluginResponse,
 };
 use crate::storage::{
     check_update, delete_shared_file, download_backup, download_file, get_backups_list,
@@ -79,6 +80,32 @@ static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 pub(crate) const OPENAPI_YAML: &str = include_str!("../../../../config/openapi-v1.yaml");
 
+// Keep these hashes in sync with the bundled viewer in openapi_ui.rs. The
+// Swagger route test verifies them against the served HTML and its script.
+const OPENAPI_VIEWER_CSP: &str = concat!(
+    "default-src 'none'; ",
+    "script-src 'sha256-jyJt4RwhcAIhFYY+cKeNwROF+/g73E7Z48dgwfww3qI='; ",
+    "style-src 'sha256-uFkWmHkrhhU0j08xygBL6L+ApAEWzPHOdAssSQkGcTg='; ",
+    "style-src-attr 'unsafe-hashes'",
+    " 'sha256-5Fsk84KIR+lDiNQtvNos/9DJZDA1zI/lJleV8flEcUw='", // border-color: rgba(244, 63, 94, 0.45);
+    " 'sha256-vlLHoHEFMi9eDFnAmMWaNmB2X3mX3y8/KrTJRwQ5Zgk='", // color:var(--rose);
+    " 'sha256-MspoDULVvFUu+EGVwxzfwJrhcBGpJbJUVylwYlqFut0='", // display:flex;align-items:center;justify-content:space-between;gap:12px;
+    " 'sha256-xC8juOyOcGVG0BdxV2vy4LlzWOZfFlsV82FV45f1hTY='", // font-size:12px;
+    " 'sha256-ZbR7rNLB0eDq+536A9faDgt/COmrZCwPOXqeYb+72AY='", // font-size:12px;margin-top:4px;
+    " 'sha256-RjZ3C0loqJUpHnVjvylsB/gI+/jzWQZIje5lII5BhvA='", // margin-bottom:12px;
+    " 'sha256-PEo9RAB0C7Pw0EzsgS+HuVOHFPZRr93dZNJ9mYzz95A='", // margin-bottom:20px;
+    " 'sha256-xQAVW2K0oJOkay83e4mq0DkGen61FPvjkekwHB20JNk='", // margin-bottom:8px;
+    " 'sha256-GVP6eWzzxD9xO2PlBQF9gO5MWEE1dewvo/XOfKaRI/k='", // margin-left:8px;
+    " 'sha256-qTg+SZK3Zo3bBUqZqmXpk0+a1nRHw5ojp7cXL9n4z4o='", // margin-left:8px;font-size:12px;
+    " 'sha256-cm6LMX8ymN9S2NZIl6bkdxkDVg8qKWjN9YrULeIqytI='", // margin-top:10px;
+    " 'sha256-NugfhhJHFN8ab5ins9DoUFIX7i7OhkkvaH+nh6H6Y3M='", // margin-top:4px;
+    " 'sha256-HUNu/B+IX8Ijz50biWW0v3RjXHoGSCMlzH2BnOV0TJc='", // margin-top:6px;
+    " 'sha256-ozuPwv93gGhip1xyJjz11Brp9Kvn+VSA8OluSNIDrx8='", // margin-top:8px;
+    " 'sha256-iAn7EfFRiJ0vGVgxvjrTlA52i5pGG79OKBU/qKXAdOg='", // max-height:70vh;
+    " 'sha256-cfmEFAlZNrRhDsLv6ZB7Pzg2EggYbJJ4l1wTyOZW7Cg='", // width:90px;
+    "; img-src data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Security Headers, Request ID & API Versioning Middlewares
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,24 +142,21 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     );
 
     let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
-    let is_swagger_raw_spec =
-        req_path.ends_with("/openapi.yaml") || req_path.ends_with("/doc.yaml");
-    let is_swagger_ui = !is_swagger_raw_spec
-        && (req_path == "/api/v1/public/swagger"
-            || req_path.starts_with("/api/v1/public/swagger/")
-            || req_path == "/api/public/swagger"
-            || req_path.starts_with("/api/public/swagger/")
-            || req_path.starts_with("/api/swagger")
-            || req_path.starts_with("/api/docs"));
-    let is_api_non_ui = req_path.starts_with("/api/") && !is_plugin_ui && !is_swagger_ui;
-
     let mut resp = next.run(req).await;
+    let is_plugin_proxy = resp.extensions().get::<ProxiedPluginResponse>().is_some();
+    let is_openapi_viewer = (req_path.starts_with("/api/v1/public/swagger/")
+        || req_path.starts_with("/api/public/swagger/"))
+        && resp.status() == StatusCode::OK
+        && resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|mime| mime == "text/html; charset=utf-8");
     let h = resp.headers_mut();
     h.insert(
         "X-Content-Type-Options",
         HeaderValue::from_static("nosniff"),
     );
-    if is_plugin_ui {
+    if is_plugin_ui && !is_plugin_proxy {
         h.insert("X-Frame-Options", HeaderValue::from_static("SAMEORIGIN"));
     } else {
         h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
@@ -145,25 +169,58 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         "X-XSS-Protection",
         HeaderValue::from_static("1; mode=block"),
     );
-    if !is_plugin_ui {
-        if is_api_non_ui {
-            h.insert(
-                "Content-Security-Policy",
-                HeaderValue::from_static(
-                    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
-                ),
-            );
-        } else {
-            let connect_src = match req_host.as_deref() {
-                Some(host) => format!("'self' ws://{host} wss://{host}"),
-                None => "'self'".to_string(),
-            };
-            let csp = format!(
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src {connect_src}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-            );
-            if let Ok(hv) = HeaderValue::from_str(&csp) {
-                h.insert("Content-Security-Policy", hv);
-            }
+    if is_plugin_proxy {
+        // Plugins are untrusted and can emit public cache directives. Replace
+        // them for every proxied response, irrespective of path, status or MIME.
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+        h.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        h.insert(header::EXPIRES, HeaderValue::from_static("0"));
+        h.remove("surrogate-control");
+        h.remove("cdn-cache-control");
+        h.remove("cloudflare-cdn-cache-control");
+        // Apply to every upstream representation, including JSON and scripts:
+        // MIME types, route suffixes and URL encodings do not reliably identify
+        // documents. Fetch callers can still consume the unchanged response.
+        // No sandbox allowances means opaque origin and no plugin script, even
+        // when an operator opens a proxy URL as a top-level document.
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            ),
+        );
+    } else if is_plugin_ui {
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts",
+            ),
+        );
+    } else if is_openapi_viewer {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(OPENAPI_VIEWER_CSP),
+        );
+    } else if req_path.starts_with("/api/") {
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            ),
+        );
+    } else {
+        let connect_src = match req_host.as_deref() {
+            Some(host) => format!("'self' ws://{host} wss://{host}"),
+            None => "'self'".to_string(),
+        };
+        let csp = format!(
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src {connect_src}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        );
+        if let Ok(hv) = HeaderValue::from_str(&csp) {
+            h.insert("Content-Security-Policy", hv);
         }
     }
     h.insert(
@@ -6600,12 +6657,12 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
 
     if !matches!(
         status_filter,
-        "pending" | "approved" | "rejected" | "executed" | "failed" | "all"
+        "pending" | "approved" | "approved_history" | "rejected" | "executed" | "failed" | "all"
     ) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid status filter. Use: pending, approved, rejected, executed, failed, all",
+            "Invalid status filter. Use: pending, approved, approved_history, rejected, executed, failed, all",
         );
     }
 
@@ -6618,19 +6675,20 @@ async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Respo
     let offset = q
         .get("offset")
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(i64::MAX as usize);
 
-    let all_actions = af_db::list_pending_actions(500, 0).unwrap_or_default();
-    let filtered: Vec<_> = if status_filter == "all" {
-        all_actions
-    } else {
-        all_actions
-            .into_iter()
-            .filter(|a| a.status == status_filter)
-            .collect()
-    };
-    let total = filtered.len();
-    let actions: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+    let (actions, total) =
+        match af_db::query_pending_actions(status_filter, limit as i64, offset as i64) {
+            Ok(result) => result,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    "Could not load pending actions",
+                )
+            }
+        };
     let count = actions.len();
     Json(serde_json::json!({
         "actions": actions,
@@ -7063,6 +7121,386 @@ mod update_error_regressions {
 #[cfg(test)]
 #[allow(clippy::await_holding_lock, clippy::field_reassign_with_default)]
 mod tests {
+    fn assert_proxy_document_policy(response: &axum::response::Response) {
+        use axum::http::header;
+
+        let policies = response.headers().get_all(header::CONTENT_SECURITY_POLICY);
+        assert_eq!(policies.iter().count(), 1);
+        assert_eq!(
+            policies.iter().next().unwrap(),
+            "sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        );
+        assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        let cache_policies = response.headers().get_all(header::CACHE_CONTROL);
+        assert_eq!(cache_policies.iter().count(), 1);
+        assert_eq!(cache_policies.iter().next().unwrap(), "private, no-store");
+        assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+        assert_eq!(response.headers()[header::EXPIRES], "0");
+        for name in [
+            "surrogate-control",
+            "cdn-cache-control",
+            "cloudflare-cdn-cache-control",
+        ] {
+            assert!(!response.headers().contains_key(name), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_proxy_response_is_always_sandboxed_by_outer_security_headers() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Request};
+        use axum::response::IntoResponse;
+        use tower::ServiceExt;
+
+        async fn upstream_response(request: Request<Body>) -> axum::response::Response {
+            let mime = request.uri().query().unwrap_or("text/html");
+            let body = if mime == "application/json" {
+                r#"{"status":"ok"}"#
+            } else {
+                "plugin bytes"
+            };
+            let mut response = ([(header::CONTENT_TYPE, mime.to_string())], body).into_response();
+            // An upstream-controlled policy must never override the host policy.
+            response.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static("sandbox allow-scripts allow-same-origin"),
+            );
+            response.headers_mut().append(
+                header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static("default-src *"),
+            );
+            response.headers_mut().insert(
+                header::X_FRAME_OPTIONS,
+                axum::http::HeaderValue::from_static("SAMEORIGIN"),
+            );
+            response.headers_mut().append(
+                header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            response.headers_mut().append(
+                header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("s-maxage=31536000"),
+            );
+            response.headers_mut().insert(
+                header::PRAGMA,
+                axum::http::HeaderValue::from_static("cache"),
+            );
+            response.headers_mut().insert(
+                header::EXPIRES,
+                axum::http::HeaderValue::from_static("Wed, 21 Oct 2099 07:28:00 GMT"),
+            );
+            for name in [
+                "surrogate-control",
+                "cdn-cache-control",
+                "cloudflare-cdn-cache-control",
+            ] {
+                response.headers_mut().insert(
+                    name,
+                    axum::http::HeaderValue::from_static("public, max-age=31536000"),
+                );
+            }
+            response
+                .extensions_mut()
+                .insert(crate::plugins::ProxiedPluginResponse);
+            response
+        }
+
+        let app = axum::Router::new()
+            .fallback(upstream_response)
+            .layer(axum::middleware::from_fn(
+                super::security_headers_middleware,
+            ));
+        for prefix in [
+            "/plugins/demo/proxy",
+            "/api/auth/plugins/demo/proxy",
+            "/api/v1/auth/plugins/%64emo/proxy",
+        ] {
+            for suffix in ["", "/landing", "/ui", "/%75i", "/asset-deadbeef.js"] {
+                for mime in [
+                    "text/html",
+                    "application/xhtml+xml",
+                    "image/svg+xml",
+                    "application/javascript",
+                    "application/json",
+                ] {
+                    let uri = format!("{prefix}{suffix}?{mime}");
+                    let response = app
+                        .clone()
+                        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_proxy_document_policy(&response);
+                    assert_eq!(response.headers()[header::CONTENT_TYPE], mime, "{uri}");
+                    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                    if mime == "application/json" {
+                        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(json["status"], "ok", "{uri}");
+                    } else {
+                        assert_eq!(body, "plugin bytes", "{uri}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn security_headers_leave_ordinary_json_cache_policy_untouched() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/public/catalog",
+                axum::routing::get(|| async {
+                    (
+                        [(header::CACHE_CONTROL, "public, max-age=60")],
+                        axum::Json(serde_json::json!({"ok": true})),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                super::security_headers_middleware,
+            ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/public/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=60"
+        );
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        );
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registered_plugin_proxy_handlers_mark_errors_and_preserve_plugin_ui() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!("af-proxy-policy-{}", uuid::Uuid::new_v4()));
+        let plugin_dir = root.join("plugins/demo");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.manifest.json"),
+            r#"{"id":"demo","name":"Demo","version":"1.0","backend":{"health_path":"/healthz"},"frontend":{"bundle":"index.html"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("index.html"),
+            "<!doctype html><title>Plugin UI</title>",
+        )
+        .unwrap();
+        for key in [
+            "AETHERFLOW_FS_ROOT",
+            "AETHERFLOW_CONFIG_ROOT",
+            "AETHERFLOW_RELEASE_ROOT",
+        ] {
+            std::env::set_var(key, &root);
+        }
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            std::env::set_var(key, root.join("fixture.sqlite"));
+        }
+        std::env::set_var("AETHERFLOW_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("ALLOWED_HOSTS", "localhost");
+        std::env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+        std::env::set_var("AETHERFLOW_SKIP_ENV_FILES", "1");
+        af_db::init_db().unwrap();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO users(id, username, role) VALUES (1, 'proxy-test', 'admin');
+             INSERT INTO plugins_registry(plugin_id, enabled, allocated_port, token_epoch, status)
+             VALUES ('demo', 0, 0, 1, 'stopped');",
+        )
+        .unwrap();
+        drop(conn);
+        let (token, _) =
+            crate::auth::create_standard_jwt(1, &axum::http::HeaderMap::new()).unwrap();
+        // Match the outer layers installed by main without starting a server.
+        let app = super::build_router()
+            .layer(crate::build_cors_layer())
+            .layer(axum::middleware::from_fn(
+                crate::middlewares::app_subdomain_proxy_middleware,
+            ));
+
+        // These are the actual registered aliases, including encoded path parameters.
+        // The stopped plugin reaches each handler without opening an upstream socket.
+        for prefix in [
+            "/plugins/demo/proxy",
+            "/api/auth/plugins/de%6do/proxy",
+            "/api/v1/auth/plugins/%64emo/proxy",
+        ] {
+            for suffix in ["", "/status", "/ui", "/%75i", "/asset-deadbeef.js"] {
+                for method in [
+                    Method::GET,
+                    Method::HEAD,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                ] {
+                    let uri = format!("{prefix}{suffix}");
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(method.clone())
+                                .uri(&uri)
+                                .header(header::HOST, "localhost")
+                                .header(header::ORIGIN, "http://localhost:8080")
+                                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "{method} {uri}"
+                    );
+                    assert_proxy_document_policy(&response);
+                    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+                    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                    if method == Method::HEAD {
+                        assert!(body.is_empty(), "{method} {uri}");
+                    } else {
+                        assert!(
+                            String::from_utf8_lossy(&body).contains("PLUGIN_STOPPED"),
+                            "{method} {uri}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // A different early handler error is marked too.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/plugins/%40invalid/proxy/ui")
+                    .header(header::HOST, "localhost")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_proxy_document_policy(&response);
+
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "UPDATE plugins_registry SET enabled = 1, allocated_port = 21000, status = 'running' WHERE plugin_id = 'demo'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/plugins/demo/proxy/%2e%2e/ui")
+                    .header(header::HOST, "localhost")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_proxy_document_policy(&response);
+
+        for uri in [
+            "/plugins/demo/ui",
+            "/api/auth/plugins/demo/ui",
+            "/api/v1/auth/plugins/demo/ui",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "localhost")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers()[header::X_FRAME_OPTIONS],
+                "SAMEORIGIN",
+                "{uri}"
+            );
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(
+                csp.split(';')
+                    .any(|directive| directive.trim() == "sandbox allow-scripts"),
+                "{uri}: {csp}"
+            );
+            assert!(!csp.contains("allow-same-origin"), "{uri}: {csp}");
+            assert_eq!(
+                to_bytes(response.into_body(), 4096).await.unwrap(),
+                "<!doctype html><title>Plugin UI</title>"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ui_csp_allows_streaming_wasm_and_dedicated_workers() {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ui" }))
+            .layer(axum::middleware::from_fn(
+                super::security_headers_middleware,
+            ));
+        let request = axum::http::Request::builder()
+            .uri("/")
+            .header("host", "localhost:8080")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let csp = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp
+            .split("; ")
+            .any(|directive| directive == "script-src 'self' 'wasm-unsafe-eval'"));
+        assert!(!csp.contains("'unsafe-inline'"));
+        assert!(csp.contains("worker-src 'self'"));
+        assert!(csp.contains("img-src 'self' data: blob: https:"));
+        assert!(csp.contains("media-src 'self' blob:"));
+        assert!(csp.contains("object-src 'none'"));
+    }
+
     use super::*;
 
     #[test]
@@ -8831,6 +9269,29 @@ mod tests {
         if crate::plugins::tests::run_plugin_test_in_subprocess() {
             return;
         }
+        async fn settle_dispatched_job(response: axum::response::Response, package: &str) {
+            let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let job_id = body["job_id"].as_str().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(5));
+                loop {
+                    if af_services::get_package_job_outcome(package)
+                        .is_some_and(|outcome| outcome.job_id == job_id)
+                    {
+                        break;
+                    }
+                    interval.tick().await;
+                }
+                // The outcome is committed before the worker drops its guard.
+                // Wait for that task to release admission before the next action.
+                let _finished = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+            })
+            .await
+            .expect("the dispatched fixture job must settle before the next action");
+        }
         let (root, connection) = lifecycle_status_fixture();
         af_db::init_db().unwrap();
 
@@ -8918,19 +9379,6 @@ mod tests {
         }
 
         let admin = progress_test_user("admin", None);
-        async fn wait_and_clear_job(pkg_name: &str) {
-            for _ in 0..500 {
-                let still_active = af_services::package_job_snapshot()
-                    .map(|snap| snap.active.contains_key(pkg_name))
-                    .unwrap_or(false);
-                if !still_active {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            af_services::clear_package_job_info(pkg_name);
-        }
-
         // A. Verify 'remove' succeeds even when app_updates has a last_error
         let res_remove = dispatch_package_lifecycle_with_target(
             "test-err-pkg".into(),
@@ -8947,7 +9395,7 @@ mod tests {
             StatusCode::OK,
             "remove must not be blocked by app_updates last_error"
         );
-        wait_and_clear_job("test-err-pkg").await;
+        settle_dispatched_job(res_remove, "test-err-pkg").await;
 
         // B. Verify 'install' succeeds on uninstalled package without app_updates record
         let res_install = dispatch_package_lifecycle_with_target(
@@ -8965,7 +9413,7 @@ mod tests {
             StatusCode::OK,
             "install must not require app_updates or confirmed target"
         );
-        wait_and_clear_job("test-fresh-pkg").await;
+        settle_dispatched_job(res_install, "test-fresh-pkg").await;
 
         // C. Verify 'reinstall' succeeds even when app_updates has last_error
         let res_reinstall = dispatch_package_lifecycle_with_target(
@@ -8983,7 +9431,7 @@ mod tests {
             StatusCode::OK,
             "reinstall must not be blocked by app_updates last_error"
         );
-        wait_and_clear_job("test-err-pkg").await;
+        settle_dispatched_job(res_reinstall, "test-err-pkg").await;
 
         // D. Verify 'remove' succeeds unconditionally on a retired package (readarr)
         let res_retired_remove = dispatch_package_lifecycle_with_target(
@@ -9001,7 +9449,7 @@ mod tests {
             StatusCode::OK,
             "remove on retired package must succeed unconditionally"
         );
-        wait_and_clear_job("readarr").await;
+        settle_dispatched_job(res_retired_remove, "readarr").await;
 
         // E. Verify 'update' on test-err-pkg IS blocked by app_updates last_error
         let res_update_blocked = dispatch_package_lifecycle_with_target(
@@ -12055,9 +12503,15 @@ mod hillclimb_tests {
 
     #[tokio::test]
     async fn openapi_swagger_routes_serve_zero_cdn_viewer_and_spec_with_expected_headers() {
-        let app = build_router();
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use sha2::{Digest, Sha256};
+        use std::collections::HashSet;
 
-        // 1. Bare /swagger redirects 307 to ./swagger/index.html with UI CSP.
+        let app = build_router();
+        let api_csp =
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+        // The bare /swagger redirect uses the API policy.
         let redirect_resp = app
             .clone()
             .oneshot(
@@ -12073,16 +12527,19 @@ mod hillclimb_tests {
             redirect_resp.headers()[header::LOCATION],
             "./swagger/index.html"
         );
-        let redirect_csp = redirect_resp.headers()[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap();
-        assert!(redirect_csp.contains("script-src 'self' 'unsafe-inline'"));
-        assert!(redirect_csp.contains("frame-ancestors 'none'"));
+        assert_eq!(
+            redirect_resp.headers()[header::CONTENT_SECURITY_POLICY],
+            api_csp
+        );
 
-        // 2. Viewer HTML at /swagger/ and /swagger/index.html must be 200 HTML and 100% offline/zero-CDN.
+        // The viewer can load its bundled script, styles and same-origin API.
+        let style_attributes =
+            regex::Regex::new(r#"\bstyle="([^"]+)"|\bstyle:\s*'([^']+)'"#).unwrap();
+        let hash = |content: &str| format!("'sha256-{}'", STANDARD.encode(Sha256::digest(content)));
         for path in [
             "/api/v1/public/swagger/",
             "/api/v1/public/swagger/index.html",
+            "/api/public/swagger/index.html",
         ] {
             let resp = app
                 .clone()
@@ -12097,57 +12554,68 @@ mod hillclimb_tests {
             assert_eq!(resp.status(), StatusCode::OK, "path={path}");
             let ct = resp.headers()[header::CONTENT_TYPE].to_str().unwrap();
             assert!(ct.starts_with("text/html"), "path={path} ct={ct}");
-            let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            if path.starts_with("/api/public/") {
+                assert_eq!(resp.headers()["deprecation"], "true");
+                let link = resp.headers()[header::LINK].to_str().unwrap();
+                assert_eq!(
+                    link,
+                    r#"</api/v1/public/swagger/index.html>; rel="successor-version""#
+                );
+            }
+            let (parts, body) = resp.into_parts();
+            let csp = parts.headers[header::CONTENT_SECURITY_POLICY]
                 .to_str()
                 .unwrap();
-            assert!(
-                csp.contains("script-src 'self' 'unsafe-inline'"),
-                "path={path} csp={csp}"
-            );
-            assert!(
-                csp.contains("frame-ancestors 'none'"),
-                "path={path} csp={csp}"
-            );
-            let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024)
-                .await
-                .unwrap();
+            let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024).await.unwrap();
             let html = String::from_utf8(bytes.to_vec()).unwrap();
             assert!(html.contains("../openapi.yaml"), "path={path}");
             assert!(
                 !html.contains("http://") && !html.contains("https://"),
                 "OpenAPI viewer HTML at {path} must not contain external http:// or https:// URLs"
             );
+
+            let directives: HashMap<_, _> = csp
+                .split("; ")
+                .map(|directive| directive.split_once(' ').unwrap())
+                .collect();
+            let script = html
+                .split_once("<script>")
+                .unwrap()
+                .1
+                .split_once("</script>")
+                .unwrap()
+                .0;
+            let style = html
+                .split_once("<style>")
+                .unwrap()
+                .1
+                .split_once("</style>")
+                .unwrap()
+                .0;
+            assert_eq!(directives["default-src"], "'none'", "path={path}");
+            assert_eq!(directives["script-src"], hash(script), "path={path}");
+            assert_eq!(directives["style-src"], hash(style), "path={path}");
+            assert_eq!(directives["img-src"], "data:", "path={path}");
+            assert_eq!(directives["connect-src"], "'self'", "path={path}");
+            assert_eq!(directives["frame-ancestors"], "'none'", "path={path}");
+            let allowed: HashSet<_> = directives["style-src-attr"]
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            let mut expected = HashSet::from(["'unsafe-hashes'".to_owned()]);
+            for captures in style_attributes.captures_iter(&html) {
+                let style = captures.get(1).or_else(|| captures.get(2)).unwrap();
+                expected.insert(hash(style.as_str()));
+            }
+            assert_eq!(allowed, expected, "path={path}");
         }
 
-        // 3. Unversioned legacy /api/public/swagger/index.html emits Deprecation + Link headers and UI CSP.
-        let deprecated_resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/api/public/swagger/index.html")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(deprecated_resp.status(), StatusCode::OK);
-        assert_eq!(deprecated_resp.headers()["deprecation"], "true");
-        let link_hdr = deprecated_resp.headers()[header::LINK].to_str().unwrap();
-        assert!(
-            link_hdr.contains("/api/v1/public/swagger/index.html")
-                && link_hdr.contains("successor-version"),
-            "unexpected Link header: {link_hdr}"
-        );
-        let deprecated_csp = deprecated_resp.headers()[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap();
-        assert!(deprecated_csp.contains("script-src 'self' 'unsafe-inline'"));
-
-        // 4. Raw OpenAPI YAML endpoints return 200 application/yaml with strict non-UI API CSP.
+        // Raw OpenAPI YAML uses the API policy, including decoded asset names.
         for spec_path in [
             "/api/v1/public/openapi.yaml",
             "/api/v1/public/swagger/openapi.yaml",
             "/api/v1/public/swagger/doc.yaml",
+            "/api/public/swagger/%6fpenapi.yaml",
         ] {
             let resp = app
                 .clone()
@@ -12165,10 +12633,7 @@ mod hillclimb_tests {
                 ct.starts_with("application/yaml"),
                 "spec_path={spec_path} ct={ct}"
             );
-            assert_eq!(
-                resp.headers()[header::CONTENT_SECURITY_POLICY],
-                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-            );
+            assert_eq!(resp.headers()[header::CONTENT_SECURITY_POLICY], api_csp);
             let bytes = axum::body::to_bytes(resp.into_body(), 2 * 1024 * 1024)
                 .await
                 .unwrap();
@@ -12176,7 +12641,7 @@ mod hillclimb_tests {
             assert!(yaml.contains("openapi: 3.1.0"), "spec_path={spec_path}");
         }
 
-        // 5. Unknown swagger asset returns 404.
+        // Unknown Swagger assets use the API policy.
         let missing_resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -12187,5 +12652,9 @@ mod hillclimb_tests {
             .await
             .unwrap();
         assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing_resp.headers()[header::CONTENT_SECURITY_POLICY],
+            api_csp
+        );
     }
 }

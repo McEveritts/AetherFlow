@@ -10,11 +10,11 @@ This checklist documents the runtime architecture, configuration contracts, priv
 
 ## 1. Architecture & Filesystem Layout (FHS)
 
-AetherFlow v4.0 replaces the legacy Go (`Gin`) + separate Next.js/PM2 stack with a single embedded Rust binary (`aetherflow-api`) and native administrative CLI (`af`), running behind **Apache2** reverse-proxy ingress (`127.0.0.1:8080`) with **SQLite WAL** persistence.
+AetherFlow v4.0 replaces the legacy Go (`Gin`) + separate Next.js/PM2 stack with a Rust API (`aetherflow-api`), an external WASM dashboard (`web/dist`), a native administrative CLI (`af`), and the Rust LibreSpeed companion (`speedtest-backend`). The API runs behind **Apache2** reverse-proxy ingress (`127.0.0.1:8080`) with **SQLite WAL** persistence.
 
 | Path | Owner / Mode | Purpose |
 | --- | --- | --- |
-| `/opt/AetherFlow/releases/<epoch>` | `root:aetherflow` (`0755`) | Immutable versioned release directories containing `aetherflow-api`, `af` (`bin/af`), `config/`, `packages/`, `deploy/`, `.version`, and `data-snapshot/`. |
+| `/opt/AetherFlow/releases/<epoch>` | `root:aetherflow` (`0755`) | Immutable versioned release directories containing `aetherflow-api`, `af` (`bin/af`), `speedtest-backend`, `web/dist/`, `config/`, `packages/`, `deploy/`, `.version`, and `data-snapshot/`. |
 | `/opt/AetherFlow/current` | Symlink | Atomic symlink pointing to the active `/opt/AetherFlow/releases/<epoch>` directory. |
 | `/usr/local/bin/af` | `root:root` (`0755`) | Installed CLI entrypoint delegating to `/opt/AetherFlow/current/af` (with legacy `af-*` fallback compatibility). |
 | `/etc/aetherflow/aetherflow.env` | `root:aetherflow` (`0640`) | Protected environment file containing `JWT_SECRET`, `AES_MASTER_KEY`, `DB_PATH`, and `ALLOWED_HOSTS`. Never overwritten by upgrades. |
@@ -96,10 +96,10 @@ systemctl cat aetherflow-runner.service | grep -E "WorkingDirectory|ExecStart"
 ### 1. Set Environment Variables
 Ensure all required variables are populated in `/etc/aetherflow/aetherflow.env` with mode `0600` (`chown root:aetherflow` or `aetherflow:aetherflow`).
 
-### 2. Build or Pull Verified Single-Binary Release
+### 2. Build or Pull a Verified Release
 
 ```bash
-# Build production single-binary Rust bundle (aetherflow-api + af + SHA256SUMS)
+# With the pinned WASM tools on PATH, build the release bundle and SHA256SUMS.
 bash scripts/build_gold.sh
 
 # Or deploy directly via the unified Rust CLI / release manager
@@ -170,14 +170,17 @@ During every deployment:
 
 ## 5. Post-Deployment Verification
 
-### Readiness & Embedded SPA Serving
+### Readiness and Dashboard Serving
 
 ```bash
 # 1. Deep readiness probe (verifies SQLite pool health)
 curl -fsS http://127.0.0.1:8080/health/ready
 # Expected JSON: {"database":"ok","redis":"disabled","status":"ready","uptime":"..."}
 
-# 2. Verify native CLI version and health
+# 2. Verify the WASM dashboard entry point is served.
+curl -fsSI http://127.0.0.1:8080/
+
+# 3. Verify native CLI version and health.
 af health
 ```
 

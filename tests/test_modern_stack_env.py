@@ -8,9 +8,12 @@ Unit and regression tests for OPUS-004 and OPUS-009:
   while preserving optional -/home/hdd in media client unit templates).
 """
 
+import hashlib
+import io
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +25,128 @@ PACKAGED_RUNNER_UNIT = REPO_ROOT / "deploy" / "systemd" / "aetherflow-runner.ser
 TEMPLATE_API_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "aetherflow-api.template"
 TEMPLATE_QBIT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "qbittorrent.template"
 TEMPLATE_RTORRENT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "rtorrent.template"
+
+
+class ModernStackSourceBuildTests(unittest.TestCase):
+    def test_source_build_has_no_legacy_next_or_npm_install(self):
+        content = MODERN_STACK_SH.read_text(encoding="utf-8")
+        self.assertNotIn("NEXT_STATIC_EXPORT", content)
+        self.assertNotIn("npm install", content)
+        self.assertIn('bash "${af_root}/scripts/build_wasm_frontend.sh" --stage || return 1', content)
+
+    def test_source_build_requires_wasm_manifest_even_with_legacy_frontend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "frontend").mkdir()
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; AF_INSTALL_ROOT="$2"; _build_modern_stack_from_source',
+                 "bash", str(MODERN_STACK_SH), str(root)],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Missing Rust WASM frontend manifest", result.stderr)
+            self.assertFalse((root / "releases").exists())
+
+    def test_source_build_requires_nonempty_index_and_wasm(self):
+        for index, wasm in ((b"", b"wasm"), (b"<html>app</html>", b"")):
+            with self.subTest(index=index, wasm=wasm), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "frontend-rs").mkdir()
+                (root / "frontend-rs/Cargo.toml").touch()
+                (root / "scripts").mkdir()
+                (root / "scripts/install_wasm_build_tools.sh").write_text(
+                    '#!/usr/bin/env bash\nexit 0\n', encoding="utf-8"
+                )
+                (root / "scripts/build_wasm_frontend.sh").write_text(
+                    '#!/usr/bin/env bash\nprintf "%s" "$1" > "${AF_INSTALL_ROOT}/invoked"\n',
+                    encoding="utf-8",
+                )
+                (root / "web/dist").mkdir(parents=True)
+                (root / "web/dist/index.html").write_bytes(index)
+                (root / "web/dist/app.wasm").write_bytes(wasm)
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; export AF_INSTALL_ROOT="$2"; _build_modern_stack_from_source',
+                     "bash", str(MODERN_STACK_SH), str(root)],
+                    env={**os.environ, "AF_OFFLINE": "1"}, capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((root / "invoked").read_text(), "--stage")
+                self.assertIn("frontend staging missing non-empty index.html or .wasm", result.stderr)
+                self.assertFalse((root / "releases").exists())
+
+    def test_source_build_copies_external_ui_into_current_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for path in ("scripts", "frontend-rs", "backend-rs/crates/af-librespeed", "config", "tools/bin"):
+                (root / path).mkdir(parents=True)
+            (root / "frontend-rs/Cargo.toml").write_text("[workspace]\n")
+            (root / "backend-rs/Cargo.lock").write_text("# lock\n")
+            (root / "backend-rs/crates/af-librespeed/Cargo.toml").touch()
+            (root / "config/packages.json").write_text("[]\n")
+            (root / "scripts/install_wasm_build_tools.sh").write_text("exit 0\n")
+            (root / "scripts/build_wasm_frontend.sh").write_text(
+                'mkdir -p "$FRONTEND_DIST_DIR/locale"\n'
+                'printf "<html>test</html>" > "$FRONTEND_DIST_DIR/index.html"\n'
+                'printf wasm > "$FRONTEND_DIST_DIR/app.wasm"\n'
+                'printf locale > "$FRONTEND_DIST_DIR/locale/en.json.gz"\n'
+            )
+            cargo = root / "tools/bin/cargo"
+            cargo.write_text('#!/bin/sh\nmkdir -p "$CARGO_TARGET_DIR/release"\n'
+                             'printf api > "$CARGO_TARGET_DIR/release/aetherflow-api"\n'
+                             'printf cli > "$CARGO_TARGET_DIR/release/af"\n'
+                             'case " $* " in\n'
+                             '  *" --bin speedtest-backend "*) printf speedtest > "$CARGO_TARGET_DIR/release/speedtest-backend";;\n'
+                             'esac\n')
+            cargo.chmod(0o755)
+            env = {**os.environ, "AF_INSTALL_ROOT": str(root), "WASM_TOOL_DIR": str(root / "tools"),
+                   "CARGO_TARGET_DIR": "custom-target", "AF_OFFLINE": "1"}
+            result = subprocess.run(["bash", "-c", 'source "$1"; _build_modern_stack_from_source',
+                                     "bash", str(MODERN_STACK_SH)], env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "current/web/dist/index.html").read_text(), "<html>test</html>")
+            self.assertEqual((root / "current/web/dist/app.wasm").read_text(), "wasm")
+            self.assertEqual((root / "current/web/dist/locale/en.json.gz").read_text(), "locale")
+            self.assertEqual((root / "current/af").read_text(), "cli")
+            self.assertEqual((root / "current/config/packages.json").read_text(), "[]\n")
+            for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+                companion = root / "current" / relpath
+                self.assertEqual(companion.read_text(), "speedtest")
+                self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((root / "backend/web/dist").exists())
+
+    def test_prebuilt_staging_rejects_missing_ui_and_keeps_valid_assets(self):
+        for index, wasm, valid in ((b"", b"wasm", False), (b"<html>", b"", False),
+                                   (b"<html>", b"wasm", True)):
+            with self.subTest(index=index, wasm=wasm), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "release.tar.gz"
+                with tarfile.open(archive, "w:gz") as tar:
+                    for name, data in (("aetherflow-api", b"api"), ("bin/speedtest-backend", b"speedtest"),
+                                       (".version", b"v4.0.0\n"),
+                                       ("web/dist/index.html", index), ("web/dist/app.wasm", wasm)):
+                        info = tarfile.TarInfo(name)
+                        info.size = len(data)
+                        info.mode = 0o755 if name == "aetherflow-api" else 0o644
+                        tar.addfile(info, io.BytesIO(data))
+                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                env = {**os.environ, "AF_INSTALL_ROOT": str(root / "install"),
+                       "AETHERFLOW_SKIP_PROVENANCE_VERIFY": "1"}
+                result = subprocess.run(["bash", "-c", 'source "$1"; _stage_prebuilt_release_archive "$2" "" "$3" v4.0.0',
+                                         "bash", str(MODERN_STACK_SH), str(archive), digest],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+                current = root / "install/current"
+                if valid:
+                    self.assertEqual((current / "web/dist/app.wasm").read_bytes(), wasm)
+                    self.assertEqual((current / "web/dist/index.html").read_bytes(), index)
+                    for relpath in ("speedtest-backend", "bin/speedtest-backend"):
+                        companion = current / relpath
+                        self.assertEqual(companion.read_bytes(), b"speedtest")
+                        self.assertEqual(companion.stat().st_mode & 0o777, 0o755)
+                else:
+                    self.assertIn("missing external frontend assets", result.stderr)
+                    self.assertFalse(current.exists())
 
 
 class ModernStackEnvGenerationTests(unittest.TestCase):
@@ -85,6 +210,7 @@ AF_ENV_DIR="{self.env_dir}"
 AF_DATA_DIR="{self.data_dir}"
 AF_SYSTEMD_DIR="{self.sysd_dst}"
 AF_RUN_DIR="{self.run_dir}"
+AF_LOG_DIR="{self.test_dir}/log_aetherflow"
 AF_SKIP_SYSTEMCTL=1
 AF_OFFLINE=1
 

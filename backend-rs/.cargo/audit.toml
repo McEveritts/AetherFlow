@@ -1,0 +1,4 @@
+[advisories]
+# Keep the same maintenance-only exception when CI runs cargo-audit from here.
+# Vulnerability, unsoundness, and yanked dependency checks remain enabled.
+ignore = ["RUSTSEC-2024-0436"]

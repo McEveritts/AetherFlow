@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -28,6 +29,31 @@ class RustBuildToolsTests(unittest.TestCase):
         (self.root / "packages").mkdir()
         (self.root / "deploy").mkdir()
         (self.root / "deploy/release-manager.sh").write_text("#!/bin/bash\n")
+        for name in ("verify-provenance.py", "log-retention.py"):
+            (self.root / "deploy" / name).write_text("#!/usr/bin/env python3\n")
+            (self.root / "deploy" / name).chmod(0o644)
+        for name in ("packages/package/example/install", "packages/system/af-tune"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\n")
+            path.chmod(0o755)
+        (self.root / "packages/system/af-tune").chmod(0o775)
+        for name in ("packages/ui/src/App.tsx", "packages/ui/tsconfig.tsbuildinfo",
+                     "packages/node_modules/unused/index.js", "deploy/__pycache__/unused.pyc",
+                     "packages/system/target/cache", "deploy/.pytest_cache/unused",
+                     "deploy/unused.pyo", "backend/config/__pycache__/unused.pyc"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"host-generated")
+        assets = self.root / "web/dist"
+        assets.mkdir(parents=True)
+        (assets / "index.html").write_text('<!doctype html><script src="app-01234567.js"></script>')
+        (assets / "app-01234567.js").write_text('export const frontend = "wasm";\n')
+        (assets / "app-01234567.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
+        (assets / "node_modules").mkdir()
+        (assets / "node_modules/unused.js").write_text("host-generated")
+        (assets / "__pycache__").mkdir()
+        (assets / "__pycache__/unused.pyc").write_bytes(b"host-generated")
         (self.root / ".version").write_text("4.0.0\n")
         for name in ("build_gold.sh", "create-plugin-sdk.sh"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
@@ -43,6 +69,7 @@ with Path(os.environ["TEST_CARGO_LOG"]).open("a") as log:
     log.write(" ".join(arguments) + "\n")
 if arguments[0] == "test":
     sys.exit(int(os.environ.get("TEST_CARGO_FAILURE", "0")))
+Path(os.environ["TEST_BUILD_DATE_LOG"]).write_text(os.environ["AETHERFLOW_BUILD_DATE"])
 target = arguments[arguments.index("--target") + 1]
 bins = [
     arguments[i + 1]
@@ -56,18 +83,21 @@ for binary in bins:
 """)
         cargo.chmod(0o755)
         self.environment = os.environ.copy()
-        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR", "CARGO_LOCKED", "CARGO_ALLOW_UNLOCKED_DEV"):
+        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR", "CARGO_LOCKED", "CARGO_ALLOW_UNLOCKED_DEV", "FRONTEND_DIST_DIR", "EMBED_DIST_DIR", "LEGACY_EMBED_DIST_DIR"):
             self.environment.pop(name, None)
         self.environment.update({
             "PATH": str(tools) + os.pathsep + self.environment["PATH"],
             "BUILD_FRONTEND": "0", "RUN_TESTS": "1", "PACKAGE_RELEASE": "1",
             "TARGETS": "amd64 arm64", "OUTPUT_DIR": str(self.root / "output"),
             "TEST_CARGO_LOG": str(self.root / "cargo.log"),
+            "TEST_BUILD_DATE_LOG": str(self.root / "build-date.log"),
+            "SOURCE_DATE_EPOCH": "1234567890",
         })
+        self.environment.pop("BUILD_DATE", None)
 
-    def run_build(self):
+    def run_build(self, **kwargs):
         return subprocess.run(["bash", str(self.root / "scripts/build_gold.sh")],
-                              env=self.environment, capture_output=True, text=True)
+                              env=self.environment, capture_output=True, text=True, **kwargs)
 
     def test_packages_only_requested_architecture(self):
         self.environment["CARGO_TARGET_DIR"] = "custom-target"
@@ -83,8 +113,48 @@ for binary in bins:
             self.assertEqual(artifact.read_text(), triple)
             self.assertEqual(cli_artifact.read_text(), triple)
             self.assertEqual(speedtest_artifact.read_text(), triple)
-            self.assertTrue((self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).exists())
+            archive = self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")
+            with tarfile.open(archive) as bundle:
+                self.assertEqual(bundle.extractfile("./web/dist/index.html").read(),
+                                 (self.root / "web/dist/index.html").read_bytes())
+                self.assertEqual(bundle.extractfile("./web/dist/app-01234567.wasm").read(),
+                                 b"\x00asm\x01\x00\x00\x00")
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
+        self.assertEqual((self.root / "build-date.log").read_text(), "2009-02-13T23:31:30Z")
+        archives = {label: (self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).read_bytes()
+                    for label in ("amd64", "arm64")}
+        # Rebuilding the same version must replace each staging tree rather than
+        # recursively nesting its previous config, package and deployment copies.
+        rebuilt = self.run_build(umask=0o077)
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+        for label in ("amd64", "arm64"):
+            archive = self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")
+            self.assertEqual(archive.read_bytes(), archives[label])
+            self.assertEqual(archive.read_bytes()[4:8], b"\0\0\0\0")
+            with tarfile.open(archive) as bundle:
+                members = bundle.getnames()
+                self.assertIn("./config/packages.json", members)
+                for name in ("./packages/package/example/install", "./packages/system/af-tune",
+                             "./deploy/verify-provenance.py", "./deploy/log-retention.py",
+                             "./aetherflow-api", "./af", "./bin/af", "./speedtest-backend",
+                             "./bin/speedtest-backend", "./web/dist/index.html"):
+                    self.assertIn(name, members)
+                    self.assertEqual(bundle.getmember(name).mode & 0o111, 0o111 if "web/dist" not in name else 0)
+                for member in bundle.getmembers():
+                    self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 1234567890))
+                self.assertEqual(bundle.getmember("./packages/system/af-tune").mode, 0o755)
+                self.assertEqual(members, sorted(members))
+                self.assertFalse(any(part in name for name in members for part in
+                                     ("/ui/", "node_modules", "__pycache__", ".pytest_cache", ".pyc", ".pyo", "tsbuildinfo", "/target/")))
+                for nested in ("./config/config", "./packages/packages", "./deploy/deploy"):
+                    self.assertFalse(any(name == nested or name.startswith(nested + "/") for name in members))
+        self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
+
+    def test_invalid_source_date_epoch_is_rejected(self):
+        self.environment["SOURCE_DATE_EPOCH"] = "not-a-timestamp"
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SOURCE_DATE_EPOCH must be a non-negative integer", result.stderr)
 
     def test_standalone_speedtest_archive_and_armv7_target_support(self):
         self.environment["TARGETS"] = "armv7"
@@ -92,7 +162,14 @@ for binary in bins:
         result = self.run_build()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / "output/aetherflow-linux-armv7.tar.gz").exists())
-        self.assertTrue((self.root / "output/speedtest-backend_4.0.0_linux_armv7.tar.gz").exists())
+        standalone = self.root / "output/speedtest-backend_4.0.0_linux_armv7.tar.gz"
+        original = standalone.read_bytes()
+        self.assertEqual(self.run_build(umask=0o077).returncode, 0)
+        self.assertEqual(standalone.read_bytes(), original)
+        with tarfile.open(standalone) as archive:
+            [member] = archive.getmembers()
+            self.assertEqual((member.name, member.mode, member.mtime),
+                             ("speedtest-backend", 0o755, 1234567890))
         sums = (self.root / "output/SHA256SUMS").read_text()
         self.assertIn("aetherflow-linux-armv7.tar.gz", sums)
         self.assertIn("speedtest-backend_4.0.0_linux_armv7.tar.gz", sums)
@@ -109,6 +186,14 @@ for binary in bins:
         result = self.run_build()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Cargo.lock is required for reproducible locked builds", result.stderr)
+        self.assertFalse((self.root / "cargo.log").exists())
+        self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
+
+    def test_full_release_rejects_missing_external_frontend(self):
+        shutil.rmtree(self.root / "web/dist")
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("full release requires", result.stderr)
         self.assertFalse((self.root / "cargo.log").exists())
         self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
 

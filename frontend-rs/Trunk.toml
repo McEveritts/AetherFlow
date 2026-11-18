@@ -1,0 +1,21 @@
+[build]
+target = "index.html"
+dist = "dist"
+filehash = true
+public_url = "/"
+release = true
+locked = true
+
+[tools]
+wasm_bindgen = "0.2.130"
+wasm_opt = "version_133"
+
+[[hooks]]
+stage = "pre_build"
+command = "bash"
+command_arguments = ["-c", "export PATH=\"${WASM_TOOL_DIR:-/usr/local/lib/aetherflow-wasm-tools}/bin:${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/aetherflow-wasm-tools/bin:${HOME:-/root}/.cargo/bin:$PATH\"; tailwindcss -i styles/input.css -o styles/compiled.css --minify"]
+
+[[hooks]]
+stage = "post_build"
+command = "python3"
+command_arguments = ["../scripts/finalize_wasm_assets.py"]

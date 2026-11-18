@@ -1189,6 +1189,20 @@ pub async fn admin_only_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+#[inline(never)]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let a = std::hint::black_box(a);
+    let b = std::hint::black_box(b);
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&left, &right) in a.iter().zip(b) {
+        diff |= left ^ right;
+    }
+    std::hint::black_box(diff) == 0
+}
+
 pub async fn csrf_middleware(req: Request, next: Next) -> Response {
     let csrf_disabled = env::var("CSRF_DISABLED")
         .map(|v| v.eq_ignore_ascii_case("true"))
@@ -1232,7 +1246,9 @@ pub async fn csrf_middleware(req: Request, next: Next) -> Response {
         .unwrap_or("");
     let cookie_token = extract_cookie(headers, "csrf_token").unwrap_or_default();
 
-    if header_token.is_empty() || header_token != cookie_token {
+    if header_token.is_empty()
+        || !constant_time_eq(header_token.as_bytes(), cookie_token.as_bytes())
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "Invalid CSRF token" })),
@@ -1253,7 +1269,7 @@ pub async fn issue_csrf_token() -> Response {
         3600,
         "Strict",
         secure_cookie_enabled(),
-        false,
+        true,
     );
     let mut resp = Json(serde_json::json!({ "csrf_token": token })).into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
@@ -3288,6 +3304,82 @@ pub(crate) fn set_session_cookie(response: &mut Response, token: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csrf_constant_time_equality_requires_all_bytes_and_equal_lengths() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"csrf-token", b"csrf-token"));
+        assert!(constant_time_eq(&[0, 128, 255], &[0, 128, 255]));
+        for (a, b) in [
+            (b"csrf-token".as_slice(), b"Csrf-token".as_slice()),
+            (b"csrf-token".as_slice(), b"csrf-tokeN".as_slice()),
+            (b"csrf-token".as_slice(), b"csrf-toke".as_slice()),
+            (b"csrf-token".as_slice(), b"csrf-token-extra".as_slice()),
+            (b"".as_slice(), b"csrf-token".as_slice()),
+            (b"a\0b".as_slice(), b"a\0c".as_slice()),
+        ] {
+            assert!(!constant_time_eq(a, b));
+            assert!(!constant_time_eq(b, a));
+        }
+    }
+
+    #[tokio::test]
+    async fn csrf_token_cookie_is_http_only_strict_and_matches_the_json_body() {
+        let response = issue_csrf_token().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cookie.split(';').any(|part| part.trim() == "HttpOnly"));
+        assert!(cookie
+            .split(';')
+            .any(|part| part.trim() == "SameSite=Strict"));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = data["csrf_token"].as_str().unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(cookie.starts_with(&format!("csrf_token={token};")));
+    }
+
+    #[tokio::test]
+    async fn csrf_middleware_accepts_matching_tokens_and_rejects_mismatches_and_prefixes() {
+        use axum::{middleware, routing::any, Router};
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/v1/auth/protected", any(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(csrf_middleware));
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            for (header_token, cookie_token, expected) in [
+                ("csrf-token", "csrf-token", StatusCode::OK),
+                ("Csrf-token", "csrf-token", StatusCode::FORBIDDEN),
+                ("csrf-tokeN", "csrf-token", StatusCode::FORBIDDEN),
+                ("csrf-token-extra", "csrf-token", StatusCode::FORBIDDEN),
+                ("csrf-token", "csrf-token-extra", StatusCode::FORBIDDEN),
+                ("csrf-toke", "csrf-token", StatusCode::FORBIDDEN),
+                ("", "csrf-token", StatusCode::FORBIDDEN),
+                ("csrf-token", "", StatusCode::FORBIDDEN),
+                ("", "", StatusCode::FORBIDDEN),
+            ] {
+                let request = Request::builder()
+                    .method(method)
+                    .uri("/api/v1/auth/protected")
+                    .header(header::COOKIE, format!("csrf_token={cookie_token}"))
+                    .header("X-CSRF-Token", header_token)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                assert_eq!(
+                    app.clone().oneshot(request).await.unwrap().status(),
+                    expected,
+                    "{method}: header={header_token:?}, cookie={cookie_token:?}"
+                );
+            }
+        }
+    }
 
     fn mfa_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

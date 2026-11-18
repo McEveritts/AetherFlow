@@ -32,10 +32,26 @@ fn request(action: &str) -> NetworkRunnerRequest {
 
 fn failure(error: impl std::fmt::Display) -> Response {
     let message = error.to_string();
+    let lower_message = message.to_ascii_lowercase();
     let (status, code) = if message.contains("NOT_FOUND:") {
         (StatusCode::NOT_FOUND, "NOT_FOUND")
     } else if message.contains("CONFLICT:") {
         (StatusCode::CONFLICT, "CONFLICT")
+    } else if [
+        "sun_len",
+        "no such file",
+        "connection refused",
+        "privileged runner",
+        "runner",
+        "disabled",
+        "unavailable",
+        "connect",
+        "socket",
+    ]
+    .iter()
+    .any(|text| lower_message.contains(text))
+    {
+        (StatusCode::SERVICE_UNAVAILABLE, "NETWORK_OPERATION_FAILED")
     } else if [
         "Invalid",
         "invalid",
@@ -341,5 +357,52 @@ pub async fn network_diagnostics(Query(query): Query<DiagnosticsQuery>) -> Respo
     match runner(&req).await {
         Ok(value) => response(StatusCode::OK, value),
         Err(error) => failure(error),
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runner_transport_errors_take_precedence_over_validation_words() {
+        for message in [
+            "path must be shorter than SUN_LEN",
+            "runner socket required: No such file or directory",
+            "Invalid runner socket: Connection refused",
+            "Privileged runner must be enabled",
+            "runner is disabled; configuration required",
+            "network unavailable: invalid socket",
+            "connect failed: invalid address",
+        ] {
+            let result = failure(message);
+            assert_eq!(
+                result.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{message}"
+            );
+            assert_eq!(result.headers()[header::CACHE_CONTROL], "no-store");
+            let body = axum::body::to_bytes(result.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "NETWORK_OPERATION_FAILED");
+            assert_eq!(body["message"], message);
+        }
+        let result = failure("Endpoint must be a valid host:port");
+        assert_eq!(result.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(result.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "INVALID_NETWORK_CONFIGURATION");
+        assert_eq!(
+            failure("NOT_FOUND: Peer required").status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            failure("CONFLICT: Peer must be unique").status(),
+            StatusCode::CONFLICT
+        );
     }
 }

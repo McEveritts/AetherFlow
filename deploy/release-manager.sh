@@ -1,8 +1,8 @@
 #!/bin/bash
 ###############################################################################
-# AetherFlow Release Manager v4.0 — Pull-Based Single-Binary Atomic Engine
+# AetherFlow Release Manager v4.0 — Pull-Based Atomic Release Engine
 #
-# Pulls pre-built, checksum-verified single-binary releases from GitHub Releases
+# Pulls pre-built, checksum-verified releases from GitHub Releases
 # (or builds in fallback --from-source mode), snapshots the live SQLite database
 # with a WAL-safe online backup, atomically swaps /opt/AetherFlow/current,
 # restarts systemd units (aetherflow-runner + aetherflow-api), and runs a deep
@@ -1438,6 +1438,11 @@ pull_prebuilt_artifact() {
         rm -rf "${tmp_dir}"
         return 1
     fi
+    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" || ! -s "${RELEASE_DIR}/web/dist/index.html" ]] || [[ -z "$(find "${RELEASE_DIR}/web/dist" -type f -name '*.wasm' -size +0c -print -quit 2>/dev/null)" ]]; then
+        log_error "Release archive is missing external frontend assets (web/dist/index.html and a non-empty .wasm file)."
+        rm -rf "${tmp_dir}" "${RELEASE_DIR}"
+        return 1
+    fi
     if [[ ! -f "${RELEASE_DIR}/.version" || -L "${RELEASE_DIR}/.version" || ! -s "${RELEASE_DIR}/.version" ]]; then
         log_error "Release archive is missing a non-empty regular .version stamp. Refusing to continue."
         rm -rf "${tmp_dir}" "${RELEASE_DIR}"
@@ -1480,7 +1485,7 @@ build_from_source() {
     if [[ "${CHANNEL}" == "nightly" ]]; then
         target_branch="nightly"
     fi
-    log_info "Building single-binary release from source (${GIT_REMOTE}/${target_branch})..."
+    log_info "Building release from source (${GIT_REMOTE}/${target_branch})..."
     cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
     if ! git fetch "${GIT_REMOTE}" "${target_branch}" --tags >> "${LOG_FILE}" 2>&1; then
         if [[ "${CHANNEL}" == "nightly" ]] && git fetch "${GIT_REMOTE}" "Nightly" --tags >> "${LOG_FILE}" 2>&1; then
@@ -1497,37 +1502,37 @@ build_from_source() {
     local source_sha
     source_sha="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
 
-    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='backend-rs/target' --exclude='data-snapshot' --exclude='*.sqlite' \
+    if ! rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='data-snapshot' --exclude='*.sqlite' \
+        --exclude='target/' --exclude='__pycache__/' --exclude='*.pyc' --exclude='*.pyo' \
+        --exclude='.cache/' --exclude='.pytest_cache/' --exclude='.mypy_cache/' \
+        --exclude='.ruff_cache/' --exclude='.tox/' --exclude='.venv/' --exclude='.turbo/' \
+        --exclude='*.tsbuildinfo' --exclude='/packages/ui/' --exclude='/web/dist/' --exclude='/frontend-rs/dist/' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1; then
         log_error "rsync source tree into ${RELEASE_DIR} failed."
         return 1
     fi
-    if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
-        echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version"
+    if [[ ! -s "${RELEASE_DIR}/.version" ]]; then
+        echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version" || return 1
     fi
 
-    log_info "Building Next.js static export (NEXT_STATIC_EXPORT=1)..."
-    cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing."
-    export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${NODE_HEAP_MB}"
-    export NEXT_STATIC_EXPORT="1"
-    if ! npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1; then
-        log_error "Frontend npm ci failed."
+    cd "${RELEASE_DIR}" || return 1
+    log_info "Building and staging Rust WASM frontend..."
+    export PATH="${WASM_TOOL_DIR:-/usr/local/lib/aetherflow-wasm-tools}/bin:${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/aetherflow-wasm-tools/bin:${HOME:-/root}/.cargo/bin:${PATH}"
+    if ! bash "${RELEASE_DIR}/scripts/install_wasm_build_tools.sh" --ensure >> "${LOG_FILE}" 2>&1; then
+        log_error "Rust WASM frontend tool bootstrap failed."
         return 1
     fi
-    if ! npm run build >> "${LOG_FILE}" 2>&1; then
-        log_error "Frontend static export build failed."
-        return 1
-    fi
-
-    log_info "Embedding frontend static bundle into web/dist..."
-    rm -rf "${RELEASE_DIR}/web/dist"
-    mkdir -p "${RELEASE_DIR}/web/dist"
-    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/web/dist/" || { log_error "Failed staging web/dist."; return 1; }
-    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" ]]; then
-        log_error "Frontend static export missing index.html."
+    if ! FRONTEND_DIST_DIR="${RELEASE_DIR}/web/dist" bash "${RELEASE_DIR}/scripts/build_wasm_frontend.sh" --stage >> "${LOG_FILE}" 2>&1; then
+        log_error "Rust WASM frontend build failed."
         return 1
     fi
 
+    if [[ ! -f "${RELEASE_DIR}/web/dist/index.html" || ! -s "${RELEASE_DIR}/web/dist/index.html" ]] || [[ -z "$(find "${RELEASE_DIR}/web/dist" -type f -name '*.wasm' -size +0c -print -quit)" ]]; then
+        log_error "Rust WASM frontend staging is missing a non-empty index.html or .wasm file in web/dist."
+        return 1
+    fi
+
+    cd "${RELEASE_DIR}/backend-rs" || { log_error "Rust backend directory missing."; return 1; }
     if [[ ! -d "${RELEASE_DIR}/backend-rs" ]] || ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
         log_error "Rust backend source (${RELEASE_DIR}/backend-rs), cargo, and rustc (>= 1.95.0) are required for source builds."
         return 1
@@ -1545,8 +1550,7 @@ build_from_source() {
         return 1
     fi
 
-    log_info "Compiling single-binary AetherFlow Rust control plane and CLI (backend-rs)..."
-    cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
+    log_info "Compiling AetherFlow Rust control plane and companions (backend-rs)..."
     local -a cargo_locked_args=(--locked)
     if [[ ! -f Cargo.lock ]]; then
         if [[ "${CARGO_ALLOW_UNLOCKED_DEV:-0}" == "1" ]]; then
@@ -1556,10 +1560,15 @@ build_from_source() {
             return 1
         fi
     fi
-    local -a cargo_bin_args=(--bin aetherflow-api --bin af)
+    local -a companion_bins=(af)
     if [[ -f "${RELEASE_DIR}/backend-rs/crates/af-librespeed/Cargo.toml" ]]; then
-        cargo_bin_args+=(--bin speedtest-backend)
+        companion_bins+=(speedtest-backend)
     fi
+    local -a cargo_bin_args=(--bin aetherflow-api)
+    local built_bin
+    for built_bin in "${companion_bins[@]}"; do
+        cargo_bin_args+=(--bin "${built_bin}")
+    done
     local af_src_ver="source-${source_sha}"
     if [[ -s "${RELEASE_DIR}/.version" ]]; then
         af_src_ver="$(tr -d '\r\n' < "${RELEASE_DIR}/.version")"
@@ -1573,25 +1582,30 @@ build_from_source() {
             cargo build --release "${cargo_locked_args[@]}" "${cargo_bin_args[@]}" >> "${LOG_FILE}" 2>&1
     ) || return 1
     local cargo_target_dir="${CARGO_TARGET_DIR:-${RELEASE_DIR}/backend-rs/target}"
-    cp -f "${cargo_target_dir}/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api" || return 1
-    local built_bin
-    for built_bin in af speedtest-backend; do
-        if [[ -f "${cargo_target_dir}/release/${built_bin}" ]]; then
-            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/${built_bin}"
-            mkdir -p "${RELEASE_DIR}/bin"
-            cp -f "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
-            chmod +x "${RELEASE_DIR}/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}"
+    [[ "${cargo_target_dir}" == /* ]] || cargo_target_dir="${RELEASE_DIR}/backend-rs/${cargo_target_dir}"
+    install -m 0755 "${cargo_target_dir}/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api" || return 1
+    mkdir -p "${RELEASE_DIR}/bin" || return 1
+    for built_bin in "${companion_bins[@]}"; do
+        install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/${built_bin}" || return 1
+        install -m 0755 "${cargo_target_dir}/release/${built_bin}" "${RELEASE_DIR}/bin/${built_bin}" || return 1
+    done
+    local runtime_script
+    for runtime_script in verify-provenance.py log-retention.py; do
+        if [[ -f "${RELEASE_DIR}/deploy/${runtime_script}" ]]; then
+            chmod 0755 "${RELEASE_DIR}/deploy/${runtime_script}" || return 1
         fi
     done
-    chmod +x "${RELEASE_DIR}/aetherflow-api"
 
-    # Retain only runtime essentials (binary, af, config, packages, deploy, .version)
-    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/web/dist" "${RELEASE_DIR}/backend-rs/target"
+    # Keep external web/dist beside the binaries after removing build-only files.
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/frontend-rs" \
+        "${RELEASE_DIR}/backend-rs/target"
 }
 
 simulate_offline_artifact() {
-    log_info "[DRY-RUN] Offline mode: simulating single-binary artifact verification and extraction."
-    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin"
+    log_info "[DRY-RUN] Offline mode: simulating artifact verification and extraction."
+    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin" "${RELEASE_DIR}/web/dist"
+    printf '<!doctype html><title>AetherFlow dry run</title>\n' > "${RELEASE_DIR}/web/dist/index.html"
+    printf '\000asm\001\000\000\000' > "${RELEASE_DIR}/web/dist/app.wasm"
     echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
     echo "#!/bin/bash" > "${RELEASE_DIR}/af"
     cp -f "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
@@ -2298,7 +2312,7 @@ cleanup_old_releases() {
 # STAGE 6: One-Shot PM2 -> Systemd Migration
 ###############################################################################
 migrate_systemd() {
-    log_info "=== STAGE 6: PM2 -> Systemd Single-Binary Migration ==="
+    log_info "=== STAGE 6: PM2 -> Systemd Migration ==="
     ensure_fhs_layout
     if [[ "${DRY_RUN}" == true ]]; then
         log_info "[DRY-RUN] Would install aetherflow-runner.service and aetherflow-api.service and stop PM2."

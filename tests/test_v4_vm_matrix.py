@@ -216,12 +216,14 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
 
     def portable_entries(self) -> dict[str, tuple[bytes, int]]:
         return {
-            "aetherflow-api": (b"\x7fELF-api index.html _next/", 0o755),
+            "aetherflow-api": (b"\x7fELF-api", 0o755),
             "af": (b"\x7fELF-new-cli", 0o755),
             "bin/af": (b"\x7fELF-new-cli", 0o755),
             "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
             "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
             ".version": (b"v4.0.0\n", 0o644),
+            "web/dist/index.html": (b"<html>app</html>", 0o644),
+            "web/dist/app.wasm": (b"wasm", 0o644),
             "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
             "deploy/release-manager.conf": (b"config\n", 0o644),
             "config/packages.json": (b"{}\n", 0o644),
@@ -333,6 +335,8 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
                     "speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
                     "bin/speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
+                    "web/dist/index.html": (b"<html>app</html>", 0o644),
+                    "web/dist/app.wasm": (b"wasm", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
@@ -351,6 +355,29 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             self.assertTrue(report["details"]["sha256_verified"])
             self.assertEqual(report["details"]["version_stamp"], "v4.0.0")
             self.assertTrue(report["details"]["glibc_compatible_ubuntu_2204"])
+
+    def test_local_and_remote_contracts_reject_missing_or_empty_external_ui(self) -> None:
+        namespace = {"__name__": "external_ui_contract_unit"}
+        exec(vm_matrix.build_remote_driver_script(), namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "aetherflow-linux-amd64.tar.gz"
+            sums = Path(directory) / "SHA256SUMS"
+            for name, value in (("web/dist/index.html", None), ("web/dist/index.html", b""),
+                                ("web/dist/app.wasm", None), ("web/dist/app.wasm", b"")):
+                entries = self.portable_entries()
+                if value is None:
+                    del entries[name]
+                else:
+                    entries[name] = (value, 0o644)
+                digest = self._build_tarball(archive, entries)
+                sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+                local = vm_matrix.verify_release_artifact_contract(archive, sums)
+                with mock.patch.dict(namespace, {"run_bounded": lambda *a, **kw: (0, "Name: GLIBC_2.34\n", "", {})}):
+                    remote = namespace["inspect_artifact_bundle"](archive, sums, vm_matrix.asdict(vm_matrix.DEFAULT_ARTIFACT_CONTRACT))
+                for report in (local, remote):
+                    with self.subTest(name=name, value=value, report=report):
+                        self.assertFalse(report["valid"])
+                        self.assertTrue(any("web/dist" in error for error in report["errors"]))
 
     def test_verify_release_artifact_contract_rejects_debian13_glibc_2_38_for_ubuntu_2204(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -415,7 +442,7 @@ class ArtifactContractAndGlibcTests(unittest.TestCase):
             self._build_tarball(
                 archive,
                 {
-                    "aetherflow-api": (b"\x7fELF-binary-payload index.html _next/", 0o755),
+                    "aetherflow-api": (b"\x7fELF-binary-payload index.html app.wasm", 0o755),
                     "af": (b"\x7fELF-cli-payload", 0o755),
                     "bin/af": (b"\x7fELF-cli-payload", 0o755),
                     "speedtest-backend": (b"\x7fELF-speedtest-payload", 0o755),
@@ -579,12 +606,14 @@ class CertificationInputAndMandatoryPhaseTests(unittest.TestCase):
             art_sha = art_helper._build_tarball(
                 archive,
                 {
-                    "aetherflow-api": (b"\x7fELF-binary index.html _next/", 0o755),
+                    "aetherflow-api": (b"\x7fELF-binary", 0o755),
                     "af": (b"\x7fELF-cli", 0o755),
                     "bin/af": (b"\x7fELF-cli", 0o755),
                     "speedtest-backend": (b"\x7fELF-speedtest", 0o755),
                     "bin/speedtest-backend": (b"\x7fELF-speedtest", 0o755),
                     ".version": (b"v4.0.0\n", 0o644),
+                    "web/dist/index.html": (b"<html>app</html>", 0o644),
+                    "web/dist/app.wasm": (b"wasm", 0o644),
                     "deploy/release-manager.sh": (b"#!/bin/bash\n", 0o755),
                     "deploy/release-manager.conf": (b"# conf\n", 0o644),
                     "config/packages.json": (b"{}\n", 0o644),
@@ -686,15 +715,21 @@ class BaselineBuildAndSingleRemoteEngineTests(unittest.TestCase):
       and is directly exercised in tests.
     """
 
-    def test_render_baseline_guest_build_script_enforces_frontend_export_locked_offline_and_resource_limits(self) -> None:
+    def test_render_baseline_guest_build_script_enforces_wasm_locked_offline_and_resource_limits(self) -> None:
         script = vm_matrix.render_baseline_guest_build_script(jobs=2)
         # Never skip frontend build merely because `web/dist` directory exists
         self.assertNotIn("if [[ ! -d web/dist", script)
-        self.assertIn("rm -rf web/dist frontend/out", script)
-        self.assertIn("NEXT_STATIC_EXPORT=1", script)
-        self.assertIn("npm run build --workspace frontend", script)
+        self.assertIn("rm -rf web/dist frontend-rs/dist", script)
+        self.assertIn("bash scripts/build_wasm_frontend.sh --stage", script)
+        self.assertIn('RUSTFLAGS="" nice -n 10 ionice -c 2 -n 7 bash scripts/build_wasm_frontend.sh --stage', script)
+        self.assertIn('WASM_TOOL_DIR="${wasm_tool_dir}" bash scripts/install_wasm_build_tools.sh --ensure', script)
+        self.assertNotIn("trunk-x86_64-unknown-linux-musl.tar.gz", script)
+        self.assertNotIn("wasm-bindgen-0.2.130-x86_64-unknown-linux-musl.tar.gz", script)
+        self.assertNotIn("NEXT_STATIC_EXPORT", script)
+        self.assertNotIn("npm run build", script)
+        self.assertNotIn("frontend/out", script)
         self.assertIn("test -s web/dist/index.html", script)
-        self.assertIn("test -d web/dist/_next", script)
+        self.assertIn("find web/dist -type f -name '*.wasm' -size +0c", script)
         self.assertNotIn("backend/web/dist", script)
         # Require Cargo.lock, explicit fetch --locked, then offline compilation with 2 jobs and nice/ionice
         self.assertIn("test -s backend-rs/Cargo.lock", script)
@@ -755,7 +790,7 @@ class BaselineBuildAndSingleRemoteEngineTests(unittest.TestCase):
             ArtHelper._build_tarball(
                 fake_tarball,
                 {
-                    "aetherflow-api": (b"\x7fELF-binary index.html _next/", 0o755),
+                    "aetherflow-api": (b"\x7fELF-binary index.html app.wasm", 0o755),
                     "af": (b"\x7fELF-cli", 0o755),
                     "bin/af": (b"\x7fELF-cli", 0o755),
                     "speedtest-backend": (b"\x7fELF-speedtest", 0o755),

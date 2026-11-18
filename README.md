@@ -5,7 +5,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?include_prereleases&style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases)
 [![Rust](https://img.shields.io/badge/Control_Plane-Rust_%28Axum_%2B_Tokio%29-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
 [![Admin CLI](https://img.shields.io/badge/Admin_CLI-af_%2812_Crates%29-4f46e5?style=flat-square)](./docs/rust-admin-cli.md)
-[![Frontend](https://img.shields.io/badge/Interface-Next.js_16_%28Obsidian_V2%29-000000?style=flat-square&logo=next.js&logoColor=white)](./frontend)
+[![Frontend](https://img.shields.io/badge/Interface-Rust_WASM_%2B_Leptos-654ff0?style=flat-square&logo=webassembly&logoColor=white)](./frontend-rs)
 [![OS Support](https://img.shields.io/badge/Target_OS-Debian_12%2F13_%7C_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-77_Apps-9333ea?style=flat-square)](./packages)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
@@ -18,13 +18,13 @@
 
 ## ⚡ Overview
 
-**AetherFlow** is a sovereign, bare-metal infrastructure and media-server orchestration platform. Built to replace fragile scripts and heavy container overlays with a compiled, single-binary **Rust** control plane, AetherFlow orchestrates **77 native Linux services**, real-time hardware telemetry, scoped tenant file management (**McBrowser**), canonical streaming analytics, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
+**AetherFlow** is a sovereign, bare-metal infrastructure and media-server orchestration platform. Its **Rust** control plane and **Rust WebAssembly** interface orchestrate **77 native Linux services**, real-time hardware telemetry, scoped tenant file management (**McBrowser**), canonical streaming analytics, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
 
 ![AetherFlow Overview Dashboard](./docs/assets/dashboard.png?v=4.0.2)
 
 ### Why AetherFlow v4.0.0?
 
-- **12-Crate Single-Binary Rust Control Plane (`aetherflow-api` + `af` + `speedtest-backend`)** — The entire **Next.js 16 (Obsidian V2)** static frontend is embedded directly inside the compiled **Rust (`Axum` + `Tokio`)** binary via `rust-embed` (`af-api`), paired with the unified **`af` (`af-cli`)** administrative CLI, native **`speedtest-backend` (`af-librespeed`)** telemetry daemon, and bundled SQLite WAL (`af-db`), eliminating separate Node.js runtime daemons, Go binaries, Redis dependencies, and port-proxy sprawl.
+- **Rust Control Plane and WASM Interface** — The **Leptos** dashboard and worker modules are built in `frontend-rs` and shipped as external `web/dist` assets beside **`aetherflow-api`**, the **`af`** administrative CLI, and the Rust LibreSpeed **`speedtest-backend`**. The API serves the UI at runtime, so UI assets can be rebuilt independently. The production dashboard needs no Node.js daemon or Go services.
 - **Native McBrowser (`af-files`)** — Built-in left-sidebar file manager backed by a capability-scoped Rust engine (`af-files`) with private per-user storage (`/var/lib/aetherflow/mcbrowser`), resumable chunked uploads (up to 64 GiB), ETag-guarded Ace code editing, 9-format archive extraction/creation, and FlowAI natural-language BFS file search. See [McBrowser Documentation](./docs/mcbrowser.md).
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (15 native declarative Rust recipes + serialized Bash installers), `systemctl` transitions, WireGuard/Tailscale management, quota updates, and isolated `aetherflow-self-update.service` deployments are mediated over `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
@@ -55,8 +55,9 @@
 
 ```mermaid
 flowchart LR
-    Operator["Operator Browser<br/>(Obsidian V2 SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
-    Ingress -->|127.0.0.1:8080| API["aetherflow-api (af-api)<br/>(Single-Binary Rust + Embedded SPA)<br/>User=aetherflow • ProtectSystem=strict"]
+    Operator["Operator Browser<br/>(Leptos Rust WASM SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
+    Ingress -->|127.0.0.1:8080| API["aetherflow-api (af-api)<br/>User=aetherflow • ProtectSystem=strict"]
+    Assets["External UI assets<br/>web/dist or STATIC_DIR"] --> API
 
     subgraph RustWorkspace["12-Crate Rust Workspace (backend-rs)"]
         DB[("SQLite WAL (af-db)<br/>AES-256-GCM + Sessions")]
@@ -90,7 +91,7 @@ flowchart LR
 
 | Crate | Role |
 | :--- | :--- |
-| **`af-api`** | Axum HTTP/WebSocket control plane, `rust-embed` Next.js 16 SPA server, JWT/TOTP/OIDC/CSRF middlewares, streaming subdomain & plugin reverse proxy, FlowAI routing, and canonical streaming history endpoints. |
+| **`af-api`** | Axum HTTP/WebSocket control plane, runtime WASM asset server, JWT/TOTP/OIDC/CSRF middlewares, streaming subdomain & plugin reverse proxy, FlowAI routing, and canonical streaming history endpoints. |
 | **`af-runner`** | Root UNIX socket daemon (`/run/aetherflow/runner.sock`), 15 built-in declarative Rust package recipes + locked Bash installer supervisor, `systemctl` allowlists, WireGuard/Tailscale helpers, and isolated `aetherflow-self-update.service` launcher. |
 | **`af-files`** | Native **McBrowser** capability-scoped tenant file system engine, resumable 64 GiB chunked upload sessions, ETag-guarded UTF-8 editor, 9-format archive engine, and public share links. |
 | **`af-db`** | Bundled `rusqlite` WAL connection pool (`max_size(1)`), schema migrations, SQLite-backed JWT revocation and session tracking (zero Redis requirement), and `enc:v1:` AES-256-GCM secret encryption. |
@@ -164,7 +165,7 @@ sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
 sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair
 ```
 
-Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./docs/upgrading.md)** and **[Self-Update Lifecycle](./docs/self-update.md)**. The embedded SPA, HTTP API, runner socket, and installed `systemd` units transition seamlessly.
+Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./docs/upgrading.md)** and **[Self-Update Lifecycle](./docs/self-update.md)**. The updater switches the API binaries and the matching `web/dist` dashboard together while preserving the HTTP API and runner socket.
 
 ---
 
@@ -175,7 +176,7 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 | :--- | :--- |
 | **[About AetherFlow](./docs/about.md)** | Platform overview, architectural axioms, and core capabilities. |
 | **[Quickstart Guide](./docs/quickstart.md)** | End-to-end walkthrough for bootstrapping your first bare-metal node. |
-| **[System Architecture](./docs/architecture.md)** | 11-crate Rust control plane internals, embedded SPA serving, and `systemd` execution model. |
+| **[System Architecture](./docs/architecture.md)** | Rust control plane internals, external WASM asset serving, and the `systemd` execution model. |
 | **[Configuration Reference](./docs/configuration.md)** | Environment variables (`/etc/aetherflow/aetherflow.env`), SQLite WAL, and service tuning. |
 | **[Security & Hardening](./docs/security.md)** | TOTP 2FA, AES-256-GCM secret encryption, OIDC provider, and privilege separation. |
 | **[Threat Model](./docs/threat_model.md)** | CWE mapping, security boundaries, AI escapement mitigations, and socket sandboxing. |
@@ -200,7 +201,8 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 | **[Rust Host Management (`af-host`)](./docs/rust-host-management.md)** | Versioned backup manifests, chunking, staged restore, and native host maintenance (`tune`, `sentinel`). |
 | **[Rust Migration Status](./docs/rust-migration-status.md)** | Complete crate-by-crate architecture and migration status matrix for v4.0.0. |
 | **[REST & WebSocket API](./docs/API.md)** | Endpoint specifications, WebSocket ticket handshake, SSE streams, and CSRF rules. |
-| **[Testing & Verification](./docs/testing.md)** | Running the Rust workspace tests, frontend Jest/Playwright suites, and Python regression tests. |
+| **[WASM Frontend](./frontend-rs/README.md)** | Frontend crates, pinned build tools, runtime asset layout, and browser verification. |
+| **[Testing & Verification](./docs/testing.md)** | Running the Rust workspace tests, Playwright suites, and Python regression tests. |
 | **[Troubleshooting & FAQ](./docs/troubleshooting.md)** | Common diagnostics for ingress routing, WebSocket connections, systemd sandboxes, and APT locks. |
 
 ---
@@ -209,10 +211,12 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 
 ```bash
 # Run Rust control plane unit & contract tests across all 11 crates
-cd backend-rs && cargo test --workspace --locked
+cargo test --manifest-path backend-rs/Cargo.toml --workspace --locked
 
-# Build the Next.js 16 (Obsidian V2) static export and run frontend tests
-cd frontend && npm run lint && npm run test:ci && NEXT_STATIC_EXPORT=1 npm run build
+# Test and build the Rust WASM dashboard and workers
+cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
+bash scripts/install_wasm_build_tools.sh --ensure
+bash scripts/build_wasm_frontend.sh --stage
 
 # Run release manager, marketplace, and build tool regression suites
 python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -220,7 +224,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 # Verify shell hygiene across all 260+ installer and lifecycle scripts
 python3 tests/check_shell_hygiene.py
 
-# Build the production single-binary Rust release bundle (aetherflow-api + af + SHA256SUMS)
+# Package the API, CLI, external web/dist assets, and SHA256SUMS
 bash scripts/build_gold.sh
 ```
 

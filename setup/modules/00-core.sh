@@ -30,12 +30,6 @@ function _af_build_jobs() {
 	echo $((cpu_count / 2))
 }
 
-AF_RUNTIME_CACHE_DIR="${AF_RUNTIME_CACHE_DIR:-/tmp/aetherflow-runtime-cache}"
-AF_NODE_VERSION="${AF_NODE_VERSION:-24.22.2}"
-AF_NODE_ARCHIVE="${AF_RUNTIME_CACHE_DIR}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz"
-AF_NODE_URL="${AF_NODE_URL:-https://nodejs.org/dist/v${AF_NODE_VERSION}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz}"
-AF_NODE_SHA256="${AF_NODE_SHA256:-48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75}"
-
 function _af_truthy() {
 	case "${1,,}" in
 	1 | true | yes | y | on) return 0 ;;
@@ -85,60 +79,6 @@ function _af_apt_install() {
 		install "$@" >>"${output}" 2>&1
 }
 
-function _af_verify_sha256() {
-	local file_path="$1"
-	local expected_sha="${2:-}"
-
-	[[ -s "${file_path}" ]] || return 1
-	if [[ -z "${expected_sha}" || "${expected_sha,,}" == "skip" ]]; then
-		return 0
-	fi
-	local actual_sha
-	actual_sha="$(sha256sum "${file_path}" | awk '{print tolower($1)}')"
-	if [[ "${actual_sha}" != "${expected_sha,,}" ]]; then
-		echo "[ERROR] SHA-256 verification failed for ${file_path} (expected=${expected_sha,,}, actual=${actual_sha})" >&2
-		rm -f "${file_path}"
-		return 1
-	fi
-	return 0
-}
-
-function _af_download() {
-	local url="$1"
-	local destination="$2"
-	local expected_sha="${3:-}"
-
-	mkdir -p "$(dirname "${destination}")"
-	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --retry 3 --output "${destination}" "${url}" || return 1
-	else
-		wget -qO "${destination}" "${url}" || return 1
-	fi
-	_af_verify_sha256 "${destination}" "${expected_sha}"
-}
-
-function _af_prefetch_runtime_archives() {
-	if ! _af_build_from_source_enabled; then
-		return 0
-	fi
-
-	local pids=()
-
-	mkdir -p "${AF_RUNTIME_CACHE_DIR}"
-
-	if ! command -v node >/dev/null 2>&1 && [[ ! -s "${AF_NODE_ARCHIVE}" ]]; then
-		(_af_download "${AF_NODE_URL}" "${AF_NODE_ARCHIVE}" "${AF_NODE_SHA256}") &
-		pids+=("$!")
-	fi
-
-	if [[ ${#pids[@]} -gt 0 ]]; then
-		_af_parallel_wait "${pids[@]}" || return 1
-	fi
-}
-
-function _af_cleanup_runtime_cache() {
-	rm -rf "${AF_RUNTIME_CACHE_DIR}"
-}
 #################################################################################
 # shellcheck disable=2005,2034,2120,2215,2164,2312
 
