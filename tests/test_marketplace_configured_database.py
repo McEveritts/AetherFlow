@@ -88,12 +88,17 @@ class ConfiguredPostgreSQLRecovery(unittest.TestCase):
             cls.run_command([str(cls.binary / 'pg_ctl'), '-D', str(cls.data), '-w', '-t', '20',
                              '-m', 'immediate', 'stop'])
 
+    def ensure_public_schema_owner(self, owner):
+        if self.query(self.database, "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public'") != 'pg_database_owner':
+            self.query(self.database, f'ALTER SCHEMA public OWNER TO "{owner}"')
+
     def setUp(self):
         self.workspace = self.root / self._testMethodName
         self.workspace.mkdir(mode=0o700)
         self.backup = self.workspace / 'backup'
         self.database = 'configured_app'
         self.query('postgres', f'CREATE DATABASE {self.database} OWNER af_app')
+        self.ensure_public_schema_owner('af_app')
         self.query(self.database, "CREATE TABLE retained(id bigserial PRIMARY KEY, value text NOT NULL); "
                    "INSERT INTO retained(value) VALUES ('before');", 'af_app')
         self.identity = self.query('postgres', f"SELECT oid FROM pg_database WHERE datname='{self.database}'")
@@ -173,6 +178,7 @@ LOGFILE="$2/application.log"
     def test_quoted_application_owner_cannot_break_identity_guard(self):
         owner = 'af_$af_identity$_owner'
         self.query('postgres', f'ALTER DATABASE {self.database} OWNER TO "{owner}"')
+        self.ensure_public_schema_owner(owner)
         self.query(self.database, f'ALTER TABLE retained OWNER TO "{owner}"')
         self.helper('backup_configured_database', username=owner)
         self.query(self.database, "UPDATE retained SET value='after'", owner)
@@ -347,6 +353,7 @@ LOGFILE="$2/application.log"
         self.helper('backup_configured_database')
         self.query('postgres', f'DROP DATABASE {self.database};')
         self.query('postgres', f'CREATE DATABASE {self.database} OWNER af_app')
+        self.ensure_public_schema_owner('af_app')
         self.query(self.database, "CREATE TABLE retained(value text); INSERT INTO retained VALUES ('replacement')", 'af_app')
         result = self.helper('restore_configured_database', check=False)
         self.assertNotEqual(result.returncode, 0)

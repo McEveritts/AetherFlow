@@ -17,7 +17,11 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+# Maintenance notices only; no vulnerability or unsoundness advisories are exempted.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 maintenance notice (no vulnerability and no safe upstream upgrade path)" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz 0.10.4 maintenance notice (no vulnerability and no safe upstream upgrade path)" },
+]
 
 [licenses]
 version = 2

@@ -480,9 +480,15 @@ pm2() { printf 'stubbed pm2 %s\n' "$*" >> "$LOG_FILE"; }
 
     def test_binary_and_source_delivery_copy_deploy_and_setup_activates_policy(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        self.assertIn('cp -R deploy "${STAGE_DIR}/deploy"', workflow)
+        self.assertIn("PACKAGE_RELEASE=1", workflow)
+        self.assertIn("bash scripts/build_gold.sh", workflow)
+        build_gold = (ROOT / "scripts/build_gold.sh").read_text()
+        self.assertIn('-cf - packages deploy | tar -C "${target_dir}" -xpf -', build_gold)
+        self.assertIn("log-retention.py", build_gold)
         source_build = (ROOT / "setup/modules/modern_stack.sh").read_text()
-        self.assertIn('cp -R "${af_root}/deploy" "${release_dir}/deploy"', source_build)
+        self.assertIn("for runtime_dir in config packages deploy; do", source_build)
+        self.assertIn('cp -R "${af_root}/${runtime_dir}" "${release_dir}/${runtime_dir}"', source_build)
+        self.assertIn("for runtime_script in release-manager.sh verify-provenance.py log-retention.py; do", source_build)
         boot = shell_function(ROOT / "setup/modules/05-finalize.sh", "_boot")
         for suffix in ("service", "timer"):
             self.assertIn(f"/opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.{suffix}", boot)

@@ -101,7 +101,7 @@ jobs:
         working-directory: .
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq sqlite3 bc
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq sqlite3 bc python3-toml python3.11 python3.11-venv
           python3 tests/check_shell_hygiene.py
           PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py
 

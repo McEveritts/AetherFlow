@@ -455,9 +455,11 @@ elif command in ('python3', 'python'):
         if failure == 'bootstrap-python' and ('urllib.request' in program or 'import requests' in program):
             sys.exit(79)
         if 'urllib.request' not in program and 'import requests' not in program:
-            sys.exit(subprocess.run(['/usr/bin/python3', *arguments], input=program, text=True).returncode)
+            real_python = next((p for p in ('/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/bin/python3') if os.path.isfile(p) and os.access(p, os.X_OK)), '/usr/bin/python3')
+            sys.exit(subprocess.run([real_python, *arguments], input=program, text=True).returncode)
     else:
-        os.execv('/usr/bin/python3', ['/usr/bin/python3', *arguments])
+        real_python = next((p for p in ('/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/bin/python3') if os.path.isfile(p) and os.access(p, os.X_OK)), '/usr/bin/python3')
+        os.execv(real_python, [real_python, *arguments])
 elif command in ('curl', 'wget'):
     config_sources = []
     for position, argument in enumerate(arguments):

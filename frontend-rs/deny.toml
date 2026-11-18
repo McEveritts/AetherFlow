@@ -19,6 +19,7 @@ unsound = "all"
 # No vulnerability or unsoundness advisories are exempted.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is a build-time Leptos macro dependency; the advisory reports archival, with no vulnerability or safe upgrade" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 maintenance notice via af-models (no vulnerability and no safe upstream upgrade path)" },
 ]
 
 [licenses]
