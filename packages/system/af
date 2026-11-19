@@ -38,7 +38,7 @@ package_root() {
 }
 package_script() {
   local root
-  [[ "$2" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
+  [[ "$2" =~ ^[a-z0-9][a-z0-9_-]*$ && "$2" != "template" ]] || return 1
   for root in "${package_roots[@]}"; do
     if [[ -f "${root}/$1/$1package-$2" ]]; then
       printf '%s\n' "${root}/$1/$1package-$2"
@@ -89,7 +89,7 @@ function _function() {
 
 function _install() {
   installa=()
-  mapfile -t locks < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | sort -d)
+  mapfile -t locks < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | grep -vx 'template' | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -112,7 +112,7 @@ function _install() {
 
 function _remove() {
 removea=()
-mapfile -t locks < <(find "$(package_root remove)" -type f -name 'removepackage-*' -printf "%f\n" | sed 's/^removepackage-//' | sort -d)
+mapfile -t locks < <(find "$(package_root remove)" -type f -name 'removepackage-*' -printf "%f\n" | sed 's/^removepackage-//' | grep -vx 'template' | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
   if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -196,49 +196,14 @@ function _clr() {
 }
 
 function _updateaf() {
-  echo -e "Updating AetherFlow local repository"
-  if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /opt/AetherFlow ]]; then
-      cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git stash --include-untracked -m "af-update-$(date +%s)" 2>/dev/null || true
-      git checkout master 2>/dev/null
-      if ! git pull --ff-only 2>/dev/null; then
-        echo "[WARN] Fast-forward failed, attempting rebase..."
-        if ! git pull --rebase 2>/dev/null; then
-          echo "[ERROR] Rebase failed (conflicts). Aborting update."
-          git rebase --abort 2>/dev/null
-          return 1
-        fi
-      fi
-    else
-      git clone --recursive https://github.com/McEveritts/AetherFlow /opt/AetherFlow
+  local updater
+  for updater in /opt/AetherFlow/current/packages/system/updateAetherFlow /opt/AetherFlow/packages/system/updateAetherFlow /usr/local/bin/AetherFlow/system/updateAetherFlow; do
+    if [[ -x "$updater" ]]; then
+      exec bash "$updater" "$@"
     fi
-  else
-    if [[ -d /opt/AetherFlow ]]; then
-      cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git stash --include-untracked -m "af-update-dev-$(date +%s)" 2>/dev/null || true
-      if git rev-parse --verify origin/development >/dev/null 2>&1; then
-        git checkout development 2>/dev/null
-        if ! git pull --ff-only 2>/dev/null; then
-          echo "[WARN] Fast-forward failed, attempting rebase..."
-          if ! git pull --rebase 2>/dev/null; then
-            echo "[ERROR] Rebase failed (conflicts). Aborting update."
-            git rebase --abort 2>/dev/null
-            return 1
-          fi
-        fi
-      else
-        echo "[WARN] development branch not found on remote, falling back to master"
-        git checkout master 2>/dev/null
-        if ! git pull --ff-only 2>/dev/null; then
-          git pull --rebase 2>/dev/null || { git rebase --abort 2>/dev/null; return 1; }
-        fi
-      fi
-    else
-      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /opt/AetherFlow 2>/dev/null || \
-        git clone --recursive https://github.com/McEveritts/AetherFlow /opt/AetherFlow
-    fi
-  fi
+  done
+  printf 'AetherFlow self-update requires the native `af` CLI or updateAetherFlow helper.\n' >&2
+  return 1
 }
 
 function _help() {
@@ -269,7 +234,7 @@ function _help() {
 }
 
 function _list() {
-  mapfile -t repo < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | sort -d)
+  mapfile -t repo < <(find "$(package_root install)" -type f -name 'installpackage-*' -printf "%f\n" | sed 's/^installpackage-//' | grep -vx 'template' | sort -d)
   for i in "${repo[@]}"; do
     app=$i
     sgformat="${bold}%-15s${normal}"
@@ -315,26 +280,7 @@ if [[ "$1" == self-update || ( "$1" == update && "$#" -eq 1 ) ]]; then
   exit 0
 fi
 if [[ $1 == upgrade ]]; then
-    # Update AetherFlow local repository before upgrade
   _updateaf
-  echo "Upgrading AetherFlow ... This may take a moment"
-  if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /opt/AetherFlow ]]; then
-      bash /opt/AetherFlow/packages/system/updateAetherFlow
-    else
-      git clone --recursive https://github.com/McEveritts/AetherFlow /opt/AetherFlow
-      bash /opt/AetherFlow/packages/system/updateAetherFlow
-    fi
-  else
-    if [[ -d /opt/AetherFlow ]]; then
-      bash /opt/AetherFlow/packages/system/updateAetherFlow
-    else
-      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /opt/AetherFlow 2>/dev/null || \
-        git clone --recursive https://github.com/McEveritts/AetherFlow /opt/AetherFlow
-      bash /opt/AetherFlow/packages/system/updateAetherFlow
-    fi
-  fi
-  #printf "" > "$LOGFILE"
   exit 0
 fi
 if [[ $1 == list ]]; then

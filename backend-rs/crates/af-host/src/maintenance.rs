@@ -72,8 +72,7 @@ pub fn sentinel_scan_auth_log(
         threshold
     };
 
-    let file = File::open(log_path)
-        .map_err(|e| HostBackupError::io(format!("opening auth log {}", log_path.display()), e))?;
+    let file = open_regular_file_read_nofollow(log_path, "auth.log")?;
 
     let reader = BufReader::new(file);
     let mut scanned_lines = 0usize;
@@ -326,6 +325,182 @@ pub struct CleanLogReport {
     pub dry_run: bool,
 }
 
+#[cfg(unix)]
+fn open_dir_step_nofollow(
+    parent_fd: std::os::unix::io::RawFd,
+    segment: &std::ffi::CStr,
+    display_path: &Path,
+    context: &str,
+) -> HostBackupResult<Option<File>> {
+    use std::os::unix::io::FromRawFd;
+
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            segment.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            Some(libc::ELOOP) => Err(HostBackupError::SymlinkRejected {
+                path: display_path.to_path_buf(),
+                reason: format!("{} is a symbolic link", context),
+            }),
+            Some(libc::ENOTDIR) => Err(HostBackupError::PathValidation {
+                path: display_path.to_path_buf(),
+                reason: format!("{} is not a directory", context),
+            }),
+            _ => Err(HostBackupError::io(
+                format!("opening directory {} ({})", display_path.display(), context),
+                err,
+            )),
+        };
+    }
+    Ok(Some(unsafe { File::from_raw_fd(fd) }))
+}
+
+#[cfg(unix)]
+fn open_existing_dir_chain_nofollow(dir: &Path, context: &str) -> HostBackupResult<Option<File>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Component;
+
+    let abs_dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| HostBackupError::io(format!("resolving cwd for {}", context), e))?
+            .join(dir)
+    };
+
+    let root_c = CString::new("/").unwrap();
+    let root_fd = unsafe {
+        libc::open(
+            root_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(HostBackupError::io(
+            format!("opening '/' directory ({})", context),
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let mut cur = unsafe { File::from_raw_fd(root_fd) };
+    let mut acc = PathBuf::from("/");
+
+    for comp in abs_dir.components() {
+        match comp {
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(HostBackupError::TraversalRejected {
+                    path: dir.to_string_lossy().into_owned(),
+                    reason: format!("{} contains '..'", context),
+                });
+            }
+            Component::Normal(seg) => {
+                acc.push(seg);
+                let seg_c =
+                    CString::new(seg.as_bytes()).map_err(|_| HostBackupError::PathValidation {
+                        path: acc.clone(),
+                        reason: format!("{} path component contains NUL byte", context),
+                    })?;
+                match open_dir_step_nofollow(cur.as_raw_fd(), &seg_c, &acc, context)? {
+                    Some(next) => cur = next,
+                    None => return Ok(None),
+                }
+            }
+        }
+    }
+    Ok(Some(cur))
+}
+
+#[cfg(unix)]
+fn open_regular_file_read_nofollow(path: &Path, context: &str) -> HostBackupResult<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| HostBackupError::io(format!("resolving cwd for {}", context), e))?
+            .join(path)
+    };
+    let parent = abs_path
+        .parent()
+        .ok_or_else(|| HostBackupError::PathValidation {
+            path: path.to_path_buf(),
+            reason: format!("{} has no parent directory", context),
+        })?;
+    let leaf = abs_path
+        .file_name()
+        .ok_or_else(|| HostBackupError::PathValidation {
+            path: path.to_path_buf(),
+            reason: format!("{} has no file name", context),
+        })?;
+    let leaf_c = CString::new(leaf.as_bytes()).map_err(|_| HostBackupError::PathValidation {
+        path: path.to_path_buf(),
+        reason: format!("{} filename contains NUL byte", context),
+    })?;
+
+    let parent_dir = open_existing_dir_chain_nofollow(parent, context)?.ok_or_else(|| {
+        HostBackupError::io(
+            format!("opening auth log {}", path.display()),
+            std::io::Error::from_raw_os_error(libc::ENOENT),
+        )
+    })?;
+
+    let fd = unsafe {
+        libc::openat(
+            parent_dir.as_raw_fd(),
+            leaf_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            return Err(HostBackupError::SymlinkRejected {
+                path: path.to_path_buf(),
+                reason: format!("{} is a symbolic link", context),
+            });
+        }
+        return Err(HostBackupError::io(
+            format!("opening auth log {}", path.display()),
+            err,
+        ));
+    }
+
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut st) } != 0 {
+        return Err(HostBackupError::io(
+            format!("inspecting auth log {}", path.display()),
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(HostBackupError::PathValidation {
+            path: path.to_path_buf(),
+            reason: format!("{} is not a regular file", context),
+        });
+    }
+
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_read_nofollow(path: &Path, _context: &str) -> HostBackupResult<File> {
+    File::open(path)
+        .map_err(|e| HostBackupError::io(format!("opening auth log {}", path.display()), e))
+}
+
 /// Safely scans log directories (`/var/log` and `/srv/aetherflow/lock` relative to `root`)
 /// and truncates regular `.log` files exceeding `max_size_bytes`.
 ///
@@ -338,33 +513,92 @@ pub fn clean_system_logs(
     validate_no_parent_traversal(root, "root")?;
     reject_if_symlink(root, "root")?;
 
-    let candidate_dirs = [root.join("var/log"), root.join("srv/aetherflow/lock")];
-
     let mut scanned_directories = Vec::new();
     let mut cleaned_files = Vec::new();
     let mut total_bytes_freed = 0u64;
 
-    for dir in &candidate_dirs {
-        if !dir.exists() {
-            continue;
-        }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::io::AsRawFd;
 
-        let meta = fs::symlink_metadata(dir).map_err(|e| {
-            HostBackupError::io(format!("inspecting directory {}", dir.display()), e)
-        })?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            continue;
-        }
+        let Some(root_dir) = open_existing_dir_chain_nofollow(root, "root")? else {
+            return Ok(CleanLogReport {
+                scanned_directories,
+                cleaned_files,
+                total_bytes_freed,
+                dry_run,
+            });
+        };
 
-        scanned_directories.push(dir.clone());
-        scan_and_clean_dir_logs(
-            dir,
-            max_size_bytes,
-            dry_run,
-            0,
-            &mut cleaned_files,
-            &mut total_bytes_freed,
-        )?;
+        let candidate_chains: [&[&str]; 2] = [&["var", "log"], &["srv", "aetherflow", "lock"]];
+        for chain in candidate_chains {
+            let mut cur_opt: Option<File> = None;
+            let mut cur_path = root.to_path_buf();
+            let mut skip = false;
+
+            for seg in chain {
+                cur_path.push(seg);
+                let seg_c = CString::new(*seg).unwrap();
+                let parent_fd = cur_opt
+                    .as_ref()
+                    .map(|f| f.as_raw_fd())
+                    .unwrap_or_else(|| root_dir.as_raw_fd());
+                match open_dir_step_nofollow(parent_fd, &seg_c, &cur_path, "log directory") {
+                    Ok(Some(next_dir)) => cur_opt = Some(next_dir),
+                    Ok(None)
+                    | Err(HostBackupError::SymlinkRejected { .. })
+                    | Err(HostBackupError::PathValidation { .. }) => {
+                        skip = true;
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            if skip {
+                continue;
+            }
+            if let Some(dir_file) = cur_opt {
+                scanned_directories.push(cur_path.clone());
+                let in_aetherflow_dir = chain.last() == Some(&"aetherflow");
+                scan_and_clean_dir_logs_fd(
+                    &dir_file,
+                    &cur_path,
+                    in_aetherflow_dir,
+                    max_size_bytes,
+                    dry_run,
+                    0,
+                    &mut cleaned_files,
+                    &mut total_bytes_freed,
+                )?;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let candidate_dirs = [root.join("var/log"), root.join("srv/aetherflow/lock")];
+        for dir in &candidate_dirs {
+            if !dir.exists() {
+                continue;
+            }
+            let meta = fs::symlink_metadata(dir).map_err(|e| {
+                HostBackupError::io(format!("inspecting directory {}", dir.display()), e)
+            })?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            scanned_directories.push(dir.clone());
+            scan_and_clean_dir_logs(
+                dir,
+                max_size_bytes,
+                dry_run,
+                0,
+                &mut cleaned_files,
+                &mut total_bytes_freed,
+            )?;
+        }
     }
 
     Ok(CleanLogReport {
@@ -377,6 +611,246 @@ pub fn clean_system_logs(
 
 const MAX_TRAVERSAL_DEPTH: usize = 32;
 
+#[cfg(unix)]
+fn read_dir_entries_from_fd(
+    dir_fd: std::os::unix::io::RawFd,
+    dir_path: &Path,
+) -> HostBackupResult<Vec<std::ffi::CString>> {
+    use std::ffi::CStr;
+
+    let dup_fd = unsafe { libc::fcntl(dir_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup_fd < 0 {
+        return Err(HostBackupError::io(
+            format!("duplicating dirfd for {}", dir_path.display()),
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let dirp = unsafe { libc::fdopendir(dup_fd) };
+    if dirp.is_null() {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(dup_fd) };
+        return Err(HostBackupError::io(
+            format!("reading dir {}", dir_path.display()),
+            err,
+        ));
+    }
+
+    struct DirGuard(*mut libc::DIR);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let _guard = DirGuard(dirp);
+
+    let mut names = Vec::new();
+    loop {
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            break;
+        }
+        let name_c = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let bytes = name_c.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        names.push(name_c.to_owned());
+    }
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn try_acquire_retention_lock_at(dir_fd: std::os::unix::io::RawFd) -> Option<File> {
+    use std::ffi::CString;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let lock_name = CString::new(".af-retention.lock").unwrap();
+    let fd = unsafe {
+        libc::openat(
+            dir_fd,
+            lock_name.as_ptr(),
+            libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::mode_t,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let lock_file = unsafe { File::from_raw_fd(fd) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(lock_file.as_raw_fd(), &mut st) } != 0
+        || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+    {
+        return None;
+    }
+    if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return None;
+    }
+    Some(lock_file)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn scan_and_clean_dir_logs_fd(
+    dir_file: &File,
+    dir_path: &Path,
+    in_aetherflow_dir: bool,
+    max_size_bytes: u64,
+    dry_run: bool,
+    depth: usize,
+    cleaned_files: &mut Vec<CleanedLogFile>,
+    total_bytes_freed: &mut u64,
+) -> HostBackupResult<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    if depth > MAX_TRAVERSAL_DEPTH {
+        return Ok(());
+    }
+
+    let dir_fd = dir_file.as_raw_fd();
+    let entries = read_dir_entries_from_fd(dir_fd, dir_path)?;
+
+    for name_c in entries {
+        let name_os = OsStr::from_bytes(name_c.as_bytes());
+        let child_path = dir_path.join(name_os);
+
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(dir_fd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) }
+            != 0
+        {
+            continue;
+        }
+
+        let file_type = st.st_mode & libc::S_IFMT;
+        if file_type == libc::S_IFLNK {
+            continue;
+        }
+
+        if file_type == libc::S_IFDIR {
+            let next_fd = unsafe {
+                libc::openat(
+                    dir_fd,
+                    name_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if next_fd < 0 {
+                continue;
+            }
+            let next_dir = unsafe { File::from_raw_fd(next_fd) };
+            let child_is_aetherflow = name_c.as_bytes() == b"aetherflow";
+            scan_and_clean_dir_logs_fd(
+                &next_dir,
+                &child_path,
+                child_is_aetherflow,
+                max_size_bytes,
+                dry_run,
+                depth + 1,
+                cleaned_files,
+                total_bytes_freed,
+            )?;
+        } else if file_type == libc::S_IFREG {
+            let filename = name_os.to_str().unwrap_or("");
+            if !filename.ends_with(".log") || st.st_nlink != 1 {
+                continue;
+            }
+            let size = st.st_size.max(0) as u64;
+            if size <= max_size_bytes {
+                continue;
+            }
+
+            if dry_run {
+                *total_bytes_freed = total_bytes_freed.saturating_add(size);
+                cleaned_files.push(CleanedLogFile {
+                    path: child_path,
+                    original_size_bytes: size,
+                });
+                continue;
+            }
+
+            let fd = unsafe {
+                libc::openat(
+                    dir_fd,
+                    name_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOENT) | Some(libc::ELOOP) | Some(libc::ENXIO)
+                ) {
+                    continue;
+                }
+                return Err(HostBackupError::io(
+                    format!("opening log file {}", child_path.display()),
+                    err,
+                ));
+            }
+            let log_file = unsafe { File::from_raw_fd(fd) };
+
+            let mut opened_st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(log_file.as_raw_fd(), &mut opened_st) } != 0 {
+                return Err(HostBackupError::io(
+                    format!("inspecting log file {}", child_path.display()),
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            if (opened_st.st_mode & libc::S_IFMT) != libc::S_IFREG || opened_st.st_nlink != 1 {
+                continue;
+            }
+            let actual_size = opened_st.st_size.max(0) as u64;
+            if actual_size <= max_size_bytes {
+                continue;
+            }
+
+            let _retention_lock = if in_aetherflow_dir && filename == "deploy.log" {
+                match try_acquire_retention_lock_at(dir_fd) {
+                    Some(lock) => Some(lock),
+                    None => continue,
+                }
+            } else {
+                None
+            };
+
+            if unsafe { libc::flock(log_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                let err = std::io::Error::last_os_error();
+                if matches!(
+                    err.raw_os_error(),
+                    Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+                ) {
+                    continue;
+                }
+                return Err(HostBackupError::io(
+                    format!("locking log file {}", child_path.display()),
+                    err,
+                ));
+            }
+
+            if unsafe { libc::ftruncate(log_file.as_raw_fd(), 0) } != 0 {
+                return Err(HostBackupError::io(
+                    format!("truncating log file {}", child_path.display()),
+                    std::io::Error::last_os_error(),
+                ));
+            }
+
+            *total_bytes_freed = total_bytes_freed.saturating_add(actual_size);
+            cleaned_files.push(CleanedLogFile {
+                path: child_path,
+                original_size_bytes: actual_size,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn scan_and_clean_dir_logs(
     dir: &Path,
     max_size_bytes: u64,
@@ -409,7 +883,6 @@ fn scan_and_clean_dir_logs(
             Err(_) => continue,
         };
 
-        // Strict symlink rejection - never follow symlinks
         if meta.file_type().is_symlink() {
             continue;
         }
@@ -630,5 +1103,100 @@ mod unit_tests {
             .as_deref()
             .unwrap_or_default()
             .contains("sysctl binary could not be executed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_system_logs_rejects_symlinks_hardlinks_and_respects_flock() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        use std::os::unix::io::AsRawFd;
+
+        let base = std::env::temp_dir().join(format!(
+            "af-host-h01-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let var_log = base.join("var/log");
+        let af_log_dir = var_log.join("aetherflow");
+        let outside_dir = base.join("outside");
+        fs::create_dir_all(&af_log_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let target_secret = outside_dir.join("secret.log");
+        fs::write(&target_secret, vec![b'x'; 2000]).unwrap();
+        symlink(&target_secret, var_log.join("sym.log")).unwrap();
+        symlink(&outside_dir, var_log.join("symdir")).unwrap();
+
+        let hardlink_a = outside_dir.join("shared.log");
+        fs::write(&hardlink_a, vec![b'h'; 2000]).unwrap();
+        fs::hard_link(&hardlink_a, var_log.join("hardlink.log")).unwrap();
+
+        let flocked_log = var_log.join("busy.log");
+        fs::write(&flocked_log, vec![b'b'; 2000]).unwrap();
+        let flocked_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&flocked_log)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(flocked_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+
+        let deploy_log = af_log_dir.join("deploy.log");
+        fs::write(&deploy_log, vec![b'd'; 2000]).unwrap();
+        let ret_lock_path = af_log_dir.join(".af-retention.lock");
+        let ret_lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&ret_lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(ret_lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+
+        let fifo_path = var_log.join("pipe.log");
+        let fifo_c = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        let rep1 = clean_system_logs(&base, 1000, false).unwrap();
+        assert!(
+            rep1.cleaned_files.is_empty(),
+            "all files should be skipped or rejected"
+        );
+        assert_eq!(fs::metadata(&target_secret).unwrap().len(), 2000);
+        assert_eq!(fs::metadata(&hardlink_a).unwrap().len(), 2000);
+        assert_eq!(fs::metadata(&flocked_log).unwrap().len(), 2000);
+        assert_eq!(fs::metadata(&deploy_log).unwrap().len(), 2000);
+
+        // Release retention lock -> deploy.log is truncated while busy/hardlink/symlink remain untouched
+        drop(ret_lock_file);
+        let rep2 = clean_system_logs(&base, 1000, false).unwrap();
+        assert_eq!(rep2.cleaned_files.len(), 1);
+        assert_eq!(rep2.cleaned_files[0].path, deploy_log);
+        assert_eq!(fs::metadata(&deploy_log).unwrap().len(), 0);
+        assert_eq!(fs::metadata(&flocked_log).unwrap().len(), 2000);
+        assert_eq!(fs::metadata(&hardlink_a).unwrap().len(), 2000);
+        assert_eq!(fs::metadata(&target_secret).unwrap().len(), 2000);
+
+        drop(flocked_file);
+
+        // Also verify sentinel_scan_auth_log rejects symlinks and FIFOs
+        let auth_fifo = outside_dir.join("auth_pipe");
+        let auth_fifo_c = CString::new(auth_fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(auth_fifo_c.as_ptr(), 0o600) }, 0);
+        assert!(sentinel_scan_auth_log(&auth_fifo, 5)
+            .unwrap_err()
+            .is_security_rejection());
+        assert!(sentinel_scan_auth_log(&var_log.join("sym.log"), 5)
+            .unwrap_err()
+            .is_security_rejection());
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

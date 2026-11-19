@@ -2,7 +2,7 @@ Alias /downloads "/srv/aetherflow/downloads"
 <Directory "/srv/aetherflow/downloads">
   Options Indexes FollowSymLinks
   AuthType Digest
-  AuthName "aetherflow"
+  AuthName "Welcome to AetherFlow"
   AuthUserFile '/etc/htpasswd'
   Require valid-user
   AllowOverride None
@@ -11,7 +11,7 @@ Alias /USERNAME.rtorrent.downloads "/home/USERNAME/torrents/rtorrent/"
 <Directory "/home/USERNAME/torrents/rtorrent/">
   Options Indexes FollowSymLinks
   AuthType Digest
-  AuthName "aetherflow"
+  AuthName "Welcome to AetherFlow"
   AuthUserFile '/etc/htpasswd'
   Require user USERNAME
   AllowOverride None
@@ -20,14 +20,26 @@ Alias /USERNAME.deluge.downloads "/home/USERNAME/torrents/deluge/"
 <Directory "/home/USERNAME/torrents/deluge/">
   Options Indexes FollowSymLinks
   AuthType Digest
-  AuthName "aetherflow"
+  AuthName "Welcome to AetherFlow"
   AuthUserFile '/etc/htpasswd'
   Require user USERNAME
   AllowOverride None
 </Directory>
-<Location "/USERNAME">
+<Location "/downloads">
     AuthType Digest
-    AuthName "aetherflow"
+    AuthName "Welcome to AetherFlow"
+    AuthUserFile "/etc/htpasswd"
+    Require valid-user
+</Location>
+<Location "/USERNAME.rtorrent.downloads">
+    AuthType Digest
+    AuthName "Welcome to AetherFlow"
+    AuthUserFile "/etc/htpasswd"
+    Require user USERNAME
+</Location>
+<Location "/USERNAME.deluge.downloads">
+    AuthType Digest
+    AuthName "Welcome to AetherFlow"
     AuthUserFile "/etc/htpasswd"
     Require user USERNAME
 </Location>

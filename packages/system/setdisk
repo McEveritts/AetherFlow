@@ -10,7 +10,7 @@
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 
-source /opt/AetherFlow/packages/common.sh 2>/dev/null || true
+set -euo pipefail
 
 JSON_OUTPUT=0
 USERNAME=""
@@ -20,14 +20,26 @@ print_usage() {
   echo "Usage: setdisk [--username USER] [--size 500GB] [--json]"
 }
 
+emit_json_error() {
+  local user="$1" quota="$2" err_msg="$3"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys; print(json.dumps({"username": sys.argv[1], "quota": sys.argv[2], "error": sys.argv[3], "status": "failed"}))' \
+      "$user" "$quota" "$err_msg"
+  else
+    printf '{"error":"%s","status":"failed"}\n' "${err_msg//\"/\'}"
+  fi
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --username)
+        [[ $# -ge 2 ]] || { echo "Missing value for --username" >&2; exit 1; }
         USERNAME="$2"
         shift 2
         ;;
       --size)
+        [[ $# -ge 2 ]] || { echo "Missing value for --size" >&2; exit 1; }
         SIZE="$2"
         shift 2
         ;;
@@ -66,7 +78,15 @@ prompt_if_needed() {
 }
 
 apply_quota() {
-  local quantity disk_blocks quota_bytes
+  local quantity disk_blocks quota_bytes setquota_err=""
+  if [[ ! "${USERNAME}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    if [[ ${JSON_OUTPUT} -eq 1 ]]; then
+      emit_json_error "${USERNAME}" "${SIZE^^}" "Invalid username."
+    else
+      echo "Invalid username: ${USERNAME}" >&2
+    fi
+    return 2
+  fi
   case "${SIZE^^}" in
     *TB)
       quantity="${SIZE^^}"
@@ -94,7 +114,14 @@ apply_quota() {
       ;;
   esac
 
-  setquota -u "${USERNAME}" "${disk_blocks}" "${disk_blocks}" 0 0 -a
+  if ! setquota_err="$(setquota -u "${USERNAME}" "${disk_blocks}" "${disk_blocks}" 0 0 -a 2>&1)"; then
+    if [[ ${JSON_OUTPUT} -eq 1 ]]; then
+      emit_json_error "${USERNAME}" "${SIZE^^}" "${setquota_err:-setquota failed}"
+    else
+      echo "Failed to apply quota for ${USERNAME}: ${setquota_err:-setquota failed}" >&2
+    fi
+    return 2
+  fi
 
   if [[ ${JSON_OUTPUT} -eq 1 ]]; then
     printf '{"username":"%s","quota":"%s","quota_bytes":%s,"status":"applied"}\n' "${USERNAME}" "${SIZE^^}" "${quota_bytes}"
@@ -106,15 +133,19 @@ apply_quota() {
 parse_args "$@"
 prompt_if_needed
 
-if ! apply_quota; then
-  if [[ ${JSON_OUTPUT} -eq 1 ]]; then
-    printf '{"error":"Invalid quota size. Use integer MB, GB, or TB values.","status":"failed"}\n'
-  else
-    echo "================================================================================="
-    echo "Disk Space MUST be in GB/TB - Do not attempt to add decimals in space settings,"
-    echo "Example - Good: 711GB OR 2TB, Example - Bad: 711.5GB OR 2.5TB"
-    echo "Exiting script, type bash $0 and try again"
-    echo "================================================================================="
+rc=0
+apply_quota || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  if [[ "$rc" -eq 1 ]]; then
+    if [[ ${JSON_OUTPUT} -eq 1 ]]; then
+      emit_json_error "${USERNAME}" "${SIZE^^}" "Invalid quota size. Use integer MB, GB, or TB values."
+    else
+      echo "================================================================================="
+      echo "Disk Space MUST be in GB/TB - Do not attempt to add decimals in space settings,"
+      echo "Example - Good: 711GB OR 2TB, Example - Bad: 711.5GB OR 2.5TB"
+      echo "Exiting script, type bash $0 and try again"
+      echo "================================================================================="
+    fi
   fi
   exit 1
 fi

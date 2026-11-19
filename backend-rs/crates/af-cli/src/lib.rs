@@ -524,14 +524,29 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
     let conn =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
-    for table in ["app_ingress_configs", "retained_app_ingress_configs"] {
-        let sql = format!(
-            "SELECT listen_port FROM {} WHERE LOWER(app_name) = LOWER(?1) LIMIT 1",
-            table
-        );
-        if let Ok(port) = conn.query_row(&sql, [app_name], |r| r.get::<_, i32>(0)) {
-            if (1024..=65535).contains(&port) {
-                return Some(port);
+    if let Ok(port) = conn.query_row(
+        "SELECT listen_port FROM app_ingress_configs WHERE LOWER(app_name) = LOWER(?1) LIMIT 1",
+        [app_name],
+        |r| r.get::<_, i32>(0),
+    ) {
+        if (1024..=65535).contains(&port) {
+            return Some(port);
+        }
+    }
+    if let Ok(json_raw) = conn.query_row(
+        "SELECT config_json FROM retained_app_ingress_configs WHERE LOWER(app_name) = LOWER(?1) LIMIT 1",
+        [app_name],
+        |r| r.get::<_, String>(0),
+    ) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_raw) {
+            if let Some(port) = val
+                .get("listen_port")
+                .and_then(|v| v.as_i64())
+                .and_then(|p| i32::try_from(p).ok())
+            {
+                if (1..=65535).contains(&port) {
+                    return Some(port);
+                }
             }
         }
     }
@@ -540,22 +555,35 @@ fn query_persisted_ingress_port_from_sqlite(db_path: &Path, app_name: &str) -> O
 
 fn candidate_cli_sqlite_dbs(global: &GlobalOptions) -> Vec<PathBuf> {
     let mut candidate_dbs = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !candidate_dbs.contains(&path) {
+            candidate_dbs.push(path);
+        }
+    };
     if let Some(ref r) = global.root {
-        candidate_dbs.push(r.join("var/lib/aetherflow/aetherflow.sqlite"));
-        candidate_dbs.push(r.join("opt/AetherFlow/backend/data/aetherflow.sqlite"));
-        candidate_dbs.push(r.join("data/aetherflow.sqlite"));
+        push_unique(r.join("var/lib/aetherflow/aetherflow.sqlite"));
+        push_unique(r.join("opt/AetherFlow/backend/data/aetherflow.sqlite"));
+        push_unique(r.join("data/aetherflow.sqlite"));
     } else {
-        if let Ok(db_env) = std::env::var("AETHERFLOW_DB_PATH") {
-            let trimmed = db_env.trim();
-            if !trimmed.is_empty() && trimmed != ":memory:" && !trimmed.starts_with("file:") {
-                candidate_dbs.push(PathBuf::from(trimmed));
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            if let Ok(db_env) = std::env::var(key) {
+                let trimmed = db_env.trim();
+                if !trimmed.is_empty() && trimmed != ":memory:" && !trimmed.starts_with("file:") {
+                    push_unique(PathBuf::from(trimmed));
+                }
             }
         }
-        candidate_dbs.push(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"));
-        candidate_dbs.push(PathBuf::from(
+        if let Ok(data_dir) = std::env::var("DATA_DIR") {
+            let trimmed = data_dir.trim();
+            if !trimmed.is_empty() {
+                push_unique(PathBuf::from(trimmed).join("aetherflow.sqlite"));
+            }
+        }
+        push_unique(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"));
+        push_unique(PathBuf::from(
             "/opt/AetherFlow/backend/data/aetherflow.sqlite",
         ));
-        candidate_dbs.push(PathBuf::from("data/aetherflow.sqlite"));
+        push_unique(PathBuf::from("data/aetherflow.sqlite"));
     }
     candidate_dbs
 }

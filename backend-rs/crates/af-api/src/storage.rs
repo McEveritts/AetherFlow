@@ -1172,7 +1172,7 @@ async fn authorize_backup_password(
             }
             let fresh_session: bool = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND expires_at > ?3)",
+                    "SELECT EXISTS(SELECT 1 FROM active_sessions WHERE jti = ?1 AND user_id = ?2 AND (CASE WHEN typeof(expires_at) = 'integer' THEN expires_at ELSE unixepoch(expires_at, 'auto') END) > ?3)",
                     params![session, uid, now],
                     |row| row.get(0),
                 )
@@ -3044,26 +3044,8 @@ impl Drop for DeploymentRegistration {
 
 pub mod af_common {
     pub mod redact {
-        use once_cell::sync::Lazy;
-        use regex::Regex;
-
-        static SECRET_BEARER_RE: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}").unwrap());
-        static SECRET_URL_CRED_RE: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@)").unwrap());
-        static SECRET_KV_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(
-                r#"(?i)\b(password|passwd|secret|api[_-]?key|token|auth[_-]?key|access[_-]?token|client[_-]?secret)(\s*[:=]\s*["']?)([^\s"',;]+)"#,
-            )
-            .unwrap()
-        });
-
         pub fn redact_secrets(input: &str) -> String {
-            let step1 = SECRET_BEARER_RE.replace_all(input, "${1}[REDACTED]");
-            let step2 = SECRET_URL_CRED_RE.replace_all(&step1, "${1}[REDACTED]${3}");
-            SECRET_KV_RE
-                .replace_all(&step2, "${1}${2}[REDACTED]")
-                .into_owned()
+            af_services::redact_secrets(input)
         }
     }
 }
@@ -4111,13 +4093,124 @@ fn deployment_ingress_config(
     config
 }
 
-fn snapshot_deploy_files(
-    bp: &af_services::AppBlueprint,
-) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+#[derive(Clone, Debug)]
+struct DeployFileSnapshot {
+    path: std::path::PathBuf,
+    prior: Option<(Vec<u8>, u32)>,
+}
+
+fn read_regular_file_nofollow(path: &std::path::Path) -> Option<(Vec<u8>, u32)> {
+    let lmeta = std::fs::symlink_metadata(path).ok()?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return None;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = opts.open(path).ok()?;
+    let fmeta = file.metadata().ok()?;
+    if !fmeta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if lmeta.dev() != fmeta.dev() || lmeta.ino() != fmeta.ino() {
+            return None;
+        }
+        fmeta.permissions().mode() & 0o777
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600u32;
+
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
+    Some((bytes, if mode == 0 { 0o600 } else { mode }))
+}
+
+fn write_atomic_nofollow_mode(
+    path: &std::path::Path,
+    bytes: &[u8],
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let Some(parent) = path.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing parent directory",
+        ));
+    };
+    if let Ok(pmeta) = std::fs::symlink_metadata(parent) {
+        if pmeta.file_type().is_symlink() || !pmeta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing symlink parent directory",
+            ));
+        }
+    } else {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(existing) = std::fs::symlink_metadata(path) {
+        if existing.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to overwrite symlink target",
+            ));
+        }
+    }
+    let fname = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("deploy");
+    let tmp_path = parent.join(format!(
+        ".{fname}.restore.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut tmp_file = opts.open(&tmp_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let effective_mode = if mode == 0 { 0o600 } else { mode & 0o777 };
+        if let Err(err) = tmp_file.set_permissions(std::fs::Permissions::from_mode(effective_mode))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+    }
+    if let Err(err) = tmp_file.write_all(bytes).and_then(|()| tmp_file.sync_all()) {
+        drop(tmp_file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    drop(tmp_file);
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn snapshot_deploy_files(bp: &af_services::AppBlueprint) -> Vec<DeployFileSnapshot> {
     let mut snapshots = Vec::new();
     let cfg_path = af_services::mutators::resolve_config_path(&bp.config_file_path);
     if !cfg_path.as_os_str().is_empty() {
-        snapshots.push((cfg_path.clone(), std::fs::read(&cfg_path).ok()));
+        let prior = read_regular_file_nofollow(&cfg_path);
+        snapshots.push(DeployFileSnapshot {
+            path: cfg_path,
+            prior,
+        });
     }
     for vhost_rel in [
         format!(
@@ -4139,23 +4232,28 @@ fn snapshot_deploy_files(
     ] {
         let resolved = af_services::mutators::resolve_config_path(&vhost_rel);
         if !resolved.as_os_str().is_empty() {
-            snapshots.push((resolved.clone(), std::fs::read(&resolved).ok()));
+            let prior = read_regular_file_nofollow(&resolved);
+            snapshots.push(DeployFileSnapshot {
+                path: resolved,
+                prior,
+            });
         }
     }
     snapshots
 }
 
-fn restore_deploy_files(snapshots: &[(std::path::PathBuf, Option<Vec<u8>>)]) {
-    for (path, prior_bytes) in snapshots {
-        match prior_bytes {
-            Some(bytes) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(path, bytes);
+fn restore_deploy_files(snapshots: &[DeployFileSnapshot]) {
+    for snap in snapshots {
+        match &snap.prior {
+            Some((bytes, mode)) => {
+                let _ = write_atomic_nofollow_mode(&snap.path, bytes, *mode);
             }
             None => {
-                let _ = std::fs::remove_file(path);
+                if let Ok(meta) = std::fs::symlink_metadata(&snap.path) {
+                    if !meta.file_type().is_symlink() && meta.is_file() {
+                        let _ = std::fs::remove_file(&snap.path);
+                    }
+                }
             }
         }
     }
@@ -5021,9 +5119,35 @@ mod updater_tests {
         // 3. Revoked/absent active_sessions row fails closed even with fresh auth_time
         let revoked_admin = AuthUser {
             jti: "oauth-jti-missing".to_string(),
-            ..admin
+            ..admin.clone()
         };
         assert!(!authorize_backup_password(&revoked_admin, Some(now - 10), &headers, &[]).await);
+
+        // 4. Expired RFC3339 TEXT expires_at must fail closed (no SQLite TEXT > INTEGER affinity bypass),
+        //    while fresh RFC3339 TEXT expires_at succeeds.
+        {
+            let conn = af_db::get_conn().unwrap();
+            let future_rfc3339 = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO active_sessions (jti, user_id, ip_address, user_agent, expires_at, last_active, family_id)
+                 VALUES ('oauth-jti-expired-text', 77, '127.0.0.1', 'TestUA', '1970-01-01T00:00:00+00:00', ?1, 'fam-78'),
+                        ('oauth-jti-fresh-text', 77, '127.0.0.1', 'TestUA', ?2, ?1, 'fam-79')",
+                params![now, future_rfc3339],
+            )
+            .unwrap();
+        }
+        let expired_text_admin = AuthUser {
+            jti: "oauth-jti-expired-text".to_string(),
+            ..admin.clone()
+        };
+        assert!(
+            !authorize_backup_password(&expired_text_admin, Some(now - 10), &headers, &[]).await
+        );
+        let fresh_text_admin = AuthUser {
+            jti: "oauth-jti-fresh-text".to_string(),
+            ..admin
+        };
+        assert!(authorize_backup_password(&fresh_text_admin, Some(now - 10), &headers, &[]).await);
 
         for (k, val) in saved {
             match val {

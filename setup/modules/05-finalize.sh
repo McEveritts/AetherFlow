@@ -38,6 +38,13 @@ function _boot() {
 	fi
 	rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
 
+	install -d -m 0755 /etc/systemd/system.conf.d
+	cat > /etc/systemd/system.conf.d/aetherflow.conf <<'EOF'
+[Manager]
+DefaultLimitNOFILE=65535
+EOF
+	chmod 0644 /etc/systemd/system.conf.d/aetherflow.conf
+
 	# Ensure permissions and service user are configured before starting services
 	_harden_permissions
 	_safe_overlay_config /opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.service \
@@ -305,6 +312,12 @@ finally:
 PY
 			chmod 600 /var/lib/aetherflow/.master.creds 2>/dev/null || true
 		fi
+		if [[ -f /var/lib/aetherflow/.master.creds ]] && type _scrub_config_keys &>/dev/null; then
+			_scrub_config_keys passwd ha1pass || true
+		fi
+		if [[ "${EUID:-$(id -u)}" -eq 0 && ! -L /install ]]; then
+			install -d -m 0750 -o root -g aetherflow /install 2>/dev/null || true
+		fi
 		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow 2>/dev/null || true
 		chown root:aetherflow /var/log/aetherflow 2>/dev/null || true
 		chmod 750 /var/log/aetherflow 2>/dev/null || true
@@ -399,6 +412,7 @@ function _finished() {
 AetherFlow Seedbox Initialized successfully.
 Dashboard Onboarding: ${onboarding_url}
 Admin Username: ${username}
+Setup Bootstrap Token File (for remote/proxied first-admin setup): /var/lib/aetherflow/.setup-bootstrap-token
 EOF
 	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
 		rm -rf "$0" >>"${OUTTO}" 2>&1

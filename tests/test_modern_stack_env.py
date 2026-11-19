@@ -23,8 +23,8 @@ MODERN_STACK_SH = REPO_ROOT / "setup" / "modules" / "modern_stack.sh"
 PACKAGED_API_UNIT = REPO_ROOT / "deploy" / "systemd" / "aetherflow-api.service"
 PACKAGED_RUNNER_UNIT = REPO_ROOT / "deploy" / "systemd" / "aetherflow-runner.service"
 TEMPLATE_API_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "aetherflow-api.template"
-TEMPLATE_QBIT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "qbittorrent.template"
-TEMPLATE_RTORRENT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "rtorrent.template"
+RETIRED_QBIT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "qbittorrent.template"
+RETIRED_RTORRENT_UNIT = REPO_ROOT / "setup" / "templates" / "sysd" / "rtorrent.template"
 
 
 class ModernStackSourceBuildTests(unittest.TestCase):
@@ -399,12 +399,10 @@ class PackagedSystemdUnitPortabilityTests(unittest.TestCase):
         self.assertIn("SupplementaryGroups=systemd-journal adm", content)
         self.assertIn("ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow", content)
 
-    def test_media_unit_templates_retain_optional_home_hdd_path(self):
-        """qbittorrent and rtorrent systemd unit templates must retain generic optional -/home/hdd ReadWritePaths."""
-        for unit_path in (TEMPLATE_QBIT_UNIT, TEMPLATE_RTORRENT_UNIT):
-            self.assertTrue(unit_path.exists(), f"Missing template {unit_path}")
-            content = unit_path.read_text(encoding="utf-8")
-            self.assertIn("-/home/hdd", content, f"{unit_path.name} must retain optional -/home/hdd path")
+    def test_retired_quickbox_media_unit_templates_stay_removed(self):
+        """Obsolete QuickBox killall-based qbittorrent/rtorrent unit templates must remain retired."""
+        for unit_path in (RETIRED_QBIT_UNIT, RETIRED_RTORRENT_UNIT):
+            self.assertFalse(unit_path.exists(), f"Retired template {unit_path} should not exist")
 
 
 if __name__ == "__main__":

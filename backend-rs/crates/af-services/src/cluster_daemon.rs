@@ -3479,9 +3479,16 @@ pub fn start_cluster_runtime() {
                 .trim()
                 .to_string();
             let psk = env::var("CLUSTER_PSK")
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    env::var("CLUSTER_ENROLL_TOKEN")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_default();
 
             if master_addr.is_empty() {
                 tracing::error!(
@@ -3491,7 +3498,7 @@ pub fn start_cluster_runtime() {
             }
             if psk.is_empty() {
                 tracing::error!(
-                    "CLUSTER_MODE=worker requires CLUSTER_PSK to be set; skipping worker loop"
+                    "CLUSTER_MODE=worker requires CLUSTER_PSK or CLUSTER_ENROLL_TOKEN to be set; skipping worker loop"
                 );
                 return;
             }

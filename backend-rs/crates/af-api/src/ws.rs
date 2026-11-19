@@ -833,7 +833,11 @@ pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
 }
 
 fn is_loopback_ip(ip: &str) -> bool {
-    matches!(ip, "127.0.0.1" | "::1" | "localhost" | "")
+    let trimmed = ip.trim().trim_matches(['[', ']']);
+    matches!(trimmed, "" | "localhost")
+        || trimmed
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|addr| addr.to_canonical().is_loopback())
 }
 
 #[derive(Deserialize)]
@@ -1833,7 +1837,11 @@ async fn tail_open_log_file_to_channel(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InboundProxyForwarded(pub bool);
+
 fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
+    let ip = ip.to_canonical();
     let trimmed = raw_entry.trim();
     if trimmed.is_empty() {
         return false;
@@ -1842,13 +1850,14 @@ fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
         let Ok(prefix_len) = mask_part.trim().parse::<u32>() else {
             return false;
         };
-        let Ok(net_ip) = net_part
+        let Ok(raw_net_ip) = net_part
             .trim()
             .trim_matches(['[', ']'])
             .parse::<std::net::IpAddr>()
         else {
             return false;
         };
+        let net_ip = raw_net_ip.to_canonical();
         match (ip, net_ip) {
             (std::net::IpAddr::V4(v4), std::net::IpAddr::V4(net_v4)) if prefix_len <= 32 => {
                 if prefix_len == 0 {
@@ -1867,15 +1876,18 @@ fn ip_matches_cidr_or_host(ip: std::net::IpAddr, raw_entry: &str) -> bool {
             _ => false,
         }
     } else if let Ok(exact_ip) = trimmed.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
-        ip == exact_ip
+        ip == exact_ip.to_canonical()
     } else {
         false
     }
 }
 
 fn is_private_or_link_local(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
         std::net::IpAddr::V6(v6) => {
             (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
@@ -1883,6 +1895,7 @@ fn is_private_or_link_local(ip: &std::net::IpAddr) -> bool {
 }
 
 pub fn is_trusted_proxy_peer(ip: std::net::IpAddr) -> bool {
+    let ip = ip.to_canonical();
     if let Ok(raw) = std::env::var("TRUSTED_PROXIES") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
@@ -1904,12 +1917,13 @@ pub fn is_trusted_proxy_peer(ip: std::net::IpAddr) -> bool {
 }
 
 fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
+    let ip = ip.to_canonical();
     if let Ok(raw) = std::env::var("TRUSTED_PROXIES") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return trimmed
                 .split(',')
-                .any(|entry| ip_matches_cidr_or_host(*ip, entry));
+                .any(|entry| ip_matches_cidr_or_host(ip, entry));
         }
     }
     if ip.is_loopback() || ip.is_unspecified() {
@@ -1921,7 +1935,7 @@ fn is_trusted_proxy_hop(ip: &std::net::IpAddr) -> bool {
     if !trust_private {
         return false;
     }
-    is_private_or_link_local(ip)
+    is_private_or_link_local(&ip)
 }
 
 fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std::net::IpAddr> {
@@ -1931,9 +1945,10 @@ fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std:
         let mut rightmost_valid: Option<std::net::IpAddr> = None;
         for hop in xff.rsplit(',') {
             let trimmed = hop.trim().trim_matches(['[', ']']);
-            let Ok(ip) = trimmed.parse::<std::net::IpAddr>() else {
+            let Ok(raw_ip) = trimmed.parse::<std::net::IpAddr>() else {
                 continue;
             };
+            let ip = raw_ip.to_canonical();
             if rightmost_valid.is_none() {
                 rightmost_valid = Some(ip);
             }
@@ -1948,7 +1963,7 @@ fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std:
     if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
         let trimmed = real_ip.trim().trim_matches(['[', ']']);
         if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-            return Some(ip);
+            return Some(ip.to_canonical());
         }
     }
     None
@@ -1956,7 +1971,7 @@ fn extract_forwarded_ip_from_trusted_headers(headers: &HeaderMap) -> Option<std:
 
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
     extract_forwarded_ip_from_trusted_headers(headers)
-        .map(|ip| ip.to_string())
+        .map(|ip| ip.to_canonical().to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
@@ -1964,25 +1979,33 @@ pub fn extract_client_ip_for_peer(
     headers: &HeaderMap,
     peer_ip: Option<std::net::IpAddr>,
 ) -> String {
-    let Some(peer) = peer_ip else {
+    let Some(raw_peer) = peer_ip else {
         return extract_client_ip(headers);
     };
+    let peer = raw_peer.to_canonical();
     if !is_trusted_proxy_peer(peer) {
         return peer.to_string();
     }
     extract_forwarded_ip_from_trusted_headers(headers)
-        .map(|ip| ip.to_string())
+        .map(|ip| ip.to_canonical().to_string())
         .unwrap_or_else(|| peer.to_string())
 }
 
 pub fn normalize_request_forwarding_for_peer(req: &mut axum::extract::Request) {
-    let Some(peer) = req
+    let had_inbound_forwarding = req.headers().contains_key("x-forwarded-for")
+        || req.headers().contains_key("x-real-ip")
+        || req.headers().contains_key("forwarded");
+    req.extensions_mut()
+        .insert(InboundProxyForwarded(had_inbound_forwarding));
+
+    let Some(raw_peer) = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|axum::extract::ConnectInfo(addr)| addr.ip())
     else {
         return;
     };
+    let peer = raw_peer.to_canonical();
     let trusted = is_trusted_proxy_peer(peer);
     let headers = req.headers_mut();
     if !trusted {

@@ -141,16 +141,19 @@ pub fn select_release_engine_with_flags(rust_enabled: bool, force_bash: bool) ->
 /// Selects the active release engine for `/v1/self-update`.
 ///
 /// Rollout control:
-/// - Default is `LegacyBashRelease` (`deploy/release-manager.sh`) unless `AETHERFLOW_ENABLE_RUST_RELEASE=1`
-///   is set.
-/// - `AETHERFLOW_FORCE_BASH_RELEASE=1` forces `LegacyBashRelease` even when `AETHERFLOW_ENABLE_RUST_RELEASE=1`.
+/// The engine name and both Rust opt-in aliases share a selector. An explicit Bash
+/// selection or the force-Bash flag takes precedence.
 pub fn select_release_engine() -> ReleaseEngineMode {
-    let rust_enabled = env::var("AETHERFLOW_ENABLE_RUST_RELEASE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let force_bash = env::var("AETHERFLOW_FORCE_BASH_RELEASE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let enabled = |key| {
+        env::var(key)
+            .is_ok_and(|value| value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
+    };
+    let engine = env::var("AETHERFLOW_RELEASE_ENGINE").unwrap_or_default();
+    let rust_enabled = engine.trim().eq_ignore_ascii_case("rust")
+        || enabled("AETHERFLOW_ENABLE_RUST_RELEASE")
+        || enabled("AETHERFLOW_USE_RUST_RELEASE");
+    let force_bash =
+        engine.trim().eq_ignore_ascii_case("bash") || enabled("AETHERFLOW_FORCE_BASH_RELEASE");
     select_release_engine_with_flags(rust_enabled, force_bash)
 }
 
@@ -1141,6 +1144,8 @@ async fn spawn_self_update_transient_unit(
 
     let preserved_envs = [
         "AETHERFLOW_ENABLE_RUST_RELEASE",
+        "AETHERFLOW_USE_RUST_RELEASE",
+        "AETHERFLOW_RELEASE_ENGINE",
         "AETHERFLOW_FORCE_BASH_RELEASE",
         "AETHERFLOW_RELEASE_ROOT",
         "AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE",
@@ -3804,7 +3809,7 @@ pub fn modify_hosts_file_at_path(
             )
         })?;
 
-    let existing = match fs::read_to_string(hosts_path) {
+    let existing = match read_confined_text(hosts_path, &[]) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
@@ -4313,8 +4318,14 @@ pub fn sync_dns_provider_files_with_mode(
 ) -> anyhow::Result<()> {
     let validated_ip = validate_hosts_ip(ip)?;
     let canonical_ip = validated_ip.to_string();
+    for domain in domains {
+        anyhow::ensure!(
+            af_models::valid_ingress_hostname(domain),
+            "invalid DNS provider domain"
+        );
+    }
     let dnsmasq_dir = resolve_provider_dir("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d");
-    if dnsmasq_dir.is_dir() {
+    if dns_provider_directory_exists(&dnsmasq_dir, false)? {
         for conf_name in [
             "aetherflow-local-dns.conf",
             "aetherflow.conf",
@@ -4322,7 +4333,7 @@ pub fn sync_dns_provider_files_with_mode(
             "05-aetherflow-dns.conf",
         ] {
             let conf_path = dnsmasq_dir.join(conf_name);
-            let existing = match fs::read_to_string(&conf_path) {
+            let existing = match read_dns_provider_text(&conf_path, false) {
                 Ok(content) => Some(content),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => {
@@ -4335,14 +4346,14 @@ pub fn sync_dns_provider_files_with_mode(
             };
             let payload =
                 render_dnsmasq_content(existing.as_deref(), &canonical_ip, domains, is_reconcile);
-            write_hosts_file_atomically(&conf_path, &payload)?;
+            write_dns_provider_text(&conf_path, &payload, false)?;
         }
     }
 
     let pihole_dir = resolve_provider_dir("AETHERFLOW_PIHOLE_DIR", "/etc/pihole");
-    if pihole_dir.is_dir() {
+    if dns_provider_directory_exists(&pihole_dir, true)? {
         let custom_list = pihole_dir.join("custom.list");
-        let existing = match fs::read_to_string(&custom_list) {
+        let existing = match read_dns_provider_text(&custom_list, true) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => {
@@ -4355,7 +4366,7 @@ pub fn sync_dns_provider_files_with_mode(
         };
         let payload =
             reconcile_pihole_custom_list_content(&existing, &canonical_ip, domains, is_reconcile);
-        write_hosts_file_atomically(&custom_list, &payload)?;
+        write_dns_provider_text(&custom_list, &payload, true)?;
     }
     Ok(())
 }
@@ -4368,7 +4379,7 @@ pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
         domains.iter().map(|d| d.to_ascii_lowercase()).collect();
 
     let dnsmasq_dir = resolve_provider_dir("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d");
-    if dnsmasq_dir.is_dir() {
+    if dns_provider_directory_exists(&dnsmasq_dir, false)? {
         for conf_name in [
             "aetherflow-local-dns.conf",
             "aetherflow.conf",
@@ -4376,7 +4387,7 @@ pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
             "05-aetherflow-dns.conf",
         ] {
             let conf_path = dnsmasq_dir.join(conf_name);
-            match fs::read_to_string(&conf_path) {
+            match read_dns_provider_text(&conf_path, false) {
                 Ok(content) => {
                     let mut out_lines = Vec::new();
                     for line in content.lines() {
@@ -4391,7 +4402,7 @@ pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
                         out_lines.push(line.to_string());
                     }
                     out_lines.push(String::new());
-                    write_hosts_file_atomically(&conf_path, &out_lines.join("\n"))?;
+                    write_dns_provider_text(&conf_path, &out_lines.join("\n"), false)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -4406,13 +4417,13 @@ pub fn remove_dns_provider_files(domains: &[String]) -> anyhow::Result<()> {
     }
 
     let pihole_dir = resolve_provider_dir("AETHERFLOW_PIHOLE_DIR", "/etc/pihole");
-    if pihole_dir.is_dir() {
+    if dns_provider_directory_exists(&pihole_dir, true)? {
         let custom_list = pihole_dir.join("custom.list");
-        match fs::read_to_string(&custom_list) {
+        match read_dns_provider_text(&custom_list, true) {
             Ok(content) => {
                 let payload = remove_pihole_custom_list_content(&content, domains);
                 if payload != content {
-                    write_hosts_file_atomically(&custom_list, &payload)?;
+                    write_dns_provider_text(&custom_list, &payload, true)?;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -4518,73 +4529,299 @@ pub fn run_hosts_cli(args: &[String]) -> anyhow::Result<String> {
     }
 }
 
-fn write_hosts_file_atomically(hosts_path: &Path, content: &str) -> anyhow::Result<()> {
-    let parent = hosts_path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_path = parent.join(format!(".hosts.tmp.{}", uuid::Uuid::new_v4()));
+fn lookup_group_gid(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut group = std::mem::MaybeUninit::<libc::group>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0; 1024];
+    loop {
+        let code = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                group.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        match code {
+            0 if !result.is_null() => return Some(unsafe { group.assume_init() }.gr_gid),
+            libc::ERANGE if buffer.len() < 64 * 1024 => buffer.resize(buffer.len() * 2, 0),
+            _ => return None,
+        }
+    }
+}
+
+fn confined_parent(
+    path: &Path,
+    expected_users: &[&str],
+) -> std::io::Result<(job_receipts::ReceiptDirectory, Vec<u32>)> {
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let dir = job_receipts::ReceiptDirectory::open_existing(parent)?
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    let mut owners = Vec::new();
+    if unsafe { libc::geteuid() } == 0 {
+        owners.push(0);
+        owners.extend(
+            expected_users
+                .iter()
+                .filter_map(|name| lookup_passwd_uid_reentrant(name)),
+        );
+        dir.verify_owners(&owners)?;
+    }
+    Ok((dir, owners))
+}
+
+fn check_confined_owner(file: &fs::File, owners: &[u32]) -> std::io::Result<fs::Metadata> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if !owners.is_empty() && !owners.contains(&metadata.uid()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unexpected file owner",
+        ));
+    }
+    Ok(metadata)
+}
+
+fn confined_file_name(path: &Path) -> std::io::Result<&std::ffi::OsStr> {
+    path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected a regular file name",
+        )
+    })
+}
+
+fn open_confined_file(path: &Path, users: &[&str]) -> std::io::Result<fs::File> {
+    let (dir, owners) = confined_parent(path, users)?;
+    let file = dir.open_file(confined_file_name(path)?, libc::O_RDONLY, 0)?;
+    check_confined_owner(&file, &owners)?;
+    Ok(file)
+}
+
+fn read_confined_text(path: &Path, users: &[&str]) -> std::io::Result<String> {
+    use std::io::Read;
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    let file = open_confined_file(path, users)?;
+    let mut text = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "configuration exceeds 2 MiB",
+        ));
+    }
+    Ok(text)
+}
+
+fn dns_provider_users(pihole: bool) -> &'static [&'static str] {
+    if pihole {
+        &["pihole"]
+    } else {
+        &["dnsmasq"]
+    }
+}
+
+pub fn dns_provider_directory_exists(path: &Path, pihole: bool) -> std::io::Result<bool> {
+    let Some(directory) = job_receipts::ReceiptDirectory::open_existing(path)? else {
+        return Ok(false);
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        let mut owners = vec![0];
+        owners.extend(
+            dns_provider_users(pihole)
+                .iter()
+                .filter_map(|name| lookup_passwd_uid_reentrant(name)),
+        );
+        directory.verify_owners(&owners)?;
+    }
+    Ok(true)
+}
+
+pub fn remove_dns_provider_file(path: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let (dir, owners) = confined_parent(path, dns_provider_users(false))?;
+    let name = confined_file_name(path)?;
+    let file = match dir.open_file(name, libc::O_RDONLY, 0) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    check_confined_owner(&file, &owners)?;
+    dir.verify()?;
+    job_receipts::verify_entry(dir.file(), name, &file, false)?;
+    if unsafe {
+        libc::unlinkat(
+            dir.file().as_raw_fd(),
+            job_receipts::c_name(name)?.as_ptr(),
+            0,
+        )
+    } != 0
     {
-        use std::io::Write;
-        let mut temp_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&temp_path)?;
-        #[cfg(unix)]
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn read_dns_provider_text(path: &Path, pihole: bool) -> std::io::Result<String> {
+    read_confined_text(path, dns_provider_users(pihole))
+}
+
+pub fn write_dns_provider_text(path: &Path, content: &str, pihole: bool) -> std::io::Result<()> {
+    replace_confined_text(path, content, dns_provider_users(pihole), false, pihole)
+}
+
+fn write_hosts_file_atomically(path: &Path, content: &str) -> anyhow::Result<()> {
+    replace_confined_text(path, content, &[], true, false)?;
+    Ok(())
+}
+
+fn replace_confined_text(
+    path: &Path,
+    content: &str,
+    users: &[&str],
+    hosts: bool,
+    pihole: bool,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let (dir, owners) = confined_parent(path, users)?;
+    let name = confined_file_name(path)?;
+    let mut previous =
+        match dir.open_file(name, if hosts { libc::O_RDWR } else { libc::O_RDONLY }, 0) {
+            Ok(file) => Some(file),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+    let previous_metadata = previous
+        .as_ref()
+        .map(|file| check_confined_owner(file, &owners))
+        .transpose()?;
+    let root = unsafe { libc::geteuid() } == 0;
+    let (mode, owner) = if hosts {
+        (0o644, root.then_some((0, 0)))
+    } else if let Some(metadata) = previous_metadata {
+        (
+            metadata.mode() & 0o7777,
+            Some((metadata.uid(), metadata.gid())),
+        )
+    } else {
+        (
+            0o640,
+            root.then(|| {
+                (
+                    0,
+                    if pihole {
+                        lookup_group_gid("pihole").unwrap_or(0)
+                    } else {
+                        0
+                    },
+                )
+            }),
+        )
+    };
+    let configure = |file: &fs::File| -> std::io::Result<()> {
+        if let Some((uid, gid)) = owner {
+            let metadata = file.metadata()?;
+            if (uid != metadata.uid() || gid != metadata.gid())
+                && unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        file.set_permissions(fs::Permissions::from_mode(mode))
+    };
+    let temporary = format!(".aetherflow.tmp.{}", uuid::Uuid::new_v4());
+    let temporary = std::ffi::OsStr::new(&temporary);
+    let mut file = dir.open_file(
+        temporary,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    )?;
+    let parent = dir.file().as_raw_fd();
+    let temporary_c = job_receipts::c_name(temporary)?;
+    let name_c = job_receipts::c_name(name)?;
+    let result = (|| {
+        file.write_all(content.as_bytes())?;
+        configure(&file)?;
+        file.sync_all()?;
+        dir.verify()?;
+        job_receipts::verify_entry(dir.file(), temporary, &file, false)?;
+        if let Some(previous) = &previous {
+            job_receipts::verify_entry(dir.file(), name, previous, false)?;
+        } else if !matches!(job_receipts::entry_at(dir.file(), name), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644));
+            return Err(std::io::Error::other(
+                "configuration appeared during update",
+            ));
         }
-        temp_file.write_all(content.as_bytes())?;
-        temp_file.sync_all()?;
-    }
-
-    if let Err(err) = fs::rename(&temp_path, hosts_path) {
-        #[cfg(unix)]
-        let is_cross_device =
-            err.raw_os_error() == Some(libc::EXDEV) || err.raw_os_error() == Some(libc::EBUSY);
-        #[cfg(not(unix))]
-        let is_cross_device = false;
-
-        if is_cross_device {
-            use std::io::Write;
-            // Open without truncating upfront so contents aren't cleared before flock is held.
-            #[allow(clippy::suspicious_open_options)]
-            let dest_file = fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(hosts_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::AsRawFd;
-                let fd = dest_file.as_raw_fd();
-                let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if rc != 0 {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(anyhow::anyhow!(
-                        "failed to lock hosts file on cross-device fallback: {}",
-                        std::io::Error::last_os_error()
-                    ));
+        if unsafe { libc::renameat(parent, temporary_c.as_ptr(), parent, name_c.as_ptr()) } == 0 {
+            return dir.file().sync_all();
+        }
+        let error = std::io::Error::last_os_error();
+        // Bind-mounted /etc/hosts cannot be replaced. Use only the previously verified inode.
+        if hosts && matches!(error.raw_os_error(), Some(libc::EXDEV) | Some(libc::EBUSY)) {
+            if let Some(destination) = &mut previous {
+                if unsafe { libc::flock(destination.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
+                dir.verify()?;
+                job_receipts::verify_entry(dir.file(), name, destination, false)?;
+                configure(destination)?;
+                destination.set_len(0)?;
+                destination.write_all(content.as_bytes())?;
+                return destination.sync_all();
             }
-            dest_file.set_len(0)?;
-            let mut writer = std::io::BufWriter::new(dest_file);
-            writer.write_all(content.as_bytes())?;
-            writer.flush()?;
-            let inner = writer.into_inner()?;
-            inner.sync_all()?;
-            #[cfg(unix)]
+        }
+        Err(error)
+    })();
+    unsafe {
+        libc::unlinkat(parent, temporary_c.as_ptr(), 0);
+    }
+    result
+}
+
+pub(crate) fn create_package_lock_directory(path: &Path) -> std::io::Result<()> {
+    if path.file_name() != Some(std::ffi::OsStr::new("install")) {
+        return fs::create_dir_all(path);
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let created = match fs::create_dir(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error),
+    };
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let directory = job_receipts::ReceiptDirectory::open_existing(path)?
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if unsafe { libc::geteuid() } == 0 {
+        directory.verify_owners(&[0])?;
+        if created {
+            let metadata = directory.file().metadata()?;
+            let gid = lookup_group_gid("aetherflow").unwrap_or(metadata.gid());
+            if metadata.gid() != gid
+                && unsafe { libc::fchown(directory.file().as_raw_fd(), 0, gid) } != 0
             {
-                use std::os::unix::io::AsRawFd;
-                let fd = inner.as_raw_fd();
-                unsafe { libc::flock(fd, libc::LOCK_UN) };
+                return Err(std::io::Error::last_os_error());
             }
-            let _ = fs::remove_file(&temp_path);
-        } else {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err.into());
         }
     }
-
+    if created {
+        directory
+            .file()
+            .set_permissions(fs::Permissions::from_mode(0o750))?;
+    }
     Ok(())
 }
 
@@ -4817,47 +5054,14 @@ async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<
 // Privileged Application Runtime Metadata Extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AppRuntimeMeta {
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
-    pub configured_port: i32,
-}
+pub use af_models::AppRuntimeMeta;
 
 static PLEX_TOKEN_ATTR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)\bPlexOnlineToken\s*=\s*"([^"]+)""#).unwrap());
 static PHP_ORGANIZR_KEY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)['"]organizrAPI['"]\s*=>\s*['"]([^'"]+)['"]"#).unwrap());
 
-pub fn normalize_runner_app_name(app_name: &str) -> String {
-    let clean = app_name
-        .trim()
-        .to_lowercase()
-        .trim_end_matches(".service")
-        .to_string();
-    match clean.as_str() {
-        "plexmediaserver" => "plex".to_string(),
-        "emby-server" => "emby".to_string(),
-        "pihole-ftl" => "pihole".to_string(),
-        "transmission-daemon" => "transmission".to_string(),
-        "deluged" | "deluge-web" => "deluge".to_string(),
-        "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
-        "qbittorrent-nox" => "qbittorrent".to_string(),
-        "calibreweb" => "calibre-web".to_string(),
-        "grafana-server" => "grafana".to_string(),
-        "uptimekuma" => "uptime-kuma".to_string(),
-        "adguard-home" => "adguardhome".to_string(),
-        "pyload-ng" => "pyload".to_string(),
-        "af-maintainerr" => "maintainerr".to_string(),
-        "af-palate" => "palate".to_string(),
-        "af-mcvnc" => "mcvnc".to_string(),
-        "af-piped" => "piped".to_string(),
-        "af-invidious" => "invidious".to_string(),
-        "home-assistant@homeassistant" => "homeassistant".to_string(),
-        _ => clean,
-    }
-}
+pub use af_models::app_metadata::normalize_app_slug as normalize_runner_app_name;
 
 fn resolve_runner_fs_path(raw_path: &str) -> PathBuf {
     let trimmed = raw_path.trim();
@@ -4876,13 +5080,33 @@ fn resolve_runner_fs_path(raw_path: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
-fn read_runner_config_text(raw_path: &str) -> Option<String> {
-    let resolved = resolve_runner_fs_path(raw_path);
-    let meta = fs::metadata(&resolved).ok()?;
-    if !meta.is_file() || meta.len() == 0 || meta.len() > 2 * 1024 * 1024 {
-        return None;
+fn app_metadata_users(logical: &Path) -> Vec<&str> {
+    let service = ["/var/lib", "/etc", "/opt"]
+        .into_iter()
+        .find_map(|prefix| logical.strip_prefix(prefix).ok())
+        .and_then(|path| path.iter().next())
+        .and_then(|name| name.to_str())
+        .filter(|name| SAFE_USERNAME.is_match(name));
+    match service {
+        Some("systemd" | "default" | "aetherflow" | "apache2") | None => Vec::new(),
+        Some("plexmediaserver") => vec!["plex"],
+        Some("emby-server") => vec!["emby"],
+        Some("kasmvnc") => vec!["af-kasmvnc"],
+        Some("mcvnc") => vec!["af-mcvnc"],
+        Some("homeassistant") => vec!["homeassistant"],
+        Some("transmission-daemon") => vec!["debian-transmission", "transmission"],
+        Some("calibre-web" | "calibreweb") => vec!["calibre-web", "calibreweb"],
+        Some("uptime-kuma" | "uptimekuma") => vec!["uptime-kuma", "uptimekuma"],
+        Some(service) => vec![service],
     }
-    fs::read_to_string(&resolved).ok()
+}
+
+pub fn read_app_metadata_config(path: &Path, logical: &Path) -> std::io::Result<String> {
+    read_confined_text(path, &app_metadata_users(logical))
+}
+
+fn read_runner_config_text(raw_path: &str) -> Option<String> {
+    read_app_metadata_config(&resolve_runner_fs_path(raw_path), Path::new(raw_path)).ok()
 }
 
 fn parse_valid_runner_port(raw: &str) -> i32 {
@@ -5114,31 +5338,78 @@ fn extract_runner_json_key_and_port(content: &str) -> (String, i32) {
     (api_key, port)
 }
 
-fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String {
-    let resolved = resolve_runner_fs_path(raw_path);
-    let Ok(meta) = fs::metadata(&resolved) else {
-        return String::new();
-    };
-    if !meta.is_file() || meta.len() == 0 {
-        return String::new();
+pub fn query_app_metadata_sqlite(
+    path: &Path,
+    logical: &Path,
+    queries: &[&str],
+    deadline: std::time::Instant,
+) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::DirBuilderExt;
+    const MAX_DB_SIZE: u64 = 512 * 1024 * 1024;
+    let source = open_confined_file(path, &app_metadata_users(logical)).ok()?;
+    let size = source.metadata().ok()?.len();
+    if size == 0 || size > MAX_DB_SIZE || std::time::Instant::now() >= deadline {
+        return None;
     }
-    let flags =
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(&resolved, flags) else {
-        return String::new();
-    };
-    let _ = conn.busy_timeout(Duration::from_millis(1000));
 
-    for query_sql in queries {
-        if let Ok(Some(val)) = conn.query_row(query_sql, [], |row| row.get::<_, Option<String>>(0))
-        {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
+    // SQLite reopens its filename internally. Only hand it a private snapshot of the
+    // verified descriptor, with a fixed filename so no service-controlled URI is parsed.
+    let scratch =
+        Path::new("/var/tmp").join(format!("aetherflow-app-meta-{}", uuid::Uuid::new_v4()));
+    fs::DirBuilder::new().mode(0o700).create(&scratch).ok()?;
+    let result = (|| {
+        let copy = scratch.join("snapshot.sqlite");
+        let mut destination = fs::File::create_new(&copy).ok()?;
+        let mut source = source.take(MAX_DB_SIZE + 1);
+        let mut buffer = [0; 64 * 1024];
+        use std::io::Write;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let count = source.read(&mut buffer).ok()?;
+            if count == 0 {
+                break;
+            }
+            destination.write_all(&buffer[..count]).ok()?;
+        }
+        if source.limit() == 0 {
+            return None;
+        }
+        drop(destination);
+        use rusqlite::OpenFlags;
+        let conn = rusqlite::Connection::open_with_flags(
+            format!("file:{}?mode=ro&immutable=1", copy.display()),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        for query in queries {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            if let Ok(value) = conn.query_row(query, [], |row| row.get::<_, String>(0)) {
+                if !value.trim().is_empty() {
+                    return Some(value.trim().to_owned());
+                }
             }
         }
-    }
-    String::new()
+        None
+    })();
+    let _ = fs::remove_dir_all(scratch);
+    result
+}
+
+fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String {
+    query_app_metadata_sqlite(
+        &resolve_runner_fs_path(raw_path),
+        Path::new(raw_path),
+        queries,
+        std::time::Instant::now() + Duration::from_secs(1),
+    )
+    .unwrap_or_default()
 }
 
 pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
@@ -5146,7 +5417,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
     let mut meta = AppRuntimeMeta::default();
 
     match canonical.as_str() {
-        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
+        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
             let candidates = [
                 format!("/var/lib/{}/config.xml", canonical),
                 format!("/var/lib/{}/config/config.xml", canonical),
@@ -5831,25 +6102,8 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
-        "nzbget" => {
-            let candidates = [
-                "/var/lib/nzbget/nzbget.conf",
-                "/etc/nzbget.conf",
-                "/opt/nzbget/nzbget.conf",
-            ];
-            for raw_path in &candidates {
-                if let Some(content) = read_runner_config_text(raw_path) {
-                    let port = parse_valid_runner_port(&extract_runner_ini_value(
-                        &content,
-                        &["ControlPort"],
-                    ));
-                    if port > 0 {
-                        meta.configured_port = port;
-                        break;
-                    }
-                }
-            }
-        }
+        "nzbget" => meta = af_models::app_metadata::nzbget_meta(read_runner_config_text),
+        "whisparr" => meta = af_models::app_metadata::whisparr_meta(read_runner_config_text),
 
         "gitea" => {
             let candidates = ["/etc/gitea/app.ini", "/var/lib/gitea/custom/conf/app.ini"];
@@ -5948,37 +6202,11 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
-        "komga" => {
-            let candidates = [
-                "/var/lib/komga/application.yml",
-                "/etc/komga/application.yml",
-                "/etc/default/komga",
-            ];
-            for raw_path in &candidates {
-                if let Some(content) = read_runner_config_text(raw_path) {
-                    let mut port = parse_valid_runner_port(&extract_runner_yaml_key_in_section(
-                        &content, "server", "port",
-                    ));
-                    if port <= 0 {
-                        port = parse_valid_runner_port(&extract_runner_ini_value(
-                            &content,
-                            &["SERVER_PORT", "PORT", "port"],
-                        ));
-                    }
-                    if port > 0 {
-                        meta.configured_port = port;
-                        break;
-                    }
-                }
-            }
-        }
-
         "calibre-web" | "calibreweb" => {
-            let db_paths = ["/var/lib/calibre-web/app.db", "/opt/calibre-web/app.db"];
-            for raw_path in &db_paths {
+            for raw_path in af_models::app_metadata::CALIBRE_WEB_DATABASES {
                 let port_str = query_runner_sqlite_single_string(
                     raw_path,
-                    &["SELECT CAST(config_port AS TEXT) FROM settings LIMIT 1"],
+                    &[af_models::app_metadata::CALIBRE_WEB_PORT_QUERY],
                 );
                 let port = parse_valid_runner_port(&port_str);
                 if port > 0 {
@@ -6026,34 +6254,9 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
-        "uptime-kuma" => {
-            if let Some(content) =
-                read_runner_config_text("/etc/systemd/system/uptime-kuma.service")
-            {
-                let port = extract_runner_systemd_or_apache_port(&content);
-                if port > 0 {
-                    meta.configured_port = port;
-                }
-            }
-            if meta.configured_port <= 0 {
-                let candidates = [
-                    "/var/lib/uptime-kuma/.env",
-                    "/opt/uptime-kuma/.env",
-                    "/etc/default/uptime-kuma",
-                ];
-                for raw_path in &candidates {
-                    if let Some(content) = read_runner_config_text(raw_path) {
-                        let port = parse_valid_runner_port(&extract_runner_ini_value(
-                            &content,
-                            &["UPTIME_KUMA_PORT", "PORT", "port"],
-                        ));
-                        if port > 0 {
-                            meta.configured_port = port;
-                            break;
-                        }
-                    }
-                }
-            }
+        "uptimekuma" => {
+            meta.configured_port =
+                af_models::app_metadata::uptime_kuma_port(read_runner_config_text);
         }
 
         "immich" => {
@@ -6838,39 +7041,22 @@ fn ensure_non_symlink_dir(dir: &Path, create_if_missing: bool) -> anyhow::Result
 
 fn read_regular_file_nofollow(path: &Path) -> anyhow::Result<Option<(Vec<u8>, u32)>> {
     use std::io::Read;
-    match fs::symlink_metadata(path) {
+    use std::os::unix::fs::PermissionsExt;
+    const LIMIT: u64 = 1024 * 1024;
+    let file = match open_confined_file(path, &[]) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                anyhow::bail!("refusing symlinked vhost target {}", path.display());
-            }
-            if !meta.is_file() {
-                anyhow::bail!("refusing non-regular vhost target {}", path.display());
-            }
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "unsafe Apache vhost {}: {err}",
+                path.display()
+            ))
         }
-    }
-    let mut opts = fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let mut file = opts.open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        anyhow::bail!("refusing non-regular vhost target {}", path.display());
-    }
-    #[cfg(unix)]
-    let mode = {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o777
     };
-    #[cfg(not(unix))]
-    let mode = 0o644;
+    let mode = file.metadata()?.permissions().mode() & 0o777;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    file.take(LIMIT + 1).read_to_end(&mut buf)?;
+    anyhow::ensure!(buf.len() as u64 <= LIMIT, "Apache vhost exceeds 1 MiB");
     Ok(Some((buf, mode)))
 }
 
@@ -6989,37 +7175,31 @@ async fn reload_apache_if_active() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_vhost_content(field: &str, content: Option<&str>) -> Result<(), String> {
-    let Some(content) = content else {
-        return Err(format!("{field} is required when enabled is true"));
-    };
-    if content.trim().is_empty() {
-        return Err(format!("{field} must not be empty when enabled is true"));
-    }
-    if content.contains('\0') {
-        return Err(format!("{field} must not contain NUL bytes"));
-    }
-    if content.len() > 1_048_576 {
-        return Err(format!("{field} exceeds maximum size (1 MiB)"));
-    }
-    if !content.to_ascii_lowercase().contains("<virtualhost") {
-        return Err(format!("{field} must contain a <VirtualHost block"));
-    }
-    Ok(())
-}
-
 fn validate_ingress_vhost_request(req: &RunnerApacheVhostRequest) -> Result<(), String> {
     if !SAFE_INGRESS_APP_NAME.is_match(&req.app_name) {
         return Err("invalid app_name: must match ^[a-z0-9][a-z0-9-]{0,47}$".to_string());
     }
-    if req.enabled {
-        validate_vhost_content("vhost_content", req.vhost_content.as_deref())?;
+    if get_runner_package_definition(&req.app_name).is_none() {
+        return Err("app_name is not in the package catalog".to_string());
     }
-    if req.external_enabled {
-        validate_vhost_content(
-            "external_vhost_content",
-            req.external_vhost_content.as_deref(),
-        )?;
+    if !req.remove_only && !(1..=65535).contains(&req.listen_port) {
+        return Err("listen_port must be in 1..=65535".to_string());
+    }
+    if let Some(domain) = &req.internal_domain {
+        if !domain.eq_ignore_ascii_case(&format!("{}.aether.local", req.app_name)) {
+            return Err("invalid internal_domain: expected <app_name>.aether.local".to_string());
+        }
+    }
+    if let Some(domain) = &req.public_domain {
+        if !af_models::valid_ingress_hostname(domain)
+            || domain.eq_ignore_ascii_case("aether.local")
+            || domain.to_ascii_lowercase().ends_with(".aether.local")
+        {
+            return Err("invalid public_domain".to_string());
+        }
+    }
+    if !req.remove_only && req.external_access_enabled && req.public_domain.is_none() {
+        return Err("public_domain is required for external access".to_string());
     }
     Ok(())
 }
@@ -7089,7 +7269,23 @@ where
         anyhow::bail!("{msg}");
     }
 
-    let any_enabled = req.enabled || req.external_enabled;
+    let internal = req.internal_domain.as_deref().filter(|_| !req.remove_only);
+    let external = req
+        .public_domain
+        .as_deref()
+        .filter(|_| !req.remove_only && req.external_access_enabled);
+    let any_enabled = internal.is_some() || external.is_some();
+    let fs_root = if apache_dir.ends_with("etc/apache2") && apache_dir != Path::new("/etc/apache2")
+    {
+        apache_dir.parent().and_then(Path::parent)
+    } else {
+        None
+    };
+    let upstream = if any_enabled {
+        package_executor::apache_upstream_tls(&req.app_name, fs_root)?
+    } else {
+        Default::default()
+    };
     let avail_dir = apache_dir.join("sites-available");
     let enabled_dir = apache_dir.join("sites-enabled");
 
@@ -7111,42 +7307,127 @@ where
 
     let int_conf_name = format!("aetherflow-app-{}.conf", req.app_name);
     let ext_conf_name = format!("aetherflow-ext-{}.conf", req.app_name);
+    let ssl_conf_name = format!("aetherflow-ext-{}-le-ssl.conf", req.app_name);
+    let legacy_conf_name = format!("{}.conf", req.app_name);
     let targets = [
-        (
-            req.enabled,
-            req.vhost_content.as_deref(),
-            int_conf_name.as_str(),
-            avail_dir.join(&int_conf_name),
-            enabled_dir.join(&int_conf_name),
-        ),
-        (
-            req.external_enabled,
-            req.external_vhost_content.as_deref(),
-            ext_conf_name.as_str(),
-            avail_dir.join(&ext_conf_name),
-            enabled_dir.join(&ext_conf_name),
-        ),
+        &int_conf_name,
+        &ext_conf_name,
+        &ssl_conf_name,
+        &legacy_conf_name,
     ];
-
     let mut backups = Vec::with_capacity(targets.len());
-    for (_, _, _, avail_path, enabled_path) in &targets {
-        let prev_avail = read_regular_file_nofollow(avail_path)?;
-        let prev_enabled = snapshot_enabled_vhost(enabled_path)?;
+    for name in targets {
+        let avail_path = avail_dir.join(name);
+        let enabled_path = enabled_dir.join(name);
+        let prev_avail = read_regular_file_nofollow(&avail_path)?;
+        let prev_enabled = snapshot_enabled_vhost(&enabled_path)?;
         backups.push(VhostBackup {
-            avail_path: avail_path.clone(),
-            enabled_path: enabled_path.clone(),
+            avail_path,
+            enabled_path,
             prev_avail,
             prev_enabled,
         });
     }
 
-    for (enabled, content, conf_name, avail_path, enabled_path) in &targets {
-        if let Err(err) =
-            apply_single_ingress_vhost(*enabled, *content, conf_name, avail_path, enabled_path)
+    let contents = |index: usize| -> anyhow::Result<Vec<&str>> {
+        let backup = &backups[index];
+        let available = backup.prev_avail.iter().map(|(bytes, _)| bytes);
+        let enabled = match &backup.prev_enabled {
+            PrevEnabledVhostState::RegularFile(bytes, _) => Some(bytes),
+            _ => None,
+        };
+        available
+            .chain(enabled)
+            .map(|bytes| Ok(std::str::from_utf8(bytes)?))
+            .collect()
+    };
+    let legacy = if any_enabled {
+        contents(3)?
+    } else {
+        Vec::new()
+    };
+    let int_existing = if internal.is_some() {
+        contents(0)?
+    } else {
+        Vec::new()
+    };
+    let mut ext_existing = Vec::new();
+    if external.is_some() {
+        ext_existing.extend(contents(1)?);
+        ext_existing.extend(contents(2)?);
+    }
+    let int_body = internal
+        .map(|domain| {
+            package_executor::render_managed_apache_vhost(
+                req,
+                domain,
+                true,
+                &upstream,
+                fs_root,
+                &int_existing,
+                &legacy,
+            )
+        })
+        .transpose()?;
+    let ext_body = external
+        .map(|domain| {
+            package_executor::render_managed_apache_vhost(
+                req,
+                domain,
+                false,
+                &upstream,
+                fs_root,
+                &ext_existing,
+                &legacy,
+            )
+        })
+        .transpose()?;
+
+    let write_result = (|| -> anyhow::Result<()> {
+        for ((name, body), backup) in targets
+            .into_iter()
+            .zip([int_body.as_deref(), ext_body.as_deref(), None])
+            .zip(&backups)
         {
-            let _ = rollback_vhost_backups(&backups);
-            return Err(err);
+            apply_single_ingress_vhost(
+                body.is_some(),
+                body,
+                name,
+                &backup.avail_path,
+                &backup.enabled_path,
+            )?;
         }
+        if any_enabled {
+            let backup = &backups[3];
+            let update = |bytes: &[u8]| -> anyhow::Result<String> {
+                package_executor::update_legacy_apache_vhost(
+                    std::str::from_utf8(bytes)?,
+                    req,
+                    &upstream,
+                    fs_root,
+                    false,
+                )
+            };
+            if let Some((bytes, mode)) = &backup.prev_avail {
+                let body = update(bytes)?;
+                if body.as_bytes() != bytes {
+                    write_file_atomically_with_mode(&backup.avail_path, body.as_bytes(), *mode)?;
+                }
+            }
+            if let PrevEnabledVhostState::RegularFile(bytes, mode) = &backup.prev_enabled {
+                let body = update(bytes)?;
+                if body.as_bytes() != bytes {
+                    write_file_atomically_with_mode(&backup.enabled_path, body.as_bytes(), *mode)?;
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        if let Err(rb_err) = rollback_vhost_backups(&backups) {
+            anyhow::bail!("{err}; rollback failed: {rb_err}");
+        }
+        return Err(err);
     }
 
     if let Err(test_err) = configtest_fn().await {
@@ -7168,9 +7449,13 @@ where
     Ok(format!(
         "synced apache vhosts ({}={}, {}={})",
         int_conf_name,
-        if req.enabled { "enabled" } else { "disabled" },
+        if internal.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        },
         ext_conf_name,
-        if req.external_enabled {
+        if external.is_some() {
             "enabled"
         } else {
             "disabled"
@@ -7193,27 +7478,7 @@ async fn handle_ingress_vhost(
     }
 
     let apache_dir = resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2");
-    let is_live_etc = apache_dir == Path::new("/etc/apache2");
-
-    let res = apply_ingress_vhost_with_hooks(
-        &req,
-        &apache_dir,
-        || async move {
-            if is_live_etc {
-                run_apache_configtest_if_present().await
-            } else {
-                Ok(())
-            }
-        },
-        || async move {
-            if is_live_etc {
-                reload_apache_if_active().await
-            } else {
-                Ok(())
-            }
-        },
-    )
-    .await;
+    let res = sync_apache_vhost_local(&req, &apache_dir).await;
 
     match res {
         Ok(output) => (
@@ -7233,6 +7498,34 @@ async fn handle_ingress_vhost(
             }),
         ),
     }
+}
+
+pub async fn sync_apache_vhost_local(
+    req: &RunnerApacheVhostRequest,
+    apache_dir: &Path,
+) -> anyhow::Result<String> {
+    static VHOST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = VHOST_LOCK.lock().await;
+    let live = apache_dir == Path::new("/etc/apache2");
+    apply_ingress_vhost_with_hooks(
+        req,
+        apache_dir,
+        || async {
+            if live {
+                run_apache_configtest_if_present().await
+            } else {
+                Ok(())
+            }
+        },
+        || async {
+            if live {
+                reload_apache_if_active().await
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await
 }
 
 pub async fn sync_apache_vhost_via_runner(
@@ -10210,258 +10503,264 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn ingress_vhost_validates_rejects_symlinks_and_rolls_back_on_configtest_failure() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let scratch = env::temp_dir().join(format!("af-vhost-unit-{}", uuid::Uuid::new_v4()));
-        let avail_dir = scratch.join("sites-available");
-        let enabled_dir = scratch.join("sites-enabled");
-        fs::create_dir_all(&avail_dir).unwrap();
-        fs::create_dir_all(&enabled_dir).unwrap();
-
-        // 1. Validation rejects traversal / invalid app names.
-        for bad in [
-            "",
-            "../evil",
-            "sonarr.conf",
-            "Sonarr",
-            "-sonarr",
-            "a".repeat(49).as_str(),
-        ] {
-            let (code, Json(resp)) = handle_ingress_vhost(Json(RunnerApacheVhostRequest {
-                app_name: bad.to_string(),
-                enabled: true,
-                vhost_content: Some("<VirtualHost *:80></VirtualHost>\n".to_string()),
-                ..Default::default()
-            }))
-            .await;
-            assert_eq!(code, StatusCode::BAD_REQUEST, "bad app_name {bad:?}");
-            assert!(!resp.success);
+        let scratch = env::temp_dir().join(format!("af-vhost-{}", uuid::Uuid::new_v4()));
+        let available = scratch.join("sites-available");
+        let enabled = scratch.join("sites-enabled");
+        let req = RunnerApacheVhostRequest {
+            app_name: "sonarr".to_string(),
+            listen_port: 8989,
+            internal_domain: Some("sonarr.aether.local".to_string()),
+            public_domain: Some("sonarr.example.com".to_string()),
+            external_access_enabled: true,
+            ..Default::default()
+        };
+        for app_name in ["", "../evil", "Sonarr", "unknown-ingress-app"] {
+            assert!(validate_ingress_vhost_request(&RunnerApacheVhostRequest {
+                app_name: app_name.to_string(),
+                ..req.clone()
+            })
+            .is_err());
         }
-
-        // 2. Enable writes 0644 sites-available + sites-enabled symlink.
-        let initial_vhost = "<VirtualHost *:80>\nServerName sonarr.aether.local\n</VirtualHost>\n";
-        apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(initial_vhost.to_string()),
-                ..Default::default()
-            },
-            &scratch,
-            || async { Ok(()) },
-            || async { Ok(()) },
+        for domain in [
+            "bad.example\n",
+            "bad.-example.com",
+            "a..example.com",
+            "name.example\"",
+        ] {
+            assert!(validate_ingress_vhost_request(&RunnerApacheVhostRequest {
+                public_domain: Some(domain.to_string()),
+                ..req.clone()
+            })
+            .is_err());
+        }
+        for port in [0, 65536, -1] {
+            assert!(validate_ingress_vhost_request(&RunnerApacheVhostRequest {
+                listen_port: port,
+                ..req.clone()
+            })
+            .is_err());
+        }
+        apply_ingress_vhost_with_hooks(&req, &scratch, || async { Ok(()) }, || async { Ok(()) })
+            .await
+            .unwrap();
+        let internal = available.join("aetherflow-app-sonarr.conf");
+        let external = available.join("aetherflow-ext-sonarr.conf");
+        let stale = available.join("aetherflow-ext-sonarr-le-ssl.conf");
+        let stale_link = enabled.join("aetherflow-ext-sonarr-le-ssl.conf");
+        let internal_before = fs::read_to_string(&internal).unwrap();
+        let external_before = fs::read_to_string(&external).unwrap();
+        assert!(internal_before.contains("Require ip 127.0.0.0/8 ::1"));
+        assert!(internal_before.contains("RewriteRule ^ - [F,L]"));
+        assert!(external_before.contains("ServerName sonarr.example.com"));
+        assert_eq!(
+            fs::read_link(enabled.join("aetherflow-app-sonarr.conf")).unwrap(),
+            Path::new("../sites-available/aetherflow-app-sonarr.conf")
+        );
+        fs::write(&stale, "previous SSL config").unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-sonarr-le-ssl.conf",
+            &stale_link,
         )
-        .await
         .unwrap();
-
-        let avail_file = avail_dir.join("aetherflow-app-sonarr.conf");
-        let enabled_link = enabled_dir.join("aetherflow-app-sonarr.conf");
-        assert_eq!(fs::read_to_string(&avail_file).unwrap(), initial_vhost);
-        assert_eq!(
-            fs::metadata(&avail_file).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-        assert_eq!(
-            fs::read_link(&enabled_link).unwrap(),
-            PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
-        );
-
-        // 3. Configtest failure rolls back to prior vhost content.
-        let broken_vhost = "<VirtualHost *:80>\nBrokenDirective\n";
+        let updated = RunnerApacheVhostRequest {
+            listen_port: 18989,
+            reload_apache: true,
+            ..req.clone()
+        };
         let err = apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(broken_vhost.to_string()),
-                ..Default::default()
-            },
+            &updated,
             &scratch,
-            || async { anyhow::bail!("apache2ctl -t syntax error") },
+            || async { anyhow::bail!("apache syntax error") },
             || async { Ok(()) },
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("syntax error"));
-        assert_eq!(fs::read_to_string(&avail_file).unwrap(), initial_vhost);
-        assert_eq!(
-            fs::read_link(&enabled_link).unwrap(),
-            PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
-        );
-
-        // 4. Symlink refusal on sites-available target.
-        let evil_target = scratch.join("evil-target.conf");
-        fs::write(&evil_target, "keep").unwrap();
-        let sym_avail = avail_dir.join("aetherflow-app-radarr.conf");
-        std::os::unix::fs::symlink(&evil_target, &sym_avail).unwrap();
-        let sym_err = apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "radarr".to_string(),
-                enabled: true,
-                vhost_content: Some("<VirtualHost *:80></VirtualHost>\n".to_string()),
-                ..Default::default()
-            },
+        assert!(err.to_string().contains("apache syntax error"));
+        let err = apply_ingress_vhost_with_hooks(
+            &updated,
             &scratch,
             || async { Ok(()) },
-            || async { Ok(()) },
+            || async { anyhow::bail!("apache reload failed") },
         )
         .await
         .unwrap_err();
-        assert!(sym_err.to_string().contains("symlink"));
-        assert_eq!(fs::read_to_string(&evil_target).unwrap(), "keep");
+        assert!(err.to_string().contains("apache reload failed"));
+        assert_eq!(fs::read_to_string(&internal).unwrap(), internal_before);
+        assert_eq!(fs::read_to_string(&external).unwrap(), external_before);
+        assert_eq!(fs::read_to_string(&stale).unwrap(), "previous SSL config");
+        assert!(fs::symlink_metadata(&stale_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
 
-        // 5. Disable removes sites-enabled and sites-available files.
+        let victim = scratch.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        fs::remove_file(&external).unwrap();
+        std::os::unix::fs::symlink(&victim, &external).unwrap();
+        assert!(apply_ingress_vhost_with_hooks(
+            &updated,
+            &scratch,
+            || async { Ok(()) },
+            || async { Ok(()) }
+        )
+        .await
+        .is_err());
+        assert_eq!(fs::read_to_string(victim).unwrap(), "keep");
+        fs::remove_file(&external).unwrap();
         apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: false,
-                vhost_content: None,
-                ..Default::default()
-            },
+            &updated,
             &scratch,
             || async { Ok(()) },
             || async { Ok(()) },
         )
         .await
         .unwrap();
-        assert!(fs::symlink_metadata(&enabled_link).is_err());
-        assert!(!avail_file.exists());
+        assert!(!stale.exists());
+        assert!(fs::symlink_metadata(&stale_link).is_err());
 
-        let _ = fs::remove_dir_all(&scratch);
+        let remove = RunnerApacheVhostRequest {
+            app_name: req.app_name,
+            remove_only: true,
+            ..Default::default()
+        };
+        apply_ingress_vhost_with_hooks(&remove, &scratch, || async { Ok(()) }, || async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(!internal.exists());
+        assert!(!external.exists());
+        fs::remove_dir_all(scratch).unwrap();
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn ingress_vhost_syncs_and_rolls_back_internal_and_external_configs() {
+    #[test]
+    fn confined_provider_preserves_permissions_and_refuses_symlinks_hardlinks_and_fifos() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = env::temp_dir().join(format!("af-confined-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let custom = root.join("custom.list");
+        fs::write(&custom, "old").unwrap();
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o600)).unwrap();
+        let original = fs::metadata(&custom).unwrap();
+        write_dns_provider_text(&custom, "new", true).unwrap();
+        let updated = fs::metadata(&custom).unwrap();
+        assert_eq!(updated.mode() & 0o777, 0o600);
+        assert_eq!(
+            (updated.uid(), updated.gid()),
+            (original.uid(), original.gid())
+        );
+
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&custom, &alias).unwrap();
+        assert!(read_dns_provider_text(&alias, true).is_err());
+        assert!(write_dns_provider_text(&alias, "wrong", true).is_err());
+        fs::remove_file(&alias).unwrap();
+        fs::hard_link(&custom, &alias).unwrap();
+        assert!(write_dns_provider_text(&custom, "wrong", true).is_err());
+        fs::remove_file(&alias).unwrap();
+        let fifo = root.join("fifo");
+        assert_eq!(
+            unsafe {
+                libc::mkfifo(
+                    job_receipts::c_name(fifo.as_os_str()).unwrap().as_ptr(),
+                    0o600,
+                )
+            },
+            0
+        );
+        assert!(read_dns_provider_text(&fifo, true).is_err());
+        let parent_alias = root.join("parent-alias");
+        std::os::unix::fs::symlink(&root, &parent_alias).unwrap();
+        assert!(dns_provider_directory_exists(&parent_alias, true).is_err());
+        assert!(write_dns_provider_text(&parent_alias.join("custom.list"), "wrong", true).is_err());
+        assert_eq!(fs::read_to_string(custom).unwrap(), "new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sqlite_probe_uses_a_snapshot_and_rejects_linked_databases() {
+        let root = env::temp_dir().join(format!("af-sqlite-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.db");
+        let logical = Path::new("/var/lib/calibre-web/app.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE settings(config_port INTEGER); INSERT INTO settings VALUES (8084); PRAGMA journal_mode=WAL;").unwrap();
+        drop(conn);
+        let query = |path: &Path| {
+            query_app_metadata_sqlite(
+                path,
+                logical,
+                &[af_models::app_metadata::CALIBRE_WEB_PORT_QUERY],
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+        };
+        assert_eq!(query(&path).as_deref(), Some("8084"));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let alias = root.join("alias.db");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert_eq!(query(&alias), None);
+        fs::remove_file(&alias).unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        assert_eq!(query(&path), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn install_lock_directory_mode_survives_restrictive_creation_permissions() {
         use std::os::unix::fs::PermissionsExt;
+        let root = env::temp_dir().join(format!("af-install-{}", uuid::Uuid::new_v4()));
+        let install = root.join("install");
+        create_package_lock_directory(&install).unwrap();
+        assert_eq!(
+            fs::metadata(&install).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o550)).unwrap();
+        create_package_lock_directory(&install).unwrap();
+        assert_eq!(
+            fs::metadata(&install).unwrap().permissions().mode() & 0o777,
+            0o550
+        );
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        let scratch = env::temp_dir().join(format!("af-vhost-ext-unit-{}", uuid::Uuid::new_v4()));
-        let avail_dir = scratch.join("sites-available");
-        let enabled_dir = scratch.join("sites-enabled");
-
-        // Validation rejects invalid external_vhost_content when external_enabled is true.
-        for bad_ext in [
-            None,
-            Some(""),
-            Some("   "),
-            Some("ServerName bad.example\n"),
-            Some("<VirtualHost *:80>\0</VirtualHost>"),
-        ] {
-            let err = validate_ingress_vhost_request(&RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: false,
-                vhost_content: None,
-                external_enabled: true,
-                external_vhost_content: bad_ext.map(str::to_string),
-                reload_apache: false,
-            })
-            .unwrap_err();
-            assert!(
-                err.contains("external_vhost_content"),
-                "unexpected error for bad external_vhost_content: {err}"
-            );
+    #[test]
+    fn release_selector_accepts_both_aliases_and_explicit_engine() {
+        let keys = [
+            "AETHERFLOW_ENABLE_RUST_RELEASE",
+            "AETHERFLOW_USE_RUST_RELEASE",
+            "AETHERFLOW_RELEASE_ENGINE",
+            "AETHERFLOW_FORCE_BASH_RELEASE",
+        ];
+        let saved = keys.map(env::var_os);
+        for key in keys {
+            env::remove_var(key);
         }
-
-        // Enable both internal and external vhosts.
-        let int_v1 = "<VirtualHost *:80>\nServerName sonarr.aether.local\n</VirtualHost>\n";
-        let ext_v1 = "<VirtualHost *:80>\nServerName sonarr.example.com\n</VirtualHost>\n";
-        apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(int_v1.to_string()),
-                external_enabled: true,
-                external_vhost_content: Some(ext_v1.to_string()),
-                reload_apache: false,
-            },
-            &scratch,
-            || async { Ok(()) },
-            || async { Ok(()) },
-        )
-        .await
-        .unwrap();
-
-        let int_avail = avail_dir.join("aetherflow-app-sonarr.conf");
-        let int_enabled = enabled_dir.join("aetherflow-app-sonarr.conf");
-        let ext_avail = avail_dir.join("aetherflow-ext-sonarr.conf");
-        let ext_enabled = enabled_dir.join("aetherflow-ext-sonarr.conf");
-        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
-        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
-        assert_eq!(
-            fs::metadata(&ext_avail).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-        assert_eq!(
-            fs::read_link(&ext_enabled).unwrap(),
-            PathBuf::from("../sites-available/aetherflow-ext-sonarr.conf")
-        );
-
-        // Configtest failure rolls back BOTH internal and external vhosts.
-        let int_v2 = "<VirtualHost *:80>\nServerName broken-int\n</VirtualHost>\n";
-        let ext_v2 = "<VirtualHost *:80>\nServerName broken-ext\n</VirtualHost>\n";
-        let cfg_err = apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(int_v2.to_string()),
-                external_enabled: true,
-                external_vhost_content: Some(ext_v2.to_string()),
-                reload_apache: false,
-            },
-            &scratch,
-            || async { anyhow::bail!("apache2ctl -t failed") },
-            || async { Ok(()) },
-        )
-        .await
-        .unwrap_err();
-        assert!(cfg_err.to_string().contains("apache2ctl -t failed"));
-        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
-        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
-
-        // Reload failure ALSO rolls back BOTH internal and external vhosts.
-        let reload_err = apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(int_v2.to_string()),
-                external_enabled: false,
-                external_vhost_content: None,
-                reload_apache: true,
-            },
-            &scratch,
-            || async { Ok(()) },
-            || async { anyhow::bail!("systemctl reload apache2 failed") },
-        )
-        .await
-        .unwrap_err();
-        assert!(reload_err
-            .to_string()
-            .contains("systemctl reload apache2 failed"));
-        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
-        assert_eq!(fs::read_to_string(&ext_avail).unwrap(), ext_v1);
-        assert!(fs::symlink_metadata(&ext_enabled).is_ok());
-
-        // Disabling external while keeping internal removes only external files.
-        apply_ingress_vhost_with_hooks(
-            &RunnerApacheVhostRequest {
-                app_name: "sonarr".to_string(),
-                enabled: true,
-                vhost_content: Some(int_v1.to_string()),
-                external_enabled: false,
-                external_vhost_content: None,
-                reload_apache: false,
-            },
-            &scratch,
-            || async { Ok(()) },
-            || async { Ok(()) },
-        )
-        .await
-        .unwrap();
-        assert_eq!(fs::read_to_string(&int_avail).unwrap(), int_v1);
-        assert!(fs::symlink_metadata(&int_enabled).is_ok());
-        assert!(!ext_avail.exists());
-        assert!(fs::symlink_metadata(&ext_enabled).is_err());
-
-        let _ = fs::remove_dir_all(&scratch);
+        for key in &keys[..3] {
+            env::set_var(
+                key,
+                if key.ends_with("ENGINE") {
+                    "rust"
+                } else {
+                    "true"
+                },
+            );
+            assert_eq!(
+                select_release_engine(),
+                ReleaseEngineMode::NativeRustRelease
+            );
+            env::set_var(keys[3], "1");
+            assert_eq!(
+                select_release_engine(),
+                ReleaseEngineMode::LegacyBashRelease
+            );
+            env::remove_var(keys[3]);
+            env::remove_var(key);
+        }
+        for (key, value) in keys.into_iter().zip(saved) {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -10558,8 +10857,8 @@ mod tests {
 
         let resp = sync_apache_vhost_via_runner(&RunnerApacheVhostRequest {
             app_name: "sonarr".to_string(),
-            enabled: true,
-            vhost_content: Some("<VirtualHost *:80>\n</VirtualHost>\n".to_string()),
+            listen_port: 8989,
+            internal_domain: Some("sonarr.aether.local".to_string()),
             ..Default::default()
         })
         .await
@@ -10577,8 +10876,7 @@ mod tests {
 
         let disable_resp = sync_apache_vhost_via_runner(&RunnerApacheVhostRequest {
             app_name: "sonarr".to_string(),
-            enabled: false,
-            vhost_content: None,
+            remove_only: true,
             ..Default::default()
         })
         .await

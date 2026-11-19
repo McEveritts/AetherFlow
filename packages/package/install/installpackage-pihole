@@ -35,7 +35,7 @@ fi
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
-check_dns_port_53_available "pihole" "adguardhome" "pihole-FTL"
+check_dns_port_53_available "pihole" "adguardhome" "pihole-FTL" 53
 report_progress 10 "Installing prerequisites for Pi-hole..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq

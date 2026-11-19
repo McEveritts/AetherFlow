@@ -65,12 +65,12 @@
         RewriteRule ^/?(.*)$ ws://127.0.0.1:8080/$1 [P,L]
 
         ProxyPass /.well-known/acme-challenge/ !
+        ProxyPass /downloads !
+        ProxyPass /USERNAME.rtorrent.downloads !
+        ProxyPass /USERNAME.deluge.downloads !
 
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=3600 keepalive=On
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
-
-        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=3600 keepalive=On
-        ProxyPassReverse /_next/ http://127.0.0.1:8080/_next/
 
         ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=3600 keepalive=On upgrade=websocket
         ProxyPassReverse / http://127.0.0.1:8080/

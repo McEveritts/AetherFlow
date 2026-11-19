@@ -294,19 +294,16 @@ pub fn launch(
             "recovery_required: run an explicit rollback before updating".to_string(),
         ));
     }
-    let use_bash = env::var("AETHERFLOW_RELEASE_ENGINE")
-        .unwrap_or_default()
-        .trim()
-        .eq_ignore_ascii_case("bash");
     let custom = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT")
         .ok()
-        .filter(|value| !value.trim().is_empty());
-    let script = if use_bash || custom.is_some() {
-        let path = custom
-            .map(PathBuf::from)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    let script = if super::select_release_engine() == super::ReleaseEngineMode::LegacyBashRelease {
+        custom
             .or_else(super::resolve_release_manager_script)
-            .ok_or_else(|| LaunchError::Failed("release-manager.sh not found".to_string()))?;
-        Some(trusted_path(&path)?)
+            .as_deref()
+            .map(trusted_path)
+            .transpose()?
     } else {
         None
     };

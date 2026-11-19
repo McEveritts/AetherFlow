@@ -19,32 +19,36 @@
 //!    `OverwritePolicy::AllowRegularFilesInStaging` on a non-production staging root.
 
 use crate::error::{HostBackupError, HostBackupResult};
-use crate::manifest::{
-    BackupManifest, BackupTargetKind, CompatibilityReport, SqliteSnapshotMetadata,
-};
+#[cfg(test)]
+use crate::manifest::SqliteSnapshotMetadata;
+use crate::manifest::{BackupManifest, BackupTargetKind, CompatibilityReport};
 use crate::snapshot::{
     verify_sqlite_snapshot_integrity, verify_sqlite_snapshot_integrity_with_trusted_uid,
 };
 use crate::verify::{
-    atomic_install_file_at_destination, atomic_install_file_at_destination_with_verification,
-    checksum_sidecar_path, compute_file_sha256, ensure_private_dir_all,
+    atomic_install_file_at_destination_with_verification, checksum_sidecar_path,
     open_existing_regular_file_nofollow, open_or_create_dir_nofollow,
     open_or_create_provenance_dir_nofollow, parse_sha256_sidecar_str,
     read_verified_text_file_nofollow, reject_if_symlink, reject_symlink_chain,
     safe_backup_file_path, sync_parent_directory, unlink_file_at_destination,
     unlink_file_at_destination_with_trusted_ancestor_uid, validate_backup_filename,
     validate_no_parent_traversal, validate_relative_backup_path, verify_file_sha256,
-    verify_file_sha256_with_trusted_uid, verify_file_with_sidecar,
-    verify_file_with_sidecar_and_trusted_uid, write_private_file_atomic,
-    write_private_file_atomic_tracking_rename, write_sha256_sidecar,
+    verify_file_sha256_with_trusted_uid, verify_file_with_sidecar_and_trusted_uid,
+    write_private_file_atomic, write_private_file_atomic_tracking_rename, write_sha256_sidecar,
 };
+#[cfg(test)]
+use crate::verify::{compute_file_sha256, ensure_private_dir_all, verify_file_with_sidecar};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-#[cfg(unix)]
+use std::fs;
+#[cfg(test)]
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, EntryType};
@@ -4536,11 +4540,7 @@ pub fn recover_interrupted_restore_with_context<Q: ServiceQuiescenceController>(
     Ok(recovered_dirs)
 }
 
-#[allow(dead_code)]
-fn _keep_legacy_imports() {
-    let _ = atomic_install_file_at_destination;
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreReceipt {
     pub backup_id: String,
@@ -4551,6 +4551,7 @@ pub struct RestoreReceipt {
     pub manifest: BackupManifest,
 }
 
+#[cfg(test)]
 pub fn execute_coordinated_restore(
     archive_or_dir: &Path,
     target_root: &Path,

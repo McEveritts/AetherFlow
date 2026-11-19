@@ -642,8 +642,15 @@ af_logged my_shell_fn
             self.assertTrue((heal_dir / "self_healing.log.af-retention.1").is_file())
 
         # Static hygiene checks on setup/sudoers/plugin scripts
-        sudo_tpl = (ROOT / "setup/templates/sudoers.template").read_text(encoding="utf-8")
-        self.assertNotIn("NOPASSWD", sudo_tpl)
+        for retired_tpl in (
+            "setup/templates/sudoers.template",
+            "setup/templates/profile.template",
+            "setup/templates/web-console.conf.template",
+        ):
+            self.assertFalse(
+                (ROOT / retired_tpl).exists(),
+                f"Obsolete QuickBox template {retired_tpl} must remain retired",
+            )
         fin_src = (ROOT / "setup/modules/05-finalize.sh").read_text(encoding="utf-8")
         self.assertIn('data-snapshot" \\) -prune', fin_src)
         self.assertNotIn("Admin Password:", fin_src)

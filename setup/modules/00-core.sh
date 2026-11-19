@@ -90,11 +90,8 @@ function _af_apt_install() {
 # shellcheck disable=2005,2034,2120,2215,2164,2312
 
 function _bashrc() {
-	\cp -f "${local_setup}templates/bashrc.template" /root/.bashrc
-	local profile="/root/.profile"
-	if [[ ! -f "${profile}" ]]; then
-		\cp -f "${local_setup}templates/profile.template" /root/.profile
-	fi
+	install -d -m 0755 /etc/profile.d
+	install -m 0644 "${local_setup}templates/bashrc.template" /etc/profile.d/aetherflow.sh
 }
 
 # intro function (1)
@@ -415,8 +412,10 @@ function _hostname() {
 
 # setting locale function
 function _locale() {
-	echo 'LANGUAGE="en_US.UTF-8"' >>/etc/default/locale
-	echo 'LC_ALL="en_US.UTF-8"' >>/etc/default/locale
+	install -d -m 0755 /etc/default
+	touch /etc/default/locale
+	grep -qxF 'LANGUAGE="en_US.UTF-8"' /etc/default/locale 2>/dev/null || echo 'LANGUAGE="en_US.UTF-8"' >>/etc/default/locale
+	grep -qxF 'LC_ALL="en_US.UTF-8"' /etc/default/locale 2>/dev/null || echo 'LC_ALL="en_US.UTF-8"' >>/etc/default/locale
 	echo "en_US.UTF-8 UTF-8" >/etc/locale.gen
 	if [[ -e /usr/sbin/locale-gen ]]; then
 		locale-gen >>"${OUTTO}" 2>&1

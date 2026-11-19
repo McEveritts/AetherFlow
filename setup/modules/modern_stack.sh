@@ -291,7 +291,17 @@ _pull_prebuilt_v4_release() {
     local channel
     channel="$(_af_resolve_release_channel)"
     local github_repo="${GITHUB_REPO:-McEveritts/AetherFlow}"
-    local artifact_name="${ARTIFACT_NAME:-aetherflow-linux-amd64.tar.gz}"
+    local af_arch=""
+    case "$(uname -m)" in
+        x86_64|amd64) af_arch="amd64" ;;
+        aarch64|arm64) af_arch="arm64" ;;
+        armv7l|armv7|armhf) af_arch="armv7" ;;
+        *)
+            echo "[ERROR] Unsupported host architecture '$(uname -m)' for prebuilt v4 release. Pass --from-source to compile natively." >&2
+            return 1
+            ;;
+    esac
+    local artifact_name="${ARTIFACT_NAME:-aetherflow-linux-${af_arch}.tar.gz}"
     local checksum_name="${CHECKSUM_NAME:-SHA256SUMS}"
 
     if [[ -n "${AETHERFLOW_PREBUILT_TARBALL:-}" ]]; then
@@ -390,8 +400,14 @@ except Exception:
         proto_flags=(--proto '=https' --proto-redir '=https')
     fi
 
-    if ! curl "${proto_flags[@]}" --max-filesize 536870912 -fsSL --retry 3 --max-time 180 -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}"; then
-        echo "[ERROR] Failed to download prebuilt v4 release ${base_url}/${artifact_name}. Refusing implicit source-build fallback." >&2
+    local http_code=""
+    http_code="$(curl "${proto_flags[@]}" --max-filesize 536870912 -sSL --retry 3 --max-time 180 -w '%{http_code}' -o "${dl_dir}/${artifact_name}" "${base_url}/${artifact_name}" || true)"
+    if [[ ! -s "${dl_dir}/${artifact_name}" || ( -n "${http_code}" && "${http_code}" != "200" && "${http_code}" != "000" ) ]]; then
+        if [[ "${http_code}" == "404" ]]; then
+            echo "[ERROR] No prebuilt v4 release tarball found for architecture '${af_arch}' at ${base_url}/${artifact_name} (HTTP 404). Pass --from-source to compile natively for ${af_arch}. Refusing implicit source-build fallback." >&2
+        else
+            echo "[ERROR] Failed to download prebuilt v4 release ${base_url}/${artifact_name} (HTTP ${http_code:-error}). Refusing implicit source-build fallback." >&2
+        fi
         rm -rf "${dl_dir}"
         return 1
     fi
@@ -696,6 +712,9 @@ _build_modern_stack() {
         chown -R aetherflow:aetherflow "${data_dir}" "${af_root}/backend/data" 2>/dev/null || true
         chown root:aetherflow "${run_dir}" "${log_dir}" 2>/dev/null || true
         chmod 0750 "${run_dir}" "${log_dir}" 2>/dev/null || true
+        if [[ "${EUID:-$(id -u)}" -eq 0 && ! -L /install ]]; then
+            install -d -m 0750 -o root -g aetherflow /install 2>/dev/null || install -d -m 0750 -o root -g root /install 2>/dev/null || true
+        fi
     fi
     chmod 0700 "${data_dir}" 2>/dev/null || true
 
@@ -736,7 +755,6 @@ _build_modern_stack() {
     local existing_db_path=""
     local existing_af_db_path=""
     local existing_af_env=""
-    local existing_gin_mode=""
 
     if [[ -f "${existing_env}" ]]; then
         existing_aes_key="$(_af_read_env_raw "${existing_env}" "AES_MASTER_KEY")"
@@ -752,7 +770,6 @@ _build_modern_stack() {
         existing_db_path="$(_af_read_env_raw "${existing_env}" "DB_PATH")"
         existing_af_db_path="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_DB_PATH")"
         existing_af_env="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_ENV")"
-        existing_gin_mode="$(_af_read_env_raw "${existing_env}" "GIN_MODE")"
     fi
 
     # ── Preserve or Generate Cryptographic Keys ───────────────────────────
@@ -876,7 +893,6 @@ _build_modern_stack() {
     local final_hosts="${existing_hosts:-${allowed_hosts}}"
     local final_cors="${existing_cors:-${cors_origins}}"
     local af_env="${existing_af_env:-production}"
-    local gin_mode="${existing_gin_mode:-release}"
 
     # Preserve any custom operator environment variables from existing file before overwriting
     local extra_lines=""
@@ -905,7 +921,6 @@ AETHERFLOW_RUNNER_SOCK=${runner_sock}
 PRIVILEGED_RUNNER_ENABLED=${priv_runner}
 COOKIE_SECURE=${cookie_secure}
 AETHERFLOW_ENV=${af_env}
-GIN_MODE=${gin_mode}
 EOF
 
     if [[ -n "${extra_lines}" ]]; then

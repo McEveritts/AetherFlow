@@ -4,8 +4,10 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_marketplace_catalog_lifecycle_matrix import InstallerFixture
 
 

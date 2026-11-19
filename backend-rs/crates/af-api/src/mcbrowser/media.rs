@@ -204,7 +204,6 @@ impl ThumbnailCache {
         self.entries.insert(key, entry);
     }
 
-    #[allow(dead_code)]
     fn invalidate_user_path(&mut self, user_id: i64, path_prefix: &str) {
         let clean = path_prefix.trim_matches('/');
         let keys_to_remove: Vec<ThumbnailCacheKey> = self
@@ -227,7 +226,6 @@ impl ThumbnailCache {
     }
 }
 
-#[allow(dead_code)]
 pub fn invalidate_thumbnail_cache(user_id: i64, path_prefix: &str) {
     if let Ok(mut guard) = THUMBNAIL_CACHE.lock() {
         guard.invalidate_user_path(user_id, path_prefix);

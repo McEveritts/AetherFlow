@@ -182,40 +182,57 @@ snapshot_app_state "$BACKUP_DIR" /var/lib/calibre-web /var/lib/calibre-library
 if [[ -f /etc/systemd/system/calibreweb.service ]]; then
     cp -a /etc/systemd/system/calibreweb.service "$BACKUP_DIR/calibreweb.service"
 fi
-mkdir -p /opt/calibre-web
-if [[ -e /opt/calibre-web/.venv || -L /opt/calibre-web/.venv ]]; then
-    if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-        stop_systemd_unit calibreweb
-        SERVICE_STOPPED=1
+chmod 755 "$BUILD_DIR"
+chown -hRP calibreweb:calibreweb "$BUILD_DIR" /var/lib/calibre-web /var/lib/calibre-library
+run_as_calibreweb_builder() {
+    if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        runuser -u calibreweb -- "$@"
+    else
+        "$@"
     fi
-    mv /opt/calibre-web/.venv "$BACKUP_DIR/venv"
-    VENV_MOVED=1
-fi
-af_logged python3 -m venv /opt/calibre-web/.venv
-VENV_ACTIVATED=1
-af_logged /opt/calibre-web/.venv/bin/pip install --upgrade pip setuptools wheel
-af_logged /opt/calibre-web/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
-test -x /opt/calibre-web/.venv/bin/python || { log_error "Failed to verify Calibre-Web virtual environment"; exit 1; }
+}
+af_logged run_as_calibreweb_builder python3 -m venv "$BUILD_DIR/.venv"
+af_logged run_as_calibreweb_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel
+af_logged run_as_calibreweb_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir -r "$BUILD_DIR/requirements.txt"
+test -x "$BUILD_DIR/.venv/bin/python" || { log_error "Failed to verify Calibre-Web virtual environment"; exit 1; }
+python3 - "$BUILD_DIR/.venv" "/opt/calibre-web/.venv" <<'VENV_PYEOF'
+import os, pathlib, stat, sys
+old_venv, new_venv = sys.argv[1], sys.argv[2]
+old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
+bin_dir = pathlib.Path(old_venv) / "bin"
+if bin_dir.is_dir():
+    for entry in bin_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        data = entry.read_bytes()
+        updated = data
+        if data.startswith(b"#!") and old_bytes in data.splitlines()[0]:
+            first, sep, rest = data.partition(b"\n")
+            updated = first.replace(old_bytes, new_bytes) + sep + rest
+        elif entry.name.startswith("activate"):
+            updated = data.replace(old_bytes, new_bytes)
+        if updated != data:
+            mode = stat.S_IMODE(entry.stat().st_mode)
+            entry.write_bytes(updated)
+            os.chmod(entry, mode)
+VENV_PYEOF
+chown -hRP root:root "$BUILD_DIR"
+chmod -R go-w,a+rX "$BUILD_DIR"
 
 if [[ ! -f /var/lib/calibre-library/metadata.db ]]; then
     af_logged sqlite3 /var/lib/calibre-library/metadata.db "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, timestamp TEXT, pubdate TEXT, series_index REAL, modify_date TEXT, path TEXT, flags INTEGER, has_cover BOOL DEFAULT 0);" || true
 fi
 
-chown -hRP calibreweb:calibreweb /opt/calibre-web/.venv "$BUILD_DIR" /var/lib/calibre-web /var/lib/calibre-library
+chown -hRP calibreweb:calibreweb /var/lib/calibre-web /var/lib/calibre-library
 
 report_progress 75 "Backing up existing Calibre-Web installation and activating new build..."
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
     stop_systemd_unit calibreweb
     SERVICE_STOPPED=1
 fi
-mv /opt/calibre-web/.venv "$BUILD_DIR/.venv"
-VENV_ACTIVATED=0
 if [[ -d /opt/calibre-web ]]; then
     mv /opt/calibre-web "$BACKUP_DIR/app"
     APP_MOVED=1
-    if [[ "$VENV_MOVED" -eq 1 ]]; then
-        mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
-    fi
 fi
 mv "$BUILD_DIR" /opt/calibre-web
 chmod 755 /opt/calibre-web
@@ -243,6 +260,7 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 /etc/systemd/system/calibreweb.service
 UNIT_WRITTEN=1
 
 af_logged systemctl daemon-reload

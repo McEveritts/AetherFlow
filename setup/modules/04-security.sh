@@ -3,7 +3,7 @@
 
 
 # Strict firewall enforcement during bootstrap.
-# Allows ONLY: SSH (22), HTTP (80), HTTPS (443), Next.js (3000).
+# Allows ONLY: SSH (22), HTTP (80), HTTPS (443), FTP passive (10090:10100), and optionally direct API (8080).
 # Uses UFW as preferred firewall, with iptables fallback.
 #
 # This replaces the old _ssdpblock() which only blocked port 1900.
@@ -17,7 +17,7 @@ function _ssdpblock() {
 _fw_allowed_ports() {
 	local ports="22/tcp 80/tcp 443/tcp 10090:10100/tcp"
 	if [[ "${AF_ALLOW_DIRECT_8080:-0}" == "1" || "${AF_ALLOW_DIRECT_8080:-false}" == "true" ]]; then
-		ports="${ports} 3000/tcp 5757/tcp 8080/tcp"
+		ports="${ports} 8080/tcp"
 	fi
 	echo "${ports}"
 }

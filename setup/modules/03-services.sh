@@ -9,14 +9,12 @@
 # NOTE: _rutorrent and _rutorrent-plugins functions removed — ruTorrent integration sunset
 
 # NOTE: _dashboard and _fileindexer functions removed — legacy PHP dashboard sunset
-# The Next.js frontend now serves as the primary UI
+# The Leptos Rust WASM dashboard served by aetherflow-api is the primary UI
 
 # function to make dirs for first user
 function _makedirs() {
 	\cp -rf /etc/skel/. /home/"${username}"
-	chown -R "${username}".www-data /home/"${username}" >>"${OUTTO}" 2>&1
-	/usr/sbin/usermod -a -G www-data "${username}" >>"${OUTTO}" 2>&1
-	/usr/sbin/usermod -a -G "${username}" www-data >>"${OUTTO}" 2>&1
+	chown -R "${username}:${username}" /home/"${username}" >>"${OUTTO}" 2>&1
 }
 
 # NOTE: _ruconf function removed — ruTorrent user config sunset

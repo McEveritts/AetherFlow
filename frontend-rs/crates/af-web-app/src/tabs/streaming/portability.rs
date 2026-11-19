@@ -8,6 +8,10 @@ use af_web_core::api::{current_auth_epoch, ApiClient};
 use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
+
+const MAX_ARCHIVE_RAW_BYTES: usize = 7 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 #[component]
 pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
     let context = app();
@@ -102,8 +106,11 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
         }
         invalidate.run(());
         let content = raw.get_untracked();
-        if content.is_empty() || content.len() > 8 * 1024 * 1024 {
-            result.set(Some("Choose an archive of 1 byte to 8 MiB.".into()));
+        if content.is_empty() || content.len() > MAX_ARCHIVE_RAW_BYTES {
+            result.set(Some(
+                "Choose an archive of 1 byte to 7 MiB (leaves headroom for the 8 MiB request wrapper)."
+                    .into(),
+            ));
             return;
         }
         let archive = match serde_json::from_str::<Value>(&content) {
@@ -123,6 +130,12 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
             }
         };
         let body = json!({"mode":mode.get_untracked(),"archive":archive});
+        if serde_json::to_vec(&body).is_ok_and(|bytes| bytes.len() > MAX_REQUEST_BODY_BYTES) {
+            result.set(Some(
+                "Serialized archive request exceeds the 8 MiB backend limit.".into(),
+            ));
+            return;
+        }
         let ticket = generation.get_untracked();
         busy.set(true);
         spawn_local(async move {
@@ -225,7 +238,7 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                 </select>
             </label>
             <label class="block text-sm">
-                {move || tt(context, "Native archive JSON file (maximum 8 MiB)")}
+                {"Native archive JSON file (maximum 7 MiB raw to fit 8 MiB request limit)"}
                 <input
                     type="file"
                     accept=".json,application/json"
@@ -234,8 +247,8 @@ pub(super) fn HistoryPortability(on_changed: Callback<()>) -> impl IntoView {
                         let input = event_target::<web_sys::HtmlInputElement>(&e);
                         if let Some(file) = input.files().and_then(|files| files.get(0)) {
                             invalidate.run(());
-                            if file.size() > 8.0 * 1024.0 * 1024.0 {
-                                result.set(Some("Archive exceeds 8 MiB.".into()));
+                            if file.size() > MAX_ARCHIVE_RAW_BYTES as f64 {
+                                result.set(Some("Archive exceeds 7 MiB raw limit (8 MiB max with request wrapper).".into()));
                                 return;
                             }
                             let ticket = generation.get_untracked();

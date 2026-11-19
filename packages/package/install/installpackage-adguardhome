@@ -41,7 +41,7 @@ if [[ ! "$DNS_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DNS_PORT < 1 || 10#$DNS_PORT > 
     print_error "AF_DNS_PORT must be between 1 and 65535."
     exit 1
 fi
-check_dns_port_53_available "adguardhome" "pihole" "AdGuardHome"
+check_dns_port_53_available "adguardhome" "pihole" "AdGuardHome" "$DNS_PORT"
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and preparing network environment..."
 

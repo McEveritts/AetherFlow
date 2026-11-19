@@ -451,49 +451,147 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
         stable) default_bootstrap_ref="${AETHERFLOW_STABLE_BOOTSTRAP_REF:-master}" ;;
     esac
     BOOTSTRAP_REF="${AETHERFLOW_BOOTSTRAP_REF:-${default_bootstrap_ref}}"
-    BOOTSTRAP_URL="${AETHERFLOW_BOOTSTRAP_URL:-https://codeload.github.com/McEveritts/AetherFlow/tar.gz/refs/heads/${BOOTSTRAP_REF}}"
-    BOOTSTRAP_TARBALL="/tmp/aetherflow-bootstrap.$$.tar.gz"
-    bootstrap_tmp="/tmp/aetherflow-bootstrap.$$"
-
-    (
-        curl -fsSL --retry 3 --output "${BOOTSTRAP_TARBALL}" \
-            "${BOOTSTRAP_URL}" >/dev/null 2>&1 || rm -f "${BOOTSTRAP_TARBALL}"
-    ) &
-    prefetch_pid=$!
+    BOOTSTRAP_URL="${AETHERFLOW_BOOTSTRAP_URL:-}"
+    bootstrap_tmp="$(mktemp -d /tmp/aetherflow-bootstrap.XXXXXXXXXX)"
+    chmod 0700 "${bootstrap_tmp}"
+    bootstrap_stage=""
+    trap 'rm -rf "${bootstrap_tmp:-}" "${bootstrap_stage:-}"' EXIT
+    BOOTSTRAP_TARBALL="${bootstrap_tmp}/aetherflow-bootstrap.tar.gz"
+    bootstrap_extract="${bootstrap_tmp}/src"
+    mkdir -p "${bootstrap_extract}"
 
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y git bc curl ca-certificates sqlite3 >/dev/null 2>&1
-    wait "${prefetch_pid}" 2>/dev/null || true
+    apt-get install -y git bc curl ca-certificates sqlite3 python3 >/dev/null 2>&1
 
-    rm -rf "${bootstrap_tmp}"
-    mkdir -p "${bootstrap_tmp}"
     bootstrap_source=""
+    expected_bootstrap_sha="${AETHERFLOW_BOOTSTRAP_SHA256:-}"
+    expected_bootstrap_sha="${expected_bootstrap_sha,,}"
 
-    if [[ -n "${AETHERFLOW_BOOTSTRAP_SHA256:-}" ]]; then
-        if [[ ! -s "${BOOTSTRAP_TARBALL}" ]]; then
-            rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
-            af_die "Bootstrap archive download failed from ${BOOTSTRAP_URL}; refusing unverified git fallback when AETHERFLOW_BOOTSTRAP_SHA256 is set."
+    if [[ -z "${BOOTSTRAP_URL}" ]]; then
+        if [[ "${RELEASE_CHANNEL}" == "stable" ]]; then
+            release_meta_url="https://api.github.com/repos/McEveritts/AetherFlow/releases/latest"
+        else
+            release_meta_url="https://api.github.com/repos/McEveritts/AetherFlow/releases?per_page=10"
         fi
-        actual_bootstrap_sha="$(sha256sum "${BOOTSTRAP_TARBALL}" | awk '{print tolower($1)}')"
-        if [[ "${actual_bootstrap_sha}" != "${AETHERFLOW_BOOTSTRAP_SHA256,,}" ]]; then
-            rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
-            af_die "Bootstrap archive SHA-256 verification failed (expected=${AETHERFLOW_BOOTSTRAP_SHA256,,}, actual=${actual_bootstrap_sha}). Existing /opt/AetherFlow preserved."
+        release_meta_json="${bootstrap_tmp}/releases.json"
+        if curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" \
+            --output "${release_meta_json}" "${release_meta_url}" >/dev/null 2>&1 && [[ -s "${release_meta_json}" ]]; then
+            resolved_release_url="$(python3 - "${release_meta_json}" "${RELEASE_CHANNEL}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+channel = sys.argv[2]
+releases = [data] if isinstance(data, dict) else (data if isinstance(data, list) else [])
+for rel in releases:
+    if not isinstance(rel, dict) or rel.get("draft"):
+        continue
+    if channel == "stable" and rel.get("prerelease"):
+        continue
+    assets = {a.get("name"): a.get("browser_download_url") for a in (rel.get("assets") or []) if isinstance(a, dict)}
+    if assets.get("aetherflow-bootstrap.tar.gz") and assets.get("SHA256SUMS"):
+        print(assets["aetherflow-bootstrap.tar.gz"])
+        break
+PYEOF
+)"
+            if [[ -n "${resolved_release_url}" ]]; then
+                BOOTSTRAP_URL="${resolved_release_url}"
+            fi
         fi
     fi
 
-    if [[ -s "${BOOTSTRAP_TARBALL}" ]]; then
-        if tar --no-same-owner --no-same-permissions -xzf "${BOOTSTRAP_TARBALL}" -C "${bootstrap_tmp}" >/dev/null 2>&1; then
-            bootstrap_source="$(find "${bootstrap_tmp}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-        fi
-        rm -f "${BOOTSTRAP_TARBALL}"
-    fi
+    if [[ -n "${BOOTSTRAP_URL}" ]]; then
+        curl -fsSL --retry 3 --output "${BOOTSTRAP_TARBALL}" \
+            "${BOOTSTRAP_URL}" >/dev/null 2>&1 || rm -f "${BOOTSTRAP_TARBALL}"
 
-    if [[ -z "${bootstrap_source}" ]]; then
-        if [[ -n "${AETHERFLOW_BOOTSTRAP_SHA256:-}" ]]; then
+        if [[ -z "${expected_bootstrap_sha}" ]]; then
+            sha256sums_url="${AETHERFLOW_BOOTSTRAP_SHA256SUMS_URL:-}"
+            if [[ -z "${sha256sums_url}" && "${BOOTSTRAP_URL}" == */releases/download/* ]]; then
+                sha256sums_url="${BOOTSTRAP_URL%/*}/SHA256SUMS"
+            fi
+            if [[ -n "${sha256sums_url}" ]]; then
+                bootstrap_sums="${bootstrap_tmp}/SHA256SUMS"
+                if curl -fsSL --retry 3 --output "${bootstrap_sums}" "${sha256sums_url}" >/dev/null 2>&1 && [[ -s "${bootstrap_sums}" ]]; then
+                    bootstrap_asset="${BOOTSTRAP_URL##*/}"
+                    bootstrap_asset="${bootstrap_asset%%\?*}"
+                    expected_bootstrap_sha="$(awk -v target="${bootstrap_asset}" '
+                        /^[0-9A-Fa-f]{64}[[:space:]]+/ {
+                            file=$2
+                            sub(/^\.\//, "", file)
+                            if (file == target) {
+                                print tolower($1)
+                                exit
+                            }
+                        }
+                    ' "${bootstrap_sums}")"
+                fi
+            fi
+        fi
+
+        if [[ -n "${expected_bootstrap_sha}" ]]; then
+            if [[ ! -s "${BOOTSTRAP_TARBALL}" ]]; then
+                rm -rf "${bootstrap_tmp}"
+                af_die "Bootstrap archive download failed from ${BOOTSTRAP_URL}; refusing unverified fallback. Existing /opt/AetherFlow preserved."
+            fi
+            actual_bootstrap_sha="$(sha256sum "${BOOTSTRAP_TARBALL}" | awk '{print tolower($1)}')"
+            if [[ "${actual_bootstrap_sha}" != "${expected_bootstrap_sha}" ]]; then
+                rm -rf "${bootstrap_tmp}"
+                af_die "Bootstrap archive SHA-256 verification failed (expected=${expected_bootstrap_sha}, actual=${actual_bootstrap_sha}). Existing /opt/AetherFlow preserved."
+            fi
+        elif [[ "${AETHERFLOW_ALLOW_UNVERIFIED_BOOTSTRAP:-0}" != "1" ]]; then
+            rm -rf "${bootstrap_tmp}"
+            af_die "Refusing unverified bootstrap download from ${BOOTSTRAP_URL} without SHA256SUMS or AETHERFLOW_BOOTSTRAP_SHA256 (set AETHERFLOW_ALLOW_UNVERIFIED_BOOTSTRAP=1 only for developer testing). Existing /opt/AetherFlow preserved."
+        fi
+
+        if [[ -s "${BOOTSTRAP_TARBALL}" ]]; then
+            if tar --no-same-owner --no-same-permissions -xzf "${BOOTSTRAP_TARBALL}" -C "${bootstrap_extract}" >/dev/null 2>&1; then
+                bootstrap_source="$(find "${bootstrap_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+            fi
+            rm -f "${BOOTSTRAP_TARBALL}"
+        fi
+        if [[ -z "${bootstrap_source}" ]]; then
             rm -rf "${bootstrap_tmp}"
             af_die "Failed to extract verified bootstrap archive. Existing /opt/AetherFlow preserved."
         fi
-        if ! git clone --depth 1 --branch "${BOOTSTRAP_REF}" https://github.com/McEveritts/AetherFlow.git "${bootstrap_tmp}/repo" >/dev/null 2>&1; then
+    else
+        commit_meta_json="${bootstrap_tmp}/commit.json"
+        resolved_commit_sha=""
+        resolved_tree_sha=""
+        if [[ "${BOOTSTRAP_REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            resolved_commit_sha="${BOOTSTRAP_REF,,}"
+        elif curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" \
+            --output "${commit_meta_json}" \
+            "https://api.github.com/repos/McEveritts/AetherFlow/commits/${BOOTSTRAP_REF}" >/dev/null 2>&1 && [[ -s "${commit_meta_json}" ]]; then
+            read -r resolved_commit_sha resolved_tree_sha < <(python3 - "${commit_meta_json}" <<'PYEOF' 2>/dev/null || true
+import json, re, sys
+doc = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+sha = str(doc.get("sha") or "").strip().lower()
+tree = str(((doc.get("commit") or {}).get("tree") or {}).get("sha") or "").strip().lower()
+if re.fullmatch(r"[0-9a-f]{40}", sha) and re.fullmatch(r"[0-9a-f]{40}", tree):
+    print(f"{sha} {tree}")
+PYEOF
+)
+        fi
+        if [[ -z "${resolved_commit_sha}" && "${AETHERFLOW_ALLOW_UNVERIFIED_BOOTSTRAP:-0}" != "1" ]]; then
+            rm -rf "${bootstrap_tmp}"
+            af_die "Unable to resolve verified commit digest for '${BOOTSTRAP_REF}' from GitHub API; refusing unverified bootstrap. Existing /opt/AetherFlow preserved."
+        fi
+        mkdir -p "${bootstrap_tmp}/repo"
+        if [[ -n "${resolved_commit_sha}" ]]; then
+            if ! (
+                git -C "${bootstrap_tmp}/repo" init -q &&
+                git -C "${bootstrap_tmp}/repo" remote add origin https://github.com/McEveritts/AetherFlow.git &&
+                git -C "${bootstrap_tmp}/repo" fetch -q --depth 1 origin "${resolved_commit_sha}" &&
+                git -C "${bootstrap_tmp}/repo" checkout -q --detach FETCH_HEAD
+            ) >/dev/null 2>&1; then
+                rm -rf "${bootstrap_tmp}"
+                af_die "Failed to fetch verified AetherFlow commit '${resolved_commit_sha}'. Refusing implicit branch fallback; existing /opt/AetherFlow preserved."
+            fi
+            actual_commit_sha="$(git -C "${bootstrap_tmp}/repo" rev-parse HEAD 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+            actual_tree_sha="$(git -C "${bootstrap_tmp}/repo" rev-parse 'HEAD^{tree}' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+            if [[ "${actual_commit_sha}" != "${resolved_commit_sha}" ]] || [[ -n "${resolved_tree_sha}" && "${actual_tree_sha}" != "${resolved_tree_sha}" ]]; then
+                rm -rf "${bootstrap_tmp}"
+                af_die "Fetched Git object digest mismatch (commit=${actual_commit_sha}/${resolved_commit_sha}, tree=${actual_tree_sha}/${resolved_tree_sha}). Existing /opt/AetherFlow preserved."
+            fi
+        elif ! git clone --depth 1 --branch "${BOOTSTRAP_REF}" https://github.com/McEveritts/AetherFlow.git "${bootstrap_tmp}/repo" >/dev/null 2>&1; then
             rm -rf "${bootstrap_tmp}"
             af_die "Failed to clone AetherFlow branch '${BOOTSTRAP_REF}'. Refusing implicit branch fallback; existing /opt/AetherFlow preserved."
         fi
@@ -505,21 +603,29 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
         af_die "Staged bootstrap tree is incomplete (missing setup/AetherFlow-Setup or setup/modules). Existing /opt/AetherFlow preserved."
     fi
 
-    # Atomically replace /opt/AetherFlow only after staging & verification succeed
+    # Atomically replace /opt/AetherFlow via sibling staging cutover after verification
+    mkdir -p /opt
+    bootstrap_stage="$(mktemp -d /opt/.AetherFlow.staging.XXXXXXXXXX)"
+    chmod 0755 "${bootstrap_stage}"
+    if ! cp -a "${bootstrap_source}/." "${bootstrap_stage}/"; then
+        rm -rf "${bootstrap_stage}" "${bootstrap_tmp}"
+        af_die "Failed to stage /opt/AetherFlow from verified bootstrap tree. Existing /opt/AetherFlow preserved."
+    fi
+
     bootstrap_backup=""
     if [[ -e /opt/AetherFlow ]]; then
         bootstrap_backup="/opt/AetherFlow.bak.$$"
         rm -rf "${bootstrap_backup}"
         mv /opt/AetherFlow "${bootstrap_backup}"
     fi
-    mkdir -p /opt/AetherFlow
-    if ! cp -a "${bootstrap_source}/." /opt/AetherFlow/; then
-        rm -rf /opt/AetherFlow "${bootstrap_tmp}"
-        if [[ -n "${bootstrap_backup}" && -d "${bootstrap_backup}" ]]; then
-            mv "${bootstrap_backup}" /opt/AetherFlow
+    if ! mv -T "${bootstrap_stage}" /opt/AetherFlow; then
+        rm -rf "${bootstrap_stage}" "${bootstrap_tmp}"
+        if [[ -n "${bootstrap_backup}" && -e "${bootstrap_backup}" ]]; then
+            mv "${bootstrap_backup}" /opt/AetherFlow || true
         fi
         af_die "Failed to stage /opt/AetherFlow from verified bootstrap tree; restored previous /opt/AetherFlow."
     fi
+    bootstrap_stage=""
     # Preserve existing immutable releases/current across bootstrap refresh if present
     if [[ -n "${bootstrap_backup}" && -d "${bootstrap_backup}/releases" && ! -d /opt/AetherFlow/releases ]]; then
         mv "${bootstrap_backup}/releases" /opt/AetherFlow/releases
@@ -528,6 +634,7 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
         fi
     fi
     rm -rf "${bootstrap_tmp}" "${bootstrap_backup}"
+    trap - EXIT
 
     # Relaunch from the proper directory
     cd /opt/AetherFlow/setup || exit 1
@@ -675,13 +782,11 @@ if [[ "${FRESH_INSTALL}" == "true" ]]; then
     _cleanup_state
 fi
 if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=1090
-    source "${CONFIG_FILE}" 2>/dev/null
+    _load_config_into_vars
 fi
 _apply_seed_config
 if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=1090
-    source "${CONFIG_FILE}" 2>/dev/null
+    _load_config_into_vars
 fi
 if af_truthy "${build_from_source:-}"; then
     BUILD_FROM_SOURCE=true
@@ -758,7 +863,7 @@ S=$(date +%s)
 OK="$(printf '[ %sDONE%s ]' "${bold}${green}" "${normal}")"
 genpass=$(_string)
 HTPASSWD="/etc/htpasswd"
-REALM="aetherflow"
+REALM="Welcome to AetherFlow"
 AUTODLPASSWORD=$(_string)
 AUTODLPORT=$(shuf -i 2000-61000 -n 1)
 # shellcheck disable=2312

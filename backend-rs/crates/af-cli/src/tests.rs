@@ -1310,10 +1310,10 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
         );
     }
 
-    // 3. Verify .aetherflow.conf has HOSTNAME_CONFIGURED and SUDOERS_HARDENED
+    // 3. Verify .aetherflow.conf has HOSTNAME_CONFIGURED and SUDOERS_HARDENED (POSIX single-quoted)
     let conf_raw = fs::read_to_string(root.join("install/.aetherflow.conf")).unwrap();
-    assert!(conf_raw.contains("HOSTNAME_CONFIGURED=true"));
-    assert!(conf_raw.contains("SUDOERS_HARDENED=true"));
+    assert!(conf_raw.contains("HOSTNAME_CONFIGURED='true'"));
+    assert!(conf_raw.contains("SUDOERS_HARDENED='true'"));
 
     // 4. Verify bashrc
     let bashrc_path = root.join("root/.bashrc");
@@ -2051,4 +2051,116 @@ fn hosts_cli_commands_validate_and_dispatch_to_runner() {
     // Validation rejections
     assert!(parse_cli_args(["hosts", "update", "not-an-ip", "app.aether.local"]).is_err());
     assert!(parse_cli_args(["hosts", "remove", "bad;domain"]).is_err());
+}
+
+#[test]
+fn query_persisted_ingress_port_reads_retained_config_json_and_aligns_db_precedence() {
+    static ENV_TEST_LOCK: once_cell::sync::Lazy<Mutex<()>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(()));
+    let tmp = TempTestDir::new("h05-ingress");
+    let db_path = tmp.path().join("aetherflow.sqlite");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE app_ingress_configs (app_name TEXT PRIMARY KEY, listen_port INTEGER NOT NULL);
+         CREATE TABLE retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+         INSERT INTO app_ingress_configs(app_name, listen_port) VALUES ('sonarr', 18989);
+         INSERT INTO retained_app_ingress_configs(app_name, config_json) VALUES ('radarr', '{\"app_name\":\"radarr\",\"listen_port\":17878}');",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        query_persisted_ingress_port_from_sqlite(&db_path, "Sonarr"),
+        Some(18989)
+    );
+    assert_eq!(
+        query_persisted_ingress_port_from_sqlite(&db_path, "Radarr"),
+        Some(17878)
+    );
+    assert_eq!(
+        query_persisted_ingress_port_from_sqlite(&db_path, "missing"),
+        None
+    );
+
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_af = std::env::var("AF_DB_PATH").ok();
+    let prev_db = std::env::var("DB_PATH").ok();
+    let prev_legacy = std::env::var("AETHERFLOW_DB_PATH").ok();
+    let prev_data = std::env::var("DATA_DIR").ok();
+
+    std::env::set_var("AF_DB_PATH", "/tmp/af_1.sqlite");
+    std::env::set_var("DB_PATH", "/tmp/db_2.sqlite");
+    std::env::set_var("AETHERFLOW_DB_PATH", "/tmp/legacy_3.sqlite");
+    std::env::set_var("DATA_DIR", "/tmp/data_4");
+
+    let cands = candidate_cli_sqlite_dbs(&GlobalOptions::default());
+    assert_eq!(
+        &cands[..5],
+        &[
+            PathBuf::from("/tmp/af_1.sqlite"),
+            PathBuf::from("/tmp/db_2.sqlite"),
+            PathBuf::from("/tmp/legacy_3.sqlite"),
+            PathBuf::from("/tmp/data_4/aetherflow.sqlite"),
+            PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"),
+        ]
+    );
+
+    let restore = |k: &str, v: Option<String>| match v {
+        Some(val) => std::env::set_var(k, val),
+        None => std::env::remove_var(k),
+    };
+    restore("AF_DB_PATH", prev_af);
+    restore("DB_PATH", prev_db);
+    restore("AETHERFLOW_DB_PATH", prev_legacy);
+    restore("DATA_DIR", prev_data);
+}
+
+#[test]
+fn provision_conf_uses_posix_single_quoting_unquotes_variants_and_blocks_passwd() {
+    let tmp = TempTestDir::new("conf-quoting");
+    let paths = ProvisionPaths::for_root(tmp.path()).unwrap();
+    let store = ProvisionStateStore::new(paths.clone());
+
+    store
+        .save_config_value("SPECIAL_VAL", "it's $(id) & `uname`; a \"b\"")
+        .unwrap();
+    let raw = fs::read_to_string(&paths.config_file).unwrap();
+    assert!(
+        raw.contains("SPECIAL_VAL='it'\\''s $(id) & `uname`; a \"b\"'\n"),
+        "unexpected serialized conf: {raw}"
+    );
+    let parsed = store.read_config_map().unwrap();
+    assert_eq!(
+        parsed.get("SPECIAL_VAL").map(String::as_str),
+        Some("it's $(id) & `uname`; a \"b\"")
+    );
+
+    // Rejects plaintext `passwd`
+    assert!(store.save_config_value("passwd", "hunter2").is_err());
+
+    // Reader unquotes single-quoted, double-quoted, bash %q backslash-escaped, and $'...' values,
+    // and strips/ignores any legacy `passwd` entry.
+    let legacy_sample = "\
+SINGLE='hello'\\''world'\n\
+DOUBLE=\"quoted \\\"val\\\" \\$ok\"\n\
+ESCAPED=foo\\ bar\\&baz\n\
+ANSIC=$'tab\\there'\n\
+PLAIN=simple\n\
+passwd='legacy-plaintext'\n";
+    let decoded = crate::provision::parse_config_map(legacy_sample);
+    assert_eq!(
+        decoded.get("SINGLE").map(String::as_str),
+        Some("hello'world")
+    );
+    assert_eq!(
+        decoded.get("DOUBLE").map(String::as_str),
+        Some("quoted \"val\" $ok")
+    );
+    assert_eq!(
+        decoded.get("ESCAPED").map(String::as_str),
+        Some("foo bar&baz")
+    );
+    assert_eq!(decoded.get("ANSIC").map(String::as_str), Some("tab\there"));
+    assert_eq!(decoded.get("PLAIN").map(String::as_str), Some("simple"));
+    assert!(!decoded.contains_key("passwd"));
 }

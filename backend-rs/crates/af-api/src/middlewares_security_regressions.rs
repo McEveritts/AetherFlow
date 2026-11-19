@@ -1,4 +1,7 @@
-use super::resolve_app_target_for_host;
+use super::{
+    app_subdomain_proxy_middleware, is_host_trusted, is_private_or_loopback_ip,
+    resolve_app_target_for_host,
+};
 use std::{env, fs, path::PathBuf};
 
 struct Fixture {
@@ -326,4 +329,119 @@ fn security_gateway_ingress_read_error_does_not_authorize_catalog_fallback() {
             "failed ingress read authorized {host}"
         );
     }
+}
+
+#[test]
+fn security_gateway_ip_canonicalization_tailscale_cgnat_and_127_evil_rejection() {
+    assert!(is_private_or_loopback_ip("127.0.0.1"));
+    assert!(is_private_or_loopback_ip("::1"));
+    assert!(is_private_or_loopback_ip("[::1]:8080"));
+    assert!(is_private_or_loopback_ip("::ffff:127.0.0.1"));
+    assert!(is_private_or_loopback_ip("[::ffff:127.0.0.1]:443"));
+    assert!(is_private_or_loopback_ip("100.64.0.1"));
+    assert!(is_private_or_loopback_ip("100.127.255.254"));
+    assert!(is_private_or_loopback_ip("::ffff:100.100.100.100"));
+
+    assert!(!is_private_or_loopback_ip("127.evil"));
+    assert!(!is_private_or_loopback_ip("127.evil.example.com"));
+    assert!(!is_private_or_loopback_ip("10.attacker.com"));
+    assert!(!is_private_or_loopback_ip("localhost"));
+    assert!(!is_private_or_loopback_ip(""));
+    assert!(!is_private_or_loopback_ip("100.63.255.255"));
+    assert!(!is_private_or_loopback_ip("100.128.0.1"));
+    assert!(!is_private_or_loopback_ip("::ffff:203.0.113.10"));
+
+    assert!(crate::ws::is_trusted_proxy_peer(
+        "::ffff:127.0.0.1".parse().unwrap()
+    ));
+    assert!(!crate::ws::is_trusted_proxy_peer(
+        "::ffff:203.0.113.10".parse().unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn security_gateway_disabled_external_subdomain_fails_closed_without_serving_dashboard() {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use std::collections::HashSet;
+    use tower::ServiceExt;
+
+    if !isolated("middlewares::security_regressions::security_gateway_disabled_external_subdomain_fails_closed_without_serving_dashboard") {
+        return;
+    }
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("packages.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {
+                "name": "syncthing", "label": "Syncthing", "description": "disposable fixture",
+                "lock_file": "/install/.syncthing.lock", "category": "test",
+                "service_type": "systemd", "service_name": "syncthing", "default_port": 8384
+            },
+            {
+                "name": "sonarr", "label": "Sonarr", "description": "unconfigured catalog app",
+                "lock_file": "/install/.sonarr.lock", "category": "test",
+                "service_type": "systemd", "service_name": "sonarr", "default_port": 8989
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("install/.syncthing.lock"), "installed").unwrap();
+    fixture.active("sync.review.test", false);
+
+    // Disabled public_domain and disabled <catalog_app>.<base_domain> must NOT be trusted for control-plane routes
+    let empty_allowed = HashSet::new();
+    assert!(!is_host_trusted("sync.review.test", &empty_allowed));
+    assert!(!is_host_trusted("syncthing.review.test", &empty_allowed));
+    assert!(!is_host_trusted("sonarr.review.test", &empty_allowed));
+    assert!(is_host_trusted("review.test", &empty_allowed));
+    assert!(is_host_trusted("aetherflow.review.test", &empty_allowed));
+
+    // app_subdomain_proxy_middleware must return 403 rather than falling through to dashboard
+    let app = Router::new()
+        .route("/", get(|| async { (StatusCode::OK, "DASHBOARD") }))
+        .layer(middleware::from_fn(app_subdomain_proxy_middleware));
+
+    for disabled_host in [
+        "sync.review.test",
+        "syncthing.review.test",
+        "sonarr.review.test",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, disabled_host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "disabled external app host {disabled_host} must fail closed"
+        );
+    }
+
+    // Control-plane base_domain must still pass through cleanly even if packages.json is unreadable
+    fs::write(fixture.root.join("packages.json"), "{corrupt").unwrap();
+    let ok_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "review.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_resp.status(), StatusCode::OK);
 }

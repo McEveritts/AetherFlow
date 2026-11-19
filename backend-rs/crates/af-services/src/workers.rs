@@ -810,23 +810,14 @@ fn resolve_backups_directory() -> PathBuf {
     } else {
         None
     };
-    let has_explicit_override = env::var("AETHERFLOW_BACKUP_DIR")
+    let default_data_backups = env::var("DATA_DIR")
         .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-        || env::var("AETHERFLOW_FS_ROOT")
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty())
-        || env::var("AETHERFLOW_CONFIG_ROOT")
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty())
-        || db_path_opt.is_some_and(|p| p != Path::new("/var/lib/aetherflow/aetherflow.sqlite"));
-    if !has_explicit_override {
-        let default_prod = Path::new("/var/backups/aetherflow");
-        if default_prod.is_dir() || fs::create_dir_all(default_prod).is_ok() {
-            return default_prod.to_path_buf();
-        }
-    }
-    af_models::resolve_active_backup_dir_from_env(None, db_path_opt, "/var/backups/aetherflow")
+        .or_else(|| env::var("AETHERFLOW_DATA_DIR").ok())
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .map(|dir| format!("{dir}/backups"))
+        .unwrap_or_else(|| "/var/lib/aetherflow/backups".to_string());
+    af_models::resolve_active_backup_dir_from_env(None, db_path_opt, &default_data_backups)
 }
 
 fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
@@ -842,7 +833,7 @@ fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
     let ts = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let config = af_host::HostBackupConfig {
         backup_dir,
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: format!("v{}", env!("CARGO_PKG_VERSION")),
         sqlite_db_path: Some(db_path),
         snapshot_options: af_host::SnapshotOptions::default(),
         config_targets: vec![],
@@ -5294,6 +5285,7 @@ pub fn publish_mediaflow_progress(event: &serde_json::Value) {
 }
 
 async fn probe_mediaflow_duration_secs(src_path: &Path) -> Option<f64> {
+    let file_uri = format!("file:{}", src_path.to_string_lossy());
     let mut cmd = Command::new("ffprobe");
     cmd.args([
         "-v",
@@ -5302,8 +5294,8 @@ async fn probe_mediaflow_duration_secs(src_path: &Path) -> Option<f64> {
         "format=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
+        &file_uri,
     ])
-    .arg(src_path)
     .kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
         .await
@@ -5328,6 +5320,246 @@ fn mediaflow_transcode_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+const DEFAULT_MEDIAFLOW_TRASH_RETENTION_SECS: u64 = 7 * 24 * 3600;
+
+fn mediaflow_trash_retention() -> Duration {
+    let secs = env::var("MEDIAFLOW_TRASH_RETENTION_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MEDIAFLOW_TRASH_RETENTION_SECS);
+    Duration::from_secs(secs)
+}
+
+fn mediaflow_allowed_roots() -> Vec<PathBuf> {
+    if let Ok(raw) = env::var("AF_ALLOWED_FS_ROOTS") {
+        let roots: Vec<PathBuf> = raw
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+    ["/mnt", "/media", "/srv", "/home"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn is_path_within_allowed_mediaflow_roots(candidate: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| {
+        if let Ok(canon_root) = fs::canonicalize(root) {
+            candidate.starts_with(&canon_root)
+        } else {
+            false
+        }
+    })
+}
+
+fn validate_queued_mediaflow_source(raw_path: &str) -> Result<PathBuf, String> {
+    let src_path = Path::new(raw_path);
+    if raw_path.trim().is_empty() || !src_path.is_absolute() {
+        return Err("Source path must be an absolute path".to_string());
+    }
+    let Some(fname_os) = src_path.file_name() else {
+        return Err("Source path has no filename".to_string());
+    };
+    let fname = fname_os.to_string_lossy();
+    if fname.starts_with(".tmp_mediaflow_")
+        || fname.ends_with(".tmp.mkv")
+        || src_path
+            .components()
+            .any(|c| c.as_os_str() == ".mediaflow_trash")
+    {
+        return Err("Refusing temporary or trash path in MediaFlow queue".to_string());
+    }
+    let Some(parent) = src_path.parent() else {
+        return Err("Source path has no parent directory".to_string());
+    };
+
+    let lmeta =
+        fs::symlink_metadata(src_path).map_err(|_| "Source file does not exist".to_string())?;
+    if lmeta.file_type().is_symlink() {
+        return Err("Refusing symlink source file".to_string());
+    }
+    if !lmeta.file_type().is_file() {
+        return Err("Source path is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if lmeta.nlink() != 1 {
+            return Err("Refusing hard-linked source file (st_nlink != 1)".to_string());
+        }
+    }
+
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let opened = open_opts
+        .open(src_path)
+        .map_err(|e| format!("Failed to open source file safely: {e}"))?;
+    let fmeta = opened
+        .metadata()
+        .map_err(|e| format!("Failed to stat opened source file: {e}"))?;
+    if !fmeta.is_file() {
+        return Err("Opened source descriptor is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fmeta.nlink() != 1 {
+            return Err("Refusing hard-linked source descriptor (st_nlink != 1)".to_string());
+        }
+        if fmeta.dev() != lmeta.dev() || fmeta.ino() != lmeta.ino() {
+            return Err("Source file inode changed concurrently during validation".to_string());
+        }
+    }
+    drop(opened);
+
+    let parent_lmeta =
+        fs::symlink_metadata(parent).map_err(|_| "Parent directory does not exist".to_string())?;
+    if parent_lmeta.file_type().is_symlink() || !parent_lmeta.is_dir() {
+        return Err("Source parent directory must not be a symlink".to_string());
+    }
+    let canon_parent = fs::canonicalize(parent)
+        .map_err(|e| format!("Failed to canonicalize parent directory: {e}"))?;
+    let canon_src = fs::canonicalize(src_path)
+        .map_err(|e| format!("Failed to canonicalize source file: {e}"))?;
+    if canon_src != canon_parent.join(fname_os) {
+        return Err("Source path resolved through an unexpected link".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let cmeta = fs::symlink_metadata(&canon_src)
+            .map_err(|e| format!("Failed to verify canonical source metadata: {e}"))?;
+        if cmeta.dev() != lmeta.dev() || cmeta.ino() != lmeta.ino() || cmeta.nlink() != 1 {
+            return Err("Canonical source metadata mismatch".to_string());
+        }
+    }
+
+    let roots = mediaflow_allowed_roots();
+    if !is_path_within_allowed_mediaflow_roots(&canon_src, &roots) {
+        return Err("Source file is outside allowed MediaFlow library roots".to_string());
+    }
+
+    Ok(canon_src)
+}
+
+fn is_stale_mediaflow_temp_name(name: &str) -> bool {
+    (name.starts_with(".tmp_mediaflow_") && name.ends_with(".mkv"))
+        || (name.starts_with('.') && name.ends_with(".tmp.mkv"))
+}
+
+fn cleanup_stale_mediaflow_temps_in_dir(dir: &Path) {
+    let Ok(dmeta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if dmeta.file_type().is_symlink() || !dmeta.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_stale_mediaflow_temp_name(name) {
+            continue;
+        }
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if !meta.file_type().is_symlink() && meta.file_type().is_file() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+fn prune_mediaflow_trash_dir(trash_dir: &Path, retention: Duration) {
+    let Ok(tmeta) = fs::symlink_metadata(trash_dir) else {
+        return;
+    };
+    if tmeta.file_type().is_symlink() || !tmeta.is_dir() {
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = fs::read_dir(trash_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            continue;
+        }
+        let expired = meta
+            .modified()
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age >= retention);
+        if expired {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Reconciles any `PROCESSING` MediaFlow jobs stranded by a prior crash/restart to `FAILED`
+/// and sweeps stale `.tmp_mediaflow_*` / `.*.tmp.mkv` temp files and expired `.mediaflow_trash` entries.
+pub fn reconcile_mediaflow_startup() {
+    let Ok(conn) = af_db::get_conn() else {
+        return;
+    };
+    let mut candidate_dirs: HashSet<PathBuf> = HashSet::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT file_path FROM mediaflow_queue") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            for path_str in rows.flatten() {
+                if let Some(parent) = Path::new(&path_str).parent() {
+                    if parent.is_absolute() {
+                        candidate_dirs.insert(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+
+    let stranded = conn
+        .execute(
+            "UPDATE mediaflow_queue SET status = 'FAILED', error_log = 'Interrupted by service restart', updated_at = CURRENT_TIMESTAMP WHERE status = 'PROCESSING'",
+            [],
+        )
+        .unwrap_or(0);
+    if stranded > 0 {
+        tracing::warn!(
+            stranded_jobs = stranded,
+            "mediaflow: marked stranded PROCESSING job(s) as FAILED after service restart"
+        );
+    }
+
+    let roots = mediaflow_allowed_roots();
+    let retention = mediaflow_trash_retention();
+    for dir in candidate_dirs {
+        let Ok(canon_dir) = fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !is_path_within_allowed_mediaflow_roots(&canon_dir, &roots) {
+            continue;
+        }
+        cleanup_stale_mediaflow_temps_in_dir(&canon_dir);
+        prune_mediaflow_trash_dir(&canon_dir.join(".mediaflow_trash"), retention);
+    }
+}
+
 /// Spawns the background MediaFlow worker poller (10-second interval) that picks up
 /// `APPROVED` items in `mediaflow_queue`, transitions them to `PROCESSING`, invokes
 /// `ffmpeg` with hardware transcode flags from [`af_hardware::get_gpu_transcode_flags()`],
@@ -5338,6 +5570,7 @@ pub fn start_mediaflow_poller() {
     }
 
     tokio::spawn(async move {
+        reconcile_mediaflow_startup();
         tracing::info!(
             interval_secs = 10,
             "mediaflow autonomous transcode poller initialized"
@@ -5381,40 +5614,85 @@ pub async fn process_next_mediaflow_job() -> bool {
         ) else {
             return false;
         };
-        let _ = conn.execute(
-            "UPDATE mediaflow_queue SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        match conn.execute(
+            "UPDATE mediaflow_queue SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'APPROVED'",
             params![row.0],
-        );
-        Some(row)
+        ) {
+            Ok(1) => Some(row),
+            _ => None,
+        }
     };
 
     let Some((job_id, file_path)) = job_opt else {
         return false;
     };
 
-    let src_path = Path::new(&file_path);
-    if !src_path.exists() {
-        record_mediaflow_failure(job_id, "Source file does not exist");
-        publish_mediaflow_progress(&serde_json::json!({
-            "status": "failed",
-            "file": file_path,
-            "progress": 0,
-            "message": "Source file does not exist",
-        }));
-        return true;
-    }
+    let src_path = match validate_queued_mediaflow_source(&file_path) {
+        Ok(valid) => valid,
+        Err(reason) => {
+            record_mediaflow_failure(job_id, &reason);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": reason,
+            }));
+            return true;
+        }
+    };
 
     let flags = af_hardware::get_gpu_transcode_flags();
-    let parent_dir = src_path.parent().unwrap_or_else(|| Path::new("."));
+    let Some(parent_dir) = src_path.parent() else {
+        record_mediaflow_failure(job_id, "Source file has no parent directory");
+        return true;
+    };
     let stem = src_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     let out_path = parent_dir.join(format!("{}_hevc.mkv", stem));
-    let temp_output = parent_dir.join(format!(".{}_hevc.{}.tmp.mkv", stem, job_id));
-    let _ = fs::remove_file(&temp_output);
+    if out_path != src_path && fs::symlink_metadata(&out_path).is_ok() {
+        let msg = format!(
+            "Refusing to clobber existing output file: {}",
+            out_path.display()
+        );
+        record_mediaflow_failure(job_id, &msg);
+        publish_mediaflow_progress(&serde_json::json!({
+            "status": "failed",
+            "file": file_path,
+            "progress": 0,
+            "message": msg,
+        }));
+        return true;
+    }
 
-    let mut args: Vec<String> = vec!["-y".to_string()];
+    let temp_output = parent_dir.join(format!(".tmp_mediaflow_{}.mkv", job_id));
+    if let Ok(tmeta) = fs::symlink_metadata(&temp_output) {
+        if tmeta.file_type().is_symlink() || !tmeta.file_type().is_file() {
+            let msg = "Refusing unsafe pre-existing temporary output entry";
+            record_mediaflow_failure(job_id, msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
+            return true;
+        }
+        if let Err(err) = fs::remove_file(&temp_output) {
+            let msg = format!("Failed to clear stale temporary output file: {err}");
+            record_mediaflow_failure(job_id, &msg);
+            publish_mediaflow_progress(&serde_json::json!({
+                "status": "failed",
+                "file": file_path,
+                "progress": 0,
+                "message": msg,
+            }));
+            return true;
+        }
+    }
+
+    let mut args: Vec<String> = vec!["-nostdin".to_string()];
     if !flags.hw_accel.is_empty() && flags.hw_accel != "none" {
         args.push("-hwaccel".to_string());
         args.push(flags.hw_accel.clone());
@@ -5434,19 +5712,24 @@ pub async fn process_next_mediaflow_job() -> bool {
         flags.video_codec.trim()
     };
 
+    let input_uri = format!("file:{}", src_path.to_string_lossy());
     args.extend([
         "-i".to_string(),
-        file_path.clone(),
+        input_uri,
+        "-map".to_string(),
+        "0".to_string(),
         "-c:v".to_string(),
         video_codec.to_string(),
         "-b:v".to_string(),
         "5M".to_string(),
         "-c:a".to_string(),
         "copy".to_string(),
+        "-c:s".to_string(),
+        "copy".to_string(),
         "-nostats".to_string(),
         "-progress".to_string(),
         "pipe:1".to_string(),
-        temp_output.to_string_lossy().to_string(),
+        format!("file:{}", temp_output.to_string_lossy()),
     ]);
 
     tracing::info!(
@@ -5462,7 +5745,7 @@ pub async fn process_next_mediaflow_job() -> bool {
         "message": "Starting transcode",
     }));
 
-    let duration_secs = probe_mediaflow_duration_secs(src_path).await;
+    let duration_secs = probe_mediaflow_duration_secs(&src_path).await;
     let timeout = mediaflow_transcode_timeout();
 
     let mut cmd = Command::new("ffmpeg");
@@ -5550,9 +5833,9 @@ pub async fn process_next_mediaflow_job() -> bool {
 
     match wait_result {
         Ok((Ok(status), _stderr_text)) if status.success() => {
-            let temp_size = fs::metadata(&temp_output)
+            let temp_size = fs::symlink_metadata(&temp_output)
                 .ok()
-                .filter(|m| m.is_file())
+                .filter(|m| !m.file_type().is_symlink() && m.file_type().is_file())
                 .map(|m| m.len())
                 .unwrap_or(0);
             if temp_size == 0 {
@@ -5569,20 +5852,90 @@ pub async fn process_next_mediaflow_job() -> bool {
             }
 
             let trash_dir = parent_dir.join(".mediaflow_trash");
-            let _ = fs::create_dir_all(&trash_dir);
-            let trashed_src = src_path.file_name().map(|fname| trash_dir.join(fname));
-            if let Some(ref dest) = trashed_src {
-                let _ = fs::rename(src_path, dest);
+            if let Ok(tmeta) = fs::symlink_metadata(&trash_dir) {
+                if tmeta.file_type().is_symlink() || !tmeta.is_dir() {
+                    let _ = fs::remove_file(&temp_output);
+                    let msg = "Refusing symlink or non-directory .mediaflow_trash";
+                    record_mediaflow_failure(job_id, msg);
+                    publish_mediaflow_progress(&serde_json::json!({
+                        "status": "failed",
+                        "file": file_path,
+                        "progress": 0,
+                        "message": msg,
+                    }));
+                    return true;
+                }
+            } else if let Err(err) = fs::create_dir(&trash_dir) {
+                if err.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = fs::remove_file(&temp_output);
+                    let msg = format!("Failed to create .mediaflow_trash directory: {err}");
+                    record_mediaflow_failure(job_id, &msg);
+                    publish_mediaflow_progress(&serde_json::json!({
+                        "status": "failed",
+                        "file": file_path,
+                        "progress": 0,
+                        "message": msg,
+                    }));
+                    return true;
+                }
             }
 
-            if let Err(err) = fs::rename(&temp_output, &out_path) {
-                if let Some(ref dest) = trashed_src {
-                    if dest.exists() && !src_path.exists() {
-                        let _ = fs::rename(dest, src_path);
-                    }
-                }
+            let fname = src_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("source");
+            let mut trashed_src = trash_dir.join(format!("{job_id}_{fname}"));
+            if fs::symlink_metadata(&trashed_src).is_ok() {
+                trashed_src = trash_dir.join(format!(
+                    "{job_id}_{}_{fname}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+            }
+            if fs::symlink_metadata(&trashed_src).is_ok() {
                 let _ = fs::remove_file(&temp_output);
-                let msg = format!("Failed to finalize transcoded output: {}", err);
+                let msg = "Refusing to clobber existing .mediaflow_trash entry";
+                record_mediaflow_failure(job_id, msg);
+                publish_mediaflow_progress(&serde_json::json!({
+                    "status": "failed",
+                    "file": file_path,
+                    "progress": 0,
+                    "message": msg,
+                }));
+                return true;
+            }
+
+            let publish_res: Result<(), String> = if out_path != src_path {
+                // Non-clobbering publication: hard_link fails atomically if out_path exists.
+                if let Err(err) = fs::hard_link(&temp_output, &out_path) {
+                    let _ = fs::remove_file(&temp_output);
+                    Err(format!(
+                        "Failed to publish transcoded output without clobbering target: {err}"
+                    ))
+                } else if let Err(err) = fs::rename(&src_path, &trashed_src) {
+                    let _ = fs::remove_file(&out_path);
+                    let _ = fs::remove_file(&temp_output);
+                    Err(format!(
+                        "Failed to move original media into .mediaflow_trash: {err}"
+                    ))
+                } else {
+                    let _ = fs::remove_file(&temp_output);
+                    Ok(())
+                }
+            } else if let Err(err) = fs::rename(&src_path, &trashed_src) {
+                let _ = fs::remove_file(&temp_output);
+                Err(format!(
+                    "Failed to move original media into .mediaflow_trash: {err}"
+                ))
+            } else if let Err(err) = fs::hard_link(&temp_output, &out_path) {
+                let _ = fs::rename(&trashed_src, &src_path);
+                let _ = fs::remove_file(&temp_output);
+                Err(format!("Failed to publish transcoded output: {err}"))
+            } else {
+                let _ = fs::remove_file(&temp_output);
+                Ok(())
+            };
+
+            if let Err(msg) = publish_res {
                 record_mediaflow_failure(job_id, &msg);
                 publish_mediaflow_progress(&serde_json::json!({
                     "status": "failed",
@@ -5592,6 +5945,8 @@ pub async fn process_next_mediaflow_job() -> bool {
                 }));
                 return true;
             }
+
+            prune_mediaflow_trash_dir(&trash_dir, mediaflow_trash_retention());
 
             let new_size = temp_size as i64;
             let out_str = out_path.to_string_lossy().to_string();
@@ -7727,36 +8082,45 @@ signal.pause()'
 
     #[test]
     fn test_dpkg_differential_ordering() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
         let pairs = [
-            ("1.0", "1.0.0"),
-            ("1.0.0", "1.0"),
-            ("1.0.0-rc1", "1.0.0"),
-            ("1.0.0", "1.0.0-rc1"),
-            ("1.0.0~rc1", "1.0.0"),
-            ("1.0.0", "1.0.0~rc1"),
-            ("1.0.0+git1", "1.0.0"),
-            ("1.0.0", "1.0.0+git1"),
-            ("1.0.0+b1", "1.0.0"),
-            ("1.0.0", "1.0.0+b1"),
-            ("1:1.0", "2.0"),
-            ("2.0", "1:1.0"),
-            ("1.0-1", "1.0-2"),
-            ("1.0-2", "1.0-1"),
-            ("1.0~beta1~svn1245", "1.0~beta1"),
-            ("1.0~beta1", "1.0~beta1~svn1245"),
-            ("1.0a", "1.0+a"),
-            ("1.0+a", "1.0a"),
-            ("1.0.0+deb11u1", "1.0.0+deb11u2"),
-            ("1.2.3-1ubuntu1", "1.2.3-2ubuntu1"),
-            ("0.4.17", "0.4.18.2805"),
-            ("0.4.18.2805", "0.4.18.2805"),
-            ("2:1.0.0", "2:1.0.0"),
-            ("1.0.0-1", "1.0.0-1"),
-            ("1.0~rc1", "1.0~rc2"),
-            ("1.0+debug", "1.0"),
-            ("1.0-0", "1.0"),
-            ("1.0", "1.0-0"),
+            ("1.0", "1.0.0", Less),
+            ("1.0.0", "1.0", Greater),
+            ("1.0.0-rc1", "1.0.0", Greater),
+            ("1.0.0", "1.0.0-rc1", Less),
+            ("1.0.0~rc1", "1.0.0", Less),
+            ("1.0.0", "1.0.0~rc1", Greater),
+            ("1.0.0+git1", "1.0.0", Greater),
+            ("1.0.0", "1.0.0+git1", Less),
+            ("1.0.0+b1", "1.0.0", Greater),
+            ("1.0.0", "1.0.0+b1", Less),
+            ("1:1.0", "2.0", Greater),
+            ("2.0", "1:1.0", Less),
+            ("1.0-1", "1.0-2", Less),
+            ("1.0-2", "1.0-1", Greater),
+            ("1.0~beta1~svn1245", "1.0~beta1", Less),
+            ("1.0~beta1", "1.0~beta1~svn1245", Greater),
+            ("1.0a", "1.0+a", Less),
+            ("1.0+a", "1.0a", Greater),
+            ("1.0.0+deb11u1", "1.0.0+deb11u2", Less),
+            ("1.2.3-1ubuntu1", "1.2.3-2ubuntu1", Less),
+            ("0.4.17", "0.4.18.2805", Less),
+            ("0.4.18.2805", "0.4.18.2805", Equal),
+            ("2:1.0.0", "2:1.0.0", Equal),
+            ("1.0.0-1", "1.0.0-1", Equal),
+            ("1.0~rc1", "1.0~rc2", Less),
+            ("1.0+debug", "1.0", Greater),
+            ("1.0-0", "1.0", Equal),
+            ("1.0", "1.0-0", Equal),
         ];
+
+        let dpkg_available = std::process::Command::new("dpkg")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
 
         let run_dpkg = |v1: &str, v2: &str| -> std::cmp::Ordering {
             let eq = std::process::Command::new("dpkg")
@@ -7778,13 +8142,19 @@ signal.pause()'
             std::cmp::Ordering::Greater
         };
 
-        for (v1, v2) in pairs {
-            let expected = run_dpkg(v1, v2);
+        for (v1, v2, expected_policy) in pairs {
             let actual = compare_debian_versions_str(v1, v2);
             assert_eq!(
-                actual, expected,
-                "Debian comparison mismatch for '{v1}' vs '{v2}': actual={actual:?}, expected(dpkg)={expected:?}"
+                actual, expected_policy,
+                "Debian Policy 5.6.12 mismatch for '{v1}' vs '{v2}': actual={actual:?}, expected={expected_policy:?}"
             );
+            if dpkg_available {
+                let expected_dpkg = run_dpkg(v1, v2);
+                assert_eq!(
+                    actual, expected_dpkg,
+                    "Debian dpkg differential mismatch for '{v1}' vs '{v2}': actual={actual:?}, expected(dpkg)={expected_dpkg:?}"
+                );
+            }
         }
     }
 
@@ -10220,16 +10590,17 @@ signal.pause()'
         for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
             env::set_var(key, &db_path);
         }
+        env::set_var("AF_ALLOWED_FS_ROOTS", root.join("media"));
         af_db::init_db().unwrap();
 
         let src_file = root.join("media/movie.mp4");
         fs::write(&src_file, b"original-video-bytes").unwrap();
 
-        // Fake ffmpeg that exits 0 but writes a 0-byte output file
+        // Fake ffmpeg that strips optional file: prefix, exits 0, and writes a 0-byte output file
         let fake_ffmpeg = root.join("bin/ffmpeg");
         fs::write(
             &fake_ffmpeg,
-            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\n: > \"$out\"\nexit 0\n",
+            "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\nout=\"${out#file:}\"\n: > \"$out\"\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&fake_ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
@@ -10323,6 +10694,59 @@ signal.pause()'
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"))
             .collect();
         assert_eq!(backups.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps() {
+        let name = "workers::tests::test_reconcile_mediaflow_startup_marks_stranded_processing_and_cleans_temps";
+        if !crate::inventory_regressions::isolated(name) {
+            return;
+        }
+        let root = env::temp_dir().join(format!("af-mf-reconcile-{}", uuid::Uuid::new_v4()));
+        let media = root.join("media");
+        let trash = media.join(".mediaflow_trash");
+        fs::create_dir_all(&trash).unwrap();
+        let db_path = root.join("aetherflow.sqlite");
+        for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+            env::set_var(key, &db_path);
+        }
+        env::set_var("AF_ALLOWED_FS_ROOTS", &media);
+        env::set_var("MEDIAFLOW_TRASH_RETENTION_SECS", "0");
+        af_db::init_db().unwrap();
+
+        let movie = media.join("sample.mkv");
+        fs::write(&movie, b"video").unwrap();
+        let stale_tmp = media.join(".tmp_mediaflow_77.mkv");
+        fs::write(&stale_tmp, b"partial").unwrap();
+        let expired_trash = trash.join("77_old.mkv");
+        fs::write(&expired_trash, b"trashed").unwrap();
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO mediaflow_queue (id, file_path, status) VALUES (77, ?1, 'PROCESSING')",
+                params![movie.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+
+        reconcile_mediaflow_startup();
+
+        let (status, err_log): (String, String) = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT status, error_log FROM mediaflow_queue WHERE id = 77",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "FAILED");
+        assert_eq!(err_log, "Interrupted by service restart");
+        assert!(!stale_tmp.exists());
+        assert!(!expired_trash.exists());
+        assert!(movie.exists());
 
         let _ = fs::remove_dir_all(&root);
     }

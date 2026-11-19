@@ -113,7 +113,6 @@ dependencies = [
  "af-models",
  "af-release",
  "af-runner",
- "anyhow",
  "chrono",
  "hex",
  "http-body-util",
@@ -168,7 +167,6 @@ name = "af-hardware"
 version = "4.0.0"
 dependencies = [
  "af-models",
- "libc",
  "libloading",
  "once_cell",
  "serde",
@@ -223,7 +221,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tower",
@@ -334,7 +331,6 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-rustls",
- "tokio-stream",
  "tracing",
  "url",
  "uuid",

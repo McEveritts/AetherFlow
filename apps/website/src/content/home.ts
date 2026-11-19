@@ -1,6 +1,6 @@
 export const heroData = {
   h1: "Orchestrating the Next Era of Bare-Metal Infrastructure.",
-  subheadline: "AetherFlow v4.0.0 pairs a 12-crate Rust Control Plane (backend-rs, Axum + Tokio) with a Leptos Rust WebAssembly Dashboard (frontend-rs) served from external web/dist assets. It orchestrates a 77-app bare-metal catalog, Native McBrowser (af-files), Zero-Sudo aetherflow-runner privilege isolation, Whatbox-style Subdomain Ingress, and human-gated FlowAI directly against systemd.",
+  subheadline: "AetherFlow v4.0.0 pairs a 11-crate Rust Control Plane (backend-rs, Axum + Tokio) with a Leptos Rust WebAssembly Dashboard (frontend-rs) served from external web/dist assets. It orchestrates a 77-app bare-metal catalog, Native McBrowser (af-files), Zero-Sudo aetherflow-runner privilege isolation, Whatbox-style Subdomain Ingress, and human-gated FlowAI directly against systemd.",
   primaryCta: {
     label: "View on GitHub",
     href: "https://github.com/McEveritts/AetherFlow"
@@ -17,7 +17,7 @@ export const directives = {
     },
     {
       title: "Rust Control Plane (backend-rs)",
-      copy: "From the 12-crate Axum HTTP/WebSocket API and bundled SQLite WAL engine to NVML GPU FFI, Zero-Sudo aetherflow-runner, and the unified af CLI, strict memory and type safety are enforced everywhere."
+      copy: "From the 11-crate Axum HTTP/WebSocket API and bundled SQLite WAL engine to NVML GPU FFI, Zero-Sudo aetherflow-runner, and the unified af CLI, strict memory and type safety are enforced everywhere."
     },
     {
       title: "AI-Native, Human-Gated",
@@ -32,7 +32,7 @@ export const architectureData = {
   columns: [
     {
       title: "Rust Control Plane (backend-rs) & Zero-Sudo aetherflow-runner",
-      copy: "Built on Axum and Tokio across 12 workspace crates, aetherflow-api runs unprivileged under ProtectSystem=strict while Zero-Sudo aetherflow-runner isolates root lifecycle, WireGuard/Tailscale, and declarative package operations behind the /run/aetherflow/runner.sock UNIX domain socket daemon."
+      copy: "Built on Axum and Tokio across 11 workspace crates, aetherflow-api runs unprivileged under ProtectSystem=strict while Zero-Sudo aetherflow-runner isolates root lifecycle, WireGuard/Tailscale, and declarative package operations behind the /run/aetherflow/runner.sock UNIX domain socket daemon."
     },
     {
       title: "Leptos Rust WebAssembly Dashboard & Native McBrowser",

@@ -1069,6 +1069,54 @@ fn trend_palette(trend: &str) -> (&'static str, &'static str, &'static str) {
     }
 }
 
+fn format_bandwidth_applied_toast(
+    context: crate::state::AppContext,
+    response: &Value,
+    requested_limits: &Value,
+) -> String {
+    let base = tt(context, "Bandwidth limits applied");
+    let (client, rx, tx) = parse_bandwidth_applied_details(response, requested_limits);
+    match (client, rx, tx) {
+        (Some(c), Some(r), Some(t)) => {
+            let limits_text = tt_with(
+                context,
+                "RX {rx} KiB/s · TX {tx} KiB/s",
+                &[("rx", &r.to_string()), ("tx", &t.to_string())],
+            );
+            format!("{base} ({c}: {limits_text})")
+        }
+        (Some(c), _, _) => format!("{base} ({c})"),
+        (None, Some(r), Some(t)) => {
+            let limits_text = tt_with(
+                context,
+                "RX {rx} KiB/s · TX {tx} KiB/s",
+                &[("rx", &r.to_string()), ("tx", &t.to_string())],
+            );
+            format!("{base} ({limits_text})")
+        }
+        (None, _, _) => base,
+    }
+}
+
+fn parse_bandwidth_applied_details(
+    response: &Value,
+    requested_limits: &Value,
+) -> (Option<String>, Option<i64>, Option<i64>) {
+    let client = response["applied_client"]
+        .as_str()
+        .or_else(|| response["client"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let rx = response["download_kbps"]
+        .as_i64()
+        .or_else(|| requested_limits["download_kbps"].as_i64());
+    let tx = response["upload_kbps"]
+        .as_i64()
+        .or_else(|| requested_limits["upload_kbps"].as_i64());
+    (client, rx, tx)
+}
+
 #[component]
 pub(super) fn CapacityPredictions() -> impl IntoView {
     let context = app();
@@ -1332,7 +1380,10 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                                     return;
                                 }
                                 match result {
-                                    Ok(_) => context.toast(tt(context, "Bandwidth limits applied"), false),
+                                    Ok(data) => context.toast(
+                                        format_bandwidth_applied_toast(context, &data, &limits),
+                                        false,
+                                    ),
                                     Err(failure) => context.toast(tt(context, &failure.message), true),
                                 }
                                 applying.set(false);
@@ -1389,5 +1440,25 @@ mod tests {
         let stale = summarize_storage_pool(&partitions, "/mnt/removed");
         assert_eq!(stale.visible.len(), 2);
         assert!((stale.total_gb.unwrap() - 1400.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bandwidth_applied_details_parse_applied_client_and_limits() {
+        let req = json!({"download_kbps": 5000, "upload_kbps": 1200});
+        assert_eq!(
+            parse_bandwidth_applied_details(
+                &json!({"applied_client": "qbittorrent", "download_kbps": 5000, "upload_kbps": 1200}),
+                &req,
+            ),
+            (Some("qbittorrent".to_string()), Some(5000), Some(1200))
+        );
+        assert_eq!(
+            parse_bandwidth_applied_details(&json!({"client": "transmission"}), &req),
+            (Some("transmission".to_string()), Some(5000), Some(1200))
+        );
+        assert_eq!(
+            parse_bandwidth_applied_details(&json!({}), &json!({})),
+            (None, None, None)
+        );
     }
 }

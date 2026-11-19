@@ -1,6 +1,5 @@
-#![allow(dead_code)]
-
 use crate::auth::AuthUser;
+#[cfg(test)]
 use af_files::Entry;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path};
@@ -659,14 +658,6 @@ pub(super) fn is_strict_ancestor_path(ancestor: &str, descendant: &str) -> bool 
     path_has_segment_prefix(descendant, ancestor)
 }
 
-fn prefix_specificity(normalized_prefix: &str) -> usize {
-    if normalized_prefix.is_empty() {
-        0
-    } else {
-        normalized_prefix.split('/').count()
-    }
-}
-
 pub(super) fn is_path_allowed_by_rules(rules: &[PathRule], normalized_path: &str) -> bool {
     let mut allowed = true;
     for rule in rules {
@@ -753,6 +744,7 @@ pub(super) fn is_entry_visible(
     is_directory && has_allowed_descendant_rule(&policy.rules, normalized_entry_path)
 }
 
+#[cfg(test)]
 pub(super) fn filter_visible_entries(policy: &PolicyDocument, entries: Vec<Entry>) -> Vec<Entry> {
     if !policy.permissions.read {
         return Vec::new();
@@ -1126,6 +1118,7 @@ pub(super) fn authorize(
     authorize_with_conn(&conn, user, permission, path)
 }
 
+#[cfg(test)]
 pub(super) fn authorize_rename_with_conn(
     conn: &Connection,
     user: &AuthUser,
@@ -1142,6 +1135,7 @@ pub(super) fn authorize_rename_with_conn(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn authorize_rename(
     user: &AuthUser,
     from_path: &str,
@@ -1204,6 +1198,7 @@ pub(super) fn authorize_directory_listing_with_conn(
     Ok(policy)
 }
 
+#[cfg(test)]
 pub(super) fn authorize_directory_listing(
     user: &AuthUser,
     dir_path: &str,
@@ -1216,6 +1211,7 @@ pub(super) fn authorize_directory_listing(
     authorize_directory_listing_with_conn(&conn, user, dir_path)
 }
 
+#[cfg(test)]
 pub(super) fn authorize_and_filter_entries(
     user: &AuthUser,
     dir_path: &str,
@@ -1234,6 +1230,7 @@ pub(super) fn effective_scope_with_conn(
     Ok(policy.scope)
 }
 
+#[cfg(test)]
 pub(super) fn effective_scope(user_id: i64) -> Result<String, McBrowserError> {
     if user_id <= 0 {
         return Err(McBrowserError::Unauthorized(

@@ -1,4 +1,0 @@
-[advisories]
-# Leptos requires this build-time macro crate. The notice reports archival only;
-# vulnerability, unsoundness, and yanked dependency checks remain enabled.
-ignore = ["RUSTSEC-2024-0436"]

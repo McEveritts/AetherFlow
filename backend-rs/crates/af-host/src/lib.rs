@@ -51,9 +51,11 @@ pub use manifest::{
     CURRENT_MANIFEST_SCHEMA_VERSION, MAX_SUPPORTED_MANIFEST_SCHEMA_VERSION,
     MIN_SUPPORTED_MANIFEST_SCHEMA_VERSION, SUPPORTED_APP_MAJOR_VERSION,
 };
+#[cfg(test)]
+use restore::execute_coordinated_restore;
 pub use restore::{
-    execute_coordinated_restore, execute_destructive_restore, execute_staged_restore,
-    plan_restore_from_manifest, plan_restore_from_manifest_with_sqlite_override,
+    execute_destructive_restore, execute_staged_restore, plan_restore_from_manifest,
+    plan_restore_from_manifest_with_sqlite_override,
     plan_restore_from_manifest_with_sqlite_overrides, preflight_restore_directory,
     preflight_restore_directory_with_sqlite_override,
     preflight_restore_directory_with_sqlite_overrides,
@@ -66,7 +68,7 @@ pub use restore::{
     validate_quiesce_service_entries, validate_trusted_sqlite_db_path, CommandQuiescenceController,
     NoopQuiescenceController, OverwritePolicy, PlannedRestoreAction, RecoveryContext,
     RestoreExecutionOptions, RestoreExecutionReport, RestorePlan, RestorePlanItem,
-    RestorePreflightOptions, RestoreReceipt, RollbackFailureJournal, RollbackFailureJournalEntry,
+    RestorePreflightOptions, RollbackFailureJournal, RollbackFailureJournalEntry,
     ServiceQuiescenceController, DEFAULT_MANDATORY_QUIESCE_SERVICES,
     IN_PROGRESS_RECOVERY_JOURNAL_FILENAME,
 };

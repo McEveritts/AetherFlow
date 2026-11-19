@@ -1,3 +1,7 @@
+pub mod app_metadata;
+pub mod md5;
+pub mod secret_redaction;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -185,6 +189,10 @@ pub struct Package {
     pub default_port: i32,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_scope: Option<String>,
 
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_source: String,
@@ -644,17 +652,37 @@ pub struct AppMetaRunnerRequest {
     pub app_name: String,
 }
 
+/// Validates the ASCII RFC 1123 labels used in ingress hostnames.
+pub fn valid_ingress_hostname(host: &str) -> bool {
+    host.len() <= 253
+        && host.contains('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerApacheVhostRequest {
     pub app_name: String,
     #[serde(default)]
-    pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub vhost_content: Option<String>,
+    pub listen_port: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_domain: Option<String>,
     #[serde(default)]
-    pub external_enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub external_vhost_content: Option<String>,
+    pub external_access_enabled: bool,
+    #[serde(default)]
+    pub tls_enabled: bool,
+    #[serde(default)]
+    pub remove_only: bool,
     #[serde(default)]
     pub reload_apache: bool,
 }
@@ -2005,24 +2033,28 @@ mod tests {
 
         let vhost_req = RunnerApacheVhostRequest {
             app_name: "sonarr".to_string(),
-            enabled: true,
-            vhost_content: Some("<VirtualHost *:80>\n</VirtualHost>\n".to_string()),
-            external_enabled: true,
-            external_vhost_content: Some(
-                "<VirtualHost *:80>\nServerName sonarr.example.com\n</VirtualHost>\n".to_string(),
-            ),
+            listen_port: 8989,
+            internal_domain: Some("sonarr.aether.local".to_string()),
+            public_domain: Some("sonarr.example.com".to_string()),
+            external_access_enabled: true,
+            tls_enabled: true,
             reload_apache: true,
+            ..Default::default()
         };
         let vhost_json = serde_json::to_string(&vhost_req).unwrap();
-        let parsed_vhost: RunnerApacheVhostRequest = serde_json::from_str(&vhost_json).unwrap();
-        assert_eq!(parsed_vhost, vhost_req);
-
-        let disable_vhost: RunnerApacheVhostRequest =
-            serde_json::from_str(r#"{"app_name":"sonarr","enabled":false}"#).unwrap();
-        assert!(!disable_vhost.enabled);
-        assert!(disable_vhost.vhost_content.is_none());
-        assert!(!disable_vhost.external_enabled);
-        assert!(disable_vhost.external_vhost_content.is_none());
-        assert!(!disable_vhost.reload_apache);
+        let parsed: RunnerApacheVhostRequest = serde_json::from_str(&vhost_json).unwrap();
+        assert_eq!(parsed, vhost_req);
+        assert!(serde_json::from_str::<RunnerApacheVhostRequest>(
+            r#"{"app_name":"sonarr","vhost_content":"arbitrary Apache configuration"}"#
+        )
+        .is_err());
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppRuntimeMeta {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub configured_port: i32,
 }

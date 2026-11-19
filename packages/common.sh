@@ -84,7 +84,25 @@ finally:
 PYEOF
 }
 
-mkdir -p "$LOCK_DIR"
+af_ensure_lock_dir() {
+    local lock_dir="${1:-$LOCK_DIR}" lock_group="root"
+    if [[ -L "$lock_dir" ]]; then
+        printf 'Refusing symlinked lock directory: %s\n' "$lock_dir" >&2
+        return 1
+    fi
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        if getent group aetherflow >/dev/null 2>&1; then
+            lock_group="aetherflow"
+        fi
+        install -d -m 0750 -o root -g "$lock_group" "$lock_dir" || return 1
+        chmod 0750 "$lock_dir" || return 1
+        chgrp "$lock_group" "$lock_dir" 2>/dev/null || true
+    else
+        mkdir -p -m 0750 "$lock_dir" || return 1
+    fi
+}
+
+af_ensure_lock_dir "$LOCK_DIR"
 af_prepare_logfile_path "$LOGFILE"
 
 timestamp() {
@@ -676,6 +694,71 @@ git_checkout_version() {
     printf '%s\n' "$version"
 }
 
+deb_compare_versions() {
+    local v1="${1:-}" op="${2:-}" v2="${3:-}"
+    if command -v dpkg >/dev/null 2>&1; then
+        dpkg --compare-versions "$v1" "$op" "$v2"
+        return $?
+    fi
+    python3 - "$v1" "$op" "$v2" <<'PYEOF'
+import sys
+
+v1, op, v2 = sys.argv[1], sys.argv[2], sys.argv[3]
+if op in ("eq-nl", "lt-nl", "le-nl", "gt-nl", "ge-nl", "ne-nl"):
+    if not v1 or not v2:
+        if op == "eq-nl":
+            sys.exit(0 if v1 == v2 else 1)
+        if op == "ne-nl":
+            sys.exit(0 if v1 != v2 else 1)
+        sys.exit(1)
+    op = op[:-3]
+
+def _split(v):
+    ep = 0
+    if ":" in v:
+        e, r = v.split(":", 1)
+        if not e.isdigit():
+            return None
+        ep, v = int(e), r
+    return (ep, *(v.rsplit("-", 1) if "-" in v else (v, "")))
+
+def _ord(c):
+    return -1 if c == "~" else (ord(c) if ("A" <= c <= "Z" or "a" <= c <= "z") else ord(c) + 256)
+
+def _pcmp(a, b):
+    i = j = 0
+    na, nb = len(a), len(b)
+    while i < na or j < nb:
+        while (i < na and not a[i].isdigit()) or (j < nb and not b[j].isdigit()):
+            ca = _ord(a[i]) if i < na and not a[i].isdigit() else 0
+            cb = _ord(b[j]) if j < nb and not b[j].isdigit() else 0
+            if ca != cb:
+                return -1 if ca < cb else 1
+            if i < na and not a[i].isdigit():
+                i += 1
+            if j < nb and not b[j].isdigit():
+                j += 1
+        ia, jb = i, j
+        while i < na and a[i].isdigit():
+            i += 1
+        while j < nb and b[j].isdigit():
+            j += 1
+        da, db = int(a[ia:i] or "0"), int(b[jb:j] or "0")
+        if da != db:
+            return -1 if da < db else 1
+    return 0
+
+s1, s2 = _split(v1), _split(v2)
+if s1 is None or s2 is None:
+    sys.exit(2)
+c = (-1 if s1[0] < s2[0] else (1 if s1[0] > s2[0] else 0)) or _pcmp(s1[1], s2[1]) or _pcmp(s1[2], s2[2])
+table = {"eq": c == 0, "ne": c != 0, "lt": c < 0, "le": c <= 0, "gt": c > 0, "ge": c >= 0}
+if op not in table:
+    sys.exit(2)
+sys.exit(0 if table[op] else 1)
+PYEOF
+}
+
 verify_deb_installed() {
     local package="$1" expected="${2:-}" observed status installed
     observed="$(dpkg-query -W -f='${db:Status-Status} ${Version}\n' "$package" 2>/dev/null)" || return 1
@@ -684,7 +767,7 @@ verify_deb_installed() {
         print_error "Package $package is not installed"
         return 1
     fi
-    if [[ -n "$expected" ]] && ! dpkg --compare-versions "$installed" eq "$expected"; then
+    if [[ -n "$expected" ]] && ! deb_compare_versions "$installed" eq "$expected"; then
         print_error "Package $package version $installed does not match $expected"
         return 1
     fi
@@ -2445,18 +2528,21 @@ purge_app_archive_backups() {
 }
 
 configure_apache_app_listener() {
-    local package_name="$1" port="$2" apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" config staged
+    local package_name="$1" port="$2" apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" config staged listen_addr="127.0.0.1"
     [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ && "$port" =~ ^[0-9]+$ ]] || return 1
     (( port >= 1024 && port <= 65535 )) || return 1
+    if [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
+        listen_addr="0.0.0.0"
+    fi
     config="aetherflow-${package_name}-listen.conf"
     mkdir -p "$apache_root/conf-available" "$apache_root/conf-enabled"
-    if grep -Eq "^[[:space:]]*Listen[[:space:]]+${port}([[:space:]]|$)" "$apache_root/ports.conf" 2>/dev/null; then
+    if grep -Eq "^[[:space:]]*Listen[[:space:]]+(${listen_addr}:)?${port}([[:space:]]|$)" "$apache_root/ports.conf" 2>/dev/null; then
         rm -f -- "$apache_root/conf-enabled/$config" "$apache_root/conf-available/$config"
         log_info "Reusing existing shared Apache listener on $port"
         return 0
     fi
     staged="$(mktemp "$apache_root/conf-available/.${config}.XXXXXX")"
-    if ! printf 'Listen %s\n' "$port" > "$staged" || ! chmod 644 "$staged" || ! mv -f -- "$staged" "$apache_root/conf-available/$config"; then
+    if ! printf 'Listen %s:%s\n' "$listen_addr" "$port" > "$staged" || ! chmod 644 "$staged" || ! mv -f -- "$staged" "$apache_root/conf-available/$config"; then
         rm -f -- "$staged"
         return 1
     fi
@@ -2472,7 +2558,11 @@ remove_apache_app_listener() {
 
 check_dns_port_53_available() {
     local package_name="$1" competing_package="$2" self_proc_regex="$3"
-    local dns_port="${AF_DNS_PORT:-53}"
+    local dns_port="${4:-${AF_DNS_PORT:-53}}"
+    if [[ ! "$dns_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$dns_port < 1 || 10#$dns_port > 65535 )); then
+        print_error "DNS port must be between 1 and 65535 (got: ${dns_port})."
+        return 1
+    fi
     if [[ "$dns_port" != "53" ]]; then
         return 0
     fi
@@ -4853,7 +4943,7 @@ load_master_credentials() {
     primary_creds_file="${AETHERFLOW_MASTER_CREDS_FILE:-$primary_creds_file}"
     if [[ -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" && "$MASTER_PASS" != adminadmin ]]; then
         export MASTER_USER MASTER_PASS
-        export MASTER_HA1="${MASTER_HA1:-$(printf '%s' "$MASTER_PASS" | md5sum | awk '{print $1}')}"
+        export MASTER_HA1="${MASTER_HA1:-$(printf '%s:Welcome to AetherFlow:%s' "$MASTER_USER" "$MASTER_PASS" | md5sum | awk '{print $1}')}"
         return 0
     fi
     local -a _creds_files=("$primary_creds_file")
@@ -5056,10 +5146,78 @@ PYEOF
     done
     local skip_host_env="${AETHERFLOW_SKIP_ENV_FILES:-0}"
     if [[ "$skip_host_env" != "1" ]]; then
-        if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
-            u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
-            p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
-            h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"
+        if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf && ! -L /install/.aetherflow.conf ]]; then
+            local _conf_parsed=""
+            _conf_parsed="$(python3 - /install/.aetherflow.conf <<'PYEOF' 2>/dev/null || true
+import base64, codecs, os, re, shlex, stat, sys
+
+target = sys.argv[1]
+parent = os.path.dirname(os.path.abspath(target)) or "."
+pst = os.lstat(parent)
+if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+    raise SystemExit(1)
+lst = os.lstat(target)
+if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+    raise SystemExit(1)
+fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    fst = os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
+        raw_lines = fh.read().splitlines()
+finally:
+    os.close(fd)
+
+def decode_shell_value(raw_val: str) -> str:
+    val = raw_val.strip()
+    if not val:
+        return ""
+    if val.startswith("$'") and val.endswith("'") and len(val) >= 3:
+        inner = val[2:-1]
+        try:
+            return codecs.decode(inner, "unicode_escape")
+        except Exception:
+            return inner
+    try:
+        tokens = shlex.split(val, posix=True, comments=True)
+        if not tokens:
+            return ""
+        return tokens[0]
+    except ValueError:
+        if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+            return val[1:-1]
+        return val
+
+parsed = {}
+for raw_line in raw_lines:
+    s = raw_line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    key, raw_val = s.split("=", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        continue
+    if key in ("username", "passwd", "ha1pass"):
+        parsed[key] = decode_shell_value(raw_val)
+
+for field in ("username", "passwd", "ha1pass"):
+    print(base64.b64encode(parsed.get(field, "").encode("utf-8")).decode("ascii"))
+PYEOF
+)"
+            if [[ -n "$_conf_parsed" ]]; then
+                local _conf_u _conf_p _conf_h
+                _conf_u="$(printf '%s\n' "$_conf_parsed" | sed -n '1p' | base64 -d 2>/dev/null || true)"
+                _conf_p="$(printf '%s\n' "$_conf_parsed" | sed -n '2p' | base64 -d 2>/dev/null || true)"
+                _conf_h="$(printf '%s\n' "$_conf_parsed" | sed -n '3p' | base64 -d 2>/dev/null || true)"
+                [[ -z "$u" && -n "$_conf_u" ]] && u="$_conf_u"
+                [[ -z "$p" && -n "$_conf_p" ]] && p="$_conf_p"
+                [[ -z "$h" && "$_conf_h" =~ ^[0-9a-fA-F]{32}$ ]] && h="$_conf_h"
+            fi
         fi
         if [[ -z "$u" && -f /etc/apache2/master.txt ]]; then
             u="$(awk -F: 'NR==1 {print $1}' /etc/apache2/master.txt 2>/dev/null | tr -d '[:space:]' || true)"
@@ -5162,8 +5320,8 @@ PYEOF
     fi
     export MASTER_USER="${u:-admin}"
     export MASTER_PASS="$p"
-    if [[ -z "$h" ]]; then
-        h="$(printf '%s' "$MASTER_PASS" | md5sum | awk '{print $1}')"
+    if [[ ! "$h" =~ ^[0-9a-fA-F]{32}$ ]]; then
+        h="$(printf '%s:Welcome to AetherFlow:%s' "$MASTER_USER" "$MASTER_PASS" | md5sum | awk '{print $1}')"
     fi
     export MASTER_HA1="$h"
     if [[ "$generated" == true ]]; then

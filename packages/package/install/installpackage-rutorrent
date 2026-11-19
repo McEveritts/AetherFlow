@@ -34,13 +34,14 @@ if ! declare -F af_logged >/dev/null 2>&1; then
 fi
 
 require_root
-validate_config_paths /var/www/rutorrent/.af-directory-check
+validate_config_paths /var/www/rutorrent/.af-directory-check /etc/apache2/AetherFlow/rutorrent.htpasswd
+load_master_credentials
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Apache, PHP, and media utility dependencies for ruTorrent..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
 DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
-    apache2 libapache2-mod-php git curl unzip unrar-free mediainfo sox ca-certificates \
+    apache2 apache2-utils libapache2-mod-php git curl unzip unrar-free mediainfo sox ca-certificates \
     php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd
 
 report_progress 40 "Cloning ruTorrent repository to /var/www/rutorrent..."
@@ -126,29 +127,54 @@ find -P /var/www/rutorrent \( -type d -o -type f \) -exec chmod 775 -- {} +
 report_progress 85 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
-if [[ -s /etc/apache2/sites-available/rutorrent.conf ]]; then
-    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/rutorrent.conf
-else
-AUTH_DIRECTIVES="Require all granted"
-if [[ -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
-    AUTH_DIRECTIVES=$'AuthType Basic\n        AuthName "ruTorrent"\n        AuthUserFile /etc/apache2/AetherFlow/rutorrent.htpasswd\n        Require valid-user'
+if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+    install -d -m 0750 -o root -g www-data /etc/apache2/AetherFlow 2>/dev/null || mkdir -p -m 0750 /etc/apache2/AetherFlow
+    RUT_HTPASSWD_ENTRY="$(printf '%s\n' "${MASTER_PASS}" | htpasswd -niB "${MASTER_USER}" 2>/dev/null || true)"
+    if [[ -z "$RUT_HTPASSWD_ENTRY" || "$RUT_HTPASSWD_ENTRY" != *:* ]]; then
+        print_error "Failed to generate /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
+        exit 1
+    fi
+    write_config_file /etc/apache2/AetherFlow/rutorrent.htpasswd 0640 <<EOF
+${RUT_HTPASSWD_ENTRY}
+EOF
+    chown root:www-data /etc/apache2/AetherFlow/rutorrent.htpasswd 2>/dev/null || true
+    chmod 0640 /etc/apache2/AetherFlow/rutorrent.htpasswd
 fi
-cat <<EOF > /etc/apache2/sites-available/rutorrent.conf
-Alias /rutorrent "/var/www/rutorrent"
+if [[ ! -s /etc/apache2/AetherFlow/rutorrent.htpasswd ]]; then
+    print_error "Missing or empty /etc/apache2/AetherFlow/rutorrent.htpasswd; refusing unprotected ruTorrent VirtualHost"
+    exit 1
+fi
 
-<Directory /var/www/rutorrent>
-    Options FollowSymLinks
-    AllowOverride All
-    ${AUTH_DIRECTIVES}
-    DirectoryIndex index.php index.html
-</Directory>
-
-<VirtualHost *:${APP_PORT}>
+RUT_VHOST_HOST="127.0.0.1"
+if [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
+    RUT_VHOST_HOST="0.0.0.0"
+fi
+validate_config_paths /etc/apache2/sites-available/rutorrent.conf
+if [[ -s /etc/apache2/sites-available/rutorrent.conf ]]; then
+    safe_config_python /etc/apache2/sites-available/rutorrent.conf "${RUT_VHOST_HOST}" "${APP_PORT}" <<'RUT_VHOST_PYEOF'
+import re, sys
+path, vhost_host, port = sys.argv[1], sys.argv[2], sys.argv[3]
+existing = safe_read_text(path)
+updated = re.sub(
+    r"<VirtualHost\s+([^:>]+):[0-9]+>",
+    lambda m: f"<VirtualHost {vhost_host if m.group(1) in ('*', '0.0.0.0', '127.0.0.1') else m.group(1)}:{port}>",
+    existing,
+)
+if updated != existing:
+    safe_write_text(path, updated, 0o644)
+RUT_VHOST_PYEOF
+else
+    write_config_file /etc/apache2/sites-available/rutorrent.conf 0644 <<EOF
+<VirtualHost ${RUT_VHOST_HOST}:${APP_PORT}>
     DocumentRoot /var/www/rutorrent
+    Alias /rutorrent "/var/www/rutorrent"
     <Directory /var/www/rutorrent>
         Options FollowSymLinks
         AllowOverride All
-        ${AUTH_DIRECTIVES}
+        AuthType Basic
+        AuthName "ruTorrent"
+        AuthUserFile /etc/apache2/AetherFlow/rutorrent.htpasswd
+        Require valid-user
         DirectoryIndex index.php index.html
     </Directory>
 </VirtualHost>

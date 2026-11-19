@@ -270,7 +270,7 @@ fn file_entries_from_paths(files: &[(&str, PathBuf)], line_limit: usize) -> io::
 }
 
 fn audit_entries(source: &str, limit: usize) -> anyhow::Result<Vec<Value>> {
-    let conn = af_db::get_conn()?;
+    let conn = af_db::get_read_conn()?;
     let mut stmt = conn.prepare(AUDIT_LOG_FALLBACK_SQL)?;
     let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
         let timestamp: String=row.get(0)?; let action: String=row.get(1)?;let target:String=row.get(2)?;let detail:String=row.get(3)?;

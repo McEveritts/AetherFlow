@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::auth::AuthUser;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path as AxumPath, Query};
@@ -38,6 +36,7 @@ pub(super) enum McBrowserEventTrigger {
 }
 
 impl McBrowserEventTrigger {
+    #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
         Self::UploadCompleted,
         Self::EntryDeleted,
@@ -60,6 +59,7 @@ impl McBrowserEventTrigger {
         }
     }
 
+    #[cfg(test)]
     pub(super) const fn pascal_name(self) -> &'static str {
         match self {
             Self::UploadCompleted => "UploadCompleted",
@@ -860,6 +860,7 @@ pub(super) fn record_pending_intent_with_conn(
     })
 }
 
+#[cfg(test)]
 pub(super) fn record_pending_intent(
     actor: &AuthUser,
     trigger: McBrowserEventTrigger,
@@ -1017,6 +1018,7 @@ pub(super) fn finalize_event_completed_with_conn(
     }
 }
 
+#[cfg(test)]
 pub(super) fn finalize_event_completed(
     event_id: &str,
     final_relative_path: Option<&str>,
@@ -1062,31 +1064,6 @@ pub(super) fn finalize_published_mutation_with_conn(
             }
         }
     }
-}
-
-pub(super) fn finalize_published_mutation(
-    pending: &PendingAuditIntent,
-    final_relative_path: Option<&str>,
-    final_destination_path: Option<&str>,
-    final_byte_delta: i64,
-) -> PostPublicationAuditOutcome {
-    let Ok(conn) = af_db::get_conn() else {
-        tracing::warn!(
-            event_id = %pending.event.event_id,
-            trigger = %pending.event.trigger.as_str(),
-            "Database unavailable after filesystem publication; retaining durable pending audit intent"
-        );
-        return PostPublicationAuditOutcome::RetainedPending {
-            event_id: pending.event.event_id.clone(),
-        };
-    };
-    finalize_published_mutation_with_conn(
-        &conn,
-        pending,
-        final_relative_path,
-        final_destination_path,
-        final_byte_delta,
-    )
 }
 
 pub(super) fn finalize_event_failed_with_conn(
@@ -1175,6 +1152,7 @@ pub(super) fn finalize_event_failed_with_conn(
     }
 }
 
+#[cfg(test)]
 pub(super) fn finalize_event_failed(
     event_id: &str,
     error_code: Option<&str>,

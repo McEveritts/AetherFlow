@@ -485,7 +485,18 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", &msg);
     }
 
-    let config_str = serde_json::to_string(&parsed_cfg).unwrap_or_else(|_| "{}".to_string());
+    let (encrypted_cfg, _) =
+        match af_db::encrypt_notification_channel_config_value(&req.channel_type, &parsed_cfg) {
+            Ok(res) => res,
+            Err(_) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CRYPTO_ERROR",
+                    "Failed to encrypt notification channel credentials",
+                );
+            }
+        };
+    let config_str = serde_json::to_string(&encrypted_cfg).unwrap_or_else(|_| "{}".to_string());
 
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
@@ -803,18 +814,20 @@ pub async fn dispatch_to_channel(
     message: &str,
     notification_id: Option<i64>,
 ) -> anyhow::Result<()> {
-    let cfg: serde_json::Value = serde_json::from_str(&channel.config).map_err(|e| {
-        let msg = format!("invalid channel config: {}", e);
-        record_delivery_log(
-            channel.id,
-            &channel.channel_type,
-            notification_id,
-            "failed",
-            0,
-            &msg,
-        );
-        anyhow::anyhow!(msg)
-    })?;
+    let cfg: serde_json::Value =
+        af_db::decrypt_notification_channel_config_str(&channel.channel_type, &channel.config)
+            .map_err(|e| {
+                let msg = format!("invalid channel config: {}", e);
+                record_delivery_log(
+                    channel.id,
+                    &channel.channel_type,
+                    notification_id,
+                    "failed",
+                    0,
+                    &msg,
+                );
+                anyhow::anyhow!(msg)
+            })?;
 
     let url_str = cfg
         .get("url")
@@ -999,7 +1012,22 @@ pub async fn dispatch_to_channel(
             anyhow::bail!(message);
         }
     };
-    match client.post(target).json(&payload).send().await {
+    let mut post_req = client.post(target).json(&payload);
+    for hdr_map_key in ["headers", "custom_headers"] {
+        if let Some(hdrs) = cfg.get(hdr_map_key).and_then(|v| v.as_object()) {
+            for (k, v) in hdrs {
+                if let Some(val_str) = v.as_str() {
+                    if let (Ok(hn), Ok(hv)) = (
+                        reqwest::header::HeaderName::from_bytes(k.trim().as_bytes()),
+                        reqwest::header::HeaderValue::from_str(val_str.trim()),
+                    ) {
+                        post_req = post_req.header(hn, hv);
+                    }
+                }
+            }
+        }
+    }
+    match post_req.send().await {
         Ok(resp) if resp.status().is_success() => {
             record_delivery_log(
                 channel.id,

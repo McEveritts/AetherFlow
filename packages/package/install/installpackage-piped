@@ -854,6 +854,13 @@ af_logged node_build run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; "$2"
 af_logged run_as_piped_clean_env "$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR"
 
 af_set_stage "build_proxy" 65
+_piped_version_ge() {
+    if declare -F deb_compare_versions >/dev/null 2>&1; then
+        deb_compare_versions "$1" ge "$2"
+    else
+        dpkg --compare-versions "$1" ge "$2"
+    fi
+}
 RUST_VERSION=0
 RUST_BUILD_PATH="$PATH"
 RUST_TOOLCHAIN_DIR=""
@@ -862,7 +869,7 @@ if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1 && \
       "$(stat -c '%u' "$(command -v rustc)" 2>/dev/null || stat -f '%u' "$(command -v rustc)" 2>/dev/null || true)" == "0" ]]; then
     RUST_VERSION="$(run_as_piped_clean_env "$DATA_DIR" rustc --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
 fi
-if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
+if ! _piped_version_ge "${RUST_VERSION:-0}" 1.89; then
     for RUST_COMPILER in /root/.rustup/toolchains/*/bin/rustc /usr/local/rustup/toolchains/*/bin/rustc /opt/rust/toolchains/*/bin/rustc /root/.cargo/bin/rustc /usr/local/cargo/bin/rustc; do
         [[ -x "$RUST_COMPILER" ]] || continue
         compiler_owner="$(stat -c '%u' "$RUST_COMPILER" 2>/dev/null || stat -f '%u' "$RUST_COMPILER" 2>/dev/null || true)"
@@ -886,7 +893,7 @@ if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
         cp -a -- "${RUST_COMPILER%/bin/rustc}/." "$RUST_TOOLCHAIN_DIR/"
         chmod -R a+rX "$RUST_TOOLCHAIN_DIR"
         RUST_VERSION="$(run_as_piped_clean_env "$DATA_DIR" "$RUST_TOOLCHAIN_DIR/bin/rustc" --version 2>/dev/null | awk '{print $2}')" || RUST_VERSION=0
-        if ! dpkg --compare-versions "${RUST_VERSION:-0}" ge 1.89; then
+        if ! _piped_version_ge "${RUST_VERSION:-0}" 1.89; then
             safe_rm_rf "$RUST_TOOLCHAIN_DIR"
             RUST_TOOLCHAIN_DIR=""
             continue

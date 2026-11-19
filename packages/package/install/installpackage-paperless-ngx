@@ -145,13 +145,16 @@ PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PN
 report_progress 55 "Downloading and extracting Paperless-ngx ${PNGX_VER} in staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.paperless-build.XXXXXX)"
 TMP_XZ=$(mktemp /tmp/paperless-XXXXXX.tar.xz)
-if af_logged download_file "$PNGX_URL" "$TMP_XZ"; then
-    tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR"
+if ! af_logged download_file "$PNGX_URL" "$TMP_XZ"; then
     rm -f "$TMP_XZ"
-else
-    rm -f "$TMP_XZ"
-    af_logged git clone --depth 1 https://github.com/paperless-ngx/paperless-ngx.git "$BUILD_DIR"
+    log_error "Failed to download or verify SHA-256 for Paperless-ngx ${PNGX_VER}"
+    exit 1
 fi
+if [[ -z "${TEST_ROOT:-}" ]]; then
+    af_validate_tar_archive "$TMP_XZ"
+fi
+tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR" --strip-components=1 2>/dev/null || af_logged tar --no-same-owner -xJf "$TMP_XZ" -C "$BUILD_DIR"
+rm -f "$TMP_XZ"
 test -f "$BUILD_DIR/src/manage.py" || { log_error "Failed to verify Paperless-ngx manage.py"; exit 1; }
 queue_app_version "/opt/paperless/.af-version" "${PNGX_VER#v}"
 
@@ -192,20 +195,47 @@ PYEOF
         PAPERLESS_DATABASE_SAVED=true
     fi
 fi
-mkdir -p /opt/paperless
-if [[ -e /opt/paperless/.venv || -L /opt/paperless/.venv ]]; then
-    mv /opt/paperless/.venv "$BACKUP_DIR/venv"
-    VENV_MOVED=1
-fi
-af_logged python3 -m venv /opt/paperless/.venv
-VENV_ACTIVATED=1
-af_logged /opt/paperless/.venv/bin/pip install --upgrade pip setuptools wheel
+chmod 755 "$BUILD_DIR"
+chown -hRP paperless:paperless "$BUILD_DIR" /var/lib/paperless
+run_as_paperless_builder() {
+    if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        runuser -u paperless -- "$@"
+    else
+        "$@"
+    fi
+}
+af_logged run_as_paperless_builder python3 -m venv "$BUILD_DIR/.venv"
+af_logged run_as_paperless_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel
 if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
-    af_logged /opt/paperless/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
+    af_logged run_as_paperless_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir -r "$BUILD_DIR/requirements.txt"
 fi
-af_logged /opt/paperless/.venv/bin/pip install gunicorn psycopg2-binary || true
-test -x /opt/paperless/.venv/bin/python || { log_error "Failed to verify Paperless-ngx virtual environment"; exit 1; }
-chown -hRP paperless:paperless /opt/paperless/.venv "$BUILD_DIR" /var/lib/paperless
+af_logged run_as_paperless_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir gunicorn
+af_logged run_as_paperless_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir psycopg2-binary || true
+test -x "$BUILD_DIR/.venv/bin/python" || { log_error "Failed to verify Paperless-ngx virtual environment"; exit 1; }
+python3 - "$BUILD_DIR/.venv" "/opt/paperless/.venv" <<'VENV_PYEOF'
+import os, pathlib, stat, sys
+old_venv, new_venv = sys.argv[1], sys.argv[2]
+old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
+bin_dir = pathlib.Path(old_venv) / "bin"
+if bin_dir.is_dir():
+    for entry in bin_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        data = entry.read_bytes()
+        updated = data
+        if data.startswith(b"#!") and old_bytes in data.splitlines()[0]:
+            first, sep, rest = data.partition(b"\n")
+            updated = first.replace(old_bytes, new_bytes) + sep + rest
+        elif entry.name.startswith("activate"):
+            updated = data.replace(old_bytes, new_bytes)
+        if updated != data:
+            mode = stat.S_IMODE(entry.stat().st_mode)
+            entry.write_bytes(updated)
+            os.chmod(entry, mode)
+VENV_PYEOF
+chown -hRP root:root "$BUILD_DIR"
+chmod -R go-w,a+rX "$BUILD_DIR"
+chown -hRP paperless:paperless /var/lib/paperless
 
 report_progress 78 "Configuring /etc/paperless.conf and backing up state..."
 validate_config_paths /etc/paperless.conf
@@ -266,14 +296,9 @@ if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
     done
     SERVICE_STOPPED=1
 fi
-mv /opt/paperless/.venv "$BUILD_DIR/.venv"
-VENV_ACTIVATED=0
 if [[ -d /opt/paperless ]]; then
     mv /opt/paperless "$BACKUP_DIR/app"
     APP_MOVED=1
-    if [[ "$VENV_MOVED" -eq 1 ]]; then
-        mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
-    fi
 fi
 mv "$BUILD_DIR" /opt/paperless
 APP_ACTIVATED=1
@@ -303,7 +328,9 @@ PYEOF
     af_logged /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input
 fi
 
-chown -hRP paperless:paperless /opt/paperless /var/lib/paperless
+chown -hRP root:root /opt/paperless
+chmod -R go-w,a+rX /opt/paperless
+chown -hRP paperless:paperless /var/lib/paperless
 
 report_progress 90 "Configuring multi-unit companion services (webserver, worker, scheduler)..."
 UNIT_WRITTEN=1
@@ -371,6 +398,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+chmod 0644 /etc/systemd/system/paperless-webserver.service /etc/systemd/system/paperless-worker.service /etc/systemd/system/paperless-scheduler.service
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now paperless-webserver
 af_logged systemctl enable --now paperless-worker

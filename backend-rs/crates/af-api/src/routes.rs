@@ -246,11 +246,17 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
     }
     if is_legacy_api {
         h.insert("Deprecation", HeaderValue::from_static("true"));
-        let successor = req_path.replacen("/api/", "/api/v1/", 1);
-        if let Ok(link_hv) =
-            HeaderValue::from_str(&format!("<{}>; rel=\"successor-version\"", successor))
-        {
-            h.insert("Link", link_hv);
+        let raw_successor = req_path.replacen("/api/", "/api/v1/", 1);
+        let safe_successor: String = raw_successor
+            .chars()
+            .filter(|&c| !c.is_control() && !matches!(c, ';' | '>' | '<' | '"' | '\\' | ' '))
+            .collect();
+        if safe_successor.starts_with("/api/v1/") {
+            if let Ok(link_hv) =
+                HeaderValue::from_str(&format!("<{}>; rel=\"successor-version\"", safe_successor))
+            {
+                h.insert("Link", link_hv);
+            }
         }
     }
     resp
@@ -270,6 +276,7 @@ pub fn build_router() -> Router {
             get(proxy_plugin_root_handler)
                 .post(proxy_plugin_root_handler)
                 .put(proxy_plugin_root_handler)
+                .patch(proxy_plugin_root_handler)
                 .delete(proxy_plugin_root_handler),
         )
         .route(
@@ -277,6 +284,7 @@ pub fn build_router() -> Router {
             get(proxy_plugin_wildcard_handler)
                 .post(proxy_plugin_wildcard_handler)
                 .put(proxy_plugin_wildcard_handler)
+                .patch(proxy_plugin_wildcard_handler)
                 .delete(proxy_plugin_wildcard_handler),
         )
         .layer(middleware::from_fn(csrf_middleware))
@@ -444,6 +452,7 @@ fn build_v1_router() -> Router {
             get(proxy_plugin_root_handler)
                 .post(proxy_plugin_root_handler)
                 .put(proxy_plugin_root_handler)
+                .patch(proxy_plugin_root_handler)
                 .delete(proxy_plugin_root_handler),
         )
         .route(
@@ -451,6 +460,7 @@ fn build_v1_router() -> Router {
             get(proxy_plugin_wildcard_handler)
                 .post(proxy_plugin_wildcard_handler)
                 .put(proxy_plugin_wildcard_handler)
+                .patch(proxy_plugin_wildcard_handler)
                 .delete(proxy_plugin_wildcard_handler),
         )
         .layer(middleware::from_fn(csrf_middleware))
@@ -594,11 +604,19 @@ fn build_v1_router() -> Router {
         )
         .route(
             crate::streaming_portability::PREVIEW_ROUTE,
-            post(crate::streaming_portability::preview_handler),
+            post(crate::streaming_portability::preview_handler).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::streaming_portability::MAX_REQUEST_BODY_BYTES,
+                ),
+            ),
         )
         .route(
             crate::streaming_portability::RESTORE_ROUTE,
-            post(crate::streaming_portability::restore_handler),
+            post(crate::streaming_portability::restore_handler).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::streaming_portability::MAX_REQUEST_BODY_BYTES,
+                ),
+            ),
         )
         .route(
             "/streaming/imports/status",
@@ -669,13 +687,18 @@ fn build_v1_router() -> Router {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn health_check() -> Json<serde_json::Value> {
-    let (status, db_status, latency_ms) = match af_db::db_health_check() {
-        Ok(val) => (
+    let check_res = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(af_db::db_health_check),
+    )
+    .await;
+    let (status, db_status, latency_ms) = match check_res {
+        Ok(Ok(Ok(val))) => (
             "ok",
             "ok",
             val.get("latency_ms").and_then(|v| v.as_i64()).unwrap_or(0),
         ),
-        Err(_) => ("degraded", "unreachable", 0),
+        _ => ("degraded", "unreachable", 0),
     };
     Json(serde_json::json!({
         "status": status,
@@ -691,9 +714,11 @@ async fn health_live() -> Json<serde_json::Value> {
 }
 
 async fn health_ready() -> Response {
-    let (code, db_state, ready_state) = match af_db::db_health_check() {
-        Ok(_) => (StatusCode::OK, "ok", "ready"),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "unreachable", "not_ready"),
+    let healthy = database_is_ready().await;
+    let (code, db_state, ready_state) = if healthy {
+        (StatusCode::OK, "ok", "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unreachable", "not_ready")
     };
     (
         code,
@@ -711,12 +736,7 @@ async fn health_ready() -> Response {
 pub(crate) async fn database_is_ready() -> bool {
     let ready = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        tokio::task::spawn_blocking(|| -> anyhow::Result<()> {
-            let conn = af_db::get_conn()?;
-            let value: i32 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
-            anyhow::ensure!(value == 1, "database readiness probe failed");
-            Ok(())
-        }),
+        tokio::task::spawn_blocking(|| af_db::db_readiness_check().map(|_| ())),
     )
     .await;
     matches!(ready, Ok(Ok(Ok(()))))
@@ -751,6 +771,84 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn parse_forwarded_ip_token(raw: &str) -> Option<std::net::IpAddr> {
+    let trimmed = raw.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(sock) = trimmed.parse::<std::net::SocketAddr>() {
+        return Some(sock.ip().to_canonical());
+    }
+    let clean = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.split_once(']').map(|(h, _)| h))
+        .unwrap_or(trimmed);
+    clean
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_canonical())
+}
+
+fn forwarded_headers_exclusively_loopback(headers: &axum::http::HeaderMap) -> bool {
+    let mut saw_any_client_ip = false;
+
+    for val in headers.get_all("x-forwarded-for") {
+        let Ok(raw) = val.to_str() else {
+            return false;
+        };
+        for hop in raw.split(',') {
+            let Some(ip) = parse_forwarded_ip_token(hop) else {
+                return false;
+            };
+            if !ip.is_loopback() {
+                return false;
+            }
+            saw_any_client_ip = true;
+        }
+    }
+
+    for val in headers.get_all("x-real-ip") {
+        let Ok(raw) = val.to_str() else {
+            return false;
+        };
+        let Some(ip) = parse_forwarded_ip_token(raw) else {
+            return false;
+        };
+        if !ip.is_loopback() {
+            return false;
+        }
+        saw_any_client_ip = true;
+    }
+
+    for val in headers.get_all("forwarded") {
+        let Ok(raw) = val.to_str() else {
+            return false;
+        };
+        let mut saw_for_in_header = false;
+        for element in raw.split(',') {
+            for pair in element.split(';') {
+                if let Some((k, v)) = pair.trim().split_once('=') {
+                    if k.trim().eq_ignore_ascii_case("for") {
+                        let Some(ip) = parse_forwarded_ip_token(v) else {
+                            return false;
+                        };
+                        if !ip.is_loopback() {
+                            return false;
+                        }
+                        saw_for_in_header = true;
+                        saw_any_client_ip = true;
+                    }
+                }
+            }
+        }
+        if !saw_for_in_header {
+            return false;
+        }
+    }
+
+    saw_any_client_ip
+}
+
 async fn is_metrics_request_authorized(req: Request) -> bool {
     let (parts, _body) = req.into_parts();
     drop(_body);
@@ -765,8 +863,20 @@ async fn is_metrics_request_authorized(req: Request) -> bool {
     let peer_ip = parts
         .extensions
         .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
-        .map(|axum::extract::connect_info::ConnectInfo(addr)| addr.ip());
-    if peer_ip.is_none_or(|ip| ip.is_loopback()) {
+        .map(|axum::extract::connect_info::ConnectInfo(addr)| addr.ip().to_canonical());
+    let had_proxy_headers = parts
+        .extensions
+        .get::<crate::ws::InboundProxyForwarded>()
+        .map(|f| f.0)
+        .unwrap_or_else(|| {
+            parts.headers.contains_key("x-forwarded-for")
+                || parts.headers.contains_key("x-real-ip")
+                || parts.headers.contains_key("forwarded")
+        });
+
+    if peer_ip.is_none_or(|ip| ip.is_loopback())
+        && (!had_proxy_headers || forwarded_headers_exclusively_loopback(&parts.headers))
+    {
         return true;
     }
 
@@ -819,6 +929,9 @@ async fn is_metrics_request_authorized(req: Request) -> bool {
         let Ok(subj) = crate::auth::load_active_human_subject(&conn, claims.user_id) else {
             return false;
         };
+        if !subj.role.eq_ignore_ascii_case("admin") {
+            return false;
+        }
         if claims.ver < subj.sessions_revoked_after {
             return false;
         }
@@ -5124,6 +5237,32 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
             endpoint.clear();
         }
     }
+    fn endpoint_origin_tuple(raw: &str) -> Option<(String, String, u16)> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let parsed = url::Url::parse(trimmed).ok()?;
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        let port = parsed.port_or_known_default()?;
+        Some((parsed.scheme().to_ascii_lowercase(), host, port))
+    }
+
+    fn is_loopback_ai_endpoint_url(raw: &str) -> bool {
+        let Ok(parsed) = url::Url::parse(raw.trim()) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
+        if host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        host.trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
+    }
+
     let prev_base_domain = af_db::get_base_domain();
 
     let Ok(mut conn) = af_db::get_conn() else {
@@ -5133,6 +5272,50 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
             "Database error",
         );
     };
+
+    let (prev_anth_endpoint, prev_anth_key): (String, String) = conn
+        .query_row(
+            "SELECT COALESCE(anthropic_endpoint, ''), COALESCE(anthropic_api_key, '') FROM settings WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or_default();
+    let effective_prev_anth = if prev_anth_endpoint.trim().is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        prev_anth_endpoint.trim()
+    };
+    let effective_next_anth = if req.anthropic_endpoint.trim().is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        req.anthropic_endpoint.trim()
+    };
+    let supplying_fresh_anth_key = !req.anthropic_api_key.trim().is_empty()
+        && !req.anthropic_api_key.trim().starts_with("****")
+        && req.anthropic_api_key.trim() != af_db::SECRET_MASK;
+    let will_have_anth_key = supplying_fresh_anth_key || !prev_anth_key.trim().is_empty();
+
+    if !prev_anth_key.trim().is_empty()
+        && !supplying_fresh_anth_key
+        && endpoint_origin_tuple(effective_prev_anth) != endpoint_origin_tuple(effective_next_anth)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "ENDPOINT_KEY_REBIND_DENIED",
+            "Changing anthropic_endpoint while an API key is stored requires supplying a fresh API key in the same request",
+        );
+    }
+    if will_have_anth_key
+        && !req.anthropic_endpoint.trim().is_empty()
+        && !req.anthropic_endpoint.trim().starts_with("https://")
+        && !is_loopback_ai_endpoint_url(&req.anthropic_endpoint)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INSECURE_AI_ENDPOINT",
+            "Non-loopback AI endpoints carrying an API key must use https://",
+        );
+    }
 
     let channel = if req.update_channel == "nightly" {
         "nightly"
@@ -5825,20 +6008,26 @@ fn get_allowed_fs_roots() -> Vec<PathBuf> {
     };
 
     if !has_env_override {
-        for def in [
-            "/mnt",
-            "/media",
-            "/home",
-            "/opt/AetherFlow",
-            "/var/lib/aetherflow",
-        ] {
+        for def in ["/mnt", "/media", "/srv", "/home"] {
             raw_roots.push(PathBuf::from(def));
         }
         raw_roots.push(env::temp_dir());
-    }
 
-    if let Ok(cwd) = env::current_dir() {
-        raw_roots.push(cwd);
+        if let Ok(cwd) = env::current_dir() {
+            let cwd_canon = fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            let is_restricted_service_dir =
+                ["/opt/AetherFlow", "/var/lib/aetherflow"]
+                    .iter()
+                    .any(|restricted| {
+                        let r_path = std::path::Path::new(restricted);
+                        let r_canon =
+                            fs::canonicalize(r_path).unwrap_or_else(|_| r_path.to_path_buf());
+                        cwd_canon == r_canon || cwd_canon.starts_with(&r_canon)
+                    });
+            if !is_restricted_service_dir {
+                raw_roots.push(cwd);
+            }
+        }
     }
 
     let mut resolved = Vec::with_capacity(raw_roots.len());
@@ -6870,13 +7059,14 @@ async fn get_notification_channels() -> Json<serde_json::Value> {
              FROM notification_channels ORDER BY created_at DESC",
         ) {
             if let Ok(rows) = stmt.query_map([], |r| {
+                let channel_type: String = r.get(2)?;
                 let raw_cfg: String = r.get(3)?;
-                let cfg_val: serde_json::Value =
-                    serde_json::from_str(&raw_cfg).unwrap_or_else(|_| serde_json::json!({}));
+                let cfg_val =
+                    af_db::mask_notification_channel_config_str(&channel_type, &raw_cfg);
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?,
                     "name": r.get::<_, String>(1)?,
-                    "type": r.get::<_, String>(2)?,
+                    "type": channel_type,
                     "config": cfg_val,
                     "enabled": r.get::<_, i32>(4)? != 0,
                     "created_at": r.get::<_, String>(5)?,

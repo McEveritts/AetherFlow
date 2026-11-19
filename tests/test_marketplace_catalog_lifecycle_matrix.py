@@ -75,7 +75,7 @@ PORT_CONFIG_EXPECTATIONS = {
     "flood": (("etc/systemd/system/flood.service", r"--port {port}\b"),),
     "autobrr": (("var/lib/autobrr/config.toml", r"(?m)^port\s*=\s*{port}\s*$"),),
     "qui": (("var/lib/qui/config.toml", r"(?m)^port\s*=\s*{port}\s*$"),),
-    "nextcloud": (("etc/apache2/conf-available/aetherflow-nextcloud-listen.conf", r"(?m)^Listen {port}$"),),
+    "nextcloud": (("etc/apache2/conf-available/aetherflow-nextcloud-listen.conf", r"(?m)^Listen 127\.0\.0\.1:{port}$"),),
     "syncthing": (("etc/systemd/system/syncthing.service", r"--gui-address=(?:0\.0\.0\.0|127\.0\.0\.1):{port}\b"),),
     "filebrowser": (("commands.jsonl", r"\"config\", \"set\"[^\n]*\"--address\", \"(?:0\.0\.0\.0|127\.0\.0\.1)\"[^\n]*\"--port\", \"{port}\"(?:[^\n]*\"--minimum-password-length\", \"(?:1|12)\")?"),),
     "wireguard": (("etc/wireguard/wg0.conf", r"(?m)^ListenPort\s*=\s*51820\s*$"),),
@@ -94,7 +94,7 @@ PORT_CONFIG_EXPECTATIONS = {
     "jellyseerr": (("etc/systemd/system/jellyseerr.service", r"(?m)^Environment=PORT={port}$"),),
     "adguardhome": (("opt/AdGuardHome/AdGuardHome.yaml", r"address:\s*127\.0\.0\.1:{port}\b"),),
     "rtorrent": (("etc/systemd/system/rtorrent.service", r"rtorrent -n -o import=[^\n]*/var/lib/rtorrent/\.rtorrent\.rc"),),
-    "rutorrent": (("etc/apache2/sites-available/rutorrent.conf", r"<VirtualHost \*:{port}>"),),
+    "rutorrent": (("etc/apache2/sites-available/rutorrent.conf", r"<VirtualHost 127\.0\.0\.1:{port}>"),),
     "rclone": (("etc/systemd/system/rclone.service", r"--rc-addr=(?:0\.0\.0\.0|127\.0\.0\.1):{port}\b"),),
     "mergerfs": (("etc/systemd/system/mergerfs.service", r"mergerfs -o defaults,allow_other,use_ino,category\.create=epmfs"),),
     "cloudplow": (("etc/systemd/system/cloudplow.service", r"cloudplow/cloudplow\.py run"),),
@@ -112,7 +112,7 @@ PORT_CONFIG_EXPECTATIONS = {
     "n8n": (("etc/systemd/system/n8n.service", r"(?m)^Environment=N8N_PORT={port}$"),),
     "palate": (("etc/palate/palate.env", r"(?m)^PORT={port}$"),),
     "gitea": (("etc/gitea/app.ini", r"(?m)^HTTP_PORT\s*=\s*{port}\s*$"),),
-    "organizr": (("etc/apache2/conf-available/aetherflow-organizr-listen.conf", r"(?m)^Listen {port}$"),),
+    "organizr": (("etc/apache2/conf-available/aetherflow-organizr-listen.conf", r"(?m)^Listen 127\.0\.0\.1:{port}$"),),
     "dispatcharr": (("etc/dispatcharr/dispatcharr.env", r"(?m)^DISPATCHARR_PORT={port}$"),),
     "duplicati": (("etc/duplicati/duplicati.env", r"(?m)^DUPLICATI_PORT={port}$"),),
     "filebot": (("var/lib/filebot/filebot-node.env", r"(?m)^FILEBOT_NODE_HTTP_PORT={port}$"),),
@@ -2604,7 +2604,7 @@ curl() {
         self.assertEqual(credentials.parent.stat().st_mode & 0o777, 0o700)
         stored = json.loads(credentials.read_text())
         self.assertEqual(stored, {"username": "admin", "password": password,
-                                  "ha1": hashlib.md5(password.encode()).hexdigest()})
+                                  "ha1": hashlib.md5(f"admin:Welcome to AetherFlow:{password}".encode()).hexdigest()})
         repeated = subprocess.run(["/bin/bash", "-euc", body], env=environment, text=True, capture_output=True)
         self.assert_success(repeated)
         self.assertEqual(repeated.stdout, result.stdout)
@@ -2629,7 +2629,7 @@ curl() {
                 result = subprocess.run(["/bin/bash", "-euc", helper + '\nload_master_credentials\nprintf "%s:%s:%s" "$MASTER_USER" "$MASTER_PASS" "$MASTER_HA1"'],
                                         env=environment, text=True, capture_output=True)
                 self.assert_success(result)
-                expected_hash = supplied_hash or hashlib.md5(b"environment-secret").hexdigest()
+                expected_hash = supplied_hash or hashlib.md5(b"operator:Welcome to AetherFlow:environment-secret").hexdigest()
                 self.assertEqual(result.stdout, "operator:environment-secret:" + expected_hash)
                 self.assertFalse((fixture.root / "var/lib/aetherflow/.master.creds").exists())
 
@@ -2951,7 +2951,7 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
             self.assertEqual(credentials.read_text(), "operator:operator-hash\n")
             self.assertIn("operator-secret", config.read_text())
             self.assertIn("15111", config.read_text())
-            self.assertIn(f"<VirtualHost *:{port}>", vhost.read_text())
+            self.assertIn(f"<VirtualHost 127.0.0.1:{port}>", vhost.read_text())
             self.assertIn("Require valid-user", vhost.read_text())
 
     def test_rutorrent_updates_upstream_plugins_and_retains_custom_plugins_after_uninstall(self):
@@ -3033,7 +3033,7 @@ os.execv(str(root / 'usr/bin/sudo'), [str(root / 'usr/bin/sudo'), *arguments])
                 for action, port in (("update", 18080), ("reinstall", 18081)):
                     self.assert_success(fixture.run(action, port))
                     self.assertEqual(config.read_text(), content)
-                    self.assertIn(f"<VirtualHost *:{port}>", vhost.read_text())
+                    self.assertIn(f"<VirtualHost 127.0.0.1:{port}>", vhost.read_text())
                     self.assertIn("Require ip 192.0.2.7", vhost.read_text())
                     self.assertIn('AuthName "operator-access"', vhost.read_text())
 

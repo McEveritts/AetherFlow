@@ -72,10 +72,14 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
+# Optional media mount points for MediaFlow transcoding; '-' skips absent directories
+# while keeping /opt/AetherFlow read-only.
+ReadWritePaths=-/srv -/mnt -/media -/data
 # Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
 # path when that directory was never created.
 ReadWritePaths=-/opt/AetherFlow/backend/data

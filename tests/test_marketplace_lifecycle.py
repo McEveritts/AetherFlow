@@ -92,7 +92,9 @@ elif command == 'openssl':
     print('test-database-password')
 elif command == 'mysqldump':
     print('-- fixture database backup')
-elif command in ('apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su'):
+elif command == 'htpasswd':
+    print(f"{args[-1]}:$2y$05$fixturehash")
+elif command in ('apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su', 'install'):
     pass
 else:
     raise RuntimeError((command, args))
@@ -109,7 +111,7 @@ class MarketplaceLifecycleTests(unittest.TestCase):
                           'etc/apache2/sites-available', 'usr/local/bin', 'usr/bin', 'usr/sbin', 'usr/lib', 'usr/share', 'srv', 'install'):
             (self.root / directory).mkdir(parents=True)
         for command in ('dpkg', 'dpkg-deb', 'dpkg-query', 'curl', 'git', 'npm', 'mysql', 'sudo', 'systemctl',
-                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su', 'mysqldump'):
+                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'getent', 'su', 'mysqldump', 'htpasswd'):
             path = self.root / 'mock-bin' / command
             path.write_text(MOCK.replace('__AF_TESTS_DIR__', str(ROOT / 'tests')))
             path.chmod(0o755)
@@ -123,6 +125,7 @@ class MarketplaceLifecycleTests(unittest.TestCase):
         common = '''set -euo pipefail
 MASTER_USER=test-admin
 MASTER_PASS=test-password
+load_master_credentials() { :; }
 log_info() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 log_warn() { printf '%s\\n' "$*" >> "$LOGFILE"; }
 print_error() { printf '%s\\n' "$*" >&2; }
@@ -254,7 +257,7 @@ purge_systemd_unit() { :; }
                 self.assert_success(self.run_script(package, AF_APP_PORT='17701'))
                 self.assertEqual(data.read_text(), 'settings and history')
                 self.assertTrue((self.root / f'var/www/{package}/new-code').exists())
-                self.assertIn('*:17701', (self.root / f'etc/apache2/sites-available/{package}.conf').read_text())
+                self.assertIn('127.0.0.1:17701', (self.root / f'etc/apache2/sites-available/{package}.conf').read_text())
 
     def test_helper_cohort_removal_retains_data_unless_purge_is_explicit(self):
         for package in ('dispatcharr', 'duplicati', 'novnc'):
@@ -399,7 +402,7 @@ purge_systemd_unit() { :; }
                 self.assertNotIn('systemctl restart apache2', commands)
                 self.assertIn('apache2ctl configtest', commands)
                 listener = self.root / f'etc/apache2/conf-available/aetherflow-{app}-listen.conf'
-                self.assertEqual(listener.read_text(), 'Listen 17899\n')
+                self.assertEqual(listener.read_text(), 'Listen 127.0.0.1:17899\n')
 
     def test_apache_config_failure_does_not_fallback_to_restart(self):
         result = self.run_script('organizr', FAIL_STAGE='apache-config')

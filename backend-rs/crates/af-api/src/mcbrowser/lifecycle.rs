@@ -180,10 +180,32 @@ fn delete_account_with_conn(
                 .map_err(database_error)?;
         }
     }
+    let has_sqlite_sequence: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_sqlite_sequence {
+        let updated_seq = transaction
+            .execute(
+                "UPDATE sqlite_sequence SET seq = CASE WHEN seq < ?1 THEN ?1 ELSE seq END WHERE name = 'users'",
+                [target_user_id],
+            )
+            .unwrap_or(0);
+        if updated_seq == 0 {
+            let _ = transaction.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?1)",
+                [target_user_id],
+            );
+        }
+    }
     transaction
         .execute("DELETE FROM users WHERE id = ?1", [target_user_id])
         .map_err(database_error)?;
     transaction.commit().map_err(database_error)?;
+    super::media::invalidate_thumbnail_cache(target_user_id, "");
     crate::auth::finalize_user_credential_revocation(target_user_id, &revoked_jtis);
     Ok(())
 }

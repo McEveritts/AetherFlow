@@ -5,38 +5,113 @@ set -euo pipefail
 
 # Reconcile /etc/hosts internal .aether.local loopback entries FIRST (even before certbot/public TLS).
 # Never write public domains into /etc/hosts, or getent ahosts will self-poison to 127.0.0.1.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGES_JSON=""
+for pkg_cand in \
+    "${AF_PACKAGES_JSON:-}" \
+    /opt/AetherFlow/current/config/packages.json \
+    /opt/AetherFlow/config/packages.json \
+    "${SCRIPT_DIR}/../../config/packages.json"; do
+    if [[ -n "$pkg_cand" && -f "$pkg_cand" ]]; then
+        PACKAGES_JSON="$pkg_cand"
+        break
+    fi
+done
+
+declare -A ALLOWED_WEB_APPS=()
+PACKAGES_JSON_LOADED=0
+if [[ -n "$PACKAGES_JSON" ]] && command -v python3 >/dev/null 2>&1; then
+    while IFS= read -r valid_app; do
+        [[ -n "$valid_app" ]] && ALLOWED_WEB_APPS["$valid_app"]=1
+    done < <(python3 - "$PACKAGES_JSON" <<'PYEOF' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    entries = json.load(fh)
+for entry in entries:
+    if not isinstance(entry, dict):
+        continue
+    name = str(entry.get("name") or "").strip()
+    port = entry.get("default_port")
+    if name and isinstance(port, (int, float)) and not isinstance(port, bool) and port > 0:
+        print(name)
+PYEOF
+)
+    [[ "${#ALLOWED_WEB_APPS[@]}" -gt 0 ]] && PACKAGES_JSON_LOADED=1
+fi
+
+is_allowed_web_app() {
+    local app="$1"
+    [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]] || return 1
+    case "$app" in
+        core|10g|developer|cron|aetherflow) return 1 ;;
+    esac
+    if [[ "$PACKAGES_JSON_LOADED" -eq 1 ]]; then
+        [[ -n "${ALLOWED_WEB_APPS[$app]:-}" ]]
+        return $?
+    fi
+    return 0
+}
+
 HOSTS_DOMAINS=("aetherflow.aether.local")
 for lock in /install/.*.lock; do
     [[ -e "$lock" ]] || continue
     app="$(basename "$lock")"
     app="${app#.}"
     app="${app%.lock}"
-    [[ "$app" == "core" ]] && continue
-    if [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]]; then
+    if is_allowed_web_app "$app"; then
         HOSTS_DOMAINS+=("${app}.aether.local")
     fi
 done
 
 if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
-    mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
-    TMP_HOSTS="$(mktemp /etc/.hosts.aetherflow.XXXXXX 2>/dev/null || mktemp)"
-    awk '
-        /^# --- AETHERFLOW INTERNAL DNS ---$/ { skip=1; next }
-        /^# --- END AETHERFLOW INTERNAL DNS ---$/ { skip=0; next }
-        !skip { print }
-    ' /etc/hosts > "$TMP_HOSTS"
-    {
-        echo "# --- AETHERFLOW INTERNAL DNS ---"
-        for h in "${UNIQUE_HOSTS[@]}"; do
-            printf "127.0.0.1\t%s\n" "$h"
-        done
-        echo "# --- END AETHERFLOW INTERNAL DNS ---"
-    } >> "$TMP_HOSTS"
-    chmod 0644 "$TMP_HOSTS"
-    if ! mv -f "$TMP_HOSTS" /etc/hosts 2>/dev/null; then
-        cat "$TMP_HOSTS" > /etc/hosts
-        rm -f "$TMP_HOSTS"
-    fi
+    (
+        HOSTS_LOCK="/run/aetherflow/hosts.lock"
+        if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+            mkdir -p -m 0750 /run/aetherflow
+            exec 8>"$HOSTS_LOCK"
+            flock -x -w 30 8 || {
+                echo "[af-certbot-sync] Timed out acquiring ${HOSTS_LOCK}" >&2
+                exit 1
+            }
+        elif mkdir -p -m 0750 /run/aetherflow 2>/dev/null && [[ -w /run/aetherflow ]]; then
+            exec 8>"$HOSTS_LOCK"
+            flock -x -w 30 8 || {
+                echo "[af-certbot-sync] Timed out acquiring ${HOSTS_LOCK}" >&2
+                exit 1
+            }
+        fi
+        # Preserve any non-.aether.local custom domains previously written inside AetherFlow's managed block
+        while IFS= read -r existing_entry; do
+            [[ -n "$existing_entry" ]] && HOSTS_DOMAINS+=("$existing_entry")
+        done < <(awk '
+            /^# (--- AETHERFLOW INTERNAL DNS ---|BEGIN AETHERFLOW MANAGED BLOCK)$/ { in_block=1; next }
+            /^# (--- END AETHERFLOW INTERNAL DNS ---|END AETHERFLOW MANAGED BLOCK)$/ { in_block=0; next }
+            in_block && $1 == "127.0.0.1" && NF >= 2 {
+                for (i = 2; i <= NF; i++) {
+                    if ($i !~ /\.aether\.local$/) print $i
+                }
+            }
+        ' /etc/hosts)
+        mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
+        TMP_HOSTS="$(mktemp /etc/.hosts.aetherflow.XXXXXX 2>/dev/null || mktemp)"
+        awk '
+            /^# (--- AETHERFLOW INTERNAL DNS ---|BEGIN AETHERFLOW MANAGED BLOCK)$/ { skip=1; next }
+            /^# (--- END AETHERFLOW INTERNAL DNS ---|END AETHERFLOW MANAGED BLOCK)$/ { skip=0; next }
+            !skip { print }
+        ' /etc/hosts > "$TMP_HOSTS"
+        {
+            echo "# --- AETHERFLOW INTERNAL DNS ---"
+            for h in "${UNIQUE_HOSTS[@]}"; do
+                printf "127.0.0.1\t%s\n" "$h"
+            done
+            echo "# --- END AETHERFLOW INTERNAL DNS ---"
+        } >> "$TMP_HOSTS"
+        chmod 0644 "$TMP_HOSTS"
+        if ! mv -f "$TMP_HOSTS" /etc/hosts 2>/dev/null; then
+            cat "$TMP_HOSTS" > /etc/hosts
+            rm -f "$TMP_HOSTS"
+        fi
+    )
 fi
 
 if ! command -v certbot >/dev/null 2>&1; then
@@ -133,13 +208,12 @@ for lock in /install/.*.lock; do
     app="$(basename "$lock")"
     app="${app#.}"
     app="${app%.lock}"
-    [[ "$app" == "core" ]] && continue
-    [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]] || continue
-    ext_disabled=""
+    is_allowed_web_app "$app" || continue
+    ext_enabled=""
     if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        ext_disabled="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
+        ext_enabled="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND external_access_enabled = 1 AND (public_domain = '' OR LOWER(public_domain) = LOWER('${app}.${BASE_DOMAIN}')) LIMIT 1;" 2>/dev/null || true)"
     fi
-    [[ -n "$ext_disabled" ]] && continue
+    [[ -n "$ext_enabled" ]] || continue
     cand="${app}.${BASE_DOMAIN}"
     if public_dns_resolves "$cand"; then
         DOMAINS+=("$cand")

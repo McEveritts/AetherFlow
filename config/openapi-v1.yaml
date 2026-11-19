@@ -683,7 +683,7 @@ paths:
         - Cluster
         - Operator
       summary: Issue worker cluster enrollment token
-      description: Generates and persists a cluster enrollment PSK (`enrollment_token`) and worker setup instructions using HTTPS REST heartbeats against the API origin (`CLUSTER_MASTER_ADDR=https://<this-server>`) with mTLS client certificates (rather than gRPC port 50051).
+      description: Generates and persists a cluster enrollment PSK (`enrollment_token`) and worker setup instructions using HTTPS REST heartbeats against the cluster listener (`CLUSTER_MASTER_ADDR=https://<this-server>:50051`) with mTLS client certificates.
       responses:
         '200':
           description: OK
@@ -4212,6 +4212,29 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/GenericObject'
+    patch:
+      tags:
+        - Plugins
+      summary: Partially update plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
     put:
       tags:
         - Plugins
@@ -4283,6 +4306,29 @@ paths:
       tags:
         - Plugins
       summary: Execute plugins proxy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericObject'
+        '401':
+          $ref: '#/components/responses/Error'
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenericObject'
+    patch:
+      tags:
+        - Plugins
+      summary: Partially update plugins proxy
       responses:
         '200':
           description: OK
@@ -5210,7 +5256,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LoginRequest'
+              $ref: '#/components/schemas/SetupRequest'
   /public/auth/setup/check:
     get:
       tags:
@@ -5551,6 +5597,19 @@ components:
           type: string
         password:
           type: string
+    SetupRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        setup_token:
+          type: string
+          description: Optional one-time bootstrap setup token when required by host policy
     User:
       type: object
       properties:

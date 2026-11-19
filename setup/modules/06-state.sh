@@ -93,9 +93,20 @@ _setup_lock_trap() {
 
 # Ensure /install directory exists and state file has a version header
 _init_state() {
-    mkdir -p "$(dirname "${STATE_FILE}")"
+    local state_dir
+    state_dir="$(dirname "${STATE_FILE}")"
+    if [[ "${state_dir}" == "/install" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        local install_group="root"
+        if getent group aetherflow >/dev/null 2>&1; then
+            install_group="aetherflow"
+        fi
+        install -d -m 0750 -o root -g "${install_group}" /install
+    else
+        mkdir -p "${state_dir}"
+    fi
     touch "${STATE_FILE}" 2>/dev/null
     touch "${CONFIG_FILE}" 2>/dev/null
+    chmod 0600 "${CONFIG_FILE}" 2>/dev/null || true
 
     # Inject version header if missing
     if [[ -s "${STATE_FILE}" ]]; then
@@ -205,28 +216,151 @@ _save_config() {
     local key="$1"
     local value="$2"
     local tmp_config
-    tmp_config="$(mktemp "${CONFIG_FILE}.XXXXXX")" || return 1
+    tmp_config="$(umask 0077; mktemp "${CONFIG_FILE}.XXXXXX")" || return 1
 
     if [[ -f "${CONFIG_FILE}" ]]; then
         # Remove existing entry, then copy remaining
         sed "/^${key}=/d" "${CONFIG_FILE}" > "${tmp_config}"
     fi
     printf '%s=%q\n' "${key}" "${value}" >> "${tmp_config}"
+    chmod 0600 "${tmp_config}" 2>/dev/null || true
     sync "${tmp_config}" 2>/dev/null || true
     mv -f "${tmp_config}" "${CONFIG_FILE}"
 }
 
-# Load a user config value
+# Remove sensitive or transient keys from CONFIG_FILE atomically
+# Usage: _scrub_config_keys "passwd" "ha1pass"
+_scrub_config_keys() {
+    [[ -f "${CONFIG_FILE}" && $# -gt 0 ]] || return 0
+    local tmp_config
+    tmp_config="$(umask 0077; mktemp "${CONFIG_FILE}.XXXXXX")" || return 1
+    python3 - "${CONFIG_FILE}" "${tmp_config}" "$@" <<'PY'
+import os, re, sys
+
+src_path, dst_path, *drop_keys = sys.argv[1:]
+drop_set = set(drop_keys)
+key_re = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
+kept = []
+with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        m = key_re.match(line)
+        if m and m.group(1) in drop_set:
+            continue
+        kept.append(line)
+with open(dst_path, "w", encoding="utf-8") as fh:
+    os.fchmod(fh.fileno(), 0o600)
+    fh.writelines(kept)
+    fh.flush()
+    os.fsync(fh.fileno())
+PY
+    if [[ $? -ne 0 ]]; then
+        rm -f "${tmp_config}"
+        return 1
+    fi
+    mv -f "${tmp_config}" "${CONFIG_FILE}"
+}
+
+# Load a user config value safely with Python key-value parsing (never source CONFIG_FILE)
 # Usage: result=$(_load_config "key")
 _load_config() {
     local key="$1"
-    if [[ -f "${CONFIG_FILE}" ]]; then
-        (
-            # shellcheck disable=1090
-            source "${CONFIG_FILE}" 2>/dev/null
-            printf '%s' "${!key-}"
-        )
-    fi
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+    python3 - "${CONFIG_FILE}" "${key}" <<'PY'
+import codecs, os, re, shlex, sys
+
+cfg_path, target_key = sys.argv[1], sys.argv[2]
+if not os.path.isfile(cfg_path) or os.path.islink(cfg_path):
+    sys.exit(0)
+
+key_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+def unquote(raw: str) -> str:
+    raw = raw.rstrip("\r\n")
+    if not raw or raw in ('""', "''"):
+        return ""
+    if raw.startswith("$'") and raw.endswith("'") and len(raw) >= 3:
+        try:
+            return codecs.decode(raw[2:-1], "unicode_escape")
+        except Exception:
+            return raw[2:-1]
+    try:
+        parts = shlex.split(raw, posix=True)
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return " ".join(parts)
+    except ValueError:
+        return raw.strip("\"'")
+
+val = ""
+with open(cfg_path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        s = line.lstrip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].lstrip()
+        m = key_re.match(s)
+        if m and m.group(1) == target_key:
+            val = unquote(m.group(2))
+
+sys.stdout.write(val)
+PY
+}
+
+# Safely populate shell variables from CONFIG_FILE without sourcing arbitrary shell code
+_load_config_into_vars() {
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+    local k v
+    while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+        if [[ "${k}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            printf -v "${k}" '%s' "${v}"
+        fi
+    done < <(python3 - "${CONFIG_FILE}" <<'PY'
+import codecs, os, re, shlex, sys
+
+cfg_path = sys.argv[1]
+if not os.path.isfile(cfg_path) or os.path.islink(cfg_path):
+    sys.exit(0)
+
+key_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+def unquote(raw: str) -> str:
+    raw = raw.rstrip("\r\n")
+    if not raw or raw in ('""', "''"):
+        return ""
+    if raw.startswith("$'") and raw.endswith("'") and len(raw) >= 3:
+        try:
+            return codecs.decode(raw[2:-1], "unicode_escape")
+        except Exception:
+            return raw[2:-1]
+    try:
+        parts = shlex.split(raw, posix=True)
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return " ".join(parts)
+    except ValueError:
+        return raw.strip("\"'")
+
+parsed = {}
+with open(cfg_path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        s = line.lstrip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].lstrip()
+        m = key_re.match(s)
+        if m:
+            parsed[m.group(1)] = unquote(m.group(2))
+
+for k, v in parsed.items():
+    sys.stdout.write(f"{k}\0{v}\0")
+PY
+    )
 }
 
 ################################################################################

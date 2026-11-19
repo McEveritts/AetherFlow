@@ -58,8 +58,10 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
     useradd --system --user-group --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
 fi
-mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/settings" "${DATA_DIR}/Downloads"
+mkdir -p "${DATA_DIR}" "${DATA_DIR}/settings" "${DATA_DIR}/Downloads"
+chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}"
 
+STAGE_BASE=""
 RUNTIME_BACKUP="$(mktemp -d /tmp/af-runtime-XXXXXX)"
 RUNTIME_PATHS=("/opt/pyload" "/var/lib/pyload" "/etc/systemd/system/pyload.service")
 RUNTIME_HAD_PREVIOUS=false
@@ -80,6 +82,7 @@ rollback_runtime() {
             af_logged systemctl restart pyload || restore_failed=true
         fi
     fi
+    [[ -z "${STAGE_BASE:-}" ]] || rm -rf -- "$STAGE_BASE"
     [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"
     if [[ "$restore_failed" == true ]]; then
         status=1
@@ -102,30 +105,72 @@ for runtime_index in "${!RUNTIME_PATHS[@]}"; do
     fi
 done
 report_progress 50 "Creating Python virtualenv and installing pyload-ng..."
-RUNTIME_MUTATED=1
-if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
-    af_logged python3 -m venv "${INSTALL_DIR}/.venv"
-fi
-af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel
+STAGE_BASE="$(mktemp -d /opt/.af-pyload-build.XXXXXX)"
+chmod 0755 "$STAGE_BASE"
+STAGE_BUILD="${STAGE_BASE}/build"
+mkdir -p "$STAGE_BUILD"
+chown -hRP "${APP_USER}:${APP_USER}" "$STAGE_BUILD"
+
+run_as_pyload_builder() {
+    if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        runuser -u "${APP_USER}" -- "$@"
+    else
+        "$@"
+    fi
+}
+
+af_logged run_as_pyload_builder python3 -m venv "${STAGE_BUILD}/.venv"
+af_logged run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel
 if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
     TARGET_VER="${AF_TARGET_VERSION#v}"
-    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng[plugins]==${TARGET_VER}" || \
-        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir "pyload-ng==${TARGET_VER}"
+    af_logged run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/pip" install --no-cache-dir "pyload-ng[plugins]==${TARGET_VER}" || \
+        af_logged run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/pip" install --no-cache-dir "pyload-ng==${TARGET_VER}"
 else
-    af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" || \
-        af_logged "${INSTALL_DIR}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng
+    af_logged run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/pip" install --upgrade --no-cache-dir "pyload-ng[plugins]" || \
+        af_logged run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/pip" install --upgrade --no-cache-dir pyload-ng
 fi
 
-PYLOAD_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || true)"
+PYLOAD_VER="$(run_as_pyload_builder "${STAGE_BUILD}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('pyload-ng'))" 2>/dev/null || true)"
 if [[ -z "$PYLOAD_VER" ]]; then
-    print_error "Failed to extract pyload-ng version from ${INSTALL_DIR}/.venv"
+    print_error "Failed to extract pyload-ng version from ${STAGE_BUILD}/.venv"
     exit 1
 fi
 if [[ -n "${AF_TARGET_VERSION:-}" && "$PYLOAD_VER" != "${AF_TARGET_VERSION#v}" ]]; then
     print_error "Installed pyload-ng version ($PYLOAD_VER) does not match requested AF_TARGET_VERSION (${AF_TARGET_VERSION#v})"
     exit 1
 fi
+python3 - "${STAGE_BUILD}/.venv" "${INSTALL_DIR}/.venv" <<'VENV_PYEOF'
+import os, pathlib, stat, sys
+old_venv, new_venv = sys.argv[1], sys.argv[2]
+old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
+bin_dir = pathlib.Path(old_venv) / "bin"
+if bin_dir.is_dir():
+    for entry in bin_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        data = entry.read_bytes()
+        updated = data
+        if data.startswith(b"#!") and old_bytes in data.splitlines()[0]:
+            first, sep, rest = data.partition(b"\n")
+            updated = first.replace(old_bytes, new_bytes) + sep + rest
+        elif entry.name.startswith("activate"):
+            updated = data.replace(old_bytes, new_bytes)
+        if updated != data:
+            mode = stat.S_IMODE(entry.stat().st_mode)
+            entry.write_bytes(updated)
+            os.chmod(entry, mode)
+VENV_PYEOF
+chown -hRP root:root "${STAGE_BUILD}"
+chmod -R go-w,a+rX "${STAGE_BUILD}"
+
+RUNTIME_MUTATED=1
 queue_app_version "${INSTALL_DIR}/.af-version" "${PYLOAD_VER}"
+if [[ -e "${INSTALL_DIR}" || -L "${INSTALL_DIR}" ]]; then
+    mv -T "${INSTALL_DIR}" "${STAGE_BASE}/prev"
+fi
+mv -T "${STAGE_BUILD}" "${INSTALL_DIR}"
+rm -rf -- "${STAGE_BASE}"
+STAGE_BASE=""
 
 report_progress 75 "Configuring ${APP_NAME} Web UI settings on port ${APP_PORT}..."
 if [[ ! -f "${DATA_DIR}/settings/pyload.cfg" ]]; then
@@ -149,7 +194,7 @@ else
     set_config_value "${DATA_DIR}/settings/pyload.cfg" ini 'int port : "Port"' "$APP_PORT"
 fi
 
-chown -hRP "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+chown -hRP "${APP_USER}:${APP_USER}" "${DATA_DIR}"
 
 report_progress 90 "Configuring ${APP_NAME} systemd service..."
 cat > "${SERVICE_FILE}" <<EOF
@@ -171,6 +216,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 0644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now pyload.service

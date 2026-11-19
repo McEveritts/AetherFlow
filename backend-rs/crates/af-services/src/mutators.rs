@@ -3,7 +3,7 @@ use base64::Engine as _;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use regex::Regex;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
@@ -1080,7 +1080,7 @@ pub fn update_pihole_custom_list(
     af_runner::validate_hosts_ip(lan_ip)
         .map_err(|e| format!("Invalid LAN IP for Pi-hole custom list: {e}"))?;
 
-    let existing = match fs::read_to_string(custom_list_path) {
+    let existing = match af_runner::read_dns_provider_text(custom_list_path, true) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
@@ -1097,7 +1097,8 @@ pub fn update_pihole_custom_list(
     if content == existing && custom_list_path.exists() {
         return Ok(());
     }
-    write_file_atomic(custom_list_path, content.as_bytes())
+    af_runner::write_dns_provider_text(custom_list_path, &content, true)
+        .map_err(|error| error.to_string())
 }
 
 pub fn update_dnsmasq_conf(
@@ -1108,7 +1109,7 @@ pub fn update_dnsmasq_conf(
     af_runner::validate_hosts_ip(lan_ip)
         .map_err(|e| format!("Invalid LAN IP for dnsmasq config: {e}"))?;
 
-    let existing = match fs::read_to_string(dnsmasq_conf_path) {
+    let existing = match af_runner::read_dns_provider_text(dnsmasq_conf_path, false) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
@@ -1144,7 +1145,8 @@ pub fn update_dnsmasq_conf(
     if content == existing && dnsmasq_conf_path.exists() {
         return Ok(());
     }
-    write_file_atomic(dnsmasq_conf_path, content.as_bytes())
+    af_runner::write_dns_provider_text(dnsmasq_conf_path, &content, false)
+        .map_err(|error| error.to_string())
 }
 
 pub fn update_dnsmasq_config(
@@ -1165,7 +1167,7 @@ pub fn update_pihole_toml_hosts(
     if !toml_path.is_file() {
         return Ok(());
     }
-    let existing = fs::read_to_string(toml_path)
+    let existing = af_runner::read_dns_provider_text(toml_path, true)
         .map_err(|e| format!("failed to read {}: {}", toml_path.display(), e))?;
 
     let normalized_domains: BTreeSet<String> = domains
@@ -1271,7 +1273,7 @@ pub fn update_pihole_toml_hosts(
     if content == existing {
         return Ok(());
     }
-    write_file_atomic(toml_path, content.as_bytes())
+    af_runner::write_dns_provider_text(toml_path, &content, true).map_err(|error| error.to_string())
 }
 
 /// Synchronizes internal `.aether.local` (and configured public) domains into:
@@ -1327,12 +1329,14 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| resolve_config_path("/etc/dnsmasq.d"));
 
-        if dnsmasq_dir.is_dir() {
+        if af_runner::dns_provider_directory_exists(&dnsmasq_dir, false)
+            .map_err(|error| error.to_string())?
+        {
             let custom_dns_path = dnsmasq_dir.join("05-aetherflow-dns.conf");
             let mut consolidated_domains = validated.clone();
             for legacy_name in ["aetherflow-local.conf", "aetherflow-local-dns.conf"] {
                 let legacy_path = dnsmasq_dir.join(legacy_name);
-                if let Ok(legacy_raw) = fs::read_to_string(&legacy_path) {
+                if let Ok(legacy_raw) = af_runner::read_dns_provider_text(&legacy_path, false) {
                     for line in legacy_raw.lines() {
                         if let Some(rest) = line.trim().strip_prefix("address=/") {
                             if let Some((dom, _ip)) = rest.split_once('/') {
@@ -1348,9 +1352,9 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
             update_dnsmasq_conf(&custom_dns_path, &lan_ip, &consolidated_domains)?;
             for legacy_name in ["aetherflow-local.conf", "aetherflow-local-dns.conf"] {
                 let legacy_path = dnsmasq_dir.join(legacy_name);
-                if legacy_path.exists() {
-                    let _ = fs::remove_file(&legacy_path);
-                }
+                af_runner::remove_dns_provider_file(&legacy_path).map_err(|error| {
+                    format!("cannot remove legacy dnsmasq configuration: {error}")
+                })?;
             }
         }
 
@@ -1361,7 +1365,9 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| resolve_config_path("/etc/pihole"));
 
-        if pihole_dir.is_dir() {
+        if af_runner::dns_provider_directory_exists(&pihole_dir, true)
+            .map_err(|error| error.to_string())?
+        {
             let custom_list = pihole_dir.join("custom.list");
             update_pihole_custom_list(&custom_list, &lan_ip, &validated)?;
             let pihole_toml = pihole_dir.join("pihole.toml");
@@ -1624,65 +1630,7 @@ fn post_runner_json_sync<T: Serialize + Sync + ?Sized>(
     })
 }
 
-fn ensure_apache_site_symlink(
-    sites_en: &Path,
-    conf_filename: &str,
-    backups: &mut Vec<(PathBuf, Option<String>)>,
-) -> Result<bool, String> {
-    if !sites_en.is_dir() {
-        return Ok(false);
-    }
-    let link_path = sites_en.join(conf_filename);
-    if let Ok(meta) = fs::symlink_metadata(&link_path) {
-        if !meta.file_type().is_symlink() {
-            // Regular file already managed directly in sites-enabled
-            return Ok(false);
-        }
-        let target = format!("../sites-available/{conf_filename}");
-        if fs::read_link(&link_path)
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .as_deref()
-            == Some(target.as_str())
-        {
-            return Ok(false);
-        }
-        let _ = fs::remove_file(&link_path);
-    }
-    #[cfg(unix)]
-    {
-        let target = format!("../sites-available/{conf_filename}");
-        std::os::unix::fs::symlink(&target, &link_path).map_err(|e| {
-            format!(
-                "failed to enable Apache vhost {}: {}",
-                link_path.display(),
-                e
-            )
-        })?;
-        backups.push((link_path, None));
-        Ok(true)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = backups;
-        Ok(false)
-    }
-}
-
-fn reload_apache2_if_active() {
-    if let Ok(status) = std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "apache2"])
-        .status()
-    {
-        if status.success() {
-            let _ = std::process::Command::new("systemctl")
-                .args(["reload", "apache2"])
-                .output();
-        }
-    }
-}
-
-/// Synchronizes Apache2 virtual host reverse-proxy configurations when `/etc/apache2/sites-available` is present.
+/// Synchronizes the managed Apache virtual hosts through the runner's typed ingress contract.
 pub fn sync_apache_app_vhost(
     app_name: &str,
     listen_port: i32,
@@ -1690,588 +1638,69 @@ pub fn sync_apache_app_vhost(
     public_domain: &str,
     external_access: bool,
 ) -> Result<bool, String> {
+    let tls_enabled = match af_db::get_app_ingress_config(app_name) {
+        Ok(ingress) => ingress.is_some_and(|ingress| ingress.tls_enabled),
+        Err(_) if resolve_config_path("/etc/apache2") != Path::new("/etc/apache2") => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    sync_apache_app_vhost_with_tls(
+        app_name,
+        listen_port,
+        internal_domain,
+        public_domain,
+        external_access,
+        tls_enabled,
+    )
+}
+
+fn sync_apache_app_vhost_with_tls(
+    app_name: &str,
+    listen_port: i32,
+    internal_domain: &str,
+    public_domain: &str,
+    external_access: bool,
+    tls_enabled: bool,
+) -> Result<bool, String> {
     if listen_port <= 0 {
         return Ok(false);
     }
-    let sites_avail = resolve_config_path("/etc/apache2/sites-available");
-    let sites_en = resolve_config_path("/etc/apache2/sites-enabled");
-    let clean_app: String = app_name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if clean_app.is_empty() {
-        return Ok(false);
-    }
+    let apache_dir = resolve_config_path("/etc/apache2");
+    let req = af_models::RunnerApacheVhostRequest {
+        app_name: app_name.to_string(),
+        listen_port,
+        internal_domain: (!internal_domain.is_empty()).then(|| internal_domain.to_string()),
+        public_domain: (!public_domain.is_empty()).then(|| public_domain.to_string()),
+        external_access_enabled: external_access,
+        tls_enabled,
+        reload_apache: true,
+        ..Default::default()
+    };
 
-    #[cfg(unix)]
-    let is_root = unsafe { libc::geteuid() == 0 };
-    #[cfg(not(unix))]
-    let is_root = false;
-
-    let is_host_apache = sites_avail == Path::new("/etc/apache2/sites-available");
-    let runner_exists = Path::new(&af_runner::runner_socket_path()).exists();
-    if !sites_avail.is_dir() && !(is_host_apache && !is_root && runner_exists) {
-        return Ok(false);
-    }
-
-    let mut candidate_vhosts = Vec::new();
-    for dir in [&sites_avail, &sites_en] {
-        if dir.is_dir() {
-            candidate_vhosts.push(dir.join(format!("aetherflow-app-{}.conf", clean_app)));
-            candidate_vhosts.push(dir.join(format!("aetherflow-ext-{}.conf", clean_app)));
-            candidate_vhosts.push(dir.join(format!("{}.conf", clean_app)));
-        }
-    }
-    let mut preserved_blocks = extract_apache_custom_blocks(&candidate_vhosts);
-    if clean_app == "librespeed"
-        && !preserved_blocks
-            .iter()
-            .any(|b| b.contains("/etc/aetherflow/librespeed-proxy-token.conf"))
+    if apache_dir == Path::new("/etc/apache2")
+        && Path::new(&af_runner::runner_socket_path()).exists()
     {
-        preserved_blocks
-            .push("    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string());
-    }
-    let proxy_token_directive = if clean_app == "librespeed" {
-        "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n"
-    } else {
-        ""
-    };
-    let librespeed_tls_cfg = if clean_app == "librespeed" {
-        let fs_root_override = ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"]
-            .into_iter()
-            .find_map(|k| env::var(k).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
-        let settings_path = std::env::var("AETHERFLOW_LIBRESPEED_SETTINGS_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| resolve_config_path("/opt/librespeed/settings.toml"));
-        af_runner::package_executor::try_librespeed_runner_settings_tls_config(
-            &settings_path,
-            fs_root_override.as_deref(),
-        )
-    } else {
-        None
-    };
-    let librespeed_tls = librespeed_tls_cfg.as_ref().map(|c| c.enabled);
-    let librespeed_ca_cert = librespeed_tls_cfg
-        .as_ref()
-        .and_then(|c| c.ca_cert_file.as_deref());
-    let ssl_proxy_directive = if librespeed_tls == Some(true) {
-        let ca_cert = librespeed_ca_cert.ok_or_else(|| {
-            "LibreSpeed enable_tls=true requires a valid, regular, non-symlinked absolute tls_cert_file in /opt/librespeed/settings.toml for Apache SSLProxyCACertificateFile pinning".to_string()
-        })?;
-        format!(
-            "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
-        )
-    } else {
-        String::new()
-    };
-    let http_scheme = if librespeed_tls == Some(true) {
-        "https"
-    } else {
-        "http"
-    };
-    let ws_scheme = if librespeed_tls == Some(true) {
-        "wss"
-    } else {
-        "ws"
-    };
-    if clean_app == "librespeed" && librespeed_tls_cfg.is_none() {
-        let has_existing_int = internal_domain.trim().is_empty()
-            || fs::read_to_string(sites_avail.join("aetherflow-app-librespeed.conf"))
-                .map(|s| s.to_ascii_lowercase().contains("<virtualhost"))
-                .unwrap_or(false);
-        let has_existing_ext = !external_access
-            || public_domain.trim().is_empty()
-            || fs::read_to_string(sites_avail.join("aetherflow-ext-librespeed.conf"))
-                .map(|s| s.to_ascii_lowercase().contains("<virtualhost"))
-                .unwrap_or(false);
-        if !has_existing_int || !has_existing_ext {
-            return Err("unable to read /opt/librespeed/settings.toml (permission denied) to verify upstream TLS configuration for new Apache vhost".to_string());
-        }
-    }
-
-    let rendered_int_vhost = if !internal_domain.trim().is_empty() {
-        let int_dom = validate_dns_domain(internal_domain)?;
-        let default_vhost = format!(
-            "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
-        );
-        let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
-        let prev_int = fs::read_to_string(&conf_file).ok();
-        let vhost = render_or_update_apache_vhost(
-            prev_int.as_deref(),
-            &default_vhost,
-            Some(&int_dom),
-            listen_port,
-            librespeed_tls,
-            librespeed_ca_cert,
-            &preserved_blocks,
-        );
-        Some((conf_file, prev_int, vhost))
-    } else {
-        None
-    };
-
-    let ext_conf_file = sites_avail.join(format!("aetherflow-ext-{}.conf", clean_app));
-    let rendered_ext_vhost = if external_access && !public_domain.trim().is_empty() {
-        let pub_dom = validate_dns_domain(public_domain)?;
-        let default_ext_vhost = format!(
-            "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"expr=%{{REQUEST_SCHEME}}\"\n{proxy_token_directive}</VirtualHost>\n"
-        );
-        let prev_ext = fs::read_to_string(&ext_conf_file).ok();
-        let ext_vhost = render_or_update_apache_vhost(
-            prev_ext.as_deref(),
-            &default_ext_vhost,
-            Some(&pub_dom),
-            listen_port,
-            librespeed_tls,
-            librespeed_ca_cert,
-            &preserved_blocks,
-        );
-        Some((prev_ext, ext_vhost))
-    } else {
-        None
-    };
-
-    if !is_root && is_host_apache && runner_exists {
-        let vhost_req = af_models::RunnerApacheVhostRequest {
-            app_name: clean_app.clone(),
-            enabled: rendered_int_vhost.is_some(),
-            vhost_content: rendered_int_vhost
-                .as_ref()
-                .map(|(_, _, content)| content.clone()),
-            external_enabled: rendered_ext_vhost.is_some(),
-            external_vhost_content: rendered_ext_vhost
-                .as_ref()
-                .map(|(_, content)| content.clone()),
-            reload_apache: true,
-        };
-        post_runner_json_sync("/v1/ingress/vhost", &vhost_req, Duration::from_secs(15))?;
+        post_runner_json_sync("/v1/ingress/vhost", &req, Duration::from_secs(45))?;
         return Ok(true);
     }
-
-    let mut backups: Vec<(PathBuf, Option<String>)> = Vec::new();
-    let mut modified_any = false;
-    let mut wrote_any = false;
-    let mut saw_unprivileged = false;
-
-    if let Some((conf_file, prev_int, vhost)) = &rendered_int_vhost {
-        let int_conf_name = format!("aetherflow-app-{}.conf", clean_app);
-        if prev_int.as_deref() != Some(vhost.as_str()) {
-            match write_file_atomic(conf_file, vhost.as_bytes()) {
-                Ok(()) => {
-                    backups.push((conf_file.clone(), prev_int.clone()));
-                    modified_any = true;
-                    wrote_any = true;
-                }
-                Err(error) if is_unprivileged_host_write_error(&error) => {
-                    saw_unprivileged = true;
-                    tracing::info!(
-                        app = %clean_app,
-                        path = %conf_file.display(),
-                        "skipping Apache internal vhost write in unprivileged API process: {}",
-                        error
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            wrote_any = true;
-        }
-        if !saw_unprivileged {
-            match ensure_apache_site_symlink(&sites_en, &int_conf_name, &mut backups) {
-                Ok(true) => modified_any = true,
-                Ok(false) => {}
-                Err(error) if is_unprivileged_host_write_error(&error) => {
-                    saw_unprivileged = true;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+    if !apache_dir.join("sites-available").is_dir() {
+        return Ok(false);
     }
-
-    let ext_conf_name = format!("aetherflow-ext-{}.conf", clean_app);
-    if let Some((prev_ext, ext_vhost)) = &rendered_ext_vhost {
-        if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
-            match write_file_atomic(&ext_conf_file, ext_vhost.as_bytes()) {
-                Ok(()) => {
-                    backups.push((ext_conf_file.clone(), prev_ext.clone()));
-                    modified_any = true;
-                    wrote_any = true;
-                }
-                Err(error) if is_unprivileged_host_write_error(&error) => {
-                    saw_unprivileged = true;
-                    tracing::info!(
-                        app = %clean_app,
-                        path = %ext_conf_file.display(),
-                        "skipping Apache external vhost write in unprivileged API process: {}",
-                        error
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            wrote_any = true;
-        }
-        if !saw_unprivileged {
-            match ensure_apache_site_symlink(&sites_en, &ext_conf_name, &mut backups) {
-                Ok(true) => modified_any = true,
-                Ok(false) => {}
-                Err(error) if is_unprivileged_host_write_error(&error) => {
-                    saw_unprivileged = true;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    } else {
-        if ext_conf_file.exists() {
-            let prev_ext = fs::read_to_string(&ext_conf_file).ok();
-            if let Err(error) = fs::remove_file(&ext_conf_file) {
-                let err_msg = format!("failed to remove external vhost: {error}");
-                if is_unprivileged_host_write_error(&err_msg) {
-                    saw_unprivileged = true;
-                    tracing::info!(
-                        app = %clean_app,
-                        path = %ext_conf_file.display(),
-                        "skipping Apache external vhost removal in unprivileged API process: {}",
-                        err_msg
-                    );
-                } else {
-                    return Err(err_msg);
-                }
-            } else {
-                backups.push((ext_conf_file.clone(), prev_ext));
-                modified_any = true;
-            }
-        }
-        let en_ext_file = sites_en.join(&ext_conf_name);
-        if fs::symlink_metadata(&en_ext_file).is_ok() {
-            if let Err(error) = fs::remove_file(&en_ext_file) {
-                let err_msg = format!("failed to remove enabled external vhost: {error}");
-                if is_unprivileged_host_write_error(&err_msg) {
-                    saw_unprivileged = true;
-                } else {
-                    return Err(err_msg);
-                }
-            } else {
-                modified_any = true;
-            }
-        }
+    let result = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(af_runner::sync_apache_vhost_local(&req, &apache_dir))
+            })
+            .join()
+            .map_err(|_| "Apache vhost synchronization thread panicked".to_string())
+    })?;
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) if is_unprivileged_host_write_error(&err.to_string()) => Ok(false),
+        Err(err) => Err(err.to_string()),
     }
-
-    if saw_unprivileged && runner_exists {
-        let vhost_req = af_models::RunnerApacheVhostRequest {
-            app_name: clean_app.clone(),
-            enabled: rendered_int_vhost.is_some(),
-            vhost_content: rendered_int_vhost
-                .as_ref()
-                .map(|(_, _, content)| content.clone()),
-            external_enabled: rendered_ext_vhost.is_some(),
-            external_vhost_content: rendered_ext_vhost
-                .as_ref()
-                .map(|(_, content)| content.clone()),
-            reload_apache: true,
-        };
-        post_runner_json_sync("/v1/ingress/vhost", &vhost_req, Duration::from_secs(15))?;
-        return Ok(true);
-    }
-
-    // Also update any existing regular (non-symlink) vhost files for this app in sites-available or sites-enabled
-    let mut extra_existing_paths = vec![
-        sites_avail.join(format!("{}.conf", clean_app)),
-        sites_en.join(format!("aetherflow-app-{}.conf", clean_app)),
-        sites_en.join(format!("{}.conf", clean_app)),
-    ];
-    if external_access && !public_domain.trim().is_empty() {
-        extra_existing_paths.push(sites_en.join(format!("aetherflow-ext-{}.conf", clean_app)));
-    }
-    for path in extra_existing_paths {
-        let is_symlink = fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if !is_symlink && path.is_file() {
-            if let Ok(prev_raw) = fs::read_to_string(&path) {
-                let updated = render_or_update_apache_vhost(
-                    Some(&prev_raw),
-                    &prev_raw,
-                    None,
-                    listen_port,
-                    librespeed_tls,
-                    librespeed_ca_cert,
-                    &preserved_blocks,
-                );
-                if prev_raw != updated && write_file_atomic(&path, updated.as_bytes()).is_ok() {
-                    backups.push((path.clone(), Some(prev_raw)));
-                    modified_any = true;
-                    wrote_any = true;
-                }
-            }
-        }
-    }
-
-    if modified_any
-        && sites_avail == Path::new("/etc/apache2/sites-available")
-        && Path::new("/etc/apache2/apache2.conf").is_file()
-    {
-        if let Err(err) = verify_apache_configtest() {
-            for (path, prev_content) in backups.into_iter().rev() {
-                match prev_content {
-                    Some(raw) => {
-                        let _ = write_file_atomic(&path, raw.as_bytes());
-                    }
-                    None => {
-                        let _ = fs::remove_file(&path);
-                    }
-                }
-            }
-            return Err(format!(
-                "apache2ctl configtest failed for {}: {}",
-                clean_app, err
-            ));
-        }
-        if is_root {
-            reload_apache2_if_active();
-        }
-    }
-
-    Ok(wrote_any)
-}
-
-fn rewrite_apache_proxy_url_port(
-    token: &str,
-    listen_port: i32,
-    upstream_tls: Option<bool>,
-) -> Option<String> {
-    for scheme in ["http://", "https://", "ws://", "wss://"] {
-        if let Some(rest) = token.strip_prefix(scheme) {
-            let out_scheme = match (scheme, upstream_tls) {
-                ("http://" | "https://", Some(true)) => "https://",
-                ("http://" | "https://", Some(false)) => "http://",
-                ("ws://" | "wss://", Some(true)) => "wss://",
-                ("ws://" | "wss://", Some(false)) => "ws://",
-                _ => scheme,
-            };
-            for host in ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"] {
-                if let Some(after_host) = rest.strip_prefix(host) {
-                    let digit_len = after_host
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .count();
-                    if digit_len > 0 {
-                        let suffix = &after_host[digit_len..];
-                        return Some(format!("{out_scheme}{host}{listen_port}{suffix}"));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn extract_apache_custom_blocks(paths: &[PathBuf]) -> Vec<String> {
-    let mut blocks = Vec::new();
-    for path in paths {
-        let Ok(raw) = fs::read_to_string(path) else {
-            continue;
-        };
-        let mut current_block: Option<(String, Vec<String>)> = None;
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if let Some((ref end_tag, ref mut buf)) = current_block {
-                buf.push(line.to_string());
-                if lower.starts_with(end_tag.as_str()) {
-                    let joined = buf.join("\n");
-                    if !blocks.iter().any(|b: &String| b.trim() == joined.trim()) {
-                        blocks.push(joined);
-                    }
-                    current_block = None;
-                }
-                continue;
-            }
-            if lower.starts_with("<location") {
-                current_block = Some(("</location>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<directory") {
-                current_block = Some(("</directory>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<requireall") {
-                current_block = Some(("</requireall>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<requireany") {
-                current_block = Some(("</requireany>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<files") {
-                current_block = Some(("</files>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("authtype ")
-                || lower.starts_with("authname ")
-                || lower.starts_with("authuserfile ")
-                || lower.starts_with("authgroupfile ")
-                || lower.starts_with("authbasicprovider ")
-                || lower.starts_with("require ")
-                || lower.starts_with("include ")
-                || lower.starts_with("includeoptional ")
-            {
-                let single = line.to_string();
-                if !blocks.iter().any(|b: &String| b.trim() == single.trim()) {
-                    blocks.push(single);
-                }
-            }
-        }
-    }
-    blocks
-}
-
-fn render_or_update_apache_vhost(
-    existing_raw: Option<&str>,
-    default_template: &str,
-    desired_server_name: Option<&str>,
-    listen_port: i32,
-    upstream_tls: Option<bool>,
-    upstream_ca_cert: Option<&str>,
-    preserved_blocks: &[String],
-) -> String {
-    let base = match existing_raw {
-        Some(raw) if raw.to_ascii_lowercase().contains("<virtualhost") => {
-            let mut out_lines = Vec::new();
-            for line in raw.lines() {
-                let trimmed = line.trim_start();
-                let indent = &line[..line.len() - trimmed.len()];
-                let lower = trimmed.to_ascii_lowercase();
-                if upstream_tls.is_some()
-                    && (lower.starts_with("sslproxyengine ")
-                        || lower.starts_with("sslproxyengine\t")
-                        || lower.starts_with("sslproxyverify ")
-                        || lower.starts_with("sslproxyverify\t")
-                        || lower.starts_with("sslproxycacertificatefile ")
-                        || lower.starts_with("sslproxycacertificatefile\t")
-                        || lower.starts_with("sslproxycheckpeercn ")
-                        || lower.starts_with("sslproxycheckpeercn\t")
-                        || lower.starts_with("sslproxycheckpeername ")
-                        || lower.starts_with("sslproxycheckpeername\t")
-                        || lower.starts_with("sslproxycheckpeerexpire ")
-                        || lower.starts_with("sslproxycheckpeerexpire\t"))
-                {
-                    continue;
-                }
-                if let Some(dom) = desired_server_name {
-                    if lower.starts_with("servername ") || lower.starts_with("servername\t") {
-                        out_lines.push(format!("{indent}ServerName {dom}"));
-                        continue;
-                    }
-                }
-                if lower.starts_with("proxypass ")
-                    || lower.starts_with("proxypass\t")
-                    || lower.starts_with("proxypassreverse ")
-                    || lower.starts_with("proxypassreverse\t")
-                    || lower.starts_with("rewriterule ")
-                    || lower.starts_with("rewriterule\t")
-                {
-                    let tokens: Vec<String> = trimmed
-                        .split_whitespace()
-                        .map(|tok| {
-                            rewrite_apache_proxy_url_port(tok, listen_port, upstream_tls)
-                                .unwrap_or_else(|| tok.to_string())
-                        })
-                        .collect();
-                    out_lines.push(format!("{indent}{}", tokens.join(" ")));
-                } else {
-                    out_lines.push(line.to_string());
-                }
-            }
-            if upstream_tls == Some(true) {
-                if let Some(ca_cert) = upstream_ca_cert {
-                    let insert_pos = out_lines
-                        .iter()
-                        .position(|l| {
-                            l.trim()
-                                .to_ascii_lowercase()
-                                .starts_with("proxypreservehost ")
-                        })
-                        .or_else(|| {
-                            out_lines
-                                .iter()
-                                .position(|l| l.trim().eq_ignore_ascii_case("</virtualhost>"))
-                        })
-                        .unwrap_or(out_lines.len());
-                    let ssl_lines = vec![
-                        "    SSLProxyEngine On".to_string(),
-                        "    SSLProxyVerify require".to_string(),
-                        format!("    SSLProxyCACertificateFile {ca_cert}"),
-                        "    SSLProxyCheckPeerCN off".to_string(),
-                        "    SSLProxyCheckPeerName off".to_string(),
-                        "    SSLProxyCheckPeerExpire off".to_string(),
-                    ];
-                    out_lines.splice(insert_pos..insert_pos, ssl_lines);
-                }
-            }
-            let mut joined = out_lines.join("\n");
-            joined.push('\n');
-            joined
-        }
-        _ => default_template.to_string(),
-    };
-
-    if preserved_blocks.is_empty() {
-        return base;
-    }
-
-    let mut missing = Vec::new();
-    for block in preserved_blocks {
-        let trimmed_block = block.trim();
-        if !trimmed_block.is_empty() && !base.contains(trimmed_block) {
-            missing.push(block.clone());
-        }
-    }
-    if missing.is_empty() {
-        return base;
-    }
-
-    let mut final_lines = Vec::new();
-    let mut inserted = false;
-    for line in base.lines() {
-        if !inserted && line.trim().eq_ignore_ascii_case("</virtualhost>") {
-            for block in &missing {
-                final_lines.push(block.clone());
-            }
-            inserted = true;
-        }
-        final_lines.push(line.to_string());
-    }
-    if !inserted {
-        for block in &missing {
-            final_lines.push(block.clone());
-        }
-    }
-    let mut out = final_lines.join("\n");
-    out.push('\n');
-    out
-}
-
-fn verify_apache_configtest() -> Result<(), String> {
-    for bin in [
-        "/usr/sbin/apache2ctl",
-        "/usr/sbin/apachectl",
-        "apache2ctl",
-        "apachectl",
-    ] {
-        match std::process::Command::new(bin).arg("-t").output() {
-            Ok(out) => {
-                if out.status.success() {
-                    return Ok(());
-                }
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!("{} {}", stderr.trim(), stdout.trim())
-                    .trim()
-                    .to_string());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Ok(()),
-        }
-    }
-    Ok(())
 }
 
 /// Triggers certificate synchronization via the privileged runner `/v1/certbot-sync`,
@@ -2379,12 +1808,13 @@ async fn provision_installed_app_subdomains_admitted(base_domain: &str) -> Resul
             cfg.public_domain = new_pub;
 
             af_db::set_app_ingress_config(&cfg).map_err(|error| error.to_string())?;
-            sync_apache_app_vhost(
+            sync_apache_app_vhost_with_tls(
                 &cfg.app_name,
                 cfg.listen_port,
                 &crate::resolve_app_internal_domain(&cfg.app_name),
                 &cfg.public_domain,
                 cfg.external_access_enabled,
+                cfg.tls_enabled,
             )?;
             updated_count += 1;
         }
@@ -2407,17 +1837,7 @@ pub async fn sync_installed_apps_base_domain(
 // App Credential & Runtime Metadata Discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppRuntimeMeta {
-    #[serde(skip_serializing_if = "String::is_empty", default)]
-    pub api_key: String,
-    #[serde(skip_serializing_if = "is_zero_i32", default)]
-    pub configured_port: i32,
-}
-
-fn is_zero_i32(v: &i32) -> bool {
-    *v <= 0
-}
+pub use af_models::AppRuntimeMeta;
 
 const APP_META_BUDGET: Duration = Duration::from_millis(1500);
 const MAX_APP_META_PROBES: usize = 4;
@@ -2481,35 +1901,22 @@ impl Drop for AppMetaFlight {
     }
 }
 
-pub fn normalize_app_key_name(app_name: &str) -> String {
-    let clean = app_name
-        .trim()
-        .to_lowercase()
-        .trim_end_matches(".service")
-        .to_string();
-    match clean.as_str() {
-        "plexmediaserver" => "plex".to_string(),
-        "emby-server" => "emby".to_string(),
-        "pihole-ftl" => "pihole".to_string(),
-        "transmission-daemon" => "transmission".to_string(),
-        "deluged" | "deluge-web" => "deluge".to_string(),
-        "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
-        "qbittorrent-nox" => "qbittorrent".to_string(),
-        "calibre-web" => "calibreweb".to_string(),
-        "grafana-server" => "grafana".to_string(),
-        "uptime-kuma" => "uptimekuma".to_string(),
-        "adguard-home" => "adguardhome".to_string(),
-        "pyload-ng" => "pyload".to_string(),
-        "af-kasmvnc" => "kasmvnc".to_string(),
-        "af-maintainerr" => "maintainerr".to_string(),
-        "af-palate" => "palate".to_string(),
-        "af-mcvnc" => "mcvnc".to_string(),
-        "af-piped" => "piped".to_string(),
-        "af-invidious" => "invidious".to_string(),
-        "home-assistant@homeassistant" => "homeassistant".to_string(),
-        _ => clean,
+pub(crate) fn qbittorrent_web_bind_address() -> Option<String> {
+    for config in [
+        "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
+        "/var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf",
+        "/var/lib/qbittorrent/qBittorrent.conf",
+    ] {
+        if let Ok(text) = read_metadata_config(resolve_config_path(config)) {
+            if let Some(address) = extract_ini_value(&text, &[r"WebUI\Address"]) {
+                return Some(address);
+            }
+        }
     }
+    None
 }
+
+pub use af_models::app_metadata::normalize_app_slug as normalize_app_key_name;
 
 fn parse_valid_port(raw: &str) -> i32 {
     let clean = raw
@@ -2718,26 +2125,29 @@ fn parse_deluge_conf_json(content: &str) -> Option<Value> {
     None
 }
 
-fn query_sqlite_first_text(db_path: &Path, queries: &[&str], deadline: Instant) -> Option<String> {
-    if Instant::now() >= deadline || !db_path.is_file() {
-        return None;
-    }
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(db_path, flags).ok()?;
-    for &q in queries {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        conn.busy_timeout(remaining.min(APP_META_BUDGET)).ok()?;
-        if let Ok(val) = conn.query_row(q, [], |r| r.get::<_, String>(0)) {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+fn app_metadata_logical_path(path: &Path) -> PathBuf {
+    for key in ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"] {
+        if let Some(root) = env::var_os(key).filter(|value| !value.is_empty()) {
+            if let Ok(relative) = path.strip_prefix(&root) {
+                return Path::new("/").join(relative);
             }
         }
     }
-    None
+    path.to_path_buf()
+}
+
+fn read_metadata_config(path: impl AsRef<Path>) -> std::io::Result<String> {
+    let path = path.as_ref();
+    af_runner::read_app_metadata_config(path, &app_metadata_logical_path(path))
+}
+
+fn query_sqlite_first_text(db_path: &Path, queries: &[&str], deadline: Instant) -> Option<String> {
+    af_runner::query_app_metadata_sqlite(
+        db_path,
+        &app_metadata_logical_path(db_path),
+        queries,
+        deadline,
+    )
 }
 
 #[cfg(unix)]
@@ -2883,7 +2293,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ];
             for raw in candidates {
                 let p = resolve_config_path(&raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_xml_tag_text(&text, "ApiKey") {
                             meta.api_key = k;
@@ -2905,7 +2315,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/bazarr/config.yaml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_yaml_section_value(&text, "auth", "apikey")
                             .or_else(|| extract_ini_value(&text, &["apikey", "api_key"]))
@@ -2928,7 +2338,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/opt/bazarr/data/config/config.ini",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_ini_value(&text, &["apikey", "api_key"]) {
                             meta.api_key = k;
@@ -2949,7 +2359,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/tautulli/config.ini",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_ini_value(&text, &["api_key"]) {
                             meta.api_key = k;
@@ -2971,7 +2381,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/sabnzbd/sabnzbd.ini",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_ini_value(&text, &["api_key", "nzb_key"]) {
                             meta.api_key = k;
@@ -2992,7 +2402,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/jackett/ServerConfig.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if meta.api_key.is_empty() {
                             if let Some(k) = val
@@ -3024,7 +2434,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ];
             for raw in candidates {
                 let p = resolve_config_path(&raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         let main_obj = val.get("main");
                         if meta.api_key.is_empty() {
@@ -3051,7 +2461,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "ombi" => {
             if let Ok(text) =
-                fs::read_to_string(resolve_config_path("/etc/systemd/system/ombi.service"))
+                read_metadata_config(resolve_config_path("/etc/systemd/system/ombi.service"))
             {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
@@ -3064,7 +2474,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/ombi/appsettings.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val
                             .get("port")
@@ -3116,7 +2526,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ];
             for raw in candidates {
                 let p = resolve_config_path(&raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3134,7 +2544,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/qbittorrent/qBittorrent.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &[r"WebUI\Port", "Port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3152,7 +2562,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/transmission-daemon/.config/transmission-daemon/settings.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val.get("rpc-port").and_then(|v| v.as_i64()) {
                             meta.configured_port = port as i32;
@@ -3169,7 +2579,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/deluge/web.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(val) = parse_deluge_conf_json(&text) {
                         if let Some(port) = val.get("port").and_then(|v| v.as_i64()) {
                             if port > 0 {
@@ -3186,7 +2596,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                     "/var/lib/deluge/core.conf",
                 ] {
                     let p = resolve_config_path(raw);
-                    if let Ok(text) = fs::read_to_string(&p) {
+                    if let Ok(text) = read_metadata_config(&p) {
                         if let Some(val) = parse_deluge_conf_json(&text) {
                             if let Some(port) = val.get("daemon_port").and_then(|v| v.as_i64()) {
                                 if port > 0 {
@@ -3200,25 +2610,14 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "nzbget" => {
-            for raw in [
-                "/var/lib/nzbget/nzbget.conf",
-                "/etc/nzbget.conf",
-                "/opt/nzbget/nzbget.conf",
-            ] {
-                let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if meta.api_key.is_empty() {
-                        if let Some(pw) = extract_ini_value(&text, &["ControlPassword"]) {
-                            meta.api_key = pw;
-                        }
-                    }
-                    if meta.configured_port <= 0 {
-                        if let Some(v) = extract_ini_value(&text, &["ControlPort"]) {
-                            meta.configured_port = parse_valid_port(&v);
-                        }
-                    }
-                }
-            }
+            meta = af_models::app_metadata::nzbget_meta(|path| {
+                read_metadata_config(resolve_config_path(path)).ok()
+            })
+        }
+        "whisparr" => {
+            meta = af_models::app_metadata::whisparr_meta(|path| {
+                read_metadata_config(resolve_config_path(path)).ok()
+            })
         }
         "znc" => {
             for raw in [
@@ -3226,7 +2625,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/znc/configs/znc.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["Port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3240,7 +2639,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "thelounge" => {
             for raw in ["/var/lib/thelounge/config.js", "/etc/thelounge/config.js"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["port"]) {
                         let clean = v.trim_end_matches(',').trim();
                         let port = parse_valid_port(clean);
@@ -3253,7 +2652,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "filebrowser" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path(
+            if let Ok(text) = read_metadata_config(resolve_config_path(
                 "/etc/systemd/system/filebrowser.service",
             )) {
                 let port = extract_port_from_systemd_or_apache_text(&text);
@@ -3270,7 +2669,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                     "/opt/filebrowser/filebrowser.json",
                 ] {
                     let p = resolve_config_path(raw);
-                    if let Ok(text) = fs::read_to_string(&p) {
+                    if let Ok(text) = read_metadata_config(&p) {
                         if let Ok(val) = serde_json::from_str::<Value>(&text) {
                             if let Some(port) = val.get("port").and_then(|v| v.as_i64()) {
                                 if port > 0 {
@@ -3289,7 +2688,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/syncthing/config.xml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_xml_tag_text(&text, "apikey") {
                             meta.api_key = k;
@@ -3312,7 +2711,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/navidrome/navidrome.toml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["Port", "ND_PORT"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3324,7 +2723,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             }
         }
         "audiobookshelf" => {
-            if let Ok(text) = fs::read_to_string(resolve_config_path(
+            if let Ok(text) = read_metadata_config(resolve_config_path(
                 "/etc/systemd/system/audiobookshelf.service",
             )) {
                 let port = extract_port_from_systemd_or_apache_text(&text);
@@ -3339,7 +2738,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                     "/var/lib/audiobookshelf/config/.env",
                 ] {
                     let p = resolve_config_path(raw);
-                    if let Ok(text) = fs::read_to_string(&p) {
+                    if let Ok(text) = read_metadata_config(&p) {
                         if let Some(v) = extract_ini_value(&text, &["PORT", "port"]) {
                             let port = parse_valid_port(&v);
                             if port > 0 {
@@ -3357,7 +2756,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/opt/Kavita/config/appsettings.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val
                             .get("Port")
@@ -3373,39 +2772,12 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 }
             }
         }
-        "komga" => {
-            for raw in [
-                "/var/lib/komga/application.yml",
-                "/etc/komga/application.yml",
-                "/etc/default/komga",
-            ] {
-                let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if let Some(v) =
-                        extract_yaml_section_value(&text, "server", "port").or_else(|| {
-                            extract_ini_value(&text, &["KOMGA_SERVER_PORT", "SERVER_PORT", "port"])
-                        })
-                    {
-                        let port = parse_valid_port(&v);
-                        if port > 0 {
-                            meta.configured_port = port;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
         "calibreweb" | "calibre-web" => {
-            for raw_db in [
-                "/var/lib/calibreweb/app.db",
-                "/opt/calibreweb/app.db",
-                "/var/lib/calibre-web/app.db",
-                "/opt/calibre-web/app.db",
-            ] {
+            for raw_db in af_models::app_metadata::CALIBRE_WEB_DATABASES {
                 let db_path = resolve_config_path(raw_db);
                 if let Some(port_str) = query_sqlite_first_text(
                     &db_path,
-                    &["SELECT CAST(config_port AS TEXT) FROM settings LIMIT 1"],
+                    &[af_models::app_metadata::CALIBRE_WEB_PORT_QUERY],
                     deadline,
                 ) {
                     let port = parse_valid_port(&port_str);
@@ -3419,7 +2791,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "grafana" => {
             for raw in ["/etc/grafana/grafana.ini", "/var/lib/grafana/grafana.ini"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["http_port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3437,7 +2809,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/sysconfig/prometheus",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(caps) = PROMETHEUS_LISTEN_PORT_RE.captures(&text) {
                         if let Some(m) = caps.get(1) {
                             let port = parse_valid_port(m.as_str());
@@ -3455,37 +2827,10 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 }
             }
         }
-        "uptimekuma" | "uptime-kuma" => {
-            for svc_raw in [
-                "/etc/systemd/system/uptimekuma.service",
-                "/etc/systemd/system/uptime-kuma.service",
-            ] {
-                if let Ok(text) = fs::read_to_string(resolve_config_path(svc_raw)) {
-                    let port = extract_port_from_systemd_or_apache_text(&text);
-                    if port > 0 {
-                        meta.configured_port = port;
-                        break;
-                    }
-                }
-            }
-            if meta.configured_port <= 0 {
-                for raw in [
-                    "/var/lib/uptime-kuma/.env",
-                    "/opt/uptime-kuma/.env",
-                    "/etc/default/uptime-kuma",
-                ] {
-                    let p = resolve_config_path(raw);
-                    if let Ok(text) = fs::read_to_string(&p) {
-                        if let Some(v) = extract_ini_value(&text, &["UPTIME_KUMA_PORT", "PORT"]) {
-                            let port = parse_valid_port(&v);
-                            if port > 0 {
-                                meta.configured_port = port;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+        "uptimekuma" => {
+            meta.configured_port = af_models::app_metadata::uptime_kuma_port(|path| {
+                read_metadata_config(resolve_config_path(path)).ok()
+            });
         }
         "vaultwarden" => {
             for raw in [
@@ -3495,7 +2840,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/default/vaultwarden",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["ROCKET_PORT", "PORT"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3513,7 +2858,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/default/immich",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) =
                         extract_ini_value(&text, &["IMMICH_PORT", "PORT", "SERVER_PORT"])
                     {
@@ -3528,7 +2873,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "dispatcharr" => {
             if let Ok(content) =
-                fs::read_to_string(resolve_config_path("/etc/dispatcharr/dispatcharr.env"))
+                read_metadata_config(resolve_config_path("/etc/dispatcharr/dispatcharr.env"))
             {
                 if let Some(port) = extract_ini_value(&content, &["DISPATCHARR_PORT"]) {
                     meta.configured_port = parse_valid_port(&port);
@@ -3543,7 +2888,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/opt/paperless/paperless.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["PAPERLESS_PORT", "PORT"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3556,7 +2901,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "pihole" => {
             let toml_path = resolve_config_path("/etc/pihole/pihole.toml");
-            if let Ok(text) = fs::read_to_string(&toml_path) {
+            if let Ok(text) = read_metadata_config(&toml_path) {
                 if let Some(v) = extract_ini_value(&text, &["port"]) {
                     for token in v.split(',') {
                         let port = parse_valid_port(token);
@@ -3568,7 +2913,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 }
             }
             let setup_vars = resolve_config_path("/etc/pihole/setupVars.conf");
-            if let Ok(text) = fs::read_to_string(&setup_vars) {
+            if let Ok(text) = read_metadata_config(&setup_vars) {
                 if let Some(pw) = extract_ini_value(&text, &["WEBPASSWORD"]) {
                     meta.api_key = pw;
                 }
@@ -3581,7 +2926,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/plex/Plex Media Server/Preferences.xml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(caps) = PLEX_TOKEN_ATTR_RE.captures(&text) {
                         if let Some(m) = caps.get(1) {
                             meta.api_key = m.as_str().trim().to_string();
@@ -3597,7 +2942,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/jellyfin/config/network.xml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_xml_tag_text(&text, "InternalHttpPort")
                         .or_else(|| extract_xml_tag_text(&text, "HttpServerPortNumber"))
                         .map(|s| parse_valid_port(&s))
@@ -3629,7 +2974,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "emby" => {
             for raw in ["/var/lib/emby/config/system.xml", "/etc/emby/system.xml"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_xml_tag_text(&text, "HttpServerPortNumber")
                         .or_else(|| extract_xml_tag_text(&text, "PublicPort"))
                         .map(|s| parse_valid_port(&s))
@@ -3664,7 +3009,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/notifiarr/notifiarr.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if meta.api_key.is_empty() {
                         if let Some(k) = extract_ini_value(&text, &["api_key"]) {
                             meta.api_key = k;
@@ -3684,7 +3029,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/organizr/www/api/config/config.php",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(caps) = PHP_ORGANIZR_KEY_RE.captures(&text) {
                         if let Some(m) = caps.get(1) {
                             meta.api_key = m.as_str().trim().to_string();
@@ -3698,7 +3043,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/apache2/sites-available/organizr.conf",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
                     if port > 0 {
                         meta.configured_port = port;
@@ -3716,7 +3061,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/opt/requestrr/Settings/settings.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val
                             .get("Port")
@@ -3738,7 +3083,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/seedcross.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
                     if port > 0 {
                         meta.configured_port = port;
@@ -3752,7 +3097,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/seedcross/config.json",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if meta.api_key.is_empty() {
                             if let Some(k) = val
@@ -3788,7 +3133,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "gitea" => {
             for raw in ["/etc/gitea/app.ini", "/var/lib/gitea/custom/conf/app.ini"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["HTTP_PORT"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3806,7 +3151,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/maintainerr/.env",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text).max(
                         extract_ini_value(&text, &["UI_PORT", "PORT"])
                             .map(|v| parse_valid_port(&v))
@@ -3826,7 +3171,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/default/flaresolverr",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text).max(
                         extract_ini_value(&text, &["PORT"])
                             .map(|v| parse_valid_port(&v))
@@ -3841,7 +3186,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "threadfin" => {
             if let Ok(text) =
-                fs::read_to_string(resolve_config_path("/etc/systemd/system/threadfin.service"))
+                read_metadata_config(resolve_config_path("/etc/systemd/system/threadfin.service"))
             {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
@@ -3849,9 +3194,9 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 }
             }
             if meta.configured_port <= 0 {
-                if let Ok(text) =
-                    fs::read_to_string(resolve_config_path("/var/lib/threadfin/conf/settings.json"))
-                {
+                if let Ok(text) = read_metadata_config(resolve_config_path(
+                    "/var/lib/threadfin/conf/settings.json",
+                )) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val
                             .get("port")
@@ -3869,7 +3214,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "flood" => {
             for raw in ["/etc/systemd/system/flood.service", "/etc/default/flood"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
                     if port > 0 {
                         meta.configured_port = port;
@@ -3885,7 +3230,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
             ];
             for raw in candidates {
                 let p = resolve_config_path(&raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
                     if port > 0 {
                         meta.configured_port = port;
@@ -3900,7 +3245,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/netdata.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["default port", "port"])
                         .map(|v| parse_valid_port(&v))
                         .unwrap_or(0)
@@ -3919,7 +3264,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/homeassistant/configuration.yaml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_yaml_section_value(&text, "http", "server_port")
                         .or_else(|| extract_ini_value(&text, &["server_port"]))
                         .map(|v| parse_valid_port(&v))
@@ -3938,7 +3283,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/AdGuardHome/AdGuardHome.yaml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_yaml_section_value(&text, "http", "address")
                         .map(|v| parse_port_from_host_port(&v))
                         .filter(|&p| p > 0)
@@ -3961,7 +3306,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/rclone/rclone.env",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text).max(
                         extract_ini_value(&text, &["RCLONE_PORT", "PORT"])
                             .map(|v| parse_valid_port(&v))
@@ -3977,7 +3322,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         "autoscan" => {
             for raw in ["/etc/autoscan/config.yml", "/var/lib/autoscan/config.yml"] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -3994,7 +3339,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/librespeed/settings.toml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["listen_port", "port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -4012,7 +3357,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/scrutiny.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["port"])
                         .map(|v| parse_valid_port(&v))
                         .unwrap_or(0)
@@ -4031,7 +3376,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/n8n/n8n.env",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text).max(
                         extract_ini_value(&text, &["N8N_PORT", "PORT"])
                             .map(|v| parse_valid_port(&v))
@@ -4050,7 +3395,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/af-palate.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["PORT", "PALATE_PORT"])
                         .map(|v| parse_valid_port(&v))
                         .unwrap_or(0)
@@ -4069,7 +3414,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/duplicati.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["DUPLICATI_PORT", "PORT"])
                         .map(|v| parse_valid_port(&v))
                         .unwrap_or(0)
@@ -4088,7 +3433,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/filebot.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["FILEBOT_NODE_HTTP_PORT", "PORT"])
                         .map(|v| parse_valid_port(&v))
                         .unwrap_or(0)
@@ -4102,7 +3447,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
         }
         "novnc" => {
             if let Ok(text) =
-                fs::read_to_string(resolve_config_path("/etc/systemd/system/novnc.service"))
+                read_metadata_config(resolve_config_path("/etc/systemd/system/novnc.service"))
             {
                 let port = extract_port_from_systemd_or_apache_text(&text);
                 if port > 0 {
@@ -4116,7 +3461,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/kasmvnc/kasmvnc.yaml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["websocket_port", "port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -4133,7 +3478,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/af-mcvnc.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["MCVNC_BIND", "MCVNC_PORT", "PORT"])
                         .map(|v| parse_port_from_host_port(&v))
                         .unwrap_or(0)
@@ -4152,7 +3497,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/pyload.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_ini_value(&text, &["int port", "port"])
                         .map(|v| {
                             let rhs = v.rsplit('=').next().unwrap_or(&v).trim();
@@ -4173,7 +3518,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/unmanic.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Ok(val) = serde_json::from_str::<Value>(&text) {
                         if let Some(port) = val
                             .get("ui_port")
@@ -4201,7 +3546,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/etc/systemd/system/af-piped.service",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     let port = extract_port_from_systemd_or_apache_text(&text);
                     if port > 0 {
                         meta.configured_port = port;
@@ -4217,7 +3562,7 @@ pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> A
                 "/var/lib/invidious/config/config.yml",
             ] {
                 let p = resolve_config_path(raw);
-                if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(text) = read_metadata_config(&p) {
                     if let Some(v) = extract_ini_value(&text, &["port"]) {
                         let port = parse_valid_port(&v);
                         if port > 0 {
@@ -4275,79 +3620,13 @@ pub struct MasterCreds {
     pub ha1: String,
 }
 
-/// Pure-Rust RFC 1321 MD5 implementation (used for HTTP Digest HA1 = MD5(user:realm:pass)).
-fn md5_hex(input: &[u8]) -> String {
-    const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    let mut msg = input.to_vec();
-    let bit_len = (input.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0x00);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    for chunk in msg.as_chunks::<64>().0 {
-        let mut words = [0u32; 16];
-        for (word_idx, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
-            words[word_idx] = u32::from_le_bytes(*word);
-        }
-        let m = words;
-        let mut a = a0;
-        let mut b = b0;
-        let mut c = c0;
-        let mut d = d0;
-
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | ((!b) & d), i),
-                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | (!d)), (7 * i) % 16),
-            };
-            let temp = d;
-            d = c;
-            c = b;
-            let sum = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
-            b = b.wrapping_add(sum.rotate_left(S[i]));
-            a = temp;
-        }
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
-    }
-
-    let mut digest = [0u8; 16];
-    digest[0..4].copy_from_slice(&a0.to_le_bytes());
-    digest[4..8].copy_from_slice(&b0.to_le_bytes());
-    digest[8..12].copy_from_slice(&c0.to_le_bytes());
-    digest[12..16].copy_from_slice(&d0.to_le_bytes());
-    hex::encode(digest)
+fn master_ha1(username: &str, password: &str) -> Result<String, String> {
+    let digest = af_models::md5::md5_digest(
+        format!("{username}:Welcome to AetherFlow:{password}").as_bytes(),
+    );
+    Ok(hex::encode(digest))
 }
 
-/// Pure-Rust RFC 2898 PBKDF2-HMAC-SHA512 (64-byte output) for qBittorrent `WebUI\Password_PBKDF2`.
 fn pbkdf2_hmac_sha512_block1(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 64] {
     // HMAC-SHA512 block size is 128 bytes
     let mut key_block = [0u8; 128];
@@ -4439,26 +3718,15 @@ fn decode_stored_master_creds(creds: MasterCreds) -> Option<(String, String, Str
     if password.is_empty() || password == "adminadmin" {
         return None;
     }
-    let raw_ha1 = if creds.ha1.trim().is_empty() {
-        String::new()
-    } else {
-        af_db::decrypt_secret_if_needed(creds.ha1.trim()).unwrap_or_default()
+    let ha1 = match load_install_master_conf() {
+        Some((loaded_user, loaded_password, loaded_ha1))
+            if loaded_user == user && loaded_password == password =>
+        {
+            loaded_ha1
+        }
+        _ => master_ha1(&user, &password).ok()?,
     };
-    let ha1 = finalized_ha1(&MasterCreds {
-        username: user.clone(),
-        password: password.clone(),
-        ha1: raw_ha1,
-    });
     Some((user, password, ha1))
-}
-
-fn finalized_ha1(creds: &MasterCreds) -> String {
-    let expected = md5_hex(creds.password.as_bytes());
-    if creds.ha1.is_empty() || creds.ha1 != expected {
-        expected
-    } else {
-        creds.ha1.clone()
-    }
 }
 
 /// Persists package-provisioning credentials (`username`, AES-256-GCM encrypted `password`
@@ -4469,7 +3737,7 @@ pub fn save_master_credentials(username: &str, password: &str) -> Result<(), Str
     if user_clean.is_empty() || password.is_empty() {
         return Err("username and password are required".to_string());
     }
-    let ha1 = md5_hex(password.as_bytes());
+    let ha1 = master_ha1(user_clean, password)?;
     let stored_password =
         af_db::encrypt_secret_if_configured(password).map_err(|e| e.to_string())?;
     let stored_ha1 = af_db::encrypt_secret_if_configured(&ha1).map_err(|e| e.to_string())?;
@@ -4656,7 +3924,7 @@ pub fn load_master_credentials() -> (String, String, String) {
 }
 
 fn load_install_master_conf() -> Option<(String, String, String)> {
-    let text = fs::read_to_string(resolve_config_path("/install/.aetherflow.conf")).ok()?;
+    let text = read_metadata_config(resolve_config_path("/install/.aetherflow.conf")).ok()?;
     let mut username = String::new();
     let mut password = String::new();
     let mut ha1 = String::new();
@@ -4682,8 +3950,8 @@ fn load_install_master_conf() -> Option<(String, String, String)> {
     if username.is_empty() || password.is_empty() {
         return None;
     }
-    if ha1.is_empty() {
-        ha1 = md5_hex(password.as_bytes());
+    if ha1.len() != 32 || !ha1.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        ha1 = master_ha1(&username, &password).ok()?;
     }
     Some((username, password, ha1))
 }
@@ -5818,12 +5086,13 @@ async fn apply_blueprint_app_config_detailed_admitted(
         .as_ref()
         .map(|c| c.external_access_enabled)
         .unwrap_or(false);
-    let vhost_synced = sync_apache_app_vhost(
+    let vhost_synced = sync_apache_app_vhost_with_tls(
         &bp.app_name,
         effective_port,
         &internal_domain,
         &public_domain,
         external_access_enabled,
+        existing_ingress.as_ref().is_some_and(|cfg| cfg.tls_enabled),
     )?;
     if !vhost_synced && effective_port > 0 {
         let msg = format!(
@@ -6085,9 +5354,10 @@ mod tests {
 
     #[test]
     fn test_md5_and_qbittorrent_pbkdf2() {
-        // RFC 1321 test vectors
-        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            master_ha1("alice", "secret").unwrap(),
+            "6bd888770befc89c83a914b36f95b87f"
+        );
 
         let hash_str = generate_qbittorrent_pbkdf2("correcthorsebatterystaple");
         assert!(hash_str.starts_with("\"@ByteArray("));

@@ -21,8 +21,10 @@ const ARCHIVE_FORMAT: &str = "aetherflow.streaming-history";
 const ARCHIVE_FORMAT_VERSION: u16 = 1;
 const DATABASE_SCHEMA_VERSION: u16 = 20;
 const PROVENANCE_VERSION: u16 = 1;
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-const MAX_PORTABLE_ROWS: usize = 10_000;
+const MAX_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_BODY_BYTES: usize = MAX_ARCHIVE_BYTES;
+const MAX_PORTABLE_ROWS: usize = 100_000;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_APPROVALS: usize = 512;
 const APPROVAL_TTL_SECS: i64 = 300;
@@ -736,8 +738,69 @@ fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
     ensure_snapshot_bounds(conn)?;
     let history = load_rows(conn, "SELECT id,session_key,provider,server_name,user_id,user_name,client_name,item_id,item_name,item_type,series_name,series_id,season_number,episode_number,production_year,play_method,container,video_codec,video_resolution,audio_codec,audio_channels,subtitle_codec,hw_accel,transcode_reasons,bitrate_bps,duration_secs,watched_secs,data_used_bytes,completion_pct,started_at,last_seen_at,ended_at,is_active,provenance,server_id,source_event_id,timestamp_certainty,byte_accuracy,policy_status FROM streaming_history ORDER BY id", read_history)?;
     let labels = load_rows(conn, "SELECT history_id,kind,value,name FROM streaming_history_labels ORDER BY history_id,kind,value", read_label)?;
-    let session_samples = load_rows(conn, "SELECT history_id,sampled_at,observed_secs,playing,bitrate_bps FROM streaming_session_samples ORDER BY history_id,sampled_at", read_sample)?;
-    let bandwidth_samples = load_rows(conn, "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY id", read_bandwidth_sample)?;
+    let base_used = history
+        .len()
+        .checked_add(labels.len())
+        .and_then(|n| n.checked_add(1))
+        .filter(|&n| n <= MAX_PORTABLE_ROWS)
+        .ok_or_else(PortabilityError::too_large)?;
+    let remaining_sample_budget = MAX_PORTABLE_ROWS - base_used;
+    let half_budget = remaining_sample_budget / 2;
+
+    let session_count: usize = conn
+        .query_row("SELECT COUNT(*) FROM streaming_session_samples", [], |r| {
+            r.get::<_, i64>(0)
+        })?
+        .max(0) as usize;
+    let bw_count: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM streaming_bandwidth_samples",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?
+        .max(0) as usize;
+
+    let (session_cap, bw_cap) = if session_count.saturating_add(bw_count) <= remaining_sample_budget
+    {
+        (session_count, bw_count)
+    } else if session_count <= half_budget {
+        (session_count, remaining_sample_budget - session_count)
+    } else if bw_count <= remaining_sample_budget - half_budget {
+        (remaining_sample_budget - bw_count, bw_count)
+    } else {
+        (half_budget, remaining_sample_budget - half_budget)
+    };
+
+    let session_samples = if session_count <= session_cap {
+        load_rows(
+            conn,
+            "SELECT history_id,sampled_at,observed_secs,playing,bitrate_bps FROM streaming_session_samples ORDER BY history_id,sampled_at",
+            read_sample,
+        )?
+    } else {
+        load_rows(
+            conn,
+            &format!(
+                "SELECT history_id,sampled_at,observed_secs,playing,bitrate_bps FROM (SELECT history_id,sampled_at,observed_secs,playing,bitrate_bps FROM streaming_session_samples ORDER BY sampled_at DESC, history_id DESC LIMIT {session_cap}) ORDER BY history_id,sampled_at"
+            ),
+            read_sample,
+        )?
+    };
+    let bandwidth_samples = if bw_count <= bw_cap {
+        load_rows(
+            conn,
+            "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY id",
+            read_bandwidth_sample,
+        )?
+    } else {
+        load_rows(
+            conn,
+            &format!(
+                "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM (SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY id DESC LIMIT {bw_cap}) ORDER BY id"
+            ),
+            read_bandwidth_sample,
+        )?
+    };
     let tracking_policy = conn.query_row(
         "SELECT minimum_watch_secs,excluded_users,excluded_libraries,reconnect_window_secs FROM streaming_tracking_policies WHERE id=1",
         [],
@@ -767,24 +830,23 @@ fn load_snapshot(conn: &Connection) -> PortabilityResult<PortableSnapshot> {
 }
 
 fn ensure_snapshot_bounds(conn: &Connection) -> PortabilityResult<()> {
-    let counts = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM streaming_history),(SELECT COUNT(*) FROM streaming_history_labels),(SELECT COUNT(*) FROM streaming_session_samples),(SELECT COUNT(*) FROM streaming_bandwidth_samples),(SELECT COUNT(*) FROM streaming_tracking_policies)",
+    let (history_rows, label_rows, policy_rows) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM streaming_history),(SELECT COUNT(*) FROM streaming_history_labels),(SELECT COUNT(*) FROM streaming_tracking_policies)",
         [],
         |row| {
-            Ok(RecordCounts {
-                history: row.get::<_, i64>(0)?.max(0) as usize,
-                labels: row.get::<_, i64>(1)?.max(0) as usize,
-                session_samples: row.get::<_, i64>(2)?.max(0) as usize,
-                bandwidth_samples: row.get::<_, i64>(3)?.max(0) as usize,
-                tracking_policies: row.get::<_, i64>(4)?.max(0) as usize,
-            })
+            Ok((
+                row.get::<_, i64>(0)?.max(0) as usize,
+                row.get::<_, i64>(1)?.max(0) as usize,
+                row.get::<_, i64>(2)?.max(0) as usize,
+            ))
         },
     )?;
-    if counts.tracking_policies != 1 {
+    if policy_rows != 1 {
         return Err(PortabilityError::unavailable());
     }
-    if counts
-        .total()
+    if history_rows
+        .checked_add(label_rows)
+        .and_then(|n| n.checked_add(policy_rows))
         .filter(|total| *total <= MAX_PORTABLE_ROWS)
         .is_none()
     {
@@ -795,12 +857,11 @@ fn ensure_snapshot_bounds(conn: &Connection) -> PortabilityResult<()> {
             (SELECT total(length(CAST(COALESCE(session_key,'') AS BLOB))+length(CAST(COALESCE(provider,'') AS BLOB))+length(CAST(COALESCE(server_name,'') AS BLOB))+length(CAST(COALESCE(user_id,'') AS BLOB))+length(CAST(COALESCE(user_name,'') AS BLOB))+length(CAST(COALESCE(client_name,'') AS BLOB))+length(CAST(COALESCE(item_id,'') AS BLOB))+length(CAST(COALESCE(item_name,'') AS BLOB))+length(CAST(COALESCE(item_type,'') AS BLOB))+length(CAST(COALESCE(series_name,'') AS BLOB))+length(CAST(COALESCE(series_id,'') AS BLOB))+length(CAST(COALESCE(play_method,'') AS BLOB))+length(CAST(COALESCE(container,'') AS BLOB))+length(CAST(COALESCE(video_codec,'') AS BLOB))+length(CAST(COALESCE(video_resolution,'') AS BLOB))+length(CAST(COALESCE(audio_codec,'') AS BLOB))+length(CAST(COALESCE(subtitle_codec,'') AS BLOB))+length(CAST(COALESCE(hw_accel,'') AS BLOB))+length(CAST(COALESCE(transcode_reasons,'') AS BLOB))+length(CAST(COALESCE(started_at,'') AS BLOB))+length(CAST(COALESCE(last_seen_at,'') AS BLOB))+length(CAST(COALESCE(ended_at,'') AS BLOB))+length(CAST(COALESCE(provenance,'') AS BLOB))+length(CAST(COALESCE(server_id,'') AS BLOB))+length(CAST(COALESCE(source_event_id,'') AS BLOB))+length(CAST(COALESCE(timestamp_certainty,'') AS BLOB))+length(CAST(COALESCE(byte_accuracy,'') AS BLOB))+length(CAST(COALESCE(policy_status,'') AS BLOB))) FROM streaming_history) +
             (SELECT total(length(CAST(COALESCE(device_name,'') AS BLOB))+length(CAST(COALESCE(device_id,'') AS BLOB))+length(CAST(COALESCE(ip_address,'') AS BLOB))) FROM streaming_history) +
             (SELECT total(length(CAST(COALESCE(kind,'') AS BLOB))+length(CAST(COALESCE(value,'') AS BLOB))+length(CAST(COALESCE(name,'') AS BLOB))) FROM streaming_history_labels) +
-            (SELECT total(length(CAST(COALESCE(timestamp,'') AS BLOB))+length(CAST(COALESCE(provider,'') AS BLOB))) FROM streaming_bandwidth_samples) +
             (SELECT total(length(CAST(COALESCE(excluded_users,'') AS BLOB))+length(CAST(COALESCE(excluded_libraries,'') AS BLOB))) FROM streaming_tracking_policies)",
         [],
         |row| row.get(0),
     )?;
-    if !text_bytes.is_finite() || text_bytes > MAX_BODY_BYTES as f64 {
+    if !text_bytes.is_finite() || text_bytes > MAX_ARCHIVE_BYTES as f64 {
         return Err(PortabilityError::too_large());
     }
     Ok(())
@@ -996,33 +1057,145 @@ fn inspect_restore(
     Ok(preview)
 }
 
+fn hash_json_record<T: Serialize>(hasher: &mut Sha256, value: &T) -> PortabilityResult<()> {
+    let bytes = serde_json::to_vec(value).map_err(|_| PortabilityError::invalid())?;
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(&bytes);
+    Ok(())
+}
+
+fn query_target_counts_and_digest_sql(
+    conn: &Connection,
+) -> PortabilityResult<(RecordCounts, String)> {
+    let counts = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM streaming_history),(SELECT COUNT(*) FROM streaming_history_labels),(SELECT COUNT(*) FROM streaming_session_samples),(SELECT COUNT(*) FROM streaming_bandwidth_samples),(SELECT COUNT(*) FROM streaming_tracking_policies)",
+        [],
+        |row| {
+            Ok(RecordCounts {
+                history: row.get::<_, i64>(0)?.max(0) as usize,
+                labels: row.get::<_, i64>(1)?.max(0) as usize,
+                session_samples: row.get::<_, i64>(2)?.max(0) as usize,
+                bandwidth_samples: row.get::<_, i64>(3)?.max(0) as usize,
+                tracking_policies: row.get::<_, i64>(4)?.max(0) as usize,
+            })
+        },
+    )?;
+    if counts.tracking_policies != 1 {
+        return Err(PortabilityError::unavailable());
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"af-streaming-sql-target-v1");
+    hash_json_record(&mut hasher, &counts)?;
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id,session_key,provider,server_name,user_id,user_name,client_name,item_id,item_name,item_type,series_name,series_id,season_number,episode_number,production_year,play_method,container,video_codec,video_resolution,audio_codec,audio_channels,subtitle_codec,hw_accel,transcode_reasons,bitrate_bps,duration_secs,watched_secs,data_used_bytes,completion_pct,started_at,last_seen_at,ended_at,is_active,provenance,server_id,source_event_id,timestamp_certainty,byte_accuracy,policy_status,device_name,device_id,ip_address FROM streaming_history ORDER BY id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let rec = read_history(row)?;
+            hash_json_record(&mut hasher, &rec)?;
+            for index in 39..=41 {
+                let value: Option<String> = row.get(index)?;
+                match value {
+                    Some(v) => {
+                        hasher.update([1]);
+                        hasher.update((v.len() as u64).to_be_bytes());
+                        hasher.update(v.as_bytes());
+                    }
+                    None => hasher.update([0]),
+                }
+            }
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT history_id,kind,value,name FROM streaming_history_labels ORDER BY history_id,kind,value",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let rec = read_label(row)?;
+            hash_json_record(&mut hasher, &rec)?;
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT history_id,sampled_at,observed_secs,playing,bitrate_bps FROM streaming_session_samples ORDER BY history_id,sampled_at",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let rec = read_sample(row)?;
+            hash_json_record(&mut hasher, &rec)?;
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id,timestamp,provider,active_streams,direct_play_count,direct_stream_count,transcode_count,total_bitrate_bps,bytes_delta FROM streaming_bandwidth_samples ORDER BY id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let rec = read_bandwidth_sample(row)?;
+            hash_json_record(&mut hasher, &rec)?;
+        }
+    }
+    let tracking_policy = conn.query_row(
+        "SELECT minimum_watch_secs,excluded_users,excluded_libraries,reconnect_window_secs FROM streaming_tracking_policies WHERE id=1",
+        [],
+        |row| {
+            Ok(TrackingPolicy {
+                minimum_watch_secs: row.get(0)?,
+                excluded_users: row.get(1)?,
+                excluded_libraries: row.get(2)?,
+                reconnect_window_secs: row.get(3)?,
+            })
+        },
+    )?;
+    hash_json_record(&mut hasher, &tracking_policy)?;
+
+    Ok((counts, hex::encode(hasher.finalize())))
+}
+
 fn inspect_restore_in_snapshot(
     conn: &Connection,
     archive: &StreamingArchive,
     mode: RestoreMode,
 ) -> PortabilityResult<RestorePreview> {
-    let target = load_snapshot(conn)?;
-    let target_counts = target.counts();
-    let target_snapshot_sha256 = target_snapshot_digest(conn, &target)?;
     let archive_sha256 = archive.manifest.sha256.clone();
-    let (plan, conflicts, replacement_counts, merge_plan) = match mode {
-        RestoreMode::Merge => {
-            let merge = plan_merge(&target, &archive.data);
-            (
-                merge.counts.clone(),
-                merge.conflicts.clone(),
-                None,
-                Some(merge),
-            )
-        }
-        RestoreMode::Replace => {
-            let plan = PlanCounts {
-                insert: archive.data.counts(),
-                ..Default::default()
-            };
-            (plan, Vec::new(), Some(target_counts.clone()), None)
-        }
-    };
+    let (target_counts, target_snapshot_sha256, plan, conflicts, replacement_counts, merge_plan) =
+        match mode {
+            RestoreMode::Merge => {
+                let target = load_snapshot(conn)?;
+                let target_counts = target.counts();
+                let target_snapshot_sha256 = target_snapshot_digest(conn, &target)?;
+                let merge = plan_merge(&target, &archive.data);
+                (
+                    target_counts,
+                    target_snapshot_sha256,
+                    merge.counts.clone(),
+                    merge.conflicts.clone(),
+                    None,
+                    Some(merge),
+                )
+            }
+            RestoreMode::Replace => {
+                let (target_counts, target_snapshot_sha256) =
+                    query_target_counts_and_digest_sql(conn)?;
+                let plan = PlanCounts {
+                    insert: archive.data.counts(),
+                    ..Default::default()
+                };
+                let replacement_counts = Some(target_counts.clone());
+                (
+                    target_counts,
+                    target_snapshot_sha256,
+                    plan,
+                    Vec::new(),
+                    replacement_counts,
+                    None,
+                )
+            }
+        };
     let fingerprint = PreviewFingerprint {
         archive_sha256: &archive_sha256,
         mode,
@@ -1583,7 +1756,13 @@ fn restore_connection(
         tx.rollback()?;
         return Err(PortabilityError::stale_preview());
     }
-    let before = load_snapshot(&tx)?;
+    let (before_counts, before_hash) = match mode {
+        RestoreMode::Merge => {
+            let before = load_snapshot(&tx)?;
+            (before.counts(), before.digest()?)
+        }
+        RestoreMode::Replace => query_target_counts_and_digest_sql(&tx)?,
+    };
     let modified = match mode {
         RestoreMode::Merge => {
             let merge = current_preview
@@ -1603,16 +1782,20 @@ fn restore_connection(
             [],
         )?;
     }
-    let after = load_snapshot(&tx)?;
-    let before_hash = before.digest()?;
-    let after_hash = after.digest()?;
+    let (after_counts, after_hash) = match mode {
+        RestoreMode::Merge => {
+            let after = load_snapshot(&tx)?;
+            (after.counts(), after.digest()?)
+        }
+        RestoreMode::Replace => query_target_counts_and_digest_sql(&tx)?,
+    };
     let before_json = serde_json::to_string(&AuditSummary {
-        counts: &before.counts(),
+        counts: &before_counts,
         snapshot_sha256: &before_hash,
     })
     .map_err(|_| PortabilityError::invalid())?;
     let after_json = serde_json::to_string(&AuditSummary {
-        counts: &after.counts(),
+        counts: &after_counts,
         snapshot_sha256: &after_hash,
     })
     .map_err(|_| PortabilityError::invalid())?;
@@ -1633,17 +1816,17 @@ fn restore_connection(
         preview_sha256: approval.preview_sha256,
         backup_verified: true,
         archive_counts: archive.data.counts(),
-        resulting_counts: after.counts(),
+        resulting_counts: after_counts,
         plan: current_preview.plan,
         conflicts: current_preview.conflicts,
     })
 }
 
 async fn read_request_body(request: Request<Body>) -> PortabilityResult<Vec<u8>> {
-    let bytes = to_bytes(request.into_body(), MAX_BODY_BYTES)
+    let bytes = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
         .await
         .map_err(|_| PortabilityError::too_large())?;
-    if bytes.len() > MAX_BODY_BYTES {
+    if bytes.len() > MAX_REQUEST_BODY_BYTES {
         return Err(PortabilityError::too_large());
     }
     Ok(bytes.to_vec())
@@ -2378,5 +2561,43 @@ mod tests {
             serde_json::Value::String("private".to_owned());
         let bytes = serde_json::to_vec(&with_unknown).unwrap();
         assert!(validate_archive_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn replace_mode_succeeds_when_existing_db_has_over_ten_thousand_rows_and_body_headroom_exists()
+    {
+        const { assert!(MAX_REQUEST_BODY_BYTES >= MAX_ARCHIVE_BYTES + 1024 * 1024) };
+        const { assert!(MAX_PORTABLE_ROWS >= 100_000) };
+
+        let source = disposable_db();
+        seed_sensitive_data(&source.connection);
+        let archive = export_archive(&source.connection);
+
+        let mut target = disposable_db();
+        let tx = target.connection.unchecked_transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO streaming_bandwidth_samples(id,provider,active_streams) VALUES (?1,'jellyfin',1)")
+                .unwrap();
+            for id in 1..=12_000_i64 {
+                stmt.execute([id]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let (preview, token) =
+            preview_and_token(&target.connection, &archive, RestoreMode::Replace, 44, 4000);
+        assert_eq!(preview.target_counts.bandwidth_samples, 12_000);
+        let restored = restore_connection(
+            &mut target.connection,
+            target.database_path.to_str().unwrap(),
+            44,
+            RestoreMode::Replace,
+            &archive,
+            &token,
+            4001,
+        )
+        .unwrap();
+        assert_eq!(restored.resulting_counts.bandwidth_samples, 1);
     }
 }

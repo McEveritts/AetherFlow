@@ -7,7 +7,6 @@ use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use once_cell::sync::Lazy;
-use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
@@ -91,7 +90,38 @@ fn query_settings_base_domain() -> String {
     af_services::resolve_base_domain()
 }
 
-pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppHostResolution {
+    Proxy(String, i32),
+    DisabledExternalApp(String),
+    ControlPlane,
+}
+
+fn is_control_plane_base_host(clean_host: &str, base_domain: &str) -> bool {
+    !base_domain.is_empty()
+        && (clean_host == base_domain
+            || clean_host == format!("www.{base_domain}")
+            || clean_host == format!("direct.{base_domain}")
+            || clean_host == format!("aetherflow.{base_domain}"))
+}
+
+fn matches_allowed_hosts_control_plane(raw_host: &str, clean_host: &str) -> bool {
+    let Ok(raw_allowed) = env::var("ALLOWED_HOSTS") else {
+        return false;
+    };
+    let trimmed_raw = raw_host.trim().to_ascii_lowercase();
+    raw_allowed
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|entry| {
+            entry == trimmed_raw
+                || entry == clean_host
+                || strip_host_port_and_dot(&entry) == clean_host
+        })
+}
+
+fn resolve_app_host_disposition(raw_host: &str) -> AppHostResolution {
     let clean_host = strip_host_port_and_dot(raw_host);
     if clean_host.is_empty()
         || clean_host == "localhost"
@@ -100,25 +130,92 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
         || clean_host == "aether.local"
         || clean_host == "aetherflow.aether.local"
     {
-        return None;
+        return AppHostResolution::ControlPlane;
     }
     if clean_host.parse::<IpAddr>().is_ok() {
-        return None;
+        return AppHostResolution::ControlPlane;
     }
 
     let base_domain = query_settings_base_domain();
-    if !base_domain.is_empty()
-        && (clean_host == base_domain
-            || clean_host == format!("www.{}", base_domain)
-            || clean_host == format!("direct.{}", base_domain)
-            || clean_host == format!("aetherflow.{}", base_domain))
+    if is_control_plane_base_host(&clean_host, &base_domain)
+        || matches_allowed_hosts_control_plane(raw_host, &clean_host)
     {
-        return None;
+        return AppHostResolution::ControlPlane;
     }
 
-    let configs = af_db::get_all_app_ingress_configs().ok()?;
-    let jobs = af_services::package_job_snapshot().ok()?;
-    let packages = af_services::get_packages_with_jobs(&jobs).ok()?;
+    let Ok(configs) = af_db::get_all_app_ingress_configs() else {
+        return AppHostResolution::ControlPlane;
+    };
+
+    // Determine whether `clean_host` is even a candidate application domain BEFORE scanning
+    // package job locks and installation markers on disk.
+    let matched_public_cfg = configs.iter().find(|cfg| {
+        let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
+        !pub_dom.is_empty() && pub_dom == clean_host
+    });
+    if let Some(cfg) = matched_public_cfg {
+        if !cfg.external_access_enabled {
+            return AppHostResolution::DisabledExternalApp(cfg.app_name.clone());
+        }
+    }
+
+    let matched_internal_cfg = configs.iter().find(|cfg| {
+        let app_lower = cfg.app_name.trim().to_lowercase();
+        !app_lower.is_empty() && clean_host == format!("{app_lower}.aether.local")
+    });
+
+    let mut candidate_app: Option<&str> = None;
+    let mut is_internal = false;
+    if let Some(app_prefix) = clean_host.strip_suffix(".aether.local") {
+        candidate_app = Some(app_prefix);
+        is_internal = true;
+    } else if !base_domain.is_empty() {
+        let suffix = format!(".{base_domain}");
+        if let Some(app_prefix) = clean_host.strip_suffix(&suffix) {
+            candidate_app = Some(app_prefix);
+        }
+    }
+
+    let blueprint_opt = candidate_app
+        .filter(|app| !app.is_empty() && !app.contains('.'))
+        .and_then(af_services::get_blueprint);
+
+    if matched_public_cfg.is_none() && matched_internal_cfg.is_none() && blueprint_opt.is_none() {
+        // Also guard configured non-blueprint app names under `<app>.<base_domain>`
+        if !is_internal {
+            if let Some(app) = candidate_app.filter(|a| !a.is_empty() && !a.contains('.')) {
+                if let Some(cfg) = configs
+                    .iter()
+                    .find(|c| c.app_name.eq_ignore_ascii_case(app))
+                {
+                    if !cfg.external_access_enabled {
+                        return AppHostResolution::DisabledExternalApp(cfg.app_name.clone());
+                    }
+                }
+            }
+        }
+        return AppHostResolution::ControlPlane;
+    }
+
+    let Ok(jobs) = af_services::package_job_snapshot() else {
+        return match matched_public_cfg {
+            Some(cfg) => AppHostResolution::DisabledExternalApp(cfg.app_name.clone()),
+            None if !is_internal && blueprint_opt.is_some() => {
+                AppHostResolution::DisabledExternalApp(blueprint_opt.unwrap().app_name)
+            }
+            _ => AppHostResolution::ControlPlane,
+        };
+    };
+    let Ok(packages) = af_services::get_packages_with_jobs(&jobs) else {
+        return match matched_public_cfg {
+            Some(cfg) => AppHostResolution::DisabledExternalApp(cfg.app_name.clone()),
+            None if !is_internal && blueprint_opt.is_some() => {
+                AppHostResolution::DisabledExternalApp(blueprint_opt.unwrap().app_name)
+            }
+            _ => AppHostResolution::ControlPlane,
+        };
+    };
+
     let authorized = |app: &str, active_ingress: bool| {
         if jobs
             .active
@@ -139,87 +236,77 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
             }) && matches!(af_db::get_retained_app_ingress_config(app), Ok(None)))
     };
 
-    // 1. Exact match on configured `public_domain` (where `external_access_enabled` is true and `listen_port > 0`)
-    //    or `<app>.aether.local` from `app_ingress_configs`
-    for cfg in &configs {
-        if !(1..=65535).contains(&cfg.listen_port) || !authorized(&cfg.app_name, true) {
-            continue;
+    if let Some(cfg) = matched_public_cfg {
+        if (1..=65535).contains(&cfg.listen_port) && authorized(&cfg.app_name, true) {
+            return AppHostResolution::Proxy(cfg.app_name.clone(), cfg.listen_port);
         }
-        let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
-        if cfg.external_access_enabled && !pub_dom.is_empty() && clean_host == pub_dom {
-            return Some((cfg.app_name.clone(), cfg.listen_port));
-        }
-        let app_lower = cfg.app_name.trim().to_lowercase();
-        if !app_lower.is_empty() && clean_host == format!("{}.aether.local", app_lower) {
-            return Some((cfg.app_name.clone(), cfg.listen_port));
+        return AppHostResolution::DisabledExternalApp(cfg.app_name.clone());
+    }
+
+    if let Some(cfg) = matched_internal_cfg {
+        if (1..=65535).contains(&cfg.listen_port) && authorized(&cfg.app_name, true) {
+            return AppHostResolution::Proxy(cfg.app_name.clone(), cfg.listen_port);
         }
     }
 
-    // 2. Fallback: match `<app>.aether.local` or `<app>.<base_domain>` against catalog blueprints
-    let mut candidate_app = None;
-    let mut is_internal = false;
-
-    if let Some(app_prefix) = clean_host.strip_suffix(".aether.local") {
-        candidate_app = Some(app_prefix);
-        is_internal = true;
-    } else if !base_domain.is_empty() {
-        let suffix = format!(".{}", base_domain);
-        if let Some(app_prefix) = clean_host.strip_suffix(&suffix) {
-            candidate_app = Some(app_prefix);
+    if let Some(bp) = blueprint_opt {
+        let ingress = configs
+            .iter()
+            .find(|config| config.app_name.eq_ignore_ascii_case(&bp.app_name));
+        if !authorized(&bp.app_name, ingress.is_some()) {
+            return if is_internal {
+                AppHostResolution::ControlPlane
+            } else {
+                AppHostResolution::DisabledExternalApp(bp.app_name)
+            };
         }
-    }
-
-    if let Some(app) = candidate_app {
-        if !app.is_empty() && !app.contains('.') {
-            if let Some(bp) = af_services::get_blueprint(app) {
-                let ingress = configs
-                    .iter()
-                    .find(|config| config.app_name.eq_ignore_ascii_case(&bp.app_name));
-                if !authorized(&bp.app_name, ingress.is_some()) {
-                    return None;
+        if bp.default_port > 0 || ingress.is_some() {
+            let mut port = bp.default_port;
+            if let Some(ing) = ingress {
+                if !(1..=65535).contains(&ing.listen_port) {
+                    return if is_internal {
+                        AppHostResolution::ControlPlane
+                    } else {
+                        AppHostResolution::DisabledExternalApp(bp.app_name)
+                    };
                 }
-                if bp.default_port > 0 || ingress.is_some() {
-                    let mut port = bp.default_port;
-                    if let Some(ing) = ingress {
-                        if !(1..=65535).contains(&ing.listen_port) {
-                            return None;
-                        }
-                        if !is_internal {
-                            if !ing.external_access_enabled {
-                                return None;
-                            }
-                            let pub_dom = strip_host_port_and_dot(&ing.public_domain);
-                            if !pub_dom.is_empty() && pub_dom != clean_host {
-                                return None;
-                            }
-                        }
-                        if ing.listen_port > 0 {
-                            port = ing.listen_port;
-                        }
-                    } else if !is_internal {
-                        return None;
+                if !is_internal {
+                    if !ing.external_access_enabled {
+                        return AppHostResolution::DisabledExternalApp(bp.app_name);
                     }
-                    if (1..=65535).contains(&port) {
-                        return Some((bp.app_name, port));
+                    let pub_dom = strip_host_port_and_dot(&ing.public_domain);
+                    if !pub_dom.is_empty() && pub_dom != clean_host {
+                        return AppHostResolution::DisabledExternalApp(bp.app_name);
                     }
                 }
+                if ing.listen_port > 0 {
+                    port = ing.listen_port;
+                }
+            } else if !is_internal {
+                return AppHostResolution::DisabledExternalApp(bp.app_name);
+            }
+            if (1..=65535).contains(&port) {
+                return AppHostResolution::Proxy(bp.app_name, port);
             }
         }
+        if !is_internal {
+            return AppHostResolution::DisabledExternalApp(bp.app_name);
+        }
     }
 
-    None
+    AppHostResolution::ControlPlane
+}
+
+pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
+    match resolve_app_host_disposition(raw_host) {
+        AppHostResolution::Proxy(app, port) => Some((app, port)),
+        AppHostResolution::DisabledExternalApp(_) | AppHostResolution::ControlPlane => None,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 2. Application Subdomain Reverse Proxy
 // ──────────────────────────────────────────────────────────────────────────────
-
-static PRIVATE_IP_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|::1$|\[::1\]|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:)",
-    )
-    .unwrap()
-});
 
 static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -481,31 +568,39 @@ fn forward_proxy_http_headers(
     upstream_req
 }
 
+fn parse_strict_ip_or_socket(raw_ip: &str) -> Option<IpAddr> {
+    let trimmed = raw_ip.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(sock) = trimmed.parse::<SocketAddr>() {
+        return Some(sock.ip().to_canonical());
+    }
+    let clean = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    clean.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
+}
+
 fn is_private_or_loopback_ip(raw_ip: &str) -> bool {
-    let mut ip_str = raw_ip.trim().to_lowercase();
-    if let Some(colon_idx) = ip_str.rfind(':') {
-        if !ip_str[colon_idx..].contains(']') && ip_str.matches(':').count() == 1 {
-            ip_str = ip_str[..colon_idx].to_string();
+    let Some(addr) = parse_strict_ip_or_socket(raw_ip) else {
+        return false;
+    };
+    match addr {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
-    let clean = ip_str.trim_matches(['[', ']']);
-    if clean.is_empty() || clean == "localhost" {
-        return true;
-    }
-    if PRIVATE_IP_RE.is_match(clean) {
-        return true;
-    }
-    if let Ok(addr) = clean.parse::<IpAddr>() {
-        return match addr {
-            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-    }
-    false
 }
 
 fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -618,14 +713,15 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
     let lookup_host = raw_host.clone();
     let lookup_headers = sanitize_headers_for_peer(req.headers(), peer_ip_opt, trust_forwarded);
     let lookup = crate::auth::blocking_auth_work(move || {
-        let target = resolve_app_target_for_host(&lookup_host);
-        let username = target
-            .as_ref()
-            .and_then(|_| resolve_authenticated_username(&lookup_headers));
-        (target, username)
+        let disposition = resolve_app_host_disposition(&lookup_host);
+        let username = match &disposition {
+            AppHostResolution::Proxy(_, _) => resolve_authenticated_username(&lookup_headers),
+            AppHostResolution::DisabledExternalApp(_) | AppHostResolution::ControlPlane => None,
+        };
+        (disposition, username)
     })
     .await;
-    let (target, authenticated_user) = match lookup {
+    let (disposition, authenticated_user) = match lookup {
         Ok(result) => result,
         Err(_) => {
             return (
@@ -635,8 +731,16 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 .into_response()
         }
     };
-    let Some((app_name, target_port)) = target else {
-        return next.run(req).await;
+    let (app_name, target_port) = match disposition {
+        AppHostResolution::Proxy(app, port) => (app, port),
+        AppHostResolution::DisabledExternalApp(_) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "EXTERNAL_ACCESS_DISABLED",
+                "External access is not enabled for this application subdomain",
+            );
+        }
+        AppHostResolution::ControlPlane => return next.run(req).await,
     };
     if !(1..=65535).contains(&target_port) {
         return next.run(req).await;
@@ -1215,18 +1319,44 @@ fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
         return true;
     }
 
-    if let Ok(configs) = af_db::get_all_app_ingress_configs() {
-        for cfg in configs {
-            let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
-            if !pub_dom.is_empty() && clean == pub_dom {
-                return true;
-            }
+    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
+    for cfg in &configs {
+        let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
+        if !pub_dom.is_empty() && clean == pub_dom {
+            return cfg.external_access_enabled;
         }
     }
 
     let base_domain = query_settings_base_domain();
-    !base_domain.is_empty()
-        && (clean == base_domain || clean.ends_with(&format!(".{}", base_domain)))
+    if base_domain.is_empty() {
+        return false;
+    }
+    if is_control_plane_base_host(&clean, &base_domain) {
+        return true;
+    }
+    let suffix = format!(".{base_domain}");
+    if let Some(sub) = clean.strip_suffix(&suffix) {
+        if !sub.is_empty() && !sub.contains('.') {
+            if let Some(bp) = af_services::get_blueprint(sub) {
+                return configs.iter().any(|cfg| {
+                    cfg.app_name.eq_ignore_ascii_case(&bp.app_name)
+                        && cfg.external_access_enabled
+                        && {
+                            let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
+                            pub_dom.is_empty() || pub_dom == clean
+                        }
+                });
+            }
+            if let Some(cfg) = configs
+                .iter()
+                .find(|c| c.app_name.eq_ignore_ascii_case(sub))
+            {
+                return cfg.external_access_enabled;
+            }
+        }
+        return true;
+    }
+    false
 }
 
 pub(crate) fn is_trusted_request_host(candidate_raw: &str) -> bool {

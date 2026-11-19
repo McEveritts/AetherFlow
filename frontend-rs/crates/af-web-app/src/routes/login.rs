@@ -8,8 +8,34 @@ use af_web_core::{
 };
 use af_web_ui::{EmptyState, QrCodeSvg};
 use leptos::prelude::*;
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, Value};
 use wasm_bindgen_futures::spawn_local;
+
+#[derive(Serialize)]
+struct SetupRequest<'a> {
+    username: &'a str,
+    password: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_token: Option<&'a str>,
+}
+
+fn build_setup_request_body(username: &str, password: &str, setup_token: &str) -> Value {
+    let trimmed_token = setup_token.trim();
+    let payload = SetupRequest {
+        username: username.trim(),
+        password,
+        setup_token: (!trimmed_token.is_empty()).then_some(trimmed_token),
+    };
+    serde_json::to_value(payload).unwrap_or_else(|_| json!({}))
+}
+
+fn is_localhost_hostname(hostname: &str) -> bool {
+    matches!(
+        hostname.trim().to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
+}
 
 fn setup_password_is_valid(password: &str) -> bool {
     password.len() >= 8
@@ -39,7 +65,11 @@ pub fn LoginPage() -> impl IntoView {
     let setup = use_api("/api/v1/public/auth/setup/check".to_string());
     let username = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
+    let setup_token = RwSignal::new(String::new());
     let code = RwSignal::new(String::new());
+    let is_remote_origin = web_sys::window()
+        .and_then(|w| w.location().hostname().ok())
+        .is_some_and(|h| !is_localhost_hostname(&h));
     let challenge = RwSignal::new(query_param("mfa").unwrap_or_default());
     let setup_mfa = RwSignal::new(false);
     let qr = RwSignal::new(String::new());
@@ -121,6 +151,12 @@ pub fn LoginPage() -> impl IntoView {
             json!({"code":code.get_untracked().trim()})
         } else if !mfa.is_empty() {
             json!({"mfa_token":mfa,"code":code.get_untracked().trim()})
+        } else if setup_required {
+            build_setup_request_body(
+                &username.get_untracked(),
+                &password.get_untracked(),
+                &setup_token.get_untracked(),
+            )
         } else {
             json!({"username":username.get_untracked().trim(),"password":password.get_untracked()})
         };
@@ -246,6 +282,24 @@ pub fn LoginPage() -> impl IntoView {
                                     prop:value=move || password.get()
                                     on:input=move |event| password.set(event_target_value(&event))
                                 />
+                                <Show when=move || setup.data.with(|value| value["setupRequired"] == true)
+                                    && (is_remote_origin || !setup_token.get().is_empty())>
+                                    <label class="block text-sm text-slate-300" for="setup-token">
+                                        {"Setup Bootstrap Token"}
+                                    </label>
+                                    <input
+                                        id="setup-token"
+                                        type="password"
+                                        autocomplete="off"
+                                        class="glass-input w-full px-3 py-3 font-mono"
+                                        placeholder="Optional unless required by remote bootstrap"
+                                        prop:value=move || setup_token.get()
+                                        on:input=move |event| setup_token.set(event_target_value(&event))
+                                    />
+                                    <p class="text-xs text-slate-400">
+                                        {"Required when bootstrapping from a non-localhost origin if a setup token is configured."}
+                                    </p>
+                                </Show>
                             </Show>
                             <Show when=move || !error.get().is_empty()>
                                 <p role="alert" class="text-rose-300 text-sm">{move || {
@@ -309,8 +363,27 @@ pub fn LoginPage() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::{login_error_message, setup_password_is_valid};
+    use super::{
+        build_setup_request_body, is_localhost_hostname, login_error_message,
+        setup_password_is_valid,
+    };
     use af_web_core::api::ApiError;
+
+    #[test]
+    fn setup_request_omits_empty_setup_token_and_includes_trimmed_value() {
+        let without_token = build_setup_request_body(" admin ", "secret123", "   ");
+        assert_eq!(without_token["username"], "admin");
+        assert_eq!(without_token["password"], "secret123");
+        assert!(without_token.get("setup_token").is_none());
+
+        let with_token = build_setup_request_body("admin", "secret123", "  boot-tok-1  ");
+        assert_eq!(with_token["setup_token"], "boot-tok-1");
+
+        assert!(is_localhost_hostname("localhost"));
+        assert!(is_localhost_hostname("127.0.0.1"));
+        assert!(is_localhost_hostname("::1"));
+        assert!(!is_localhost_hostname("panel.example.com"));
+    }
 
     #[test]
     fn setup_password_validation_matches_the_backend_utf8_byte_minimum() {

@@ -1,10 +1,70 @@
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 #[path = "streaming_tests.rs"]
 mod tests;
+
+const MAX_RETAINED_STREAMING_BACKUPS: usize = 2;
+static STREAMING_BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn parse_backup_dir_sort_key(name: &str) -> u128 {
+    // Format: streaming-backup-<pid>-<nanos>[-<seq>]
+    let parts: Vec<&str> = name.split('-').collect();
+    if parts.len() >= 4 {
+        let nanos = parts[3].parse::<u128>().unwrap_or(0);
+        let seq = parts
+            .get(4)
+            .and_then(|s| s.parse::<u128>().ok())
+            .unwrap_or(0);
+        (nanos << 16) | (seq & 0xffff)
+    } else {
+        0
+    }
+}
+
+fn prune_old_streaming_backups(parent: &Path, keep_current: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut backups: Vec<(bool, u128, std::time::SystemTime, String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("streaming-backup-") {
+            continue;
+        }
+        if !path.join("before-migration.sqlite").is_file() {
+            continue;
+        }
+        let is_current = path == keep_current;
+        let sort_key = parse_backup_dir_sort_key(name);
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        backups.push((is_current, sort_key, mtime, name.to_string(), path));
+    }
+    if backups.len() <= MAX_RETAINED_STREAMING_BACKUPS {
+        return;
+    }
+    backups.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| b.3.cmp(&a.3))
+    });
+    for (_, _, _, _, stale_dir) in backups.into_iter().skip(MAX_RETAINED_STREAMING_BACKUPS) {
+        let _ = std::fs::remove_dir_all(stale_dir);
+    }
+}
 
 pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Option<PathBuf>> {
     if db_path == ":memory:" || (db_path.starts_with("file:") && db_path.contains("mode=memory")) {
@@ -18,10 +78,12 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
+    let seq = STREAMING_BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
     let directory = parent.join(format!(
-        "streaming-backup-{}-{}",
+        "streaming-backup-{}-{}-{}",
         std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        seq
     ));
     struct BackupDirGuard {
         path: Option<PathBuf>,
@@ -66,6 +128,7 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
     })();
     result?;
     dir_guard.path = None;
+    prune_old_streaming_backups(parent, &directory);
     Ok(Some(backup))
 }
 
@@ -146,4 +209,52 @@ fn migrate_read_epoch(conn: &Connection) -> anyhow::Result<()> {
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod backup_prune_tests {
+    use super::*;
+
+    #[test]
+    fn verified_backup_prunes_older_directories_retaining_two_newest() {
+        let root =
+            std::env::temp_dir().join(format!("af-stream-bkp-prune-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_file = root.join("aetherflow.sqlite");
+        let conn = Connection::open(&db_file).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE streaming_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_name TEXT);",
+        )
+        .unwrap();
+
+        let mut created = Vec::new();
+        for idx in 0..4 {
+            conn.execute(
+                "INSERT INTO streaming_history (item_name) VALUES (?1)",
+                [format!("item-{idx}")],
+            )
+            .unwrap();
+            let bkp = verified_backup(&conn, db_file.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            created.push(bkp.parent().unwrap().to_path_buf());
+        }
+
+        let remaining: Vec<PathBuf> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("streaming-backup-"))
+            })
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&created[2]));
+        assert!(remaining.contains(&created[3]));
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

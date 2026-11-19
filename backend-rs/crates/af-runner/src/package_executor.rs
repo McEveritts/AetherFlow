@@ -3036,7 +3036,7 @@ impl CrossProcessLockGuard {
         let flock_path = env_cfg.resolve_path(&flock_logical)?;
         if let Some(parent) = flock_path.parent() {
             validate_filesystem_path(parent, env_cfg.fs_root.as_deref())?;
-            fs::create_dir_all(parent)?;
+            crate::create_package_lock_directory(parent)?;
             validate_filesystem_path(parent, env_cfg.fs_root.as_deref())?;
         }
         validate_filesystem_path(&flock_path, env_cfg.fs_root.as_deref())?;
@@ -5562,7 +5562,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         let log_file_path = self.env_cfg.resolve_log_file(action, &recipe.package_id)?;
         if let Some(parent) = log_file_path.parent() {
             validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
-            let _ = fs::create_dir_all(parent);
+            crate::create_package_lock_directory(parent)?;
         }
 
         let mut logs = Vec::new();
@@ -5961,7 +5961,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
                         if let Some(parent) = lock_file_path.parent() {
                             validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
-                            fs::create_dir_all(parent)?;
+                            crate::create_package_lock_directory(parent)?;
                         }
                         journal.stage_file_mutation(&lock_file_path)?;
                         let lock_payload = format!(
@@ -10927,6 +10927,7 @@ impl RunnerBlueprintConfigBackup {
 struct RunnerBlueprintConfigChanges<'a> {
     fs_root: Option<&'a Path>,
     backups: Vec<RunnerBlueprintConfigBackup>,
+    removed_aliases: Vec<(PathBuf, PathBuf)>,
 }
 
 impl RunnerBlueprintConfigChanges<'_> {
@@ -10963,8 +10964,18 @@ impl RunnerBlueprintConfigChanges<'_> {
         })
     }
 
+    fn remove_vhost_alias(&mut self, path: &Path) -> Result<(), PackageExecutorError> {
+        if let Some(parent) = path.parent() {
+            validate_filesystem_path(parent, self.fs_root)?;
+        }
+        let target = fs::read_link(path)?;
+        fs::remove_file(path)?;
+        self.removed_aliases.push((path.to_path_buf(), target));
+        Ok(())
+    }
+
     fn rollback(self, error: PackageExecutorError) -> PackageExecutorError {
-        if self.backups.is_empty() {
+        if self.backups.is_empty() && self.removed_aliases.is_empty() {
             return error;
         }
         let mut failures = Vec::new();
@@ -10975,6 +10986,11 @@ impl RunnerBlueprintConfigChanges<'_> {
                     backup.path.display(),
                     err
                 ));
+            }
+        }
+        for (path, target) in self.removed_aliases.into_iter().rev() {
+            if let Err(err) = std::os::unix::fs::symlink(target, &path) {
+                failures.push(format!("failed to restore {}: {err}", path.display()));
             }
         }
         if failures.is_empty() {
@@ -11072,6 +11088,7 @@ pub fn collect_blueprint_target_paths(pkg_id: &str, fs_root: Option<&Path>) -> V
         for dir in [&sites_avail, &sites_en] {
             paths.push(dir.join(format!("aetherflow-app-{}.conf", clean_app)));
             paths.push(dir.join(format!("aetherflow-ext-{}.conf", clean_app)));
+            paths.push(dir.join(format!("aetherflow-ext-{}-le-ssl.conf", clean_app)));
             paths.push(dir.join(format!("{}.conf", clean_app)));
         }
     }
@@ -11088,6 +11105,7 @@ fn try_apply_runner_blueprint_app_config_with_ingress(
     let mut changes = RunnerBlueprintConfigChanges {
         fs_root,
         backups: Vec::new(),
+        removed_aliases: Vec::new(),
     };
     apply_runner_blueprint_app_config_changes(&mut changes, pkg_id, listen_port, load_ingress)
         .map_err(|err| changes.rollback(err))
@@ -11333,156 +11351,145 @@ fn apply_runner_blueprint_app_config_changes(
                 candidate_vhosts.push(dir.join(format!("{}.conf", clean_app)));
             }
         }
-        let mut preserved_blocks =
+        let preserved_blocks =
             extract_runner_apache_custom_blocks(&candidate_vhosts, fs_root, &sites_en)?;
-        if clean_app == "librespeed"
-            && !preserved_blocks
-                .iter()
-                .any(|b| b.contains("/etc/aetherflow/librespeed-proxy-token.conf"))
-        {
-            preserved_blocks.push(
-                "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string(),
-            );
-        }
-        let proxy_token_directive = if clean_app == "librespeed" {
-            "    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf\n"
-        } else {
-            ""
-        };
-        let librespeed_tls_cfg = if clean_app == "librespeed" {
-            let settings_path = match fs_root {
-                Some(root) => root.join("opt/librespeed/settings.toml"),
-                None => PathBuf::from("/opt/librespeed/settings.toml"),
-            };
-            Some(librespeed_runner_settings_tls_config(
-                &settings_path,
-                fs_root,
-            ))
-        } else {
-            None
-        };
-        let librespeed_tls = librespeed_tls_cfg.as_ref().map(|c| c.enabled);
-        let librespeed_ca_cert = librespeed_tls_cfg
-            .as_ref()
-            .and_then(|c| c.ca_cert_file.as_deref());
-        let ssl_proxy_directive = if librespeed_tls == Some(true) {
-            let ca_cert = librespeed_ca_cert.ok_or_else(|| {
-                PackageExecutorError::VerificationFailed(
-                    "LibreSpeed enable_tls=true requires a valid, regular, non-symlinked absolute tls_cert_file in /opt/librespeed/settings.toml for Apache SSLProxyCACertificateFile pinning".to_string(),
-                )
-            })?;
-            format!(
-                "    SSLProxyEngine On\n    SSLProxyVerify require\n    SSLProxyCACertificateFile {ca_cert}\n    SSLProxyCheckPeerCN off\n    SSLProxyCheckPeerName off\n    SSLProxyCheckPeerExpire off\n"
-            )
-        } else {
-            String::new()
-        };
-        let http_scheme = if librespeed_tls == Some(true) {
-            "https"
-        } else {
-            "http"
-        };
-        let ws_scheme = if librespeed_tls == Some(true) {
-            "wss"
-        } else {
-            "ws"
-        };
         let existing_ingress = load_ingress(canonical)?;
-
+        let req = af_models::RunnerApacheVhostRequest {
+            app_name: clean_app.clone(),
+            listen_port,
+            internal_domain: Some(format!("{clean_app}.aether.local")),
+            public_domain: existing_ingress
+                .as_ref()
+                .map(|ing| ing.public_domain.clone())
+                .filter(|domain| !domain.is_empty()),
+            external_access_enabled: existing_ingress
+                .as_ref()
+                .is_some_and(|ing| ing.external_access_enabled),
+            tls_enabled: existing_ingress.as_ref().is_some_and(|ing| ing.tls_enabled),
+            ..Default::default()
+        };
+        crate::validate_ingress_vhost_request(&req)
+            .map_err(PackageExecutorError::VerificationFailed)?;
+        let render_error =
+            |error: anyhow::Error| PackageExecutorError::VerificationFailed(error.to_string());
+        let upstream = apache_upstream_tls(&clean_app, fs_root).map_err(render_error)?;
         let mut modified_any = false;
 
-        if sites_avail_exists {
-            let int_dom = format!("{}.aether.local", clean_app);
-            let default_vhost = format!(
-                "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n{proxy_token_directive}</VirtualHost>\n"
-            );
-            let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
-            let prev_int = read_runner_apache_vhost(&conf_file, fs_root, false)?;
-            let vhost = render_or_update_runner_apache_vhost_with_ca(
-                prev_int.as_deref(),
-                &default_vhost,
-                Some(&int_dom),
-                listen_port,
-                librespeed_tls,
-                librespeed_ca_cert,
-                &preserved_blocks,
-            );
-            if prev_int.as_deref() != Some(vhost.as_str()) {
-                changes.write_vhost(&conf_file, &vhost)?;
-                modified_any = true;
-            }
-        }
-
-        let ext_conf_file = sites_avail.join(format!("aetherflow-ext-{}.conf", clean_app));
-        let prev_ext = read_runner_apache_vhost(&ext_conf_file, fs_root, false)?;
-        if let Some(ing) = existing_ingress {
-            let pub_dom = ing.public_domain.trim().to_ascii_lowercase();
-            let valid_dom = !pub_dom.is_empty()
-                && pub_dom.contains('.')
-                && pub_dom
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
-            if ing.external_access_enabled && valid_dom && sites_avail_exists {
-                let default_ext_vhost = format!(
-                    "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n{ssl_proxy_directive}    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) {ws_scheme}://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / {http_scheme}://127.0.0.1:{listen_port}/\n    ProxyPassReverse / {http_scheme}://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"expr=%{{REQUEST_SCHEME}}\"\n{proxy_token_directive}</VirtualHost>\n"
-                );
-                let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
-                    prev_ext.as_deref(),
-                    &default_ext_vhost,
-                    Some(&pub_dom),
-                    listen_port,
-                    librespeed_tls,
-                    librespeed_ca_cert,
-                    &preserved_blocks,
-                );
-                if prev_ext.as_deref() != Some(ext_vhost.as_str()) {
-                    changes.write_vhost(&ext_conf_file, &ext_vhost)?;
-                    modified_any = true;
+        let internal_name = format!("aetherflow-app-{clean_app}.conf");
+        let external_name = format!("aetherflow-ext-{clean_app}.conf");
+        let ssl_name = format!("aetherflow-ext-{clean_app}-le-ssl.conf");
+        let legacy_name = format!("{clean_app}.conf");
+        let mut external_sources = Vec::new();
+        for dir in [&sites_avail, &sites_en] {
+            for name in [&external_name, &ssl_name] {
+                if let Some(raw) =
+                    read_runner_apache_vhost(&dir.join(name), fs_root, dir == &sites_en)?
+                {
+                    external_sources.push(raw);
                 }
-            } else if prev_ext.is_some() {
-                changes.remove_vhost(&ext_conf_file)?;
-                modified_any = true;
-            }
-        } else if let Some(prev_ext) = prev_ext {
-            let ext_vhost = render_or_update_runner_apache_vhost_with_ca(
-                Some(&prev_ext),
-                &prev_ext,
-                None,
-                listen_port,
-                librespeed_tls,
-                librespeed_ca_cert,
-                &preserved_blocks,
-            );
-            if prev_ext != ext_vhost {
-                changes.write_vhost(&ext_conf_file, &ext_vhost)?;
-                modified_any = true;
             }
         }
+        let external_sources: Vec<&str> = external_sources.iter().map(String::as_str).collect();
+        let shared: Vec<&str> = preserved_blocks.iter().map(String::as_str).collect();
+        let external_body = req
+            .public_domain
+            .as_deref()
+            .filter(|_| req.external_access_enabled)
+            .map(|domain| {
+                render_managed_apache_vhost(
+                    &req,
+                    domain,
+                    false,
+                    &upstream,
+                    fs_root,
+                    &external_sources,
+                    &shared,
+                )
+            })
+            .transpose()
+            .map_err(render_error)?;
 
-        // Also update any existing regular (non-symlink) vhost files for this app in sites-available or sites-enabled
         let extra_existing_paths = [
-            sites_avail.join(format!("{}.conf", clean_app)),
-            sites_en.join(format!("aetherflow-app-{}.conf", clean_app)),
-            sites_en.join(format!("aetherflow-ext-{}.conf", clean_app)),
-            sites_en.join(format!("{}.conf", clean_app)),
+            sites_avail.join(&internal_name),
+            sites_avail.join(&external_name),
+            sites_avail.join(&ssl_name),
+            sites_avail.join(&legacy_name),
+            sites_en.join(&internal_name),
+            sites_en.join(&external_name),
+            sites_en.join(&ssl_name),
+            sites_en.join(&legacy_name),
         ];
         for path in extra_existing_paths {
-            if let Some(prev_raw) =
-                read_runner_apache_vhost(&path, fs_root, path.parent() == Some(sites_en.as_path()))?
-            {
-                let updated = render_or_update_runner_apache_vhost_with_ca(
-                    Some(&prev_raw),
-                    &prev_raw,
-                    None,
-                    listen_port,
-                    librespeed_tls,
-                    librespeed_ca_cert,
-                    &preserved_blocks,
-                );
-                if prev_raw != updated {
-                    changes.write_vhost(&path, &updated)?;
+            let name = path.file_name().unwrap_or_default();
+            let in_enabled = path.parent() == Some(sites_en.as_path());
+            let is_alias = in_enabled
+                && fs::symlink_metadata(&path)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+            if is_alias {
+                if name == ssl_name.as_str()
+                    || (name == external_name.as_str()
+                        && existing_ingress.is_some()
+                        && external_body.is_none())
+                {
+                    changes.remove_vhost_alias(&path)?;
                     modified_any = true;
                 }
+                continue;
+            }
+            let prior = read_runner_apache_vhost(&path, fs_root, in_enabled)?;
+            if prior.is_none()
+                && (in_enabled
+                    || !sites_avail_exists
+                    || (name != internal_name.as_str() && name != external_name.as_str()))
+            {
+                continue;
+            }
+
+            let next = if name == internal_name.as_str() {
+                let existing: Vec<_> = prior.iter().map(String::as_str).collect();
+                Some(
+                    render_managed_apache_vhost(
+                        &req,
+                        req.internal_domain.as_deref().unwrap_or_default(),
+                        true,
+                        &upstream,
+                        fs_root,
+                        &existing,
+                        &shared,
+                    )
+                    .map_err(render_error)?,
+                )
+            } else if name == external_name.as_str() && existing_ingress.is_some() {
+                external_body.clone()
+            } else if name == ssl_name.as_str() {
+                None
+            } else {
+                prior
+                    .as_deref()
+                    .map(|raw| {
+                        update_legacy_apache_vhost_with_blocks(
+                            raw,
+                            &req,
+                            &upstream,
+                            fs_root,
+                            name == external_name.as_str(),
+                            &preserved_blocks,
+                        )
+                    })
+                    .transpose()
+                    .map_err(render_error)?
+            };
+
+            match (prior.as_deref(), next.as_deref()) {
+                (old, Some(new)) if old != Some(new) => {
+                    changes.write_vhost(&path, new)?;
+                    modified_any = true;
+                }
+                (Some(_), None) => {
+                    changes.remove_vhost(&path)?;
+                    modified_any = true;
+                }
+                _ => {}
             }
         }
 
@@ -12038,48 +12045,394 @@ fn extract_runner_apache_custom_blocks(
         let Some(raw) = read_runner_apache_vhost(&source, fs_root, false)? else {
             continue;
         };
-        let mut current_block: Option<(String, Vec<String>)> = None;
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if let Some((ref end_tag, ref mut buf)) = current_block {
-                buf.push(line.to_string());
-                if lower.starts_with(end_tag.as_str()) {
-                    let joined = buf.join("\n");
-                    if !blocks.iter().any(|b: &String| b.trim() == joined.trim()) {
-                        blocks.push(joined);
-                    }
-                    current_block = None;
-                }
-                continue;
-            }
-            if lower.starts_with("<location") {
-                current_block = Some(("</location>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<directory") {
-                current_block = Some(("</directory>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<requireall") {
-                current_block = Some(("</requireall>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<requireany") {
-                current_block = Some(("</requireany>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("<files") {
-                current_block = Some(("</files>".to_string(), vec![line.to_string()]));
-            } else if lower.starts_with("authtype ")
-                || lower.starts_with("authname ")
-                || lower.starts_with("authuserfile ")
-                || lower.starts_with("authgroupfile ")
-                || lower.starts_with("authbasicprovider ")
-                || lower.starts_with("require ")
-                || lower.starts_with("include ")
-                || lower.starts_with("includeoptional ")
-            {
-                let single = line.to_string();
-                if !blocks.iter().any(|b: &String| b.trim() == single.trim()) {
-                    blocks.push(single);
-                }
-            }
-        }
+        collect_apache_custom_blocks(&raw, &mut blocks);
     }
     Ok(blocks)
+}
+
+fn collect_apache_custom_blocks(raw: &str, blocks: &mut Vec<String>) {
+    let mut depth = 0usize;
+    let mut section = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let directive = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if depth > 0 {
+            if !section.is_empty() {
+                section.push(line);
+            }
+            if directive.starts_with("</") {
+                depth -= 1;
+            } else if directive.starts_with('<') && trimmed.ends_with('>') {
+                depth += 1;
+            }
+            if depth == 0 && !section.is_empty() {
+                let block = section.join("\n");
+                if !blocks
+                    .iter()
+                    .any(|existing| existing.trim() == block.trim())
+                {
+                    blocks.push(block);
+                }
+                section.clear();
+            }
+        } else if directive.starts_with('<')
+            && !directive.starts_with("</")
+            && directive != "<virtualhost"
+            && trimmed.ends_with('>')
+        {
+            depth = 1;
+            if matches!(
+                directive.as_str(),
+                "<location"
+                    | "<locationmatch"
+                    | "<directory"
+                    | "<directorymatch"
+                    | "<files"
+                    | "<filesmatch"
+                    | "<requireall>"
+                    | "<requireany>"
+                    | "<requirenone>"
+            ) {
+                section.push(line);
+            }
+        } else if matches!(
+            directive.as_str(),
+            "authtype"
+                | "authname"
+                | "authuserfile"
+                | "authgroupfile"
+                | "authbasicprovider"
+                | "require"
+                | "include"
+                | "includeoptional"
+        ) && !blocks.iter().any(|block| block.trim() == trimmed)
+        {
+            blocks.push(line.to_string());
+        }
+    }
+}
+
+pub(crate) fn apache_upstream_tls(
+    app: &str,
+    fs_root: Option<&Path>,
+) -> anyhow::Result<LibreSpeedUpstreamTlsConfig> {
+    let rebase = |path: &str| {
+        fs_root.map_or_else(
+            || PathBuf::from(path),
+            |root| root.join(path.trim_start_matches('/')),
+        )
+    };
+    let config = match app {
+        "librespeed" => {
+            let settings = env::var_os("AETHERFLOW_LIBRESPEED_SETTINGS_PATH")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| rebase("/opt/librespeed/settings.toml"));
+            try_librespeed_runner_settings_tls_config(&settings, fs_root)
+                .ok_or_else(|| anyhow::anyhow!("cannot verify LibreSpeed upstream TLS settings"))?
+        }
+        "kasmvnc" => LibreSpeedUpstreamTlsConfig {
+            enabled: true,
+            ca_cert_file: [
+                "/etc/kasmvnc/kasmvnc.crt",
+                "/var/lib/kasmvnc/.vnc/aetherflow-cert.pem",
+            ]
+            .into_iter()
+            .find_map(|path| validate_librespeed_apache_ca_cert(path, fs_root)),
+        },
+        _ => Default::default(),
+    };
+    anyhow::ensure!(
+        !config.enabled || config.ca_cert_file.is_some(),
+        "{app} upstream TLS requires a regular, non-symlinked certificate for Apache SSLProxyCACertificateFile pinning"
+    );
+    Ok(config)
+}
+
+const INTERNAL_NETWORKS: &str =
+    "127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10";
+const APACHE_HTPASSWD: &str = "/etc/apache2/AetherFlow/htpasswd";
+
+fn requires_external_basic_auth(app: &str) -> bool {
+    matches!(
+        app,
+        "mcvnc" | "scrutiny" | "prometheus" | "flaresolverr" | "threadfin" | "rutorrent"
+    )
+}
+
+fn external_auth_policy(app: &str, fs_root: Option<&Path>) -> anyhow::Result<String> {
+    if !requires_external_basic_auth(app) {
+        return Ok(String::new());
+    }
+    let path = fs_root.map_or_else(
+        || PathBuf::from(APACHE_HTPASSWD),
+        |root| root.join(APACHE_HTPASSWD.trim_start_matches('/')),
+    );
+    anyhow::ensure!(
+        crate::open_confined_file(&path, &[])
+            .and_then(|file| file.metadata())
+            .is_ok_and(|meta| meta.len() > 0),
+        "external access for {app} requires {APACHE_HTPASSWD}"
+    );
+    // Apache merges <If> after <Location>. And preserves restrictions already applied
+    // to an operator location and also requires the managed credentials there.
+    Ok(format!(
+        "    <If \"true\">
+        AuthType Basic
+        AuthName \"AetherFlow\"
+        AuthBasicProvider file
+        AuthUserFile {APACHE_HTPASSWD}
+        AuthMerging And
+        Require valid-user
+    </If>
+"
+    ))
+}
+
+fn internal_network_policy() -> String {
+    format!(
+        "    <Proxy \"*\">
+        Require ip {INTERNAL_NETWORKS}
+    </Proxy>
+"
+    )
+}
+
+fn internal_rewrite_guard() -> String {
+    // The vhost rewrite guard also covers any <Location> with its own authz rules
+    // and runs before the WebSocket proxy rewrite.
+    let networks = INTERNAL_NETWORKS
+        .split_whitespace()
+        .map(|network| format!("-R '{network}'"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    format!(
+        "    RewriteCond expr \"!({networks})\"
+    RewriteRule ^ - [F,L]
+"
+    )
+}
+
+fn apache_tls_pair(domain: &str, fs_root: Option<&Path>) -> Option<(String, String)> {
+    let exists = |path: &str| {
+        let resolved = fs_root.map_or_else(
+            || PathBuf::from(path),
+            |root| root.join(path.trim_start_matches('/')),
+        );
+        if let Some(root) = fs_root {
+            if !resolved
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(root))
+            {
+                return false;
+            }
+        }
+        fs::metadata(resolved).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    };
+    [
+        (
+            format!("/etc/letsencrypt/live/{domain}/fullchain.pem"),
+            format!("/etc/letsencrypt/live/{domain}/privkey.pem"),
+        ),
+        (
+            format!("/etc/ssl/AetherFlow/{domain}/fullchain.pem"),
+            format!("/etc/ssl/AetherFlow/{domain}/privkey.pem"),
+        ),
+        (
+            format!("/etc/ssl/AetherFlow/{domain}.crt"),
+            format!("/etc/ssl/AetherFlow/{domain}.key"),
+        ),
+    ]
+    .into_iter()
+    .find(|(cert, key)| exists(cert) && exists(key))
+}
+
+pub(crate) fn render_managed_apache_vhost(
+    req: &af_models::RunnerApacheVhostRequest,
+    domain: &str,
+    internal: bool,
+    upstream: &LibreSpeedUpstreamTlsConfig,
+    fs_root: Option<&Path>,
+    existing: &[&str],
+    legacy: &[&str],
+) -> anyhow::Result<String> {
+    let auth = if internal {
+        String::new()
+    } else {
+        external_auth_policy(&req.app_name, fs_root)?
+    };
+    let tls = (!internal && req.tls_enabled)
+        .then(|| apache_tls_pair(domain, fs_root))
+        .flatten();
+    let (mut out, port, downstream_tls) = if let Some((cert, key)) = tls {
+        (
+            format!(
+                "<VirtualHost *:80>
+    ServerName {domain}
+    Redirect permanent / https://{domain}/
+</VirtualHost>
+"
+            ),
+            443,
+            format!(
+                "    SSLEngine On
+    SSLCertificateFile {cert}
+    SSLCertificateKeyFile {key}
+"
+            ),
+        )
+    } else {
+        (String::new(), 80, String::new())
+    };
+    let ssl_proxy = upstream
+        .ca_cert_file
+        .as_ref()
+        .map_or_else(String::new, |ca_cert| {
+            format!(
+                "    SSLProxyEngine On
+    SSLProxyVerify require
+    SSLProxyCACertificateFile {ca_cert}
+    SSLProxyCheckPeerCN off
+    SSLProxyCheckPeerName off
+    SSLProxyCheckPeerExpire off
+"
+            )
+        });
+    let (http, ws) = if upstream.enabled {
+        ("https", "wss")
+    } else {
+        ("http", "ws")
+    };
+    let proto = if internal {
+        "http"
+    } else {
+        "expr=%{REQUEST_SCHEME}"
+    };
+    let guard = if internal {
+        internal_rewrite_guard()
+    } else {
+        String::new()
+    };
+    let ip_policy = if internal {
+        internal_network_policy()
+    } else {
+        String::new()
+    };
+    let listen_port = req.listen_port;
+    out.push_str(&format!(
+        "<VirtualHost *:{port}>
+    ServerName {domain}
+{downstream_tls}{ssl_proxy}    ProxyPreserveHost On
+    ProxyRequests Off
+    RewriteEngine On
+{guard}    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]
+    RewriteRule /(.*) {ws}://127.0.0.1:{listen_port}/$1 [P,L]
+    ProxyPass / {http}://127.0.0.1:{listen_port}/
+    ProxyPassReverse / {http}://127.0.0.1:{listen_port}/
+    RequestHeader set X-Forwarded-Proto \"{proto}\"
+{ip_policy}"
+    ));
+    let mut blocks = Vec::new();
+    for raw in existing.iter().chain(legacy) {
+        collect_apache_custom_blocks(raw, &mut blocks);
+    }
+    if req.app_name == "librespeed"
+        && !blocks
+            .iter()
+            .any(|block| block.contains("/etc/aetherflow/librespeed-proxy-token.conf"))
+    {
+        blocks.push("    IncludeOptional /etc/aetherflow/librespeed-proxy-token.conf".to_string());
+    }
+    for block in blocks {
+        out.push_str(&block);
+        out.push('\n');
+    }
+    out.push_str(&auth);
+    out.push_str(
+        "</VirtualHost>
+",
+    );
+    Ok(out)
+}
+
+pub(crate) fn update_legacy_apache_vhost(
+    raw: &str,
+    req: &af_models::RunnerApacheVhostRequest,
+    upstream: &LibreSpeedUpstreamTlsConfig,
+    fs_root: Option<&Path>,
+    external: bool,
+) -> anyhow::Result<String> {
+    update_legacy_apache_vhost_with_blocks(raw, req, upstream, fs_root, external, &[])
+}
+
+fn update_legacy_apache_vhost_with_blocks(
+    raw: &str,
+    req: &af_models::RunnerApacheVhostRequest,
+    upstream: &LibreSpeedUpstreamTlsConfig,
+    fs_root: Option<&Path>,
+    external: bool,
+    blocks: &[String],
+) -> anyhow::Result<String> {
+    let tls = matches!(req.app_name.as_str(), "librespeed" | "kasmvnc").then_some(upstream.enabled);
+    let updated = render_or_update_runner_apache_vhost_with_ca(
+        Some(raw),
+        raw,
+        None,
+        req.listen_port,
+        tls,
+        upstream.ca_cert_file.as_deref(),
+        blocks,
+    );
+    static VHOST_END: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)</VirtualHost\s*>").unwrap());
+    let mut out = String::new();
+    let mut start = 0;
+    for close_tag in VHOST_END.find_iter(&updated) {
+        let host = &updated[start..close_tag.end()];
+        let body = &updated[start..close_tag.start()];
+        start = close_tag.end();
+        let internal = host.lines().any(|line| {
+            let mut words = line.split_whitespace();
+            words.next().is_some_and(|word| {
+                word.eq_ignore_ascii_case("ServerName") || word.eq_ignore_ascii_case("ServerAlias")
+            }) && words.any(|name| {
+                name.trim_matches('"')
+                    .to_ascii_lowercase()
+                    .ends_with(".aether.local")
+            })
+        });
+        if internal && !body.contains(&internal_network_policy()) {
+            // Put the vhost rewrite guard ahead of existing proxy rules.
+            let open = body
+                .to_ascii_lowercase()
+                .find("<virtualhost")
+                .and_then(|offset| body[offset..].find('>').map(|end| offset + end + 1))
+                .unwrap_or_default();
+            out.push_str(&body[..open]);
+            out.push_str(
+                "
+    RewriteEngine On
+",
+            );
+            out.push_str(&internal_rewrite_guard());
+            out.push_str(&body[open..]);
+            out.push_str(&internal_network_policy());
+        } else {
+            out.push_str(body);
+        }
+        if external || (!internal && req.external_access_enabled) {
+            let auth = external_auth_policy(&req.app_name, fs_root)?;
+            if !body.contains(&auth) {
+                out.push_str(&auth);
+            }
+        }
+        out.push_str(close_tag.as_str());
+    }
+    out.push_str(&updated[start..]);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -12249,6 +12602,72 @@ fn verify_runner_apache_configtest() -> Result<(), String> {
         }
     }
     Err("no Apache configtest command is available".to_string())
+}
+
+fn legacy_sandbox_units(pkg_id: &str) -> Vec<String> {
+    let Some(pkg) = crate::get_runner_package_definition(pkg_id) else {
+        return Vec::new();
+    };
+    if (!pkg.service_type.is_empty() && pkg.service_type != "systemd")
+        || matches!(pkg.sandbox_profile.as_str(), "" | "privileged" | "none")
+    {
+        return Vec::new();
+    }
+    let mut units = pkg.sandbox_service_ids;
+    if units.is_empty() {
+        units.push(if pkg.service_name.is_empty() {
+            pkg_id.to_string()
+        } else {
+            pkg.service_name
+        });
+    }
+    units
+        .into_iter()
+        .map(|unit| normalize_unit_filename(&unit))
+        .filter(|unit| !crate::is_exempt_sandbox_unit(unit))
+        .collect()
+}
+
+fn legacy_unit_snapshot(unit: &str) -> anyhow::Result<Vec<Option<fs::Metadata>>> {
+    [
+        "/etc/systemd/system",
+        "/usr/local/lib/systemd/system",
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+    ]
+    .iter()
+    .map(|dir| match fs::metadata(Path::new(dir).join(unit)) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    })
+    .collect()
+}
+
+fn legacy_unit_changed(before: &[Option<fs::Metadata>], after: &[Option<fs::Metadata>]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.iter().zip(after).any(|(before, after)| {
+        let identity =
+            |stat: &fs::Metadata| (stat.dev(), stat.ino(), stat.ctime(), stat.ctime_nsec());
+        before.as_ref().map(identity) != after.as_ref().map(identity)
+    })
+}
+
+async fn run_legacy_sandbox_systemctl(
+    guard: &af_release::ReleaseLockGuard,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    let mut command = Command::new("systemctl");
+    command.args(args).kill_on_drop(true);
+    guard.preserve_in_child(command.as_std_mut())?;
+    let output = tokio::time::timeout(Duration::from_secs(45), command.output()).await??;
+    anyhow::ensure!(
+        output.status.success(),
+        "systemctl {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    );
+    Ok(())
 }
 
 /// Sets the lifecycle contract environment for a legacy Bash package script.
@@ -12865,6 +13284,37 @@ pub fn execute_package_request_stream(
         };
         let env_cfg = default_env;
 
+        let installs = matches!(action, PackageAction::Install | PackageAction::Reinstall | PackageAction::Update);
+        let sandbox_units = legacy_sandbox_units(&req.package_id);
+        let live_sandbox = env_cfg.fs_root.is_none()
+            && env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none()
+            && !env::var("AETHERFLOW_SANDBOX_DRY_RUN").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            && cfg!(target_os = "linux");
+        let mut unit_snapshots = Vec::new();
+        if installs && !sandbox_units.is_empty() {
+            if let Err(error) = ensure_package_sandbox_dropin_under_root(
+                env_cfg.fs_root.as_deref(), &req.package_id, &req.action,
+            ) {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:pre-install sandbox failed: {error}\n"));
+                return;
+            }
+            if live_sandbox {
+                for unit in &sandbox_units {
+                    match legacy_unit_snapshot(unit) {
+                        Ok(snapshot) => unit_snapshots.push((unit, snapshot)),
+                        Err(error) => {
+                            yield Ok(format!("__RUNNER_EXIT_ERROR__:cannot snapshot {unit}: {error}\n"));
+                            return;
+                        }
+                    }
+                }
+                if let Err(error) = run_legacy_sandbox_systemctl(&maintenance_guard, &["daemon-reload"]).await {
+                    yield Ok(format!("__RUNNER_EXIT_ERROR__:pre-install sandbox failed: {error}\n"));
+                    return;
+                }
+            }
+        }
+
         let mut cmd = Command::new("bash");
         cmd.arg(&script_path)
             .stdin(Stdio::null())
@@ -12986,6 +13436,21 @@ pub fn execute_package_request_stream(
                             yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
                             return;
                         }
+                        if installs && live_sandbox && !sandbox_units.is_empty() {
+                            let result = async {
+                                run_legacy_sandbox_systemctl(&maintenance_guard, &["daemon-reload"]).await?;
+                                for (unit, before) in &unit_snapshots {
+                                    if legacy_unit_changed(before, &legacy_unit_snapshot(unit)?) {
+                                        run_legacy_sandbox_systemctl(&maintenance_guard, &["try-restart", unit]).await?;
+                                    }
+                                }
+                                Ok::<(), anyhow::Error>(())
+                            }.await;
+                            if let Err(error) = result {
+                                yield Ok(format!("__RUNNER_EXIT_ERROR__:post-install sandbox failed: {error}\n"));
+                                return;
+                            }
+                        }
                         let defer_blueprint = std::env::var("AETHERFLOW_DEFER_BLUEPRINT_SYNC")
                             .map(|v| v == "1")
                             .unwrap_or(false)
@@ -13012,20 +13477,7 @@ pub fn execute_package_request_stream(
                                 return;
                             }
                         }
-                        if env_cfg.fs_root.is_none()
-                            && matches!(
-                                action,
-                                PackageAction::Install
-                                    | PackageAction::Reinstall
-                                    | PackageAction::Update
-                            )
-                        {
-                            let _ = crate::apply_package_sandbox_reserved(
-                                &req.package_id,
-                                &maintenance_guard,
-                            )
-                            .await;
-                        }
+
                     }
                 }
             }
@@ -17001,6 +17453,7 @@ sleep 30
         let mut changes = RunnerBlueprintConfigChanges {
             fs_root: Some(&root),
             backups: Vec::new(),
+            removed_aliases: Vec::new(),
         };
         let result = changes.remove_vhost(&target);
         fs::set_permissions(directory, permissions).unwrap();
@@ -17029,6 +17482,7 @@ sleep 30
             let mut changes = RunnerBlueprintConfigChanges {
                 fs_root: Some(&root),
                 backups: Vec::new(),
+                removed_aliases: Vec::new(),
             };
             changes
                 .write_vhost(&restored, "updated internal config")
@@ -18780,6 +19234,72 @@ int main(int argc, char** argv) {
     include!("native_catalog_regressions.rs");
 
     #[test]
+    fn managed_apache_vhost_pins_kasm_tls_and_requires_auth_for_public_backends() {
+        let root = create_isolated_test_dir("managed-vhost-tls-auth");
+        let cert = root.join("var/lib/kasmvnc/.vnc/aetherflow-cert.pem");
+        fs::create_dir_all(cert.parent().unwrap()).unwrap();
+        fs::write(&cert, "upstream-cert-fixture").unwrap();
+        let mut req = af_models::RunnerApacheVhostRequest {
+            app_name: "kasmvnc".to_owned(),
+            listen_port: 8444,
+            ..Default::default()
+        };
+        let kasm_tls = apache_upstream_tls("kasmvnc", Some(&root)).unwrap();
+        let rendered = render_managed_apache_vhost(
+            &req,
+            "kasmvnc.aether.local",
+            true,
+            &kasm_tls,
+            Some(&root),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(rendered
+            .contains("SSLProxyCACertificateFile /var/lib/kasmvnc/.vnc/aetherflow-cert.pem"));
+        assert!(rendered.contains("wss://127.0.0.1:8444/"));
+        assert!(rendered.contains("https://127.0.0.1:8444/"));
+
+        req.app_name = "prometheus".to_string();
+        req.tls_enabled = true;
+        let domain = "metrics.example.test";
+        let options = LibreSpeedUpstreamTlsConfig::default();
+        assert!(
+            render_managed_apache_vhost(&req, domain, false, &options, Some(&root), &[], &[])
+                .is_err()
+        );
+        let htpasswd = root.join(APACHE_HTPASSWD.trim_start_matches('/'));
+        fs::create_dir_all(htpasswd.parent().unwrap()).unwrap();
+        fs::write(&htpasswd, "fixture").unwrap();
+        let tls_dir = root.join("etc/letsencrypt/live").join(domain);
+        fs::create_dir_all(&tls_dir).unwrap();
+        fs::write(tls_dir.join("fullchain.pem"), "cert-fixture").unwrap();
+        fs::write(tls_dir.join("privkey.pem"), "key-fixture").unwrap();
+        let managed =
+            render_managed_apache_vhost(&req, domain, false, &options, Some(&root), &[], &[])
+                .unwrap();
+        assert!(managed.contains("Redirect permanent / https://metrics.example.test/"));
+        assert!(managed.contains("<VirtualHost *:443>"));
+        assert!(managed.contains(
+            "SSLCertificateKeyFile /etc/letsencrypt/live/metrics.example.test/privkey.pem"
+        ));
+        assert!(managed.contains("AuthUserFile /etc/apache2/AetherFlow/htpasswd"));
+        assert!(managed.contains("Require valid-user"));
+        let rerendered = render_managed_apache_vhost(
+            &req,
+            domain,
+            false,
+            &options,
+            Some(&root),
+            &[&managed],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(managed, rerendered);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn test_librespeed_apache_vhost_honors_and_toggles_upstream_tls() {
         assert!(!parse_librespeed_root_tls_flag("enable_tls = false\n"));
         assert!(parse_librespeed_root_tls_flag(
@@ -18835,6 +19355,7 @@ int main(int argc, char** argv) {
         let mut changes = RunnerBlueprintConfigChanges {
             fs_root: Some(&tmp_dir),
             backups: Vec::new(),
+            removed_aliases: Vec::new(),
         };
         let err =
             apply_runner_blueprint_app_config_changes(&mut changes, "librespeed", 18988, |_| {
@@ -18860,6 +19381,7 @@ int main(int argc, char** argv) {
         let mut ok_changes = RunnerBlueprintConfigChanges {
             fs_root: Some(&tmp_dir),
             backups: Vec::new(),
+            removed_aliases: Vec::new(),
         };
         apply_runner_blueprint_app_config_changes(&mut ok_changes, "librespeed", 18988, |_| {
             Ok(None)

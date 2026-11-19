@@ -318,6 +318,14 @@ jobs:
             TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
 
+      - name: Package ARM64 Release Tarball
+        run: |
+          BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 \
+            TARGETS=arm64 OUTPUT_DIR="${PWD}/release-dist-arm64" VERSION="${VERSION_STAMP}" \
+            bash scripts/build_gold.sh
+          cp -f release-dist-arm64/aetherflow-linux-arm64.tar.gz release-dist/aetherflow-linux-arm64.tar.gz
+          cp -rf release-dist-arm64/linux-arm64 release-dist/linux-arm64
+
       - name: Build and Package Standalone Rust LibreSpeed Archives
         run: |
           set -euo pipefail
@@ -348,7 +356,17 @@ jobs:
           package_speedtest "release-dist/linux-amd64/speedtest-backend" amd64
           package_speedtest "backend-rs/target/aarch64-unknown-linux-gnu/release/speedtest-backend" arm64
           package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
-          (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz "${speedtest_archives[@]}" > SHA256SUMS)
+          if git rev-parse --git-dir >/dev/null 2>&1; then
+            git archive --format=tar.gz --prefix=AetherFlow/ HEAD > release-dist/aetherflow-bootstrap.tar.gz
+          fi
+          release_archives=(aetherflow-linux-amd64.tar.gz)
+          if [[ -s release-dist/aetherflow-linux-arm64.tar.gz ]]; then
+            release_archives+=(aetherflow-linux-arm64.tar.gz)
+          fi
+          if [[ -s release-dist/aetherflow-bootstrap.tar.gz ]]; then
+            release_archives+=(aetherflow-bootstrap.tar.gz)
+          fi
+          (cd release-dist && sha256sum "${release_archives[@]}" "${speedtest_archives[@]}" > SHA256SUMS)
 
       - name: Install Playwright Browser Engines for Release Verification
         run: |
@@ -379,7 +397,8 @@ jobs:
         with:
           name: release-dist
           path: |
-            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/aetherflow-linux-*.tar.gz
+            release-dist/aetherflow-bootstrap.tar.gz
             release-dist/speedtest-backend_*_linux_*.tar.gz
             release-dist/SHA256SUMS
           if-no-files-found: error
@@ -414,6 +433,12 @@ jobs:
           set -euo pipefail
           cd release-dist
           expected=(aetherflow-linux-amd64.tar.gz)
+          if [[ -s aetherflow-linux-arm64.tar.gz ]]; then
+            expected+=(aetherflow-linux-arm64.tar.gz)
+          fi
+          if [[ -s aetherflow-bootstrap.tar.gz ]]; then
+            expected+=(aetherflow-bootstrap.tar.gz)
+          fi
           for arch in amd64 arm64 armv7; do
             expected+=("speedtest-backend_${RELEASE_TAG#v}_linux_${arch}.tar.gz")
           done
@@ -427,7 +452,8 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
-            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/aetherflow-linux-*.tar.gz
+            release-dist/aetherflow-bootstrap.tar.gz
             release-dist/speedtest-backend_*_linux_*.tar.gz
             release-dist/SHA256SUMS
 
@@ -473,6 +499,20 @@ jobs:
           )
           cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json
           RELEASE_ASSETS+=(release-dist/aetherflow-linux-amd64.tar.gz.sigstore.json)
+          if [[ -s release-dist/aetherflow-linux-arm64.tar.gz ]]; then
+            cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-linux-arm64.tar.gz.sigstore.json
+            RELEASE_ASSETS+=(
+              release-dist/aetherflow-linux-arm64.tar.gz
+              release-dist/aetherflow-linux-arm64.tar.gz.sigstore.json
+            )
+          fi
+          if [[ -s release-dist/aetherflow-bootstrap.tar.gz ]]; then
+            cp -f "${ATTEST_BUNDLE_PATH}" release-dist/aetherflow-bootstrap.tar.gz.sigstore.json
+            RELEASE_ASSETS+=(
+              release-dist/aetherflow-bootstrap.tar.gz
+              release-dist/aetherflow-bootstrap.tar.gz.sigstore.json
+            )
+          fi
           for arch in amd64 arm64 armv7; do
             extra_tar="release-dist/speedtest-backend_${RELEASE_TAG#v}_linux_${arch}.tar.gz"
             test -s "${extra_tar}"

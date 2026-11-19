@@ -315,6 +315,10 @@ pub(crate) fn launch_url_with_host(
     settings: &Value,
     browser_host: Option<&str>,
 ) -> Option<String> {
+    let explicit_launch = field(info, &["launch_url"]);
+    if explicit_launch.starts_with("http://") || explicit_launch.starts_with("https://") {
+        return Some(explicit_launch);
+    }
     let path = field(info, &["web_path"]);
     let path = if path.is_empty() {
         String::new()
@@ -341,7 +345,14 @@ pub(crate) fn launch_url_with_host(
     } else {
         "http"
     };
+    let internal = field(info, &["internal_domain"]);
+    if info["external_access_enabled"] == false && valid_domain(&internal) {
+        return Some(format!("http://{internal}{path}"));
+    }
     if info["bind_scope"] == "loopback" {
+        if valid_domain(&internal) {
+            return Some(format!("http://{internal}{path}"));
+        }
         let host = browser_host?;
         if !matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") {
             return None;
@@ -566,6 +577,48 @@ mod tests {
             launch_url_with_host(&exposed_loopback, &with_base, Some("panel.example.com")),
             Some("https://rt.example.com".into())
         );
+
+        // When external access is disabled, internal_domain takes precedence over dashboard_host:port
+        let disabled_with_internal = json!({
+            "id": "sonarr",
+            "active_port": 8989,
+            "public_domain": "sonarr.example.com",
+            "internal_domain": "sonarr.aether.local",
+            "external_access_enabled": false
+        });
+        assert_eq!(
+            launch_url_with_host(&disabled_with_internal, &with_base, Some("host.test")),
+            Some("http://sonarr.aether.local".into())
+        );
+
+        // Loopback-bound apps with internal_domain or active external public_domain must NOT suppress Launch
+        for app_id in ["palate", "mcvnc", "kasmvnc", "qbittorrent"] {
+            let loopback_internal = json!({
+                "id": app_id,
+                "default_port": 8180,
+                "bind_scope": "loopback",
+                "internal_domain": format!("{app_id}.aether.local"),
+                "external_access_enabled": false
+            });
+            assert_eq!(
+                launch_url_with_host(&loopback_internal, &with_base, Some("panel.example.com")),
+                Some(format!("http://{app_id}.aether.local")),
+                "{app_id}"
+            );
+            let loopback_external = json!({
+                "id": app_id,
+                "default_port": 8180,
+                "bind_scope": "loopback",
+                "internal_domain": format!("{app_id}.aether.local"),
+                "public_domain": format!("{app_id}.example.com"),
+                "external_access_enabled": true
+            });
+            assert_eq!(
+                launch_url_with_host(&loopback_external, &with_base, Some("panel.example.com")),
+                Some(format!("https://{app_id}.example.com")),
+                "{app_id}"
+            );
+        }
 
         // Regular network-scoped web apps can use baseDomain subdomain routing or direct host:port
         let sonarr = json!({ "id": "sonarr", "default_port": 8989, "active_port": 8989 });

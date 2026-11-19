@@ -87,7 +87,8 @@ fn aes_key_candidate_env_files() -> Vec<std::path::PathBuf> {
 }
 
 pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
-    if let Ok(guard) = AES_MASTER_KEY.read() {
+    {
+        let guard = AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
         if let Some(key) = *guard {
             return Some(key);
         }
@@ -231,42 +232,39 @@ pub fn init_aes_key() -> anyhow::Result<()> {
     }
     if raw.is_empty() {
         let af_env = env::var("AETHERFLOW_ENV").unwrap_or_default();
-        let gin_mode = env::var("GIN_MODE").unwrap_or_default();
         let is_production = af_env.trim().eq_ignore_ascii_case("production")
-            || af_env.trim().eq_ignore_ascii_case("release")
-            || gin_mode.trim().eq_ignore_ascii_case("release");
+            || af_env.trim().eq_ignore_ascii_case("release");
         if is_production {
             anyhow::bail!(
-                "FATAL: AES_MASTER_KEY is required in production (AETHERFLOW_ENV=production or GIN_MODE=release). \
-                 Set a 32-byte key (raw or base64-encoded) to enable API key encryption."
+                "FATAL: AES_MASTER_KEY is required in production (AETHERFLOW_ENV=production). \
+                 Set a 32-byte key (raw, hex, or base64-encoded) to enable API key encryption."
             );
         }
         tracing::info!(
             "WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only)."
         );
-        if let Ok(mut guard) = AES_MASTER_KEY.write() {
-            *guard = None;
-        }
+        *AES_MASTER_KEY.write().unwrap_or_else(|e| e.into_inner()) = None;
         return Ok(());
     }
 
     let key_bytes = parse_aes_key_bytes(&raw)?;
 
-    if let Ok(mut guard) = AES_MASTER_KEY.write() {
-        *guard = Some(key_bytes);
-    }
+    *AES_MASTER_KEY.write().unwrap_or_else(|e| e.into_inner()) = Some(key_bytes);
     tracing::info!("AES-256-GCM encryption key loaded successfully.");
     Ok(())
 }
 
 pub fn is_encryption_enabled() -> bool {
-    AES_MASTER_KEY.read().map(|g| g.is_some()).unwrap_or(false)
+    AES_MASTER_KEY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
 }
 
 /// Encrypts plaintext using AES-256-GCM with a 12-byte random nonce, returning
 /// `"enc:v1:<base64(nonce || ciphertext)>"` — byte-for-byte compatible with Go's `EncryptKey`.
 pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
-    let key_opt = *AES_MASTER_KEY.read().unwrap();
+    let key_opt = *AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
     let Some(key) = key_opt else {
         return Ok(plaintext.to_string());
     };
@@ -275,7 +273,7 @@ pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
 
 /// Decrypts a versioned `"enc:v1:<base64>"` string produced by Go or Rust.
 pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
-    let key_opt = *AES_MASTER_KEY.read().unwrap();
+    let key_opt = *AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
     let Some(key) = key_opt else {
         return Ok(encoded.to_string());
     };
@@ -285,6 +283,247 @@ pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     }
 
     anyhow::bail!("ciphertext tampered or missing required version prefix")
+}
+
+pub const SECRET_MASK: &str = "••••••••";
+
+fn is_notification_secret_field_name(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "bot_token"
+            | "token"
+            | "webhook_url"
+            | "password"
+            | "smtp_password"
+            | "pass"
+            | "secret"
+            | "api_key"
+            | "apikey"
+            | "auth_token"
+            | "access_token"
+            | "bearer_token"
+            | "signing_secret"
+            | "authorization"
+            | "client_secret"
+    )
+}
+
+fn is_notification_secret_header_name(header_name: &str, value: &str) -> bool {
+    let lower = header_name.trim().to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    ) {
+        return true;
+    }
+    if ["token", "secret", "key", "pass", "auth", "signature"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    let trimmed = value.trim();
+    trimmed.starts_with(CIPHERTEXT_PREFIX)
+        || trimmed
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("bearer "))
+        || trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("basic "))
+        || trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("token "))
+}
+
+fn url_contains_userinfo(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let Some(scheme_sep) = trimmed.find("://") else {
+        return false;
+    };
+    let rest = &trimmed[scheme_sep + 3..];
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    authority.contains('@')
+}
+
+fn is_url_field_secret(channel_type: &str, key: &str, value: &str) -> bool {
+    let lower = key.trim().to_ascii_lowercase();
+    if lower != "url" && lower != "endpoint" && !lower.ends_with("_url") {
+        return false;
+    }
+    if lower == "webhook_url" {
+        return true;
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.starts_with(CIPHERTEXT_PREFIX)
+        || url_contains_userinfo(trimmed)
+        || (lower == "url" && channel_type.trim().eq_ignore_ascii_case("webhook"))
+}
+
+fn encrypt_notification_value_in_place(
+    channel_type: &str,
+    val: &mut serde_json::Value,
+    in_headers_map: bool,
+) -> anyhow::Result<usize> {
+    let mut encrypted_count = 0usize;
+    let Some(obj) = val.as_object_mut() else {
+        return Ok(0);
+    };
+    for (key, field_val) in obj.iter_mut() {
+        let key_lower = key.trim().to_ascii_lowercase();
+        if !in_headers_map && (key_lower == "headers" || key_lower == "custom_headers") {
+            encrypted_count += encrypt_notification_value_in_place(channel_type, field_val, true)?;
+            continue;
+        }
+        if field_val.is_object() {
+            encrypted_count += encrypt_notification_value_in_place(channel_type, field_val, false)?;
+            continue;
+        }
+        let Some(raw_str) = field_val.as_str() else {
+            continue;
+        };
+        let trimmed = raw_str.trim();
+        if trimmed.is_empty() || trimmed == SECRET_MASK || trimmed.starts_with(CIPHERTEXT_PREFIX) {
+            continue;
+        }
+        let should_encrypt = if in_headers_map {
+            is_notification_secret_header_name(key, trimmed)
+        } else {
+            is_notification_secret_field_name(key)
+                || is_url_field_secret(channel_type, key, trimmed)
+        };
+        if should_encrypt {
+            let enc = encrypt_key(trimmed)?;
+            if enc != raw_str {
+                encrypted_count += 1;
+            }
+            *field_val = serde_json::Value::String(enc);
+        }
+    }
+    Ok(encrypted_count)
+}
+
+fn decrypt_notification_secret_str(raw: &str) -> anyhow::Result<String> {
+    if raw.starts_with(CIPHERTEXT_PREFIX) {
+        if is_encryption_enabled() {
+            return decrypt_key(raw);
+        }
+        return decrypt_secret_if_needed(raw);
+    }
+    Ok(raw.to_string())
+}
+
+fn decrypt_notification_value_in_place(
+    channel_type: &str,
+    val: &mut serde_json::Value,
+    in_headers_map: bool,
+) -> anyhow::Result<()> {
+    let Some(obj) = val.as_object_mut() else {
+        return Ok(());
+    };
+    for (key, field_val) in obj.iter_mut() {
+        let key_lower = key.trim().to_ascii_lowercase();
+        if !in_headers_map && (key_lower == "headers" || key_lower == "custom_headers") {
+            decrypt_notification_value_in_place(channel_type, field_val, true)?;
+            continue;
+        }
+        if field_val.is_object() {
+            decrypt_notification_value_in_place(channel_type, field_val, false)?;
+            continue;
+        }
+        let Some(raw_str) = field_val.as_str() else {
+            continue;
+        };
+        let should_decrypt = raw_str.starts_with(CIPHERTEXT_PREFIX)
+            || (in_headers_map && is_notification_secret_header_name(key, raw_str))
+            || is_notification_secret_field_name(key)
+            || is_url_field_secret(channel_type, key, raw_str);
+        if should_decrypt && raw_str.starts_with(CIPHERTEXT_PREFIX) {
+            let dec = decrypt_notification_secret_str(raw_str)?;
+            *field_val = serde_json::Value::String(dec);
+        }
+    }
+    Ok(())
+}
+
+fn mask_notification_value_in_place(
+    channel_type: &str,
+    val: &mut serde_json::Value,
+    in_headers_map: bool,
+) {
+    let Some(obj) = val.as_object_mut() else {
+        return;
+    };
+    for (key, field_val) in obj.iter_mut() {
+        let key_lower = key.trim().to_ascii_lowercase();
+        if !in_headers_map && (key_lower == "headers" || key_lower == "custom_headers") {
+            mask_notification_value_in_place(channel_type, field_val, true);
+            continue;
+        }
+        if field_val.is_object() {
+            mask_notification_value_in_place(channel_type, field_val, false);
+            continue;
+        }
+        let Some(raw_str) = field_val.as_str() else {
+            continue;
+        };
+        let trimmed = raw_str.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let should_mask = trimmed.starts_with(CIPHERTEXT_PREFIX)
+            || (in_headers_map && is_notification_secret_header_name(key, trimmed))
+            || is_notification_secret_field_name(key)
+            || is_url_field_secret(channel_type, key, trimmed);
+        if should_mask {
+            *field_val = serde_json::Value::String(SECRET_MASK.to_string());
+        }
+    }
+}
+
+/// Encrypts secret fields inside a `notification_channels.config` JSON value using `encrypt_key`.
+pub fn encrypt_notification_channel_config_value(
+    channel_type: &str,
+    config: &serde_json::Value,
+) -> anyhow::Result<(serde_json::Value, usize)> {
+    let mut cloned = config.clone();
+    let count = encrypt_notification_value_in_place(channel_type, &mut cloned, false)?;
+    Ok((cloned, count))
+}
+
+/// Encrypts secret fields inside a serialized `notification_channels.config` JSON string.
+pub fn encrypt_notification_channel_config_str(
+    channel_type: &str,
+    raw_config: &str,
+) -> anyhow::Result<(String, usize)> {
+    let parsed: serde_json::Value = serde_json::from_str(raw_config)
+        .map_err(|e| anyhow::anyhow!("invalid notification channel config JSON: {e}"))?;
+    let (encrypted, count) = encrypt_notification_channel_config_value(channel_type, &parsed)?;
+    Ok((encrypted.to_string(), count))
+}
+
+/// Decrypts `enc:v1:` secret fields inside a `notification_channels.config` JSON string at dispatch time.
+pub fn decrypt_notification_channel_config_str(
+    channel_type: &str,
+    raw_config: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut parsed: serde_json::Value = serde_json::from_str(raw_config)
+        .map_err(|e| anyhow::anyhow!("invalid notification channel config JSON: {e}"))?;
+    decrypt_notification_value_in_place(channel_type, &mut parsed, false)?;
+    Ok(parsed)
+}
+
+/// Masks secret fields inside `notification_channels.config` as `"••••••••"` for API responses.
+pub fn mask_notification_channel_config_str(
+    channel_type: &str,
+    raw_config: &str,
+) -> serde_json::Value {
+    let mut parsed: serde_json::Value =
+        serde_json::from_str(raw_config).unwrap_or_else(|_| serde_json::json!({}));
+    mask_notification_value_in_place(channel_type, &mut parsed, false);
+    parsed
 }
 
 /// Migrates any unprefixed plaintext secrets in `settings`, `users`, and `streaming_servers` to `enc:v1:` format.
@@ -403,6 +642,29 @@ pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
         }
     }
 
+    if has_table("notification_channels")? && has_column("notification_channels", "config")? {
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, COALESCE(type, ''), COALESCE(config, '') FROM notification_channels WHERE COALESCE(config, '') != ''",
+            )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (channel_id, channel_type, raw_cfg) in rows {
+            if let Ok((encrypted_cfg, count)) =
+                encrypt_notification_channel_config_str(&channel_type, &raw_cfg)
+            {
+                if count > 0 && encrypted_cfg != raw_cfg {
+                    tx.execute(
+                        "UPDATE notification_channels SET config = ?1 WHERE id = ?2",
+                        params![encrypted_cfg, channel_id],
+                    )?;
+                    migrated += count;
+                }
+            }
+        }
+    }
+
     tx.commit()?;
     if migrated > 0 {
         tracing::info!(
@@ -468,7 +730,10 @@ pub fn resolve_db_path() -> String {
 }
 
 pub fn get_db_path() -> String {
-    let current = DB_PATH_RESOLVED.read().unwrap().clone();
+    let current = DB_PATH_RESOLVED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if !current.is_empty() {
         return current;
     }
@@ -478,7 +743,7 @@ pub fn get_db_path() -> String {
 pub fn get_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
     let pool = DB_POOL
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Database pool not initialized"))?;
@@ -489,7 +754,10 @@ pub fn get_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManag
 /// Bounded, read-only WAL connections. The writer remains a pool of one.
 /// Private in-memory test databases must use their original connection.
 pub fn get_read_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
-    let pool = DB_READ_POOL.read().unwrap().clone();
+    let pool = DB_READ_POOL
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     match pool {
         Some(pool) => pool.get().map_err(Into::into),
         None => get_conn(),
@@ -500,7 +768,7 @@ fn build_read_pool(db_path: &str) -> anyhow::Result<Pool<SqliteConnectionManager
     let manager = SqliteConnectionManager::file(db_path)
         .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
         .with_init(|conn| {
-            conn.busy_timeout(Duration::from_secs(5))?;
+            conn.busy_timeout(Duration::from_millis(750))?;
             conn.execute_batch(
                 "PRAGMA query_only=ON; PRAGMA foreign_keys=ON; PRAGMA cache_size=-8000;",
             )
@@ -508,7 +776,7 @@ fn build_read_pool(db_path: &str) -> anyhow::Result<Pool<SqliteConnectionManager
     Ok(Pool::builder()
         .max_size(4)
         .min_idle(Some(1))
-        .connection_timeout(Duration::from_secs(5))
+        .connection_timeout(Duration::from_secs(2))
         .build(manager)?)
 }
 
@@ -1258,9 +1526,9 @@ pub fn init_db() -> anyhow::Result<()> {
     } else {
         Some(build_read_pool(&db_path)?)
     };
-    *DB_PATH_RESOLVED.write().unwrap() = db_path.clone();
-    *DB_POOL.write().unwrap() = Some(pool);
-    *DB_READ_POOL.write().unwrap() = read_pool;
+    *DB_PATH_RESOLVED.write().unwrap_or_else(|e| e.into_inner()) = db_path.clone();
+    *DB_POOL.write().unwrap_or_else(|e| e.into_inner()) = Some(pool);
+    *DB_READ_POOL.write().unwrap_or_else(|e| e.into_inner()) = read_pool;
     if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
         map.clear();
     }
@@ -1561,10 +1829,21 @@ pub fn list_notifications_for_user_with_conn(
 // Health Check & Data Pruning
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub fn db_readiness_check() -> anyhow::Result<i64> {
+    let start = Instant::now();
+    let conn = get_read_conn()?;
+    let _: Option<i32> = conn
+        .query_row("SELECT 1 FROM users LIMIT 1", [], |row| row.get(0))
+        .optional()?;
+    Ok(start.elapsed().as_millis() as i64)
+}
+
 pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
     let start = Instant::now();
-    let conn = get_conn()?;
-    let _one: i32 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
+    let conn = get_read_conn()?;
+    let _: Option<i32> = conn
+        .query_row("SELECT 1 FROM users LIMIT 1", [], |row| row.get(0))
+        .optional()?;
     let latency_ms = start.elapsed().as_millis() as i64;
 
     let tables = [
@@ -1582,9 +1861,7 @@ pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
         }
     }
 
-    let wal_pages: i64 = conn
-        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(0))
-        .unwrap_or(0);
+    let wal_pages: i64 = 0;
 
     Ok(serde_json::json!({
         "status": "healthy",
@@ -2966,9 +3243,13 @@ pub(crate) mod tests {
         assert!(err
             .to_string()
             .contains("AES_MASTER_KEY is required in production"));
+        assert!(!err.to_string().contains("GIN_MODE"));
 
         env::set_var("AETHERFLOW_ENV", "disposable-guest-lifecycle-drill");
-        init_aes_key().expect("explicit non-production drill environment may omit AES_MASTER_KEY");
+        env::set_var("GIN_MODE", "release");
+        init_aes_key().expect(
+            "legacy GIN_MODE=release must be ignored when AETHERFLOW_ENV is non-production",
+        );
 
         match prev_aes {
             Some(v) => env::set_var("AES_MASTER_KEY", v),
@@ -3214,6 +3495,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod pending_action_query_tests {
     use super::*;
+    use crate::tests::TEST_DB_MUTEX;
 
     fn connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -3318,5 +3600,143 @@ mod pending_action_query_tests {
             query_pending_actions_with_connection(&conn, "pending", 50, 1).unwrap();
         assert_eq!(total, 1);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_wal_readiness_check_succeeds_during_active_writer_lock() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = env::temp_dir().join(format!("af-db-wal-ready-{}", rand::random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        let db_file = dir.join("aetherflow.sqlite");
+        let prev_af = env::var("AF_DB_PATH").ok();
+        let prev_db = env::var("DB_PATH").ok();
+        let prev_af2 = env::var("AETHERFLOW_DB_PATH").ok();
+        env::set_var("AF_DB_PATH", &db_file);
+        env::set_var("DB_PATH", &db_file);
+        env::set_var("AETHERFLOW_DB_PATH", &db_file);
+
+        init_db().unwrap();
+        let writer = get_conn().unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT INTO users (username, password_hash, role) VALUES ('alice', 'hash', 'admin')",
+                [],
+            )
+            .unwrap();
+
+        let latency = db_readiness_check()
+            .expect("read-only WAL readiness check must not stall on active writer lock");
+        assert!(latency < 1000);
+        let health =
+            db_health_check().expect("read-only WAL health check must not stall on writer lock");
+        assert_eq!(health["status"], "healthy");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        match prev_af {
+            Some(v) => env::set_var("AF_DB_PATH", v),
+            None => env::remove_var("AF_DB_PATH"),
+        }
+        match prev_db {
+            Some(v) => env::set_var("DB_PATH", v),
+            None => env::remove_var("DB_PATH"),
+        }
+        match prev_af2 {
+            Some(v) => env::set_var("AETHERFLOW_DB_PATH", v),
+            None => env::remove_var("AETHERFLOW_DB_PATH"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_notification_channel_secret_encryption_migration_and_masking() {
+        let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = env::temp_dir().join(format!("af-db-notif-enc-{}", rand::random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        let db_file = dir.join("aetherflow.sqlite");
+        let prev_af = env::var("AF_DB_PATH").ok();
+        let prev_aes = env::var("AES_MASTER_KEY").ok();
+        env::set_var("AF_DB_PATH", &db_file);
+        env::set_var(
+            "AES_MASTER_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        init_aes_key().unwrap();
+        init_db().unwrap();
+
+        {
+            let conn = get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO notification_channels (name, type, config, enabled) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    "tg",
+                    "telegram",
+                    r#"{"bot_token":"123456:ABC-DEF","chat_id":"-1001"}"#
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO notification_channels (name, type, config, enabled) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    "hook",
+                    "webhook",
+                    r#"{"webhook_url":"https://hooks.example.com/sec","headers":{"Authorization":"Bearer tok123","Content-Type":"application/json"},"password":"smtp-secret"}"#
+                ],
+            )
+            .unwrap();
+        }
+
+        migrate_legacy_secrets().unwrap();
+
+        let conn = get_conn().unwrap();
+        let (tg_type, tg_cfg): (String, String) = conn
+            .query_row(
+                "SELECT type, config FROM notification_channels WHERE name = 'tg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(!tg_cfg.contains("123456:ABC-DEF"));
+        assert!(tg_cfg.contains("enc:v1:"));
+        let tg_masked = mask_notification_channel_config_str(&tg_type, &tg_cfg);
+        assert_eq!(tg_masked["bot_token"], SECRET_MASK);
+        assert_eq!(tg_masked["chat_id"], "-1001");
+        let tg_dec = decrypt_notification_channel_config_str(&tg_type, &tg_cfg).unwrap();
+        assert_eq!(tg_dec["bot_token"], "123456:ABC-DEF");
+
+        let (hk_type, hk_cfg): (String, String) = conn
+            .query_row(
+                "SELECT type, config FROM notification_channels WHERE name = 'hook'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(!hk_cfg.contains("https://hooks.example.com/sec"));
+        assert!(!hk_cfg.contains("Bearer tok123"));
+        assert!(!hk_cfg.contains("smtp-secret"));
+        let hk_masked = mask_notification_channel_config_str(&hk_type, &hk_cfg);
+        assert_eq!(hk_masked["webhook_url"], SECRET_MASK);
+        assert_eq!(hk_masked["password"], SECRET_MASK);
+        assert_eq!(hk_masked["headers"]["Authorization"], SECRET_MASK);
+        assert_eq!(hk_masked["headers"]["Content-Type"], "application/json");
+        let hk_dec = decrypt_notification_channel_config_str(&hk_type, &hk_cfg).unwrap();
+        assert_eq!(hk_dec["webhook_url"], "https://hooks.example.com/sec");
+        assert_eq!(hk_dec["headers"]["Authorization"], "Bearer tok123");
+        assert_eq!(hk_dec["password"], "smtp-secret");
+
+        drop(conn);
+        match prev_af {
+            Some(v) => env::set_var("AF_DB_PATH", v),
+            None => env::remove_var("AF_DB_PATH"),
+        }
+        match prev_aes {
+            Some(v) => env::set_var("AES_MASTER_KEY", v),
+            None => {
+                env::remove_var("AES_MASTER_KEY");
+                let _ = init_aes_key();
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

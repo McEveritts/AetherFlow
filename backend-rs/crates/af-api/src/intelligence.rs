@@ -1087,6 +1087,32 @@ async fn call_gemini_api(
     Ok(out)
 }
 
+fn ai_endpoint_origin_tuple(raw: &str) -> Option<(String, String, u16)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let port = parsed.port_or_known_default()?;
+    Some((parsed.scheme().to_ascii_lowercase(), host, port))
+}
+
+fn is_loopback_ai_endpoint(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 async fn call_openai_compatible_api(
     endpoint: &str,
     api_key: &str,
@@ -1116,12 +1142,18 @@ async fn call_openai_compatible_api(
 
     let endpoint = af_services::validate_server_url(endpoint)
         .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    if !api_key.trim().is_empty()
+        && !endpoint.starts_with("https://")
+        && !is_loopback_ai_endpoint(&endpoint)
+    {
+        anyhow::bail!("Non-loopback AI endpoints carrying an API key must use https://");
+    }
     let url = build_versioned_endpoint_url(&endpoint, "chat/completions");
     let mut req = client.post(&url).json(&serde_json::json!({
         "model": model_name.trim(),
         "messages": messages,
     }));
-    if !api_key.is_empty() {
+    if !api_key.trim().is_empty() {
         req = req.bearer_auth(api_key);
     }
     let resp = req.send().await?;
@@ -1161,6 +1193,12 @@ async fn call_anthropic_api(
     };
     let base = af_services::validate_server_url(base_raw)
         .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    if !api_key.trim().is_empty()
+        && !base.starts_with("https://")
+        && !is_loopback_ai_endpoint(&base)
+    {
+        anyhow::bail!("Non-loopback AI endpoints carrying an API key must use https://");
+    }
     if base == "https://api.anthropic.com" && api_key.trim().is_empty() {
         anyhow::bail!(
             "anthropic API key not configured. Set it in Settings \u{2192} FlowAI Engine"
@@ -1215,62 +1253,133 @@ async fn call_anthropic_api(
     Ok(out)
 }
 
+fn contains_identifier_token(lower_text: &str, token: &str) -> bool {
+    let bytes = lower_text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    lower_text.match_indices(token).any(|(idx, _)| {
+        let before_ok = idx == 0 || !is_ident(bytes[idx - 1]);
+        let end = idx + token.len();
+        let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
+fn contains_word_token(lower_text: &str, word: &str) -> bool {
+    let bytes = lower_text.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'\'';
+    lower_text.match_indices(word).any(|(idx, _)| {
+        let before_ok = idx == 0 || !is_word(bytes[idx - 1]);
+        let end = idx + word.len();
+        let after_ok = end >= bytes.len() || !is_word(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
 fn extract_service_target(message: &str) -> &'static str {
     let lower = message.to_lowercase();
-    for svc in [
-        "apache2",
-        "apache",
-        "aetherflow-api",
-        "aetherflow-runner",
-        "nginx",
-        "postgres",
-        "postgresql",
-        "redis",
-        "qbittorrent",
-        "qui",
-        "autobrr",
-        "sonarr",
-        "radarr",
-        "lidarr",
-        "prowlarr",
-        "plex",
-        "jellyfin",
-        "emby",
-        "threadfin",
-        "dispatcharr",
-        "transmission",
-        "deluge",
-        "jackett",
-        "wireguard",
-        "tailscale",
-        "traefik",
-        "duplicati",
-        "filebot",
-        "listenarr",
-        "notifiarr",
-        "novnc",
-        "pyload",
-        "quassel",
-        "requestrr",
-        "seedcross",
-        "unmanic",
-        "x2go",
-        "invidious",
-        "piped",
+    for (alias, canonical) in [
+        ("aetherflow-api", "aetherflow-api"),
+        ("aetherflow-runner", "aetherflow-runner"),
+        ("apache2", "apache2"),
+        ("apache", "apache2"),
+        ("nginx", "nginx"),
+        ("postgresql", "postgresql"),
+        ("postgres", "postgresql"),
+        ("valkey", "valkey"),
+        ("redis", "valkey"),
+        ("qbittorrent", "qbittorrent"),
+        ("qui", "qui"),
+        ("autobrr", "autobrr"),
+        ("sonarr", "sonarr"),
+        ("radarr", "radarr"),
+        ("lidarr", "lidarr"),
+        ("prowlarr", "prowlarr"),
+        ("plex", "plex"),
+        ("jellyfin", "jellyfin"),
+        ("emby", "emby"),
+        ("threadfin", "threadfin"),
+        ("dispatcharr", "dispatcharr"),
+        ("transmission", "transmission"),
+        ("deluge", "deluge"),
+        ("jackett", "jackett"),
+        ("wireguard", "wireguard"),
+        ("tailscale", "tailscale"),
+        ("traefik", "traefik"),
+        ("duplicati", "duplicati"),
+        ("filebot", "filebot"),
+        ("listenarr", "listenarr"),
+        ("notifiarr", "notifiarr"),
+        ("novnc", "novnc"),
+        ("pyload", "pyload"),
+        ("quassel", "quassel"),
+        ("requestrr", "requestrr"),
+        ("seedcross", "seedcross"),
+        ("unmanic", "unmanic"),
+        ("x2go", "x2go"),
+        ("invidious", "invidious"),
+        ("piped", "piped"),
     ] {
-        if lower.contains(svc) {
-            return svc;
+        if contains_identifier_token(&lower, alias) {
+            return canonical;
         }
     }
     "target service"
 }
 
+fn is_negated_or_interrogative_sentence(sentence_lower: &str) -> bool {
+    if sentence_lower.contains('?') {
+        return true;
+    }
+    for phrase in [
+        "do not",
+        "should not",
+        "would not",
+        "could not",
+        "no need",
+        "instead of",
+    ] {
+        if sentence_lower.contains(phrase) {
+            return true;
+        }
+    }
+    for neg in [
+        "not",
+        "don't",
+        "dont",
+        "never",
+        "without",
+        "avoid",
+        "shouldn't",
+        "shouldnt",
+        "cannot",
+        "can't",
+        "cant",
+        "won't",
+        "wont",
+    ] {
+        if contains_word_token(sentence_lower, neg) {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<ProposedAction> {
-    let target = extract_service_target(user_message);
-    if target == "target service" {
+    if ai_reply.trim().is_empty() {
         return None;
     }
-    let combined = format!("{} {}", ai_reply, user_message).to_lowercase();
+    let fallback_target = {
+        let from_reply = extract_service_target(ai_reply);
+        if from_reply != "target service" {
+            from_reply
+        } else {
+            extract_service_target(user_message)
+        }
+    };
+    if fallback_target == "target service" {
+        return None;
+    }
+
     let specs: &[(&[&str], &str, &str, &str)] = &[
         (
             &["restart", "reboot"],
@@ -1286,18 +1395,32 @@ fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<Propose
         ),
     ];
 
-    for (keywords, classification, verb, impact) in specs {
-        for kw in *keywords {
-            if combined.contains(kw) {
-                let title = format!("{} {}", verb, target);
-                return Some(ProposedAction {
-                    action_type: "system_action".to_string(),
-                    action_id: 0,
-                    title: title.clone(),
-                    description: format!("AI-proposed: {}", title),
-                    danger_level: (*classification).to_string(),
-                    impact: (*impact).to_string(),
-                });
+    for raw_sentence in ai_reply.split(['\n', '.', '!', ';']) {
+        let sentence = raw_sentence.trim().to_lowercase();
+        if sentence.is_empty() || is_negated_or_interrogative_sentence(&sentence) {
+            continue;
+        }
+        let sentence_target = {
+            let t = extract_service_target(&sentence);
+            if t != "target service" {
+                t
+            } else {
+                fallback_target
+            }
+        };
+        for (keywords, classification, verb, impact) in specs {
+            for kw in *keywords {
+                if contains_word_token(&sentence, kw) {
+                    let title = format!("{} {}", verb, sentence_target);
+                    return Some(ProposedAction {
+                        action_type: "system_action".to_string(),
+                        action_id: 0,
+                        title: title.clone(),
+                        description: format!("AI-proposed: {}", title),
+                        danger_level: (*classification).to_string(),
+                        impact: (*impact).to_string(),
+                    });
+                }
             }
         }
     }
@@ -1786,6 +1909,14 @@ pub async fn test_ai_connection(
         return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
     let mut ps = resolve_provider_settings();
+    let stored_anth_endpoint = if ps.anthropic_endpoint.trim().is_empty() {
+        "https://api.anthropic.com".to_string()
+    } else {
+        ps.anthropic_endpoint.trim().to_string()
+    };
+    let had_stored_anth_key = !ps.anthropic_api_key.trim().is_empty();
+    let mut supplied_fresh_anth_key = false;
+
     let provider_type = req
         .get("provider")
         .and_then(|v| v.as_str())
@@ -1796,23 +1927,24 @@ pub async fn test_ai_connection(
     if let Some(k) = req
         .get("gemini_api_key")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty() && !s.starts_with("****"))
+        .filter(|s| !s.is_empty() && !s.starts_with("****") && *s != af_db::SECRET_MASK)
     {
         ps.gemini_api_key = k.to_string();
     }
     if let Some(k) = req
         .get("openai_api_key")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty() && !s.starts_with("****"))
+        .filter(|s| !s.is_empty() && !s.starts_with("****") && *s != af_db::SECRET_MASK)
     {
         ps.openai_api_key = k.to_string();
     }
     if let Some(k) = req
         .get("anthropic_api_key")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty() && !s.starts_with("****"))
+        .filter(|s| !s.is_empty() && !s.starts_with("****") && *s != af_db::SECRET_MASK)
     {
         ps.anthropic_api_key = k.to_string();
+        supplied_fresh_anth_key = true;
     }
     if let Some(ep) = req
         .get("endpoint")
@@ -1827,7 +1959,14 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
-        ps.anthropic_endpoint = clean_ep.clone();
+        let wants_anth = matches!(provider_type, "anthropic" | "anthropic-local")
+            || req
+                .get("local_provider")
+                .and_then(|v| v.as_str())
+                .is_some_and(|lp| lp.trim() == "anthropic-local");
+        if wants_anth {
+            ps.anthropic_endpoint = clean_ep.clone();
+        }
         ps.lm_studio_endpoint = clean_ep.clone();
         ps.ollama_endpoint = clean_ep;
     }
@@ -1845,6 +1984,33 @@ pub async fn test_ai_connection(
             );
         };
         ps.anthropic_endpoint = clean_ep;
+    }
+
+    let next_anth_endpoint = if ps.anthropic_endpoint.trim().is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        ps.anthropic_endpoint.trim()
+    };
+    if had_stored_anth_key
+        && !supplied_fresh_anth_key
+        && ai_endpoint_origin_tuple(&stored_anth_endpoint)
+            != ai_endpoint_origin_tuple(next_anth_endpoint)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "ENDPOINT_KEY_REBIND_DENIED",
+            "Changing anthropic_endpoint while an API key is stored requires supplying a fresh API key",
+        );
+    }
+    if !ps.anthropic_api_key.trim().is_empty()
+        && !next_anth_endpoint.starts_with("https://")
+        && !is_loopback_ai_endpoint(next_anth_endpoint)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INSECURE_AI_ENDPOINT",
+            "Non-loopback AI endpoints carrying an API key must use https://",
+        );
     }
     if let Some(ep) = req
         .get("lm_studio_endpoint")
@@ -3412,6 +3578,20 @@ async fn apply_transmission_bandwidth_to_url(
             "Torrent daemon rejected RPC request",
         ));
     }
+    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "BAD_GATEWAY",
+            "Transmission RPC returned malformed JSON",
+        )
+    })?;
+    if parsed.get("result").and_then(|v| v.as_str()) != Some("success") {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "BAD_GATEWAY",
+            "Transmission RPC did not report result == \"success\"",
+        ));
+    }
     Ok(text)
 }
 
@@ -3430,23 +3610,30 @@ fn extract_cookie_header(headers: &reqwest::header::HeaderMap) -> Option<String>
     }
 }
 
-async fn apply_qbittorrent_bandwidth_to_url(
+#[derive(Clone, Copy, Debug)]
+struct QbittorrentApplyError {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    mutated: bool,
+}
+
+async fn apply_qbittorrent_bandwidth_inner(
     base_url: &str,
     upload_kbps: i64,
     download_kbps: i64,
     creds: Option<&(String, String)>,
-) -> Result<String, (StatusCode, &'static str, &'static str)> {
+) -> Result<String, QbittorrentApplyError> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to construct HTTP client",
-            )
+        .map_err(|_| QbittorrentApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR",
+            message: "Failed to construct HTTP client",
+            mutated: false,
         })?;
 
     let base = base_url.trim_end_matches('/');
@@ -3457,24 +3644,39 @@ async fn apply_qbittorrent_bandwidth_to_url(
             .form(&[("username", user.as_str()), ("password", pass.as_str())])
             .send()
             .await
-            .map_err(|_| {
-                (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "GATEWAY_TIMEOUT",
-                    "qBittorrent WebUI timeout or unreachable",
-                )
+            .map_err(|_| QbittorrentApplyError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "GATEWAY_TIMEOUT",
+                message: "qBittorrent WebUI timeout or unreachable",
+                mutated: false,
             })?;
         let login_status = login_resp.status();
         cookie_header = extract_cookie_header(login_resp.headers());
         let login_body = login_resp.text().await.unwrap_or_default();
         if !login_status.is_success() || login_body.trim() == "Fails." {
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "BAD_GATEWAY",
-                "qBittorrent WebUI authentication failed",
-            ));
+            return Err(QbittorrentApplyError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "BAD_GATEWAY",
+                message: "qBittorrent WebUI authentication failed",
+                mutated: false,
+            });
         }
     }
+
+    // Best-effort snapshot of prior download limit so partial failure on upload limit can compensate.
+    let mut prior_down_req = client.get(format!("{base}/api/v2/transfer/downloadLimit"));
+    if let Some(ref cookie) = cookie_header {
+        prior_down_req = prior_down_req.header(reqwest::header::COOKIE, cookie);
+    }
+    let prior_down_bytes: Option<i64> = match prior_down_req.send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .text()
+            .await
+            .ok()
+            .and_then(|t| t.trim().parse::<i64>().ok())
+            .filter(|&v| v >= 0),
+        _ => None,
+    };
 
     let down_bytes = download_kbps.saturating_mul(1024).to_string();
     let up_bytes = upload_kbps.saturating_mul(1024).to_string();
@@ -3485,19 +3687,19 @@ async fn apply_qbittorrent_bandwidth_to_url(
     if let Some(ref cookie) = cookie_header {
         down_req = down_req.header(reqwest::header::COOKIE, cookie);
     }
-    let down_resp = down_req.send().await.map_err(|_| {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "GATEWAY_TIMEOUT",
-            "qBittorrent WebUI timeout or unreachable",
-        )
+    let down_resp = down_req.send().await.map_err(|_| QbittorrentApplyError {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        code: "GATEWAY_TIMEOUT",
+        message: "qBittorrent WebUI timeout or unreachable",
+        mutated: false,
     })?;
     if !down_resp.status().is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "BAD_GATEWAY",
-            "qBittorrent rejected setDownloadLimit",
-        ));
+        return Err(QbittorrentApplyError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
+            message: "qBittorrent rejected setDownloadLimit",
+            mutated: false,
+        });
     }
 
     let mut up_req = client
@@ -3506,22 +3708,51 @@ async fn apply_qbittorrent_bandwidth_to_url(
     if let Some(ref cookie) = cookie_header {
         up_req = up_req.header(reqwest::header::COOKIE, cookie);
     }
-    let up_resp = up_req.send().await.map_err(|_| {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "GATEWAY_TIMEOUT",
-            "qBittorrent WebUI timeout or unreachable",
-        )
-    })?;
-    if !up_resp.status().is_success() {
-        return Err((
+    let up_outcome = match up_req.send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(_) => Err((
             StatusCode::BAD_GATEWAY,
             "BAD_GATEWAY",
             "qBittorrent rejected setUploadLimit",
-        ));
+        )),
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            "GATEWAY_TIMEOUT",
+            "qBittorrent WebUI timeout during setUploadLimit",
+        )),
+    };
+
+    if let Err((status, code, message)) = up_outcome {
+        // Compensate the earlier download limit mutation on this client.
+        let rollback_limit = prior_down_bytes.unwrap_or(0).to_string();
+        let mut rb_req = client
+            .post(format!("{base}/api/v2/transfer/setDownloadLimit"))
+            .form(&[("limit", rollback_limit.as_str())]);
+        if let Some(ref cookie) = cookie_header {
+            rb_req = rb_req.header(reqwest::header::COOKIE, cookie);
+        }
+        let _ = rb_req.send().await;
+        return Err(QbittorrentApplyError {
+            status,
+            code,
+            message,
+            mutated: true,
+        });
     }
 
     Ok("ok".to_string())
+}
+
+#[allow(dead_code)]
+async fn apply_qbittorrent_bandwidth_to_url(
+    base_url: &str,
+    upload_kbps: i64,
+    download_kbps: i64,
+    creds: Option<&(String, String)>,
+) -> Result<String, (StatusCode, &'static str, &'static str)> {
+    apply_qbittorrent_bandwidth_inner(base_url, upload_kbps, download_kbps, creds)
+        .await
+        .map_err(|e| (e.status, e.code, e.message))
 }
 
 async fn apply_deluge_bandwidth_to_url(
@@ -3561,14 +3792,32 @@ async fn apply_deluge_bandwidth_to_url(
                     "Deluge WebUI timeout or unreachable",
                 )
             })?;
-        if !login_resp.status().is_success() {
+        let login_status = login_resp.status();
+        cookie_header = extract_cookie_header(login_resp.headers());
+        let login_text = login_resp.text().await.unwrap_or_default();
+        if !login_status.is_success() {
             return Err((
                 StatusCode::BAD_GATEWAY,
                 "BAD_GATEWAY",
                 "Deluge WebUI authentication failed",
             ));
         }
-        cookie_header = extract_cookie_header(login_resp.headers());
+        let login_json: serde_json::Value = serde_json::from_str(&login_text).map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "BAD_GATEWAY",
+                "Deluge auth.login returned malformed JSON-RPC response",
+            )
+        })?;
+        let login_err_null = login_json.get("error").is_none_or(|e| e.is_null());
+        let login_ok = login_json.get("result").and_then(|v| v.as_bool()) == Some(true);
+        if !login_err_null || !login_ok {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "BAD_GATEWAY",
+                "Deluge WebUI authentication rejected credentials",
+            ));
+        }
     }
 
     let mut set_req = client.post(rpc_url).json(&serde_json::json!({
@@ -3596,6 +3845,20 @@ async fn apply_deluge_bandwidth_to_url(
             StatusCode::BAD_GATEWAY,
             "BAD_GATEWAY",
             "Deluge WebUI rejected RPC request",
+        ));
+    }
+    let set_json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "BAD_GATEWAY",
+            "Deluge core.set_config returned malformed JSON-RPC response",
+        )
+    })?;
+    if !set_json.get("error").is_none_or(|e| e.is_null()) {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "BAD_GATEWAY",
+            "Deluge core.set_config returned a JSON-RPC error",
         ));
     }
     Ok(text)
@@ -3643,16 +3906,24 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
                 .and_then(|r| r.ok())
                 .unwrap_or_default();
             let mut order = Vec::new();
-            for name in ["transmission", "qbittorrent", "deluge"] {
-                let is_running = active.iter().any(|(_, item)| {
-                    (item.id.eq_ignore_ascii_case(name) || item.process.eq_ignore_ascii_case(name))
-                        && item.status == "running"
+            for (name, aliases) in [
+                ("transmission", &["transmission", "transmission-daemon"][..]),
+                ("qbittorrent", &["qbittorrent", "qbittorrent-nox"][..]),
+                ("deluge", &["deluge", "deluged", "deluge-web"][..]),
+            ] {
+                let is_running = active.iter().any(|(label, item)| {
+                    item.status == "running"
+                        && aliases.iter().any(|alias| {
+                            label.eq_ignore_ascii_case(alias)
+                                || item.id.eq_ignore_ascii_case(alias)
+                                || item.process.eq_ignore_ascii_case(alias)
+                        })
                 });
                 if is_running {
                     order.push(name);
                 }
             }
-            for fallback in ["transmission", "qbittorrent"] {
+            for fallback in ["transmission", "qbittorrent", "deluge"] {
                 if !order.contains(&fallback) {
                     order.push(fallback);
                 }
@@ -3668,49 +3939,65 @@ pub async fn bandwidth_apply(Json(req): Json<serde_json::Value>) -> Response {
     );
 
     for client_name in candidates {
-        let outcome = match client_name {
-            "transmission" => {
-                let port = resolve_torrent_client_port("transmission", 9091);
-                let creds = load_transmission_rpc_credentials();
-                let url = format!("http://127.0.0.1:{port}/transmission/rpc");
-                apply_transmission_bandwidth_to_url(
-                    &url,
-                    upload_kbps,
-                    download_kbps,
-                    creds.as_ref(),
-                )
-                .await
-            }
-            "qbittorrent" => {
-                let port = resolve_torrent_client_port("qbittorrent", 8180);
-                let creds = load_master_torrent_credentials();
-                let url = format!("http://127.0.0.1:{port}");
-                apply_qbittorrent_bandwidth_to_url(&url, upload_kbps, download_kbps, creds.as_ref())
+        let outcome: Result<String, (StatusCode, &'static str, &'static str, bool)> =
+            match client_name {
+                "transmission" => {
+                    let port = resolve_torrent_client_port("transmission", 9091);
+                    let creds = load_transmission_rpc_credentials();
+                    let url = format!("http://127.0.0.1:{port}/transmission/rpc");
+                    apply_transmission_bandwidth_to_url(
+                        &url,
+                        upload_kbps,
+                        download_kbps,
+                        creds.as_ref(),
+                    )
                     .await
-            }
-            "deluge" => {
-                let port = resolve_torrent_client_port("deluge", 8112);
-                let creds = load_master_torrent_credentials();
-                let pw = creds.as_ref().map(|(_, p)| p.as_str());
-                let url = format!("http://127.0.0.1:{port}/json");
-                apply_deluge_bandwidth_to_url(&url, upload_kbps, download_kbps, pw).await
-            }
-            _ => continue,
-        };
+                    .map_err(|(s, c, m)| (s, c, m, false))
+                }
+                "qbittorrent" => {
+                    let port = resolve_torrent_client_port("qbittorrent", 8180);
+                    let creds = load_master_torrent_credentials();
+                    let url = format!("http://127.0.0.1:{port}");
+                    apply_qbittorrent_bandwidth_inner(
+                        &url,
+                        upload_kbps,
+                        download_kbps,
+                        creds.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| (e.status, e.code, e.message, e.mutated))
+                }
+                "deluge" => {
+                    let port = resolve_torrent_client_port("deluge", 8112);
+                    let creds = load_master_torrent_credentials();
+                    let pw = creds.as_ref().map(|(_, p)| p.as_str());
+                    let url = format!("http://127.0.0.1:{port}/json");
+                    apply_deluge_bandwidth_to_url(&url, upload_kbps, download_kbps, pw)
+                        .await
+                        .map_err(|(s, c, m)| (s, c, m, false))
+                }
+                _ => continue,
+            };
 
         match outcome {
             Ok(rpc_text) => {
                 return Json(serde_json::json!({
                     "message": format!("Limits applied successfully to {} via RPC", client_name),
                     "client": client_name,
+                    "applied_client": client_name,
                     "upload_kbps": upload_kbps,
                     "download_kbps": download_kbps,
+                    "upload_limit_kbps": upload_kbps,
+                    "download_limit_kbps": download_kbps,
                     "rpc_response": rpc_text,
                 }))
                 .into_response();
             }
-            Err(err) => {
-                last_err = err;
+            Err((status, code, msg, mutated)) => {
+                last_err = (status, code, msg);
+                if mutated {
+                    break;
+                }
             }
         }
     }
@@ -4378,7 +4665,7 @@ fn probe_video_codec_and_size(file_path: &StdPath) -> (String, i64) {
 fn mediaflow_library_roots() -> Vec<PathBuf> {
     let roots: Vec<PathBuf> = match env::var("AF_ALLOWED_FS_ROOTS") {
         Ok(configured) => configured
-            .split(',')
+            .split([',', ';'])
             .map(str::trim)
             .filter(|root| !root.is_empty())
             .map(PathBuf::from)
@@ -4386,9 +4673,8 @@ fn mediaflow_library_roots() -> Vec<PathBuf> {
         Err(_) => vec![
             PathBuf::from("/mnt"),
             PathBuf::from("/media"),
+            PathBuf::from("/srv"),
             PathBuf::from("/home"),
-            PathBuf::from("/opt/AetherFlow"),
-            PathBuf::from("/var/lib/aetherflow"),
         ],
     };
     roots
@@ -5482,11 +5768,12 @@ pub async fn enroll_worker() -> Response {
             );
         }
     };
+    let bind_cfg = af_services::cluster_daemon::resolve_master_bind_config();
     Json(serde_json::json!({
         "enrollment_token": token,
         "instructions": format!(
-            "Configure /etc/aetherflow/aetherflow.env on the worker node with mTLS certificates:\nCLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>\nCLUSTER_CA_CERT=/etc/aetherflow/certs/ca.crt\nCLUSTER_CLIENT_CERT=/etc/aetherflow/certs/worker.crt\nCLUSTER_CLIENT_KEY=/etc/aetherflow/certs/worker.key\nCLUSTER_PSK={}\nThen restart aetherflow-api.service.",
-            token
+            "Configure /etc/aetherflow/aetherflow.env on the worker node with mTLS certificates:\nCLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:{}\nCLUSTER_CA_CERT=/etc/aetherflow/certs/ca.crt\nCLUSTER_CLIENT_CERT=/etc/aetherflow/certs/worker.crt\nCLUSTER_CLIENT_KEY=/etc/aetherflow/certs/worker.key\nCLUSTER_PSK={}\nThen restart aetherflow-api.service.",
+            bind_cfg.port, token
         ),
     }))
     .into_response()
@@ -5782,8 +6069,7 @@ mod tests {
             .to_string();
         assert_eq!(tok.len(), 64);
         let instructions = enroll_json["instructions"].as_str().unwrap();
-        assert!(instructions.contains("CLUSTER_MASTER_ADDR=https://<this-server>"));
-        assert!(!instructions.contains(":50051"));
+        assert!(instructions.contains("CLUSTER_MASTER_ADDR=https://<this-server>:50051"));
 
         // Enroll worker using the persisted single-use token
         let reg = af_services::cluster_daemon::register_worker_node(
@@ -6083,5 +6369,128 @@ mod tests {
         assert!(!text.contains("api.openai.com"));
         assert!(!text.contains("OPENAI_API_KEY"));
         assert!(!text.contains("Settings"));
+    }
+
+    #[test]
+    fn flowai_action_extraction_canonicalizes_targets_and_ignores_user_or_negated_verbs() {
+        assert_eq!(extract_service_target("check apache logs"), "apache2");
+        assert_eq!(extract_service_target("check postgres pool"), "postgresql");
+        assert_eq!(extract_service_target("inspect redis cache"), "valkey");
+
+        // User message verbs must never trigger a proposed action when AI reply does not propose one
+        assert!(extract_proposed_action(
+            "Apache is healthy and serving traffic normally.",
+            "Should I restart apache or stop it?"
+        )
+        .is_none());
+
+        // Negated and interrogative sentences in AI reply must be ignored
+        assert!(extract_proposed_action(
+            "Do not restart apache right now! Never stop postgres without draining connections. Would you like to restart redis?",
+            "apache status"
+        )
+        .is_none());
+
+        // Affirmative AI proposal with canonicalized target succeeds
+        let action = extract_proposed_action(
+            "Logs show a wedged worker. Please restart apache to recover.",
+            "help with web server",
+        )
+        .expect("affirmative restart proposal");
+        assert_eq!(action.title, "Restart apache2");
+
+        let valkey_action =
+            extract_proposed_action("You should stop redis immediately.", "cache issue")
+                .expect("affirmative stop proposal");
+        assert_eq!(valkey_action.title, "Stop valkey");
+    }
+
+    #[tokio::test]
+    async fn bandwidth_apply_validates_deluge_transmission_jsonrpc_and_compensates_qbit() {
+        // Deluge: result=false on auth.login must fail; result=true + error=null succeeds
+        let deluge_bad = axum::Router::new().route(
+            "/json",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"result": false, "error": null, "id": 1}))
+            }),
+        );
+        let dl_bad_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dl_bad_url = format!("http://{}/json", dl_bad_listener.local_addr().unwrap());
+        let dl_bad_srv = tokio::spawn(async move {
+            let _ = axum::serve(dl_bad_listener, deluge_bad).await;
+        });
+        assert!(
+            apply_deluge_bandwidth_to_url(&dl_bad_url, 500, 1000, Some("wrong"))
+                .await
+                .is_err()
+        );
+        dl_bad_srv.abort();
+
+        let deluge_ok = axum::Router::new().route(
+            "/json",
+            axum::routing::post(
+                |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    if body["method"] == "auth.login" {
+                        let mut resp =
+                            axum::Json(serde_json::json!({"result": true, "error": null, "id": 1}))
+                                .into_response();
+                        resp.headers_mut().insert(
+                            header::SET_COOKIE,
+                            axum::http::HeaderValue::from_static("_session_id=deluge-ok; Path=/"),
+                        );
+                        resp
+                    } else {
+                        axum::Json(serde_json::json!({"result": null, "error": null, "id": 2}))
+                            .into_response()
+                    }
+                },
+            ),
+        );
+        let dl_ok_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dl_ok_url = format!("http://{}/json", dl_ok_listener.local_addr().unwrap());
+        let dl_ok_srv = tokio::spawn(async move {
+            let _ = axum::serve(dl_ok_listener, deluge_ok).await;
+        });
+        assert!(
+            apply_deluge_bandwidth_to_url(&dl_ok_url, 500, 1000, Some("secret"))
+                .await
+                .is_ok()
+        );
+        dl_ok_srv.abort();
+
+        // qBittorrent: setUploadLimit failure rolls back setDownloadLimit to prior value and marks mutated=true
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let tx_down = tx.clone();
+        let qbit_partial = axum::Router::new()
+            .route(
+                "/api/v2/transfer/downloadLimit",
+                axum::routing::get(|| async { "409600" }),
+            )
+            .route(
+                "/api/v2/transfer/setDownloadLimit",
+                axum::routing::post(move |body: String| {
+                    let tx_down = tx_down.clone();
+                    async move {
+                        let _ = tx_down.send(body);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/api/v2/transfer/setUploadLimit",
+                axum::routing::post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            );
+        let qb_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let qb_url = format!("http://{}", qb_listener.local_addr().unwrap());
+        let qb_srv = tokio::spawn(async move {
+            let _ = axum::serve(qb_listener, qbit_partial).await;
+        });
+        let err = apply_qbittorrent_bandwidth_inner(&qb_url, 1000, 2000, None)
+            .await
+            .expect_err("partial qBittorrent failure must error");
+        assert!(err.mutated);
+        assert_eq!(rx.recv().await.unwrap(), format!("limit={}", 2000 * 1024));
+        assert_eq!(rx.recv().await.unwrap(), "limit=409600");
+        qb_srv.abort();
     }
 }

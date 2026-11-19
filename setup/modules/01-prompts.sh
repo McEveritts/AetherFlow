@@ -8,7 +8,11 @@ function _ask10g() {
 	local saved=$(_load_config is10g)
 	if [[ -n "${saved}" ]]; then
 		if [[ "${saved}" == "yes" ]]; then
-			mkdir -p /install
+			if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+				install -d -m 0750 -o root -g "$(getent group aetherflow >/dev/null 2>&1 && echo aetherflow || echo root)" /install
+			else
+				mkdir -p /install
+			fi
 			touch /install/.10g.lock
 		fi
 		echo "Using saved preference: 10g=${saved}"
@@ -26,7 +30,11 @@ function _ask10g() {
 	read -r input
 	case ${input} in
 	[yY] | [yY][Ee][Ss])
-		if [[ -d /install ]]; then cd /; else mkdir -p /install; fi
+		if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+			install -d -m 0750 -o root -g "$(getent group aetherflow >/dev/null 2>&1 && echo aetherflow || echo root)" /install
+		else
+			mkdir -p /install
+		fi
 		touch /install/.10g.lock
 		echo "${bold}The devs are officially jealous${normal}"
 		_save_config is10g "yes"
@@ -141,8 +149,7 @@ function _adduser() {
 	# Check for saved user credentials
 	local saved_user=$(_load_config username)
 	local saved_pass=$(_load_config passwd)
-	local saved_ha1=$(_load_config ha1pass)
-	local REALM="aetherflow"
+	local REALM="Welcome to AetherFlow"
 	local HTPASSWD="/etc/htpasswd"
 	local theshell="/bin/bash"
 
@@ -153,18 +160,13 @@ function _adduser() {
 		if [[ -z "${saved_pass}" ]]; then
 			saved_pass="${passwd:-${password:-${genpass}}}"
 		fi
-		if [[ -z "${saved_ha1}" && -n "${saved_pass}" ]]; then
-			saved_ha1=$(printf '%s' "${saved_pass}" | md5sum | awk '{print $1}')
-		fi
 		_save_config username "${saved_user}"
 		_save_config passwd "${saved_pass}"
-		_save_config ha1pass "${saved_ha1}"
 	fi
 
 	if [[ -n "${saved_user}" && -n "${saved_pass}" ]]; then
 		username="${saved_user}"
 		passwd="${saved_pass}"
-		ha1pass="${saved_ha1}"
 		echo "Using saved user: ${username}"
 		# Ensure user exists on system (idempotent)
 		if id "${username}" &>/dev/null; then
@@ -179,11 +181,9 @@ function _adduser() {
 		chmod 0640 "${HTPASSWD}"
 		sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
 		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
-		(umask 0077 && printf '%s:%s' "${username}" "${passwd}" >/root/"${username}".info.db)
-		chmod 0600 /root/"${username}".info.db
+		rm -f /root/"${username}".info.db
 		_save_config username "${username}"
 		_save_config passwd "${passwd}"
-		_save_config ha1pass "${ha1pass}"
 		return 0
 	fi
 
@@ -246,15 +246,12 @@ function _adduser() {
 	chmod 0640 "${HTPASSWD}"
 	sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
 	(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
-	(umask 0077 && printf '%s:%s' "${username}" "${passwd}" >/root/"${username}".info.db)
-	chmod 0600 /root/"${username}".info.db
+	rm -f /root/"${username}".info.db
 	echo
-	ha1pass=$(printf '%s' "${passwd}" | md5sum | cut -f1 -d' ')
 
-	# Persist credentials for resume
+	# Persist username and temporary passwd for resume (scrubbed once .master.creds is initialized)
 	_save_config username "${username}"
 	_save_config passwd "${passwd}"
-	_save_config ha1pass "${ha1pass}"
 }
 
 # install ffmpeg question (11)

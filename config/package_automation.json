@@ -188,7 +188,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/bazarr",
       "/var/lib/bazarr",
       "{{SERVICE_HOME}}",
       "-/mnt",
@@ -438,7 +437,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/SABnzbd",
       "/var/lib/sabnzbd",
       "{{SERVICE_HOME}}",
       "-/mnt",
@@ -1070,7 +1068,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/calibre-web",
       "/var/lib/calibre-web",
       "/var/lib/calibre-library",
       "{{SERVICE_HOME}}",
@@ -1167,7 +1164,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/paperless",
       "/var/lib/paperless",
       "/etc/paperless.conf",
       "{{SERVICE_HOME}}",
@@ -1395,7 +1391,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/pyload",
       "/var/lib/pyload",
       "{{SERVICE_HOME}}",
       "-/mnt",
@@ -1460,7 +1455,6 @@
     ],
     "sandbox_profile": "python",
     "sandbox_rw_paths": [
-      "/opt/seedcross",
       "/var/lib/seedcross",
       "{{SERVICE_HOME}}",
       "-/mnt",

@@ -15,7 +15,7 @@ fn io_error(error: impl std::fmt::Display) -> Error {
     Error::other(error.to_string())
 }
 
-fn c_name(name: &OsStr) -> Result<CString> {
+pub(crate) fn c_name(name: &OsStr) -> Result<CString> {
     CString::new(name.as_bytes()).map_err(io_error)
 }
 
@@ -34,7 +34,7 @@ fn open_at(parent: libc::c_int, name: &OsStr, flags: libc::c_int, mode: u32) -> 
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
-fn entry_at(parent: &File, name: &OsStr) -> Result<libc::stat> {
+pub(crate) fn entry_at(parent: &File, name: &OsStr) -> Result<libc::stat> {
     let mut metadata = std::mem::MaybeUninit::uninit();
     if unsafe {
         libc::fstatat(
@@ -50,7 +50,12 @@ fn entry_at(parent: &File, name: &OsStr) -> Result<libc::stat> {
     Ok(unsafe { metadata.assume_init() })
 }
 
-fn verify_entry(parent: &File, name: &OsStr, file: &File, directory: bool) -> Result<()> {
+pub(crate) fn verify_entry(
+    parent: &File,
+    name: &OsStr,
+    file: &File,
+    directory: bool,
+) -> Result<()> {
     let held = file.metadata()?;
     let entry = entry_at(parent, name)?;
     let kind = if directory {
@@ -88,6 +93,18 @@ impl ReceiptDirectory {
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) fn verify_owners(&self, allowed: &[u32]) -> Result<()> {
+        for (_, directory) in &self.chain {
+            if !allowed.contains(&directory.metadata()?.uid()) {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "unexpected directory owner",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn try_clone(&self) -> Result<Self> {
@@ -212,7 +229,7 @@ impl ReceiptDirectory {
         Ok(directory)
     }
 
-    fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         &self.chain.last().unwrap().1
     }
 
@@ -243,7 +260,7 @@ impl ReceiptDirectory {
         Ok(directory)
     }
 
-    fn verify(&self) -> Result<()> {
+    pub(crate) fn verify(&self) -> Result<()> {
         let root = self.chain[0].1.metadata()?;
         if !root.is_dir() || root.nlink() == 0 {
             return Err(io_error("Receipt directory root disappeared"));
@@ -259,8 +276,16 @@ impl ReceiptDirectory {
         Ok(())
     }
 
-    fn open_file(&self, name: &OsStr, flags: libc::c_int, mode: u32) -> Result<File> {
+    pub(crate) fn open_file(&self, name: &OsStr, flags: libc::c_int, mode: u32) -> Result<File> {
         self.verify()?;
+        if flags & libc::O_CREAT == 0 {
+            let entry = entry_at(self.file(), name)?;
+            if entry.st_mode & libc::S_IFMT != libc::S_IFREG || entry.st_nlink != 1 {
+                return Err(io_error(
+                    "expected a regular non-symlinked file with a single link",
+                ));
+            }
+        }
         let file = open_at(self.file().as_raw_fd(), name, flags, mode)?;
         verify_entry(self.file(), name, &file, false)?;
         self.verify()?;
@@ -347,6 +372,7 @@ impl ReceiptLock {
 
     fn persist(&self, status: &SelfUpdateJobStatus, previous: Option<&File>) -> Result<()> {
         self.verify()?;
+        let status = redact_status(status);
         let mut temporary = self.name.clone();
         temporary.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
         let mut file = self.directory.open_file(
@@ -355,7 +381,7 @@ impl ReceiptLock {
             0o644,
         )?;
         let result = (|| {
-            file.write_all(&serde_json::to_vec_pretty(status).map_err(io_error)?)?;
+            file.write_all(&serde_json::to_vec_pretty(&status).map_err(io_error)?)?;
             file.sync_all()?;
             self.verify()?;
             verify_entry(self.directory.file(), &temporary, &file, false)?;
@@ -393,6 +419,12 @@ impl ReceiptLock {
         }
         result
     }
+}
+
+fn redact_status(status: &SelfUpdateJobStatus) -> SelfUpdateJobStatus {
+    let mut status = status.clone();
+    status.error = af_models::secret_redaction::redact_diagnostic(&status.error).into_owned();
+    status
 }
 
 pub fn write(path: &Path, status: &SelfUpdateJobStatus) -> Result<()> {
@@ -441,7 +473,7 @@ fn compare_exchange_locked(
         return Ok(current);
     }
     guard.persist(replacement, Some(&file))?;
-    Ok(replacement.clone())
+    Ok(redact_status(replacement))
 }
 
 pub fn claim(path: &Path, unit: &str) -> Result<()> {

@@ -274,11 +274,84 @@ fn package_lock_installed(package: &Package) -> anyhow::Result<bool> {
     }
 }
 
+fn launch_target(
+    app: &str,
+    port: i32,
+    web_path: &str,
+    ingress: Option<&af_models::AppIngressConfig>,
+    host: &str,
+) -> (Option<String>, Option<String>) {
+    let path = if web_path != "/" && web_path.starts_with('/') && !web_path.starts_with("//") {
+        web_path
+    } else {
+        ""
+    };
+    if let Some(ingress) = ingress.filter(|ing| {
+        ing.external_access_enabled
+            && af_models::valid_ingress_hostname(&ing.public_domain)
+            && (1..=65535).contains(&ing.listen_port)
+    }) {
+        let scheme = if ingress.tls_enabled { "https" } else { "http" };
+        let domain = &ingress.public_domain;
+        return (
+            Some(format!("{scheme}://{domain}{path}")),
+            Some("public".to_string()),
+        );
+    }
+    let enabled_vhost = mutators::resolve_config_path(&format!(
+        "/etc/apache2/sites-enabled/aetherflow-app-{app}.conf"
+    ));
+    if enabled_vhost.is_file() {
+        let internal = resolve_app_internal_domain(app);
+        return (
+            Some(format!("http://{internal}{path}")),
+            Some("internal".to_string()),
+        );
+    }
+    let scheme = service_web_scheme_for_id(app, port);
+    if !(1..=65535).contains(&port) || scheme.is_empty() {
+        return (None, None);
+    }
+    let bind = (app == "qbittorrent")
+        .then(mutators::qbittorrent_web_bind_address)
+        .flatten();
+    let scope = if app == "qbittorrent" {
+        qbittorrent_bind_scope(bind.as_deref())
+    } else {
+        service_bind_scope_for_id(app)
+    };
+    if scope == "loopback" {
+        return (None, None);
+    }
+    let ip = bind
+        .as_deref()
+        .and_then(|address| address.parse::<std::net::IpAddr>().ok())
+        .filter(|address| !address.is_unspecified())
+        .or_else(|| host.parse().ok());
+    let Some(ip) = ip else {
+        return (None, None);
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return (None, None);
+    }
+    let address = std::net::SocketAddr::new(ip, port as u16);
+    (
+        Some(format!("{scheme}://{address}{path}")),
+        Some("network".to_string()),
+    )
+}
+
 fn populate_package_statuses(
     pkgs: &mut [Package],
     jobs: &PackageJobSnapshot,
 ) -> anyhow::Result<()> {
     let update_map = get_package_update_map();
+    let ingress: HashMap<_, _> = af_db::get_all_app_ingress_configs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|config| (config.app_name.clone(), config))
+        .collect();
+    let host = mutators::detect_lan_ip();
 
     for p in pkgs {
         let installed = package_lock_installed(p)?;
@@ -288,6 +361,16 @@ fn populate_package_statuses(
             p.status = "installed".to_string();
         } else {
             p.status = "uninstalled".to_string();
+        }
+
+        if installed {
+            let config = ingress.get(&p.name);
+            let port = config
+                .map(|ing| ing.listen_port)
+                .filter(|port| *port > 0)
+                .unwrap_or(p.default_port);
+            (p.launch_url, p.launch_scope) =
+                launch_target(&p.name, port, &p.web_path, config, &host);
         }
 
         if let Some(u) = update_map.get(&p.name) {
@@ -737,6 +820,10 @@ pub struct ServiceStatusItem {
     pub tls_enabled: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_scope: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_scheme: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -889,10 +976,27 @@ pub fn resolve_service_bind_scope(target: &str) -> &'static str {
 }
 
 pub fn service_bind_scope_for_id(clean: &str) -> &'static str {
-    if matches!(clean, "maintainerr" | "palate" | "kasmvnc" | "mcvnc") {
-        "loopback"
-    } else {
+    match clean {
+        "qbittorrent" => {
+            qbittorrent_bind_scope(mutators::qbittorrent_web_bind_address().as_deref())
+        }
+        "maintainerr" | "palate" | "kasmvnc" | "mcvnc" | "nextcloud" | "rutorrent" | "organizr" => {
+            "loopback"
+        }
+        _ => "network",
+    }
+}
+
+fn qbittorrent_bind_scope(address: Option<&str>) -> &'static str {
+    if address.is_some_and(|address| {
+        address == "*"
+            || address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| !ip.is_loopback())
+    }) {
         "network"
+    } else {
+        "loopback"
     }
 }
 
@@ -1714,6 +1818,7 @@ pub fn get_active_services_with_jobs(
             .map(|c| (c.app_name.clone(), c))
             .collect();
     let base_domain = resolve_base_domain();
+    let launch_host = mutators::detect_lan_ip();
     for p in &pkgs {
         let active_job = jobs.active.get(&p.name).cloned();
         if !included(p) {
@@ -1806,6 +1911,8 @@ pub fn get_active_services_with_jobs(
         let bind_scope = service_bind_scope_for_id(&p.name).to_string();
         let control_scope = service_control_scope_for_id(&p.name).to_string();
 
+        let (launch_url, launch_scope) =
+            launch_target(&p.name, active_port, &p.web_path, ing, &launch_host);
         let display_name = p.label_or_name();
         anyhow::ensure!(
             !map.contains_key(&display_name),
@@ -1832,6 +1939,8 @@ pub fn get_active_services_with_jobs(
                 external_access_enabled,
                 tls_enabled,
                 web_path: p.web_path.clone(),
+                launch_url,
+                launch_scope,
                 web_scheme,
                 bind_scope,
                 control_scope,
@@ -2804,6 +2913,29 @@ mod tests {
         assert!(child.wait().await.unwrap().success());
         drop(af_release::ReleaseLockGuard::acquire(&path, std::time::Duration::ZERO).unwrap());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launch_target_prefers_active_public_ingress_and_hides_loopback_ports() {
+        assert_eq!(qbittorrent_bind_scope(None), "loopback");
+        assert_eq!(qbittorrent_bind_scope(Some("192.168.1.20")), "network");
+        assert_eq!(
+            launch_target("qbittorrent", 8080, "/", None, "192.168.1.9"),
+            (None, None)
+        );
+        let ingress = af_models::AppIngressConfig {
+            public_domain: "qbit.example.test".to_owned(),
+            external_access_enabled: true,
+            tls_enabled: true,
+            listen_port: 8080,
+            ..Default::default()
+        };
+        let launch = launch_target("qbittorrent", 8080, "/", Some(&ingress), "192.168.1.9");
+        assert_eq!(launch.0.as_deref(), Some("https://qbit.example.test"));
+        assert_eq!(launch.1.as_deref(), Some("public"));
+        let launch = launch_target("direct-launch-test", 8989, "/app", None, "192.168.1.9");
+        assert_eq!(launch.0.as_deref(), Some("http://192.168.1.9:8989/app"));
+        assert_eq!(launch.1.as_deref(), Some("network"));
     }
 
     #[test]

@@ -1069,7 +1069,16 @@ ensure_fhs_layout() {
                     chown root:aetherflow "${host_dir}"
                     chmod 0750 "${host_dir}"
                 done
+                if [[ -L /install ]]; then
+                    log_fatal "Refusing symlinked host directory: /install"
+                fi
+                install -d -m 0750 -o root -g aetherflow /install
             fi
+        elif [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+            if [[ -L /install ]]; then
+                log_fatal "Refusing symlinked host directory: /install"
+            fi
+            install -d -m 0750 -o root -g root /install
         fi
     fi
 

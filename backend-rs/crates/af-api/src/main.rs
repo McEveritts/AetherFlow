@@ -103,7 +103,7 @@ fn build_cors_layer() -> CorsLayer {
         header::CACHE_CONTROL,
         HeaderName::from_static("x-mcbrowser-share-token"),
         HeaderName::from_static("x-requested-with"),
-        HeaderName::from_static("rsc"),
+        HeaderName::from_static("x-aetherflow-setup-token"),
     ];
     let expose_headers = [
         header::CONTENT_LENGTH,
@@ -213,6 +213,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
     af_db::init_db()?;
+    auth::ensure_setup_bootstrap_token();
     let init_conn = rusqlite::Connection::open(af_db::get_db_path())?;
     init_conn.busy_timeout(Duration::from_secs(5))?;
     af_services::initialize_package_jobs(init_conn)?;

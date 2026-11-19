@@ -244,39 +244,51 @@ fn format_enrollment_instructions(
     let clean_origin = origin
         .map(str::trim)
         .filter(|o| o.starts_with("https://"))
-        .map(|o| {
-            let trimmed = o.trim_end_matches('/');
-            trimmed.strip_suffix(":50051").unwrap_or(trimmed)
-        });
+        .map(|o| o.trim_end_matches('/'));
     let clean_host = hostname.map(str::trim).filter(|h| !h.is_empty());
 
     let mut out = instructions.to_string();
-    if let Some(https_origin) = clean_origin {
-        out = out
-            .replace("https://<this-server>:50051", https_origin)
-            .replace("http://<this-server>:50051", https_origin)
-            .replace("https://<this-server>", https_origin);
-    }
     if let Some(host) = clean_host {
         let authority_host = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]")
         } else {
             host.to_string()
         };
-        let fallback_https = clean_origin
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("https://{authority_host}"));
-        out = out
-            .replace(&format!("https://{host}:50051"), &fallback_https)
-            .replace(&format!("https://{authority_host}:50051"), &fallback_https)
-            .replace("<this-server>:50051", host)
-            .replace("<this-server>", host);
-    } else {
-        out = out
-            .replace("https://<this-server>:50051", "https://<this-server>")
-            .replace("<this-server>:50051", "<this-server>");
+        // Preserve explicit port numbers (e.g. `https://<this-server>:50051`) before
+        // substituting portless `https://<this-server>` with the HTTPS origin.
+        out = out.replace("<this-server>:", &format!("{authority_host}:"));
+        if let Some(https_origin) = clean_origin {
+            out = out.replace("https://<this-server>", https_origin);
+        } else {
+            out = out.replace(
+                "https://<this-server>",
+                &format!("https://{authority_host}"),
+            );
+        }
+        out = out.replace("<this-server>", host);
+    } else if let Some(https_origin) = clean_origin {
+        let origin_host = https_origin
+            .trim_start_matches("https://")
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        if !origin_host.is_empty() {
+            let host_only = origin_host
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once(']'))
+                .map(|(h, _)| format!("[{h}]"))
+                .unwrap_or_else(|| {
+                    origin_host
+                        .split_once(':')
+                        .map(|(h, _)| h)
+                        .unwrap_or(origin_host)
+                        .to_string()
+                });
+            out = out.replace("<this-server>:", &format!("{host_only}:"));
+        }
+        out = out.replace("https://<this-server>", https_origin);
     }
-    out.replace(":50051", "")
+    out
 }
 
 #[component]
@@ -1094,32 +1106,55 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_instructions_replace_grpc_port_with_https_origin() {
-        let raw =
+    fn enrollment_instructions_preserve_explicit_ports_and_format_server_host() {
+        let with_port =
             "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:50051\nCLUSTER_PSK=abc";
         assert_eq!(
             format_enrollment_instructions(
-                raw,
+                with_port,
                 Some("https://panel.example.com"),
                 Some("panel.example.com"),
             ),
-            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com\nCLUSTER_PSK=abc"
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com:50051\nCLUSTER_PSK=abc"
         );
         assert_eq!(
             format_enrollment_instructions(
-                raw,
+                with_port,
+                Some("https://panel.example.com:8443"),
+                Some("panel.example.com"),
+            ),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com:50051\nCLUSTER_PSK=abc"
+        );
+        assert_eq!(
+            format_enrollment_instructions(
+                with_port,
+                Some("http://localhost:3000"),
+                Some("localhost"),
+            ),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://localhost:50051\nCLUSTER_PSK=abc"
+        );
+        assert_eq!(
+            format_enrollment_instructions(with_port, None, None),
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>:50051\nCLUSTER_PSK=abc"
+        );
+
+        let portless =
+            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>\nCLUSTER_PSK=abc";
+        assert_eq!(
+            format_enrollment_instructions(
+                portless,
                 Some("https://panel.example.com:8443"),
                 Some("panel.example.com"),
             ),
             "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://panel.example.com:8443\nCLUSTER_PSK=abc"
         );
         assert_eq!(
-            format_enrollment_instructions(raw, Some("http://localhost:3000"), Some("localhost")),
+            format_enrollment_instructions(
+                portless,
+                Some("http://localhost:3000"),
+                Some("localhost"),
+            ),
             "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://localhost\nCLUSTER_PSK=abc"
-        );
-        assert_eq!(
-            format_enrollment_instructions(raw, None, None),
-            "CLUSTER_MODE=worker\nCLUSTER_MASTER_ADDR=https://<this-server>\nCLUSTER_PSK=abc"
         );
     }
 }

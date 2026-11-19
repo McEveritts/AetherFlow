@@ -70,12 +70,67 @@ trap 'exit 143' TERM
 chmod 755 "$BUILD_DIR"
 
 report_progress 45 "Cloning ${APP_NAME} repository..."
-af_logged git clone https://github.com/ccf-2012/seedcross.git "$BUILD_DIR"
-if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
-    af_logged git -C "$BUILD_DIR" checkout "$AF_TARGET_VERSION" || {
-        log_error "Failed to checkout commit ${AF_TARGET_VERSION} for ${APP_NAME}"
-        exit 1
-    }
+SEEDCROSS_REPO="https://github.com/ccf-2012/seedcross.git"
+if [[ -n "${AF_FIXTURE_ROOT:-}" || -n "${TEST_ROOT:-}" ]]; then
+    af_logged git clone --branch "${AF_TARGET_VERSION:-main}" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+else
+    if [[ -n "${AF_TARGET_VERSION:-}" ]]; then
+        if [[ "${AF_TARGET_VERSION}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            SEEDCROSS_BRANCH="${AF_SEEDCROSS_BRANCH:-main}"
+            af_logged git clone --branch "$SEEDCROSS_BRANCH" "$SEEDCROSS_REPO" "$BUILD_DIR"
+            af_logged git -C "$BUILD_DIR" checkout --detach "${AF_TARGET_VERSION}" || {
+                log_error "Failed to checkout commit ${AF_TARGET_VERSION} for ${APP_NAME}"
+                exit 1
+            }
+            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
+            if [[ "$ACTUAL_SHA" != "${AF_TARGET_VERSION}"* ]]; then
+                log_error "Checked-out SeedCross commit ($ACTUAL_SHA) does not match requested ${AF_TARGET_VERSION}"
+                exit 1
+            fi
+        else
+            TARGET_TAG="${AF_TARGET_VERSION}"
+            if ! git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}" >/dev/null 2>&1; then
+                if [[ "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG#v}" >/dev/null 2>&1; then
+                    TARGET_TAG="${TARGET_TAG#v}"
+                elif [[ ! "$TARGET_TAG" =~ ^v ]] && git ls-remote --exit-code --tags "$SEEDCROSS_REPO" "refs/tags/v${TARGET_TAG}" >/dev/null 2>&1; then
+                    TARGET_TAG="v${TARGET_TAG}"
+                else
+                    af_write_failure_receipt 1 "download" "invalid_target_tag" "Upstream tag refs/tags/${TARGET_TAG} not found in ${SEEDCROSS_REPO}"
+                    exit 1
+                fi
+            fi
+            EXPECTED_SHA="$(git ls-remote --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}^{}" "refs/tags/${TARGET_TAG}" | tail -n1 | awk '{print $1}')"
+            af_logged git clone --branch "$TARGET_TAG" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
+            if [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+                log_error "SeedCross tag ${TARGET_TAG} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
+                exit 1
+            fi
+        fi
+    else
+        TARGET_TAG="$(git ls-remote --tags --refs "$SEEDCROSS_REPO" 2>/dev/null | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1 || true)"
+        if [[ -n "$TARGET_TAG" ]]; then
+            EXPECTED_SHA="$(git ls-remote --tags "$SEEDCROSS_REPO" "refs/tags/${TARGET_TAG}^{}" "refs/tags/${TARGET_TAG}" | tail -n1 | awk '{print $1}')"
+            af_logged git clone --branch "$TARGET_TAG" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
+            if [[ -n "$EXPECTED_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+                log_error "SeedCross tag ${TARGET_TAG} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
+                exit 1
+            fi
+        else
+            SYMREF_LINE="$(git ls-remote --symref "$SEEDCROSS_REPO" HEAD 2>/dev/null || true)"
+            TARGET_BRANCH="$(printf '%s\n' "$SYMREF_LINE" | sed -n 's#^ref: refs/heads/\([^\t[:space:]]*\)[[:space:]]*HEAD$#\1#p' | head -n1)"
+            TARGET_BRANCH="${TARGET_BRANCH:-${AF_SEEDCROSS_BRANCH:-main}}"
+            EXPECTED_SHA="$(printf '%s\n' "$SYMREF_LINE" | awk '$2 == "HEAD" {print $1; exit}')"
+            [[ -n "$EXPECTED_SHA" ]] || { log_error "Unable to verify upstream SeedCross ref for branch ${TARGET_BRANCH}"; exit 1; }
+            af_logged git clone --branch "$TARGET_BRANCH" --depth 1 "$SEEDCROSS_REPO" "$BUILD_DIR"
+            ACTUAL_SHA="$(git -C "$BUILD_DIR" rev-parse HEAD)"
+            if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+                log_error "SeedCross branch ${TARGET_BRANCH} resolved to unexpected commit ${ACTUAL_SHA} (expected ${EXPECTED_SHA})"
+                exit 1
+            fi
+        fi
+    fi
 fi
 [[ -s "$BUILD_DIR/manage.py" && -s "$BUILD_DIR/csui/settings.py" ]]
 if [[ -f "$INSTALL_DIR/csui/settings.py" ]]; then
@@ -88,11 +143,42 @@ COMMIT_VER="$(git -C "$BUILD_DIR" rev-parse HEAD)"
 queue_app_version "/opt/seedcross/.af-version" "${COMMIT_VER}"
 
 report_progress 65 "Creating Python virtualenv and installing dependencies..."
-af_logged python3 -m venv "$BUILD_DIR/.venv"
-af_logged "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel gunicorn 'whitenoise>=6,<7'
+chown -hRP "${APP_USER}:${APP_USER}" "$BUILD_DIR" "$DATA_DIR"
+run_as_seedcross_builder() {
+    if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        runuser -u "${APP_USER}" -- "$@"
+    else
+        "$@"
+    fi
+}
+af_logged run_as_seedcross_builder python3 -m venv "$BUILD_DIR/.venv"
+af_logged run_as_seedcross_builder "$BUILD_DIR/.venv/bin/python" -m pip install --no-cache-dir --upgrade pip setuptools wheel gunicorn 'whitenoise>=6,<7'
 if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
-    af_logged "$BUILD_DIR/.venv/bin/python" -m pip install --upgrade --no-cache-dir -r "$BUILD_DIR/requirements.txt"
+    af_logged run_as_seedcross_builder "$BUILD_DIR/.venv/bin/python" -m pip install --no-cache-dir -r "$BUILD_DIR/requirements.txt"
 fi
+python3 - "$BUILD_DIR/.venv" "$INSTALL_DIR/.venv" <<'VENV_PYEOF'
+import os, pathlib, stat, sys
+old_venv, new_venv = sys.argv[1], sys.argv[2]
+old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
+bin_dir = pathlib.Path(old_venv) / "bin"
+if bin_dir.is_dir():
+    for entry in bin_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        data = entry.read_bytes()
+        updated = data
+        if data.startswith(b"#!") and old_bytes in data.splitlines()[0]:
+            first, sep, rest = data.partition(b"\n")
+            updated = first.replace(old_bytes, new_bytes) + sep + rest
+        elif entry.name.startswith("activate"):
+            updated = data.replace(old_bytes, new_bytes)
+        if updated != data:
+            mode = stat.S_IMODE(entry.stat().st_mode)
+            entry.write_bytes(updated)
+            os.chmod(entry, mode)
+VENV_PYEOF
+chown -hRP root:root "$BUILD_DIR"
+chmod -R go-w,a+rX "$BUILD_DIR"
 
 cat > "$BUILD_DIR/start-seedcross.sh" <<EOF
 #!/bin/bash
@@ -108,7 +194,10 @@ retain_app_data_directory "$AF_ARCHIVE_BACKUP/app/db" "$DATA_DIR/db"
 rm -rf -- "$INSTALL_DIR/db"
 ln -s "$DATA_DIR/db" "$INSTALL_DIR/db"
 PUBLIC_DOMAIN="$(get_base_domain)"
-chown -hRP "${APP_USER}:${APP_USER}" "$INSTALL_DIR" "$DATA_DIR"
+chown -hRP root:root "$INSTALL_DIR"
+chmod -R go-w,a+rX "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR/start-seedcross.sh"
+chown -hRP "${APP_USER}:${APP_USER}" "$DATA_DIR"
 validate_config_paths "$DATA_DIR/runtime.json" "$INSTALL_DIR/csui/settings.py"
 LEGACY_SETTINGS_SNAPSHOT="$AF_ARCHIVE_BACKUP/legacy-settings.json"
 if [[ ! -e "$DATA_DIR/runtime.json" ]]; then
@@ -134,22 +223,33 @@ fi
 safe_config_python "$DATA_DIR/runtime.json" "$LEGACY_SETTINGS_SNAPSHOT" "$PUBLIC_DOMAIN" <<'RUNTIME_PYEOF'
 import json, pathlib, secrets, sys
 path, settings, domain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+managed_hosts = ['localhost', '127.0.0.1', '[::1]', 'seedcross.aether.local']
+managed_origins = ['http://seedcross.aether.local', 'https://seedcross.aether.local']
+if domain:
+    managed_hosts.append('seedcross.' + domain)
+    managed_origins.append('https://seedcross.' + domain)
 runtime_text = safe_read_text(path)
 if runtime_text:
     runtime = json.loads(runtime_text)
     if not isinstance(runtime.get('secret_key'), str) or not runtime['secret_key']:
         raise ValueError('Retained SeedCross runtime secret is missing; restore runtime.json')
+    existing_hosts = [host for host in runtime.get('allowed_hosts', []) if isinstance(host, str) and host != '*']
+    existing_origins = [origin for origin in runtime.get('csrf_trusted_origins', []) if isinstance(origin, str)]
+    updated_hosts = list(dict.fromkeys([*existing_hosts, *managed_hosts]))
+    updated_origins = list(dict.fromkeys([*existing_origins, *managed_origins]))
+    if updated_hosts != runtime.get('allowed_hosts') or updated_origins != runtime.get('csrf_trusted_origins'):
+        runtime['allowed_hosts'] = updated_hosts
+        runtime['csrf_trusted_origins'] = updated_origins
+        safe_write_text(path, json.dumps(runtime), 0o640)
 else:
     operator_settings = json.loads(safe_read_text(settings))
     secret = operator_settings.get('SECRET_KEY', '')
     if not secret or secret.startswith('django-insecure-'):
         secret = secrets.token_urlsafe(48)
     hosts = [host for host in operator_settings.get('ALLOWED_HOSTS', []) if isinstance(host, str) and host != '*']
-    origins = operator_settings.get('CSRF_TRUSTED_ORIGINS', [])
-    hosts.extend(['localhost', '127.0.0.1', '[::1]'])
-    if domain:
-        hosts.append('seedcross.' + domain)
-        origins = [*origins, 'https://seedcross.' + domain]
+    origins = [origin for origin in operator_settings.get('CSRF_TRUSTED_ORIGINS', []) if isinstance(origin, str)]
+    hosts.extend(managed_hosts)
+    origins.extend(managed_origins)
     runtime = {'secret_key': secret, 'allowed_hosts': list(dict.fromkeys(hosts)),
                'csrf_trusted_origins': list(dict.fromkeys(origins))}
     safe_write_text(path, json.dumps(runtime), 0o640)
@@ -171,6 +271,7 @@ MIDDLEWARE = list(MIDDLEWARE)
 if "whitenoise.middleware.WhiteNoiseMiddleware" not in MIDDLEWARE:
     MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 EOF
+chmod 644 "$INSTALL_DIR/af_settings.py"
 export DJANGO_SETTINGS_MODULE=af_settings
 
 report_progress 80 "Initializing ${APP_NAME} database and master account..."
@@ -216,6 +317,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 644 "${SERVICE_FILE}"
 
 af_logged systemctl daemon-reload
 af_logged systemctl enable --now seedcross.service

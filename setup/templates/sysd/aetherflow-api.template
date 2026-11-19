@@ -1,6 +1,8 @@
 [Unit]
 Description=AetherFlow Control Plane and WASM Dashboard
 Documentation=https://github.com/McEveritts/AetherFlow
+
+# ── Boot Race Prevention ─────────────────────────────────────────────────────
 After=network-online.target time-sync.target aetherflow-runner.service
 Wants=network-online.target aetherflow-runner.service
 RequiresMountsFor=/opt/AetherFlow
@@ -11,15 +13,16 @@ User=aetherflow
 Group=aetherflow
 SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/current
-ExecStart=/opt/AetherFlow/current/aetherflow-api
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
-# Managed Directories
+# ── FHS Managed Directories ──────────────────────────────────────────────────
+# Automatically provisions /var/lib/aetherflow owned by aetherflow:aetherflow and
+# grants write access inside ProtectSystem=strict. /var/log/aetherflow is owned
+# by root:aetherflow via aetherflow-runner.service so log-retention stays strict.
 StateDirectory=aetherflow
 StateDirectoryMode=0700
+
+# ── Execution ────────────────────────────────────────────────────────────────
+ExecStart=/opt/AetherFlow/current/aetherflow-api
 
 Environment=PORT=8080
 Environment=DATA_DIR=/var/lib/aetherflow
@@ -29,10 +32,23 @@ Environment=AETHERFLOW_ENV=production
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
-# Zero-Trust Namespace Isolation
+# ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=35s
+
+# ── Restart Policy ───────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Zero-Trust Namespace Isolation ───────────────────────────────────────────
+# Safe to enforce strictly because writable state is limited to the paths below
+# and root host operations go through /run/aetherflow/runner.sock.
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectControlGroups=yes
 DevicePolicy=closed
 DeviceAllow=/dev/null rw
 DeviceAllow=/dev/zero rw
@@ -45,9 +61,7 @@ DeviceAllow=/dev/nvidiactl rw
 DeviceAllow=/dev/nvidia0 rw
 DeviceAllow=/dev/nvidia-modeset rw
 DeviceAllow=/dev/nvidia-uvm rw
-NoNewPrivileges=yes
 ProtectClock=yes
-ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
@@ -58,12 +72,30 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
+# Optional media mount points for MediaFlow transcoding; '-' skips absent directories
+# while keeping /opt/AetherFlow read-only.
+ReadWritePaths=-/srv -/mnt -/media -/data
+# Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
+# path when that directory was never created.
 ReadWritePaths=-/opt/AetherFlow/backend/data
 
+# ── Operator Drop-in Overrides ──────────────────────────────────────────────
+# Host-specific bind mounts, local media paths, or supplementary groups (such as
+# media downloader groups or user storage directories) should not be hard-coded
+# in this packaged unit. Instead, configure them in an operator-owned systemd
+# drop-in file at /etc/systemd/system/aetherflow-api.service.d/local.conf:
+#
+#   [Service]
+#   SupplementaryGroups=media
+#   ReadWritePaths=/mnt/storage
+#   BindPaths=/mnt/storage/media:/var/lib/aetherflow/mcbrowser/user-1/Media
+
+# ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535
 
 [Install]

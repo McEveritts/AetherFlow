@@ -151,20 +151,42 @@ snapshot_app_state "$BACKUP_DIR" /var/lib/sabnzbd
 if [[ -f /etc/systemd/system/sabnzbd.service ]]; then
     cp -a /etc/systemd/system/sabnzbd.service "$BACKUP_DIR/sabnzbd.service"
 fi
-mkdir -p /opt/SABnzbd
-if [[ -e /opt/SABnzbd/.venv || -L /opt/SABnzbd/.venv ]]; then
-    if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
-        stop_systemd_unit sabnzbd
-        SERVICE_STOPPED=1
+chmod 755 "$BUILD_DIR"
+chown -hRP sabnzbd:sabnzbd "$BUILD_DIR" /var/lib/sabnzbd
+run_as_sabnzbd_builder() {
+    if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        runuser -u sabnzbd -- "$@"
+    else
+        "$@"
     fi
-    mv /opt/SABnzbd/.venv "$BACKUP_DIR/venv"
-    VENV_MOVED=1
-fi
-af_logged python3 -m venv /opt/SABnzbd/.venv
-VENV_ACTIVATED=1
-af_logged /opt/SABnzbd/.venv/bin/pip install --upgrade pip wheel setuptools
-af_logged /opt/SABnzbd/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt"
-test -x /opt/SABnzbd/.venv/bin/python3 || { log_error "Failed to verify SABnzbd virtual environment"; exit 1; }
+}
+af_logged run_as_sabnzbd_builder python3 -m venv "$BUILD_DIR/.venv"
+af_logged run_as_sabnzbd_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir --upgrade pip wheel setuptools
+af_logged run_as_sabnzbd_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir -r "$BUILD_DIR/requirements.txt"
+test -x "$BUILD_DIR/.venv/bin/python3" || { log_error "Failed to verify SABnzbd virtual environment"; exit 1; }
+python3 - "$BUILD_DIR/.venv" "/opt/SABnzbd/.venv" <<'VENV_PYEOF'
+import os, pathlib, stat, sys
+old_venv, new_venv = sys.argv[1], sys.argv[2]
+old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
+bin_dir = pathlib.Path(old_venv) / "bin"
+if bin_dir.is_dir():
+    for entry in bin_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        data = entry.read_bytes()
+        updated = data
+        if data.startswith(b"#!") and old_bytes in data.splitlines()[0]:
+            first, sep, rest = data.partition(b"\n")
+            updated = first.replace(old_bytes, new_bytes) + sep + rest
+        elif entry.name.startswith("activate"):
+            updated = data.replace(old_bytes, new_bytes)
+        if updated != data:
+            mode = stat.S_IMODE(entry.stat().st_mode)
+            entry.write_bytes(updated)
+            os.chmod(entry, mode)
+VENV_PYEOF
+chown -hRP root:root "$BUILD_DIR"
+chmod -R go-w,a+rX "$BUILD_DIR"
 
 queue_app_version "/opt/SABnzbd/.af-version" "${SAB_VERSION#v}" "$BUILD_DIR" "$BACKUP_DIR"
 BASE_DOMAIN="$(get_base_domain || true)"
@@ -188,21 +210,16 @@ EOF
     )
 fi
 set_config_file_mode 0600 /var/lib/sabnzbd/sabnzbd.ini
-chown -hRP sabnzbd:sabnzbd /opt/SABnzbd/.venv "$BUILD_DIR" /var/lib/sabnzbd
+chown -hRP sabnzbd:sabnzbd /var/lib/sabnzbd
 
 report_progress 80 "Backing up existing SABnzbd installation and activating new build..."
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
     stop_systemd_unit sabnzbd
     SERVICE_STOPPED=1
 fi
-mv /opt/SABnzbd/.venv "$BUILD_DIR/.venv"
-VENV_ACTIVATED=0
 if [[ -d /opt/SABnzbd ]]; then
     mv /opt/SABnzbd "$BACKUP_DIR/app"
     APP_MOVED=1
-    if [[ "$VENV_MOVED" -eq 1 ]]; then
-        mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
-    fi
 fi
 mv "$BUILD_DIR" /opt/SABnzbd
 APP_ACTIVATED=1

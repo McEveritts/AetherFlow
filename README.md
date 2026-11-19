@@ -29,7 +29,7 @@
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (12 native declarative Rust recipes + serialized Bash installers), `systemctl` transitions, WireGuard/Tailscale management, quota updates, and isolated `aetherflow-self-update.service` deployments are mediated over `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry & NVML FFI (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, decoupled navigation/telemetry rendering, zero-fork `/proc` & `sysinfo` sampling, and dynamic `libnvidia-ml.so.1` FFI + DRM `sysfs` GPU discovery.
-- **Canonical Streaming Intelligence & VPN Control** — Built-in Jellyfin/Plex streaming history explorer with snapshot-consistent pagination, CSV/JSON portability, reconciliation gates, and native **WireGuard** (`wg0`) + **Tailscale** mesh VPN management.
+- **Canonical Streaming Intelligence & VPN Control** — Built-in Plex, Jellyfin, and Emby streaming history explorer with snapshot-consistent pagination, CSV/JSON portability, reconciliation gates, and native **WireGuard** (`wg0`) + **Tailscale** mesh VPN management.
 - **100% Bare-Metal, Zero Docker Overhead** — Every application runs natively under `systemd` cgroups and `af-systemd-sandbox` profiles—zero Docker daemons, zero container bridging latency.
 
 ---
@@ -133,7 +133,7 @@ AetherFlow manages **77 native Linux packages** across 7 infrastructure domains,
 ## 🗂️ Native McBrowser & Streaming Intelligence
 
 - **Scoped Tenant File Manager (`McBrowser`)** — Manage files directly from the dashboard sidebar without containers or separate logins. Supports drag-and-drop directory uploads, resumable multi-gigabyte transfers, Ace code editing with Markdown/KaTeX preview, password-protected public shares, and FlowAI natural-language search.
-- **Canonical Streaming Analytics** — Real-time Jellyfin & Plex session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous library/genre metadata enrichment, CSV/JSON portability exports, and human-gated history reconciliation.
+- **Canonical Streaming Analytics** — Real-time Plex, Jellyfin, and Emby session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous library/genre metadata enrichment, CSV/JSON portability exports, and human-gated history reconciliation.
 - **WireGuard & Tailscale Control Center** — Provision one-time WireGuard client keypairs/QR codes and manage Tailscale tailnet authentication, advertised subnet routes, and exit-node preferences directly from the **Network** tab.
 
 ---

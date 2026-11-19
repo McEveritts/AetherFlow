@@ -63,7 +63,11 @@ function _updates() {
 	apt-get -yqq full-upgrade >>"${OUTTO}" 2>&1 || return 1
 
 	# Create the service lock file directory
-	if [[ -d /install ]]; then cd /; else mkdir -p /install; fi
+	if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+		install -d -m 0750 -o root -g "$(getent group aetherflow >/dev/null 2>&1 && echo aetherflow || echo root)" /install
+	else
+		mkdir -p /install
+	fi
 	if [[ -d /root/tmp ]]; then cd && rm -r tmp; fi
 
 }
@@ -181,7 +185,7 @@ function _skel() {
 
 
 
-# build function for ffmpeg
+# install function for ffmpeg via verified APT packages
 # shellcheck disable=2215,2312,2250
 function _ffmpeg() {
 	if [[ ${ffmpeg} == "yes" ]]; then
@@ -194,73 +198,7 @@ function _ffmpeg() {
 				return 0
 			fi
 		fi
-		local -a ffmpeg_packages=(
-			autotools-dev autoconf automake cmake cmake-curses-gui
-			build-essential mercurial libass-dev
-		)
-		_af_apt_install "${ffmpeg_packages[@]}" || return 1
-		MAXCPUS="$(_af_build_jobs)"
-		mkdir -p /tmp
-		cd /tmp || exit 1
-		if [[ -d /tmp/ffmpeg ]]; then rm -rf ffmpeg; fi
-		git clone --depth 1 -b release/4.4 https://github.com/FFmpeg/FFmpeg.git ffmpeg >>"${OUTTO}" 2>&1
-		git clone https://github.com/yasm/yasm.git ffmpeg/yasm >>"${OUTTO}" 2>&1 &
-		yasm_clone_pid=$!
-		git clone https://github.com/yixia/x264.git ffmpeg/x264 >>"${OUTTO}" 2>&1 &
-		x264_clone_pid=$!
-		#hg clone https://bitbucket.org/multicoreware/x265 ffmpeg/x265 >>"${OUTTO}" 2>&1
-		git clone https://bitbucket.org/multicoreware/x265_git.git ffmpeg/x265 >>"${OUTTO}" 2>&1 &
-		x265_clone_pid=$!
-		_af_parallel_wait "${yasm_clone_pid}" "${x264_clone_pid}" "${x265_clone_pid}" || return 1
-		############################################################################
-		####---- Github Mirror source ----####
-		#git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg >>"${OUTTO}" 2>&1
-		############################################################################
-		cd ffmpeg || exit 1
-		wget -q https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/nasm-2.15.05.tar.gz
-		tar zxvf nasm-2.15.05.tar.gz >>"${OUTTO}" 2>&1
-		cd nasm-2.15.05 || exit 1
-		./autogen.sh >>"${OUTTO}" 2>&1
-		./configure >>"${OUTTO}" 2>&1
-		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-		make install >>"${OUTTO}" 2>&1
-		cd ../yasm || exit 1
-		./autogen.sh >>"${OUTTO}" 2>&1
-		./configure >>"${OUTTO}" 2>&1
-		make >>"${OUTTO}" 2>&1
-		make install >>"${OUTTO}" 2>&1
-		(
-			cd ../x264 || exit 1
-			PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" ./configure --prefix="/tmp/ffmpeg" --enable-static --enable-pic >>"${OUTTO}" 2>&1
-			make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-			make install >>"${OUTTO}" 2>&1
-		) &
-		x264_build_pid=$!
-		(
-			cd ../x265/build/linux || exit 1
-			#./make-Makefiles.bash >>"${OUTTO}" 2>&1
-			cmake -G "Unix Makefiles" /tmp/ffmpeg/x265/source -DCMAKE_INSTALL_PREFIX="/tmp/ffmpeg" -DENABLE_SHARED:bool=off >>"${OUTTO}" 2>&1
-			make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-			make install >>"${OUTTO}" 2>&1
-		) &
-		x265_build_pid=$!
-		_af_parallel_wait "${x264_build_pid}" "${x265_build_pid}" || return 1
-		ldconfig >>"${OUTTO}" 2>&1
-		cd /tmp/ffmpeg || exit 1
-		export FC_CONFIG_DIR=/etc/fonts
-		export FC_CONFIG_FILE=/etc/fonts/fonts.conf
-		PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" \
-		./configure --enable-libfreetype --enable-filter=drawtext --enable-fontconfig \
-		--enable-libx265 --enable-libx264 --enable-gpl --enable-shared --enable-pic \
-		--extra-libs="-lpthread -lm" \
-		--extra-ldflags="-L/tmp/ffmpeg/lib -L/tmp/ffmpeg/lib/pkgconfig" \
-		--extra-cflags="-I/tmp/ffmpeg/include" \
-		--pkg-config-flags="--static" >>"${OUTTO}" 2>&1
-		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-		make install >>"${OUTTO}" 2>&1
-		\cp -f /usr/local/bin/ffmpeg /usr/bin >>"${OUTTO}" 2>&1
-		\cp -f /usr/local/bin/ffprobe /usr/bin >>"${OUTTO}" 2>&1
-		cd /tmp || exit 1
-		rm -rf /tmp/ffmpeg >>"${OUTTO}" 2>&1
+		echo "[ERROR] Failed to install verified ffmpeg APT package; refusing unverified source build." >>"${OUTTO}" 2>&1
+		return 1
 	fi
 }

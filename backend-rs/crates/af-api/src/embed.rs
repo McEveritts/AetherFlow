@@ -355,7 +355,7 @@ fn spa_response_inner(req: &Request, read: impl Fn(&str) -> Option<Vec<u8>>) -> 
 
     // Missing files must not masquerade as successful HTML downloads. Unmatched
     // extensionless routes continue to enter the client-side SPA router.
-    let asset_namespace = ["assets", "locales", "img", "images", "fonts", "_next"]
+    let asset_namespace = ["assets", "locales", "img", "images", "fonts"]
         .iter()
         .any(|prefix| clean_path == *prefix || clean_path.starts_with(&format!("{prefix}/")));
     let filename = clean_path.rsplit('/').next().unwrap_or(&clean_path);

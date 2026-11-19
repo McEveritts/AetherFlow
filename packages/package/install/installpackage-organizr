@@ -138,21 +138,29 @@ find -P /var/www/organizr \( -type d -o -type f \) -exec chmod 775 -- {} +
 report_progress 80 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+ORG_VHOST_HOST="127.0.0.1"
+if [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
+    ORG_VHOST_HOST="0.0.0.0"
+fi
+validate_config_paths /etc/apache2/sites-available/organizr.conf
 if [[ -s /etc/apache2/sites-available/organizr.conf ]]; then
-    sed -i -E "s/(<VirtualHost [^:>]+:)[0-9]+>/\1${APP_PORT}>/g" /etc/apache2/sites-available/organizr.conf
+    safe_config_python /etc/apache2/sites-available/organizr.conf "${ORG_VHOST_HOST}" "${APP_PORT}" <<'ORG_VHOST_PYEOF'
+import re, sys
+path, vhost_host, port = sys.argv[1], sys.argv[2], sys.argv[3]
+existing = safe_read_text(path)
+updated = re.sub(
+    r"<VirtualHost\s+([^:>]+):[0-9]+>",
+    lambda m: f"<VirtualHost {vhost_host if m.group(1) in ('*', '0.0.0.0', '127.0.0.1') else m.group(1)}:{port}>",
+    existing,
+)
+if updated != existing:
+    safe_write_text(path, updated, 0o644)
+ORG_VHOST_PYEOF
 else
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/organizr.conf
-Alias /organizr "/var/www/organizr"
-
-<Directory /var/www/organizr>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-    DirectoryIndex index.php index.html
-</Directory>
-
-<VirtualHost *:@AF_APP_PORT@>
+sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_VHOST_HOST@/${ORG_VHOST_HOST}/g" <<'EOF' | write_config_file /etc/apache2/sites-available/organizr.conf 0644
+<VirtualHost @AF_VHOST_HOST@:@AF_APP_PORT@>
     DocumentRoot /var/www/organizr
+    Alias /organizr "/var/www/organizr"
     <Directory /var/www/organizr>
         Options FollowSymLinks
         AllowOverride All

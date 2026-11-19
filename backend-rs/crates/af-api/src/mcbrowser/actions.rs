@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::media::{
     discover_subtitles_in_fs, is_image_content_type, is_video_extension, media_type,
     read_image_dimensions_from_file, ImageResolution, MediaMetadataResponse, SubtitleTrackInfo,
@@ -79,8 +77,6 @@ pub enum Action {
     #[serde(rename = "inspect_media_metadata")]
     InspectMediaMetadata { path: String },
 }
-
-pub type ActionRequest = Action;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -258,15 +254,6 @@ impl Action {
             ExternalActionWire::InspectMediaMetadata(payload) => {
                 Ok(Self::InspectMediaMetadata { path: payload.path })
             }
-        }
-    }
-
-    pub const fn action_name(&self) -> &'static str {
-        match self {
-            Self::ComputeChecksums { .. } => "compute_checksums",
-            Self::ExtractArchive { .. } => "extract_archive",
-            Self::CreateArchive { .. } => "create_archive",
-            Self::InspectMediaMetadata { .. } => "inspect_media_metadata",
         }
     }
 

@@ -271,19 +271,27 @@ fi
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
 configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
+NC_VHOST_HOST="127.0.0.1"
+if [[ "${AF_APACHE_LISTEN_ALL:-0}" == "1" ]]; then
+    NC_VHOST_HOST="0.0.0.0"
+fi
 validate_config_paths /etc/apache2/sites-available/nextcloud.conf
 if [[ -s /etc/apache2/sites-available/nextcloud.conf ]]; then
-    safe_config_python /etc/apache2/sites-available/nextcloud.conf "${APP_PORT}" <<'NC_VHOST_PYEOF'
+    safe_config_python /etc/apache2/sites-available/nextcloud.conf "${NC_VHOST_HOST}" "${APP_PORT}" <<'NC_VHOST_PYEOF'
 import re, sys
-path, port = sys.argv[1], sys.argv[2]
+path, vhost_host, port = sys.argv[1], sys.argv[2], sys.argv[3]
 existing = safe_read_text(path)
-updated = re.sub(r"(<VirtualHost [^:>]+:)[0-9]+>", rf"\g<1>{port}>", existing)
+updated = re.sub(
+    r"<VirtualHost\s+([^:>]+):[0-9]+>",
+    lambda m: f"<VirtualHost {vhost_host if m.group(1) in ('*', '0.0.0.0', '127.0.0.1') else m.group(1)}:{port}>",
+    existing,
+)
 if updated != existing:
     safe_write_text(path, updated, 0o644)
 NC_VHOST_PYEOF
 else
     write_config_file /etc/apache2/sites-available/nextcloud.conf 0644 <<EOF
-<VirtualHost 127.0.0.1:${APP_PORT}>
+<VirtualHost ${NC_VHOST_HOST}:${APP_PORT}>
     DocumentRoot /var/www/nextcloud
     Alias /nextcloud "/var/www/nextcloud/"
     <Directory /var/www/nextcloud/>

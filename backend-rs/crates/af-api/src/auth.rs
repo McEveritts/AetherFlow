@@ -518,7 +518,8 @@ fn create_session_jwt(
     create_session_jwt_in_conn(&conn, user_id, headers, auth_time, None, ver)
 }
 
-pub fn mint_plugin_jwt(
+#[cfg(test)]
+pub(crate) fn mint_plugin_jwt(
     issuer_user_id: i64,
     plugin_id: &str,
     scopes: &[String],
@@ -1056,54 +1057,16 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         );
     };
 
-    // Enforce scoped RBAC if this JWT is a plugin-scoped token (`plugin_id` or `plugin_scopes` set)
-    if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
-        let check_path = if path.starts_with("/api/v1/") {
-            path.clone()
-        } else if let Some(rest) = path.strip_prefix("/api/") {
-            format!("/api/v1/{}", rest)
-        } else if let Some(rest) = path.strip_prefix("/plugins/") {
-            let trimmed = rest.trim_matches('/');
-            if let Some((pid, sub)) = trimmed.split_once('/') {
-                format!("/api/v1/auth/plugins/{}/proxy/{}", pid, sub)
-            } else {
-                format!("/api/v1/auth/plugins/{}/proxy", trimmed)
-            }
-        } else {
-            format!("/api/v1/auth{}", path)
-        };
-        if crate::plugins::is_plugin_request_denied(&method, &check_path)
-            || crate::plugins::is_plugin_request_denied(&method, &path)
-        {
-            return api_error(
-                StatusCode::FORBIDDEN,
-                "PLUGIN_SCOPE_DENIED",
-                "Plugin tokens cannot delegate this HTTP capability",
-            );
-        }
-        if !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &check_path)
-            && !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &path)
-        {
-            return api_error(
-                StatusCode::FORBIDDEN,
-                "PLUGIN_SCOPE_DENIED",
-                format!(
-                    "Plugin '{}' token is not authorized for route '{}'",
-                    claims.plugin_id, path
-                ),
-            );
-        }
-
-        req.extensions_mut().insert(AuthUser {
-            user_id: claims.user_id,
-            username: format!("plugin:{}", claims.plugin_id),
-            role: "plugin".to_string(),
-            jti: claims.jti,
-            plugin_id: Some(claims.plugin_id),
-            plugin_scopes: claims.plugin_scopes,
-        });
-
-        return next.run(req).await;
+    // Reject legacy session-signed plugin claims (`plugin_id` / `plugin_scopes`);
+    // active plugins must authenticate via `crate::plugins::decode_and_verify_plugin_token`.
+    if !claims.plugin_id.trim().is_empty() || !claims.plugin_scopes.is_empty() {
+        let _ = method;
+        let _ = path;
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "PLUGIN_SCOPE_DENIED",
+            "Legacy session-scoped plugin tokens are no longer supported",
+        );
     }
 
     let ua = headers
@@ -1306,6 +1269,8 @@ pub struct CredentialsRequest {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    #[serde(default, alias = "setupToken")]
+    pub setup_token: Option<String>,
 }
 
 pub async fn check_setup_needed() -> Response {
@@ -1315,14 +1280,18 @@ pub async fn check_setup_needed() -> Response {
 fn check_setup_needed_blocking() -> Response {
     let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to verify setup state",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Database unavailable",
         );
     };
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
-        .unwrap_or(0);
+    let Ok(count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Failed to query setup state",
+        );
+    };
     Json(serde_json::json!({ "setupRequired": count == 0 })).into_response()
 }
 
@@ -1474,28 +1443,230 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
     bcrypt::verify(password, password_hash).unwrap_or(false)
 }
 
-pub async fn setup_admin(headers: HeaderMap, Json(req): Json<CredentialsRequest>) -> Response {
-    blocking_response(move || setup_admin_blocking(headers, req)).await
+fn constant_time_secret_matches(candidate: &str, expected: &str) -> bool {
+    let cand_bytes = candidate.as_bytes();
+    let exp_bytes = expected.as_bytes();
+    let cand_hash = Sha256::digest(cand_bytes);
+    let exp_hash = Sha256::digest(exp_bytes);
+    let mut diff = usize::from(cand_bytes.len() != exp_bytes.len()) as u8;
+    for (&a, &b) in cand_hash.iter().zip(exp_hash.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0 && !cand_bytes.is_empty()
 }
 
-fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response {
+fn setup_bootstrap_token_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for env_key in ["DATA_DIR", "AETHERFLOW_DATA_DIR"] {
+        if let Ok(raw_dir) = env::var(env_key) {
+            let clean = raw_dir.trim();
+            if !clean.is_empty() {
+                let candidate = std::path::PathBuf::from(clean).join(".setup-bootstrap-token");
+                if !paths.contains(&candidate) {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    let db_path = af_db::get_db_path();
+    if db_path != ":memory:" && !db_path.starts_with("file:") {
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                let candidate = parent.join(".setup-bootstrap-token");
+                if !paths.contains(&candidate) {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    let default_path = std::path::PathBuf::from("/var/lib/aetherflow/.setup-bootstrap-token");
+    if !paths.contains(&default_path) {
+        paths.push(default_path);
+    }
+    paths
+}
+
+fn read_setup_bootstrap_token_file(path: &std::path::Path) -> Option<String> {
+    let lmeta = std::fs::symlink_metadata(path).ok()?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return None;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = opts.open(path).ok()?;
+    let fmeta = file.metadata().ok()?;
+    if !fmeta.is_file() || fmeta.len() > 4096 {
+        return None;
+    }
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents).ok()?;
+    let trimmed = contents.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn configured_setup_bootstrap_tokens() -> Vec<String> {
+    let mut expected = Vec::new();
+    if let Ok(env_tok) = env::var("AETHERFLOW_SETUP_TOKEN") {
+        let trimmed = env_tok.trim().to_string();
+        if !trimmed.is_empty() {
+            expected.push(trimmed);
+        }
+    }
+    for path in setup_bootstrap_token_paths() {
+        if let Some(file_tok) = read_setup_bootstrap_token_file(&path) {
+            if !expected.contains(&file_tok) {
+                expected.push(file_tok);
+            }
+        }
+    }
+    expected
+}
+
+fn unlink_setup_bootstrap_token_files() {
+    for path in setup_bootstrap_token_paths() {
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if !meta.file_type().is_symlink() && meta.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Ensures a one-time `.setup-bootstrap-token` file (mode `0600`) exists on disk whenever
+/// no administrator account exists yet and no bootstrap token is already configured.
+/// This prevents headless or Apache-proxied installations from being locked out of
+/// first-admin setup while keeping the token strictly out of application logs.
+pub fn ensure_setup_bootstrap_token() {
     let Ok(conn) = af_db::get_conn() else {
+        return;
+    };
+    let Ok(user_count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0))
+    else {
+        return;
+    };
+    if user_count > 0 || !configured_setup_bootstrap_tokens().is_empty() {
+        return;
+    }
+
+    let generated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    for target in setup_bootstrap_token_paths() {
+        let Some(parent) = target.parent() else {
+            continue;
+        };
+        let Ok(pmeta) = std::fs::symlink_metadata(parent) else {
+            continue;
+        };
+        if pmeta.file_type().is_symlink() || !pmeta.is_dir() {
+            continue;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        if let Ok(mut file) = opts.open(&target) {
+            if std::io::Write::write_all(&mut file, format!("{generated}\n").as_bytes()).is_ok() {
+                let _ = file.sync_all();
+                tracing::info!(
+                    path = %target.display(),
+                    "First-admin setup pending: generated one-time setup bootstrap token file (read via SSH for remote/proxied onboarding)"
+                );
+                return;
+            }
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+}
+
+fn has_raw_proxy_forwarding_headers(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded")
+}
+
+pub async fn setup_admin(
+    crate::ws::PeerIp(peer_ip): crate::ws::PeerIp,
+    inbound_forwarded: Option<axum::Extension<crate::ws::InboundProxyForwarded>>,
+    headers: HeaderMap,
+    Json(req): Json<CredentialsRequest>,
+) -> Response {
+    let was_proxied = inbound_forwarded
+        .map(|axum::Extension(f)| f.0)
+        .unwrap_or_else(|| has_raw_proxy_forwarding_headers(&headers));
+    blocking_response(move || setup_admin_blocking(peer_ip, was_proxied, headers, req)).await
+}
+
+fn setup_admin_blocking(
+    peer_ip: Option<std::net::IpAddr>,
+    was_proxied: bool,
+    headers: HeaderMap,
+    req: CredentialsRequest,
+) -> Response {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
             "Database unavailable",
         );
     };
 
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
-        .unwrap_or(0);
+    let Ok(count) = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Failed to verify existing user accounts",
+        );
+    };
     if count > 0 {
         return api_error(
             StatusCode::CONFLICT,
             "CONFLICT",
             "Admin account already exists",
         );
+    }
+
+    let is_direct_unproxied_loopback = !was_proxied
+        && match peer_ip {
+            Some(ip) => ip.to_canonical().is_loopback(),
+            None => true,
+        };
+
+    let provided_setup_token = req
+        .setup_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("X-AetherFlow-Setup-Token")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+
+    if !is_direct_unproxied_loopback {
+        let expected_tokens = configured_setup_bootstrap_tokens();
+        let token_valid = match provided_setup_token {
+            Some(candidate) if !expected_tokens.is_empty() => expected_tokens
+                .iter()
+                .any(|exp| constant_time_secret_matches(candidate, exp)),
+            _ => false,
+        };
+        if !token_valid {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "SETUP_TOKEN_REQUIRED",
+                "Valid setup bootstrap token required for remote or proxied first-admin setup",
+            );
+        }
     }
 
     let trimmed_username = req.username.trim();
@@ -1529,7 +1700,35 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
         );
     };
 
-    if conn
+    let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "Database unavailable",
+            );
+        }
+    };
+    let live_count = match tx.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0)) {
+        Ok(c) => c,
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "Failed to verify existing user accounts",
+            );
+        }
+    };
+    if live_count > 0 {
+        return api_error(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "Admin account already exists",
+        );
+    }
+
+    if tx
         .execute(
             "INSERT INTO users (username, password_hash, role) VALUES (?1, ?2, 'admin')",
             params![trimmed_username, hash],
@@ -1542,8 +1741,17 @@ fn setup_admin_blocking(headers: HeaderMap, req: CredentialsRequest) -> Response
             "Failed to create admin account",
         );
     }
-    let user_id = conn.last_insert_rowid();
+    let user_id = tx.last_insert_rowid();
+    if tx.commit().is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to commit admin account",
+        );
+    }
     drop(conn);
+
+    unlink_setup_bootstrap_token_files();
 
     // Provision dedicated random package credentials rather than persisting the operator's control-plane password.
     af_services::mutators::ensure_provisioning_credentials(trimmed_username);
@@ -3057,8 +3265,8 @@ pub async fn disable_2fa(req: Request) -> Response {
                 }
             }
         };
-        let password_ok = payload.password.is_empty()
-            || (!password_hash.is_empty() && verify_password(&payload.password, &password_hash));
+        let password_ok = password_hash.is_empty()
+            || (!payload.password.is_empty() && verify_password(&payload.password, &password_hash));
         let result = (|| -> anyhow::Result<Option<(String, Vec<String>)>> {
             let mut conn = af_db::get_conn()?;
             let transaction =
@@ -3103,7 +3311,7 @@ pub async fn disable_2fa(req: Request) -> Response {
         let (new_token, revoked_jtis) = match result {
             Ok(Some(pair)) => pair,
             Ok(None) => {
-                let err_code = if !payload.password.is_empty() && !password_ok {
+                let err_code = if !password_ok {
                     "INVALID_CURRENT_PASSWORD"
                 } else {
                     "INVALID_2FA_CODE"
@@ -4123,45 +4331,26 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                response.status(),
-                if read {
-                    StatusCode::NO_CONTENT
-                } else {
-                    StatusCode::FORBIDDEN
-                },
-                "{path}"
-            );
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
     }
 
     #[test]
-    fn mint_plugin_jwt_encodes_plugin_id_and_scopes() {
+    fn legacy_plugin_jwt_is_rejected_and_live_plugin_scope_verification_enforced() {
         let scopes = vec![
             "/api/v1/public/marketplace".to_string(),
             "/api/v1/auth/system/metrics".to_string(),
         ];
         let (token, claims) = mint_plugin_jwt(1, "sdk-template-rust", &scopes, 600).unwrap();
         assert_eq!(claims.plugin_id, "sdk-template-rust");
-        assert_eq!(claims.plugin_scopes, scopes);
         assert!(decode_session_claims(&token, false).is_err());
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.validate_aud = false;
-        let decoded = decode::<SessionClaims>(
-            &token,
-            &DecodingKey::from_secret(&jwt_secret_bytes()),
-            &validation,
-        )
-        .unwrap()
-        .claims;
-        assert_eq!(decoded.plugin_id, "sdk-template-rust");
-        assert_eq!(decoded.plugin_scopes, scopes);
+        assert!(crate::plugins::decode_and_verify_plugin_token(&token).is_err());
         assert!(af_services::plugins::verify_plugin_route_scope(
-            &decoded.plugin_scopes,
+            &scopes,
             "/api/v1/auth/system/metrics"
         ));
         assert!(!af_services::plugins::verify_plugin_route_scope(
-            &decoded.plugin_scopes,
+            &scopes,
             "/api/v1/admin/users"
         ));
     }
@@ -4401,6 +4590,7 @@ mod tests {
             Json(CredentialsRequest {
                 username: "suspended-user".into(),
                 password: "suspended-pass".into(),
+                setup_token: None,
             }),
         )
         .await;
@@ -4743,5 +4933,161 @@ mod tests {
         );
         let refresh_resp = refresh_session(refresh_headers).await;
         assert_eq!(refresh_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn disable_2fa_rejects_empty_password_for_password_account_and_setup_guards_remote() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        crate::plugins::tests::ensure_shared_test_db();
+        let pw_hash = bcrypt::hash("valid-pass-123", 4).unwrap();
+        let secret_plain = "JBSWY3DPEHPK3PXP";
+        let secret_enc = af_db::encrypt_key(secret_plain).unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM users WHERE id = 9751", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, role, password_hash, totp_secret, totp_enabled, last_totp_step) VALUES (9751, 'disable2fa-user', 'admin', ?1, ?2, 1, -1)",
+                params![pw_hash, secret_enc],
+            )
+            .unwrap();
+        }
+        let now_secs = Utc::now().timestamp().max(0) as u64;
+        let secret_bytes = BASE32_NOPAD.decode(secret_plain.as_bytes()).unwrap();
+        let totp_code = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &secret_bytes, now_secs);
+        let user = AuthUser {
+            user_id: 9751,
+            username: "disable2fa-user".into(),
+            role: "admin".into(),
+            jti: "jti-9751".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+        let mut denied_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/user/2fa/disable")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "code": totp_code,
+                    "password": "",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        denied_req.extensions_mut().insert(user.clone());
+        let denied = disable_2fa(denied_req).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let mut allowed_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/user/2fa/disable")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "code": totp_code,
+                    "password": "valid-pass-123",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        allowed_req.extensions_mut().insert(user);
+        let allowed = disable_2fa(allowed_req).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn setup_admin_requires_loopback_or_bootstrap_token_and_unlinks_token_file() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("af-setup-bootstrap-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = tmp.join("setup.sqlite");
+        let token_file = tmp.join(".setup-bootstrap-token");
+        std::fs::write(&token_file, "boot-secret-token-991\n").unwrap();
+        std::env::set_var("AETHERFLOW_DATA_DIR", &tmp);
+        std::env::set_var("AF_DB_PATH", &db_path);
+        std::env::set_var("DB_PATH", &db_path);
+        std::env::set_var("AETHERFLOW_DB_PATH", &db_path);
+        af_db::init_db().unwrap();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM users", []).unwrap();
+        }
+
+        // Proxied request without setup token must receive 403 SETUP_TOKEN_REQUIRED
+        let mut proxied_headers = HeaderMap::new();
+        proxied_headers.insert("x-forwarded-for", "203.0.113.42".parse().unwrap());
+        let denied = setup_admin_blocking(
+            Some("127.0.0.1".parse().unwrap()),
+            true,
+            proxied_headers.clone(),
+            CredentialsRequest {
+                username: "firstadmin".into(),
+                password: "StrongPassword!123".into(),
+                setup_token: None,
+            },
+        );
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert!(token_file.exists());
+
+        // Proxied request WITH valid setup token succeeds and atomically unlinks token file
+        let created = setup_admin_blocking(
+            Some("127.0.0.1".parse().unwrap()),
+            true,
+            proxied_headers,
+            CredentialsRequest {
+                username: "firstadmin".into(),
+                password: "StrongPassword!123".into(),
+                setup_token: Some("boot-secret-token-991".into()),
+            },
+        );
+        assert_eq!(created.status(), StatusCode::OK);
+        assert!(!token_file.exists());
+
+        // Verify ensure_setup_bootstrap_token auto-provisions 0600 token when users == 0
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM users", []).unwrap();
+        }
+        ensure_setup_bootstrap_token();
+        assert!(token_file.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::symlink_metadata(&token_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let auto_tok = std::fs::read_to_string(&token_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(auto_tok.len(), 64);
+        let mut proxied_headers2 = HeaderMap::new();
+        proxied_headers2.insert("x-forwarded-for", "203.0.113.42".parse().unwrap());
+        let created2 = setup_admin_blocking(
+            Some("127.0.0.1".parse().unwrap()),
+            true,
+            proxied_headers2,
+            CredentialsRequest {
+                username: "secondboot".into(),
+                password: "StrongPassword!123".into(),
+                setup_token: Some(auto_tok),
+            },
+        );
+        assert_eq!(created2.status(), StatusCode::OK);
+        assert!(!token_file.exists());
+        // Does not recreate once a user exists
+        ensure_setup_bootstrap_token();
+        assert!(!token_file.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
